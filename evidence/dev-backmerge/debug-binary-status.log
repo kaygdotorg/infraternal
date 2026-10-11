@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "state": "stopped",
+  "message": "No infraternal server service is running on this node.",
+  "next_step": "Run `infraternal server init` to create a server on this node.",
+  "data": {
+    "components": [
+      {
+        "name": "server",
+        "state": "Stopped"
+      },
+      {
+        "name": "agent",
+        "state": "Not available yet"
+      },
+      {
+        "name": "mesh",
+        "state": "Not available yet"
+      },
+      {
+        "name": "host",
+        "state": "Not available yet"
+      },
+      {
+        "name": "relay",
+        "state": "Not available yet"
+      },
+      {
+        "name": "backup",
+        "state": "Not available yet"
+      },
+      {
+        "name": "ssh",
+        "state": "Not available yet"
+      }
+    ],
+    "role": "node"
+  }
+}

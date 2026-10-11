@@ -1,0 +1,2050 @@
+Running as unit: run-p3973614-i50063628.scope; invocation ID: f7183fb0cf2144b1b864f1f66f55e3cc
+METRIC name=network_rtt_selftest configured_rtt_ms=300 jitter_ms=30 loss=unsupported transport=tcp-stream n=3 p50_ms=302.93 p99_ms=318.64 result=PASS
+
+==> fmt
+
+==> VT native fmt
+
+==> CLI plugin compile-out
+disabled CLI plugin dependencies: absent from normal dependency graph
+warning: variable does not need to be mutable
+   --> crates/infraternal/src/cli/actions.rs:110:9
+    |
+110 |     let mut plugin = PluginDefinition::new(
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `infraternal` (bin "infraternal" test) generated 1 warning (run `cargo fix --bin "infraternal" -p infraternal --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/dev-backmerge/target/debug/deps/infraternal-3b46d02e044fd543)
+
+running 24 tests
+test cli::actions::tests::no_default_plugins_register_no_component_commands ... ok
+test cli::actions::tests::compiled_out_mesh_has_no_registered_commands ... ok
+test cli::actions::tests::hidden_session_shim_is_registered_to_its_runtime_handler ... ok
+test cli::actions::tests::every_registered_action_has_description_and_step_by_step_guidance ... ok
+test cli::actions::tests::agent_session_integration_target_is_gated_by_agent_plugin ... ok
+test cli::output::tests::non_terminal_pretty_snapshot_has_aligned_details_and_table ... ok
+test cli::command_tree::tests::hidden_session_shim_parser_uses_the_registered_input_schema ... ok
+test cli::output::tests::json_snapshot_has_stable_versioned_fields_and_omits_absent_details ... ok
+test cli::output::tests::pretty_snapshot_omits_empty_skill_write_sections ... ok
+test cli::output::tests::terminal_snapshot_uses_color_but_still_wraps_to_the_requested_width ... ok
+test cli::output::tests::pretty_tables_omit_empty_columns_and_rows ... ok
+test cli::command_tree::tests::skill_parser_accepts_a_multi_part_command_and_write_directory ... ok
+test cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes ... ok
+test cli::command_tree::tests::compiled_out_plugin_has_no_help_or_parse_path ... ok
+test cli::actions::tests::server_only_dependencies_are_removed_with_server_plugin ... ok
+test cli::command_tree::tests::root_help_uses_registered_descriptions_and_long_action_guidance ... ok
+test failure_data_tests::skill_errors_keep_the_registered_result_data_shape ... ok
+test failure_data_tests::unavailable_results_keep_registered_data_shapes ... ok
+test status_tests::custom_named_stopped_server_service_is_reported_as_stopped ... ok
+test status_tests::unrelated_services_do_not_appear_as_infraternal_servers ... ok
+test status_tests::custom_named_server_service_is_reported_as_running ... ok
+test dispatch_tests::hidden_session_shim_dispatches_from_the_registered_action ... ok
+test startup_tests::process_dumpability_is_disabled_before_dispatch ... ok
+test cli::skills::tests::writing_skills_creates_one_file_per_visible_action ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+==> clippy
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/plugins/remote)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-agent)
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-server)
+    Checking infraternal-fuzz v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/fuzz)
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.10s
+
+==> test
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-agent)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 49s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/dev-backmerge/target/debug/deps/infraternal-33c5a16771df4842)
+
+running 64 tests
+test cli::actions::tests::enabled_mesh_plugin_registers_its_component_commands ... ok
+test cli::actions::tests::every_registered_action_has_description_and_step_by_step_guidance ... ok
+test cli::actions::tests::hidden_session_shim_is_registered_to_its_runtime_handler ... ok
+test cli::actions::factory_tests::plugin_command_materializes_only_its_owner_and_discovery_remains_complete ... ok
+test cli::command_tree::tests::parser_uses_plugin_inputs_and_accepts_json_after_a_leaf_command ... ok
+test cli::command_tree::backmerge_tests::restart_inherits_private_state_before_or_after_the_command ... ok
+test cli::actions::tests::registered_actions_include_plugin_permission_contract_fields ... ok
+test cli::command_tree::backmerge_tests::removal_and_retention_inputs_keep_the_production_runtime_bindings ... ok
+test cli::actions::hosted_tests::production_descriptors_share_cli_registry_and_skills ... ok
+test cli::command_tree::tests::root_help_uses_registered_descriptions_and_long_action_guidance ... ok
+test cli::output::tests::pretty_tables_omit_empty_columns_and_rows ... ok
+test cli::output::tests::non_terminal_pretty_snapshot_has_aligned_details_and_table ... ok
+test cli::output::tests::pretty_snapshot_omits_empty_skill_write_sections ... ok
+test cli::command_tree::tests::server_init_parses_confirmation_plan_and_server_configuration ... ok
+test cli::output::tests::terminal_snapshot_uses_color_but_still_wraps_to_the_requested_width ... ok
+test cli::command_tree::tests::hidden_session_shim_parser_uses_the_registered_input_schema ... ok
+test cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes ... FAILED
+test dispatch_tests::hidden_session_shim_dispatches_from_the_registered_action ... ok
+test embedded_cli::tests::dispatch_keeps_public_help_operator_modes_and_foreign_commands ... ok
+test cli::skills::tests::generated_skill_contains_front_matter_inputs_outputs_and_safety ... ok
+test install::tests::dry_run_prints_a_process_surviving_user_unit ... ok
+test failure_data_tests::server_errors_keep_the_registered_result_data_shapes ... ok
+test failure_data_tests::unavailable_results_keep_registered_data_shapes ... ok
+test cli::output::tests::json_snapshot_has_stable_versioned_fields_and_omits_absent_details ... ok
+test cli::command_tree::tests::skill_parser_accepts_a_multi_part_command_and_write_directory ... ok
+test remote::tests::ordinary_join_keeps_the_foreground_connection_default ... ok
+test embedded_cli::tests::inherited_flags_keep_public_parser_validation_and_values ... ok
+test remote::tests::join_dns_failure_reports_resolution_instead_of_generic_refusal ... ok
+test remote::tests::oversized_or_invalid_invitation_fails_before_local_state_is_created ... ok
+test remote::tests::ssh_installation_can_enroll_before_starting_the_service ... ok
+test remote::tests::uid_and_privilege_mismatch_fails_before_key_generation ... ok
+test remote::tests::preparation_refuses_shared_and_symlinked_data_directories ... ok
+test remote::tests::local_identity_load_refuses_symlink_and_shared_file ... ok
+test failure_data_tests::skill_errors_keep_the_registered_result_data_shape ... ok
+test remote_server::tests::missing_ca_refuses_before_database_or_listener_creation ... ok
+test cli::skills::tests::writing_skills_creates_one_file_per_visible_action ... ok
+test remote_server::tests::service_dry_run_preserves_remote_listener_and_private_trust_path ... ok
+test remote_server::tests::independent_review_remote_operator_commands_accept_json_output ... ok
+test remote::tests::publication_is_private_and_never_replaces_existing_identity ... ok
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test remote_server::tests::remote_activation_is_explicit_and_ca_override_requires_listener ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test remote::tests::renewal_publication_replaces_only_certificate_and_preserves_private_metadata ... ok
+test remote_server::tests::failed_cold_configuration_still_disposes_handoff_stdin ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+test setup_token_tests::setup_token_command_reads_only_the_expected_socket_response ... ok
+test startup_tests::process_dumpability_is_disabled_before_dispatch ... ok
+test status_tests::custom_named_server_service_is_reported_as_running ... ok
+test status_tests::custom_named_stopped_server_service_is_reported_as_stopped ... ok
+test status_tests::unrelated_services_do_not_appear_as_infraternal_servers ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... ok
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... ok
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+
+failures:
+
+---- cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes stdout ----
+
+thread 'cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes' (3997638) panicked at crates/infraternal/src/cli/output.rs:652:13:
+result for `remove-host` must conform to its registered output schema: {"command":"remove-host","data":{},"message":"Schema fixture result.","schema_version":1,"state":"ready"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes
+
+test result: FAILED. 63 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.27s
+
+error: test failed, to rerun pass `-p infraternal --bin infraternal`
+
+==> cargo-deny
+warning[duplicate]: found 2 duplicate entries for crate 'base64'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:24:1
+   │  
+24 │ ╭ base64 0.21.7 registry+https://github.com/rust-lang/crates.io-index
+25 │ │ base64 0.22.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ base64 v0.21.7
+     ├── base64urlsafedata v0.5.5
+     │   ├── webauthn-attestation-ca v0.5.5
+     │   │   └── webauthn-rs-core v0.5.5
+     │   │       └── webauthn-rs v0.5.5
+     │   │           └── infraternal-server v0.1.0
+     │   │               ├── infraternal v0.1.0
+     │   │               └── infraternal-fuzz v0.1.0
+     │   ├── webauthn-rs v0.5.5 (*)
+     │   ├── webauthn-rs-core v0.5.5 (*)
+     │   └── webauthn-rs-proto v0.5.5
+     │       └── webauthn-rs-core v0.5.5 (*)
+     ├── webauthn-rs-core v0.5.5 (*)
+     └── webauthn-rs-proto v0.5.5 (*)
+   ├ base64 v0.22.1
+     ├── axum v0.8.9
+     │   ├── infraternal-fuzz v0.1.0
+     │   └── infraternal-server v0.1.0
+     │       ├── infraternal v0.1.0
+     │       └── infraternal-fuzz v0.1.0 (*)
+     ├── infraternal v0.1.0 (*)
+     ├── infraternal-server v0.1.0 (*)
+     └── sqlx-core v0.8.6
+         ├── sqlx v0.8.6
+         │   ├── infraternal-plugin-api v0.1.0
+         │   │   ├── infraternal v0.1.0 (*)
+         │   │   ├── infraternal-agent v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   ├── infraternal-mesh v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   └── infraternal-plugin-mesh v0.1.0
+         │   │   │       ├── infraternal v0.1.0 (*)
+         │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │       └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-plugin-backup v0.1.0
+         │   │   │   └── infraternal v0.1.0 (*)
+         │   │   ├── infraternal-plugin-host-facts v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   └── infraternal-fuzz v0.1.0 (*)
+         │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+         │   │   ├── infraternal-plugin-relay v0.1.0
+         │   │   │   └── infraternal v0.1.0 (*)
+         │   │   ├── infraternal-plugin-remote v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-plugin-ssh v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   └── infraternal-server v0.1.0 (*)
+         │   ├── infraternal-plugin-mesh v0.1.0 (*)
+         │   └── infraternal-server v0.1.0 (*)
+         ├── sqlx-macros v0.8.6
+         │   └── sqlx v0.8.6 (*)
+         ├── sqlx-macros-core v0.8.6
+         │   └── sqlx-macros v0.8.6 (*)
+         └── sqlx-sqlite v0.8.6
+             ├── sqlx v0.8.6 (*)
+             └── sqlx-macros-core v0.8.6 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'cpufeatures'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:50:1
+   │  
+50 │ ╭ cpufeatures 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+51 │ │ cpufeatures 0.3.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ cpufeatures v0.2.17
+     ├── aes v0.8.4
+     │   └── aes-gcm v0.10.3
+     │       └── (dev) infraternal-server v0.1.0
+     │           ├── infraternal v0.1.0
+     │           └── infraternal-fuzz v0.1.0
+     ├── argon2 v0.5.3
+     │   └── infraternal-server v0.1.0 (*)
+     ├── polyval v0.6.2
+     │   └── ghash v0.5.1
+     │       └── aes-gcm v0.10.3 (*)
+     ├── sha1 v0.10.7
+     │   ├── axum v0.8.9
+     │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   └── infraternal-server v0.1.0 (*)
+     │   └── tungstenite v0.29.0
+     │       └── tokio-tungstenite v0.29.0
+     │           ├── axum v0.8.9 (*)
+     │           └── (dev) infraternal-server v0.1.0 (*)
+     └── sha2 v0.10.9
+         ├── infraternal-plugin-ssh v0.1.0
+         │   ├── infraternal v0.1.0 (*)
+         │   ├── infraternal-fuzz v0.1.0 (*)
+         │   └── infraternal-server v0.1.0 (*)
+         ├── infraternal-server v0.1.0 (*)
+         ├── sqlx-core v0.8.6
+         │   ├── sqlx v0.8.6
+         │   │   ├── infraternal-plugin-api v0.1.0
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-agent v0.1.0
+         │   │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   ├── infraternal-mesh v0.1.0
+         │   │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   │   └── infraternal-plugin-mesh v0.1.0
+         │   │   │   │       ├── infraternal v0.1.0 (*)
+         │   │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+         │   │   │   │       └── infraternal-server v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-backup v0.1.0
+         │   │   │   │   └── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+         │   │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-relay v0.1.0
+         │   │   │   │   └── infraternal v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-remote v0.1.0
+         │   │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+         │   │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+         │   │   └── infraternal-server v0.1.0 (*)
+         │   ├── sqlx-macros v0.8.6
+         │   │   └── sqlx v0.8.6 (*)
+         │   ├── sqlx-macros-core v0.8.6
+         │   │   └── sqlx-macros v0.8.6 (*)
+         │   └── sqlx-sqlite v0.8.6
+         │       ├── sqlx v0.8.6 (*)
+         │       └── sqlx-macros-core v0.8.6 (*)
+         └── sqlx-macros-core v0.8.6 (*)
+   ├ cpufeatures v0.3.1
+     └── chacha20 v0.10.2
+         └── rand v0.10.3
+             └── quinn-proto v0.11.19
+                 └── quinn v0.11.12
+                     ├── infraternal-agent v0.1.0
+                     │   ├── infraternal v0.1.0
+                     │   ├── infraternal-fuzz v0.1.0
+                     │   └── infraternal-server v0.1.0
+                     │       ├── infraternal v0.1.0 (*)
+                     │       └── infraternal-fuzz v0.1.0 (*)
+                     ├── infraternal-plugin-remote v0.1.0
+                     │   ├── infraternal v0.1.0 (*)
+                     │   ├── infraternal-agent v0.1.0 (*)
+                     │   └── infraternal-server v0.1.0 (*)
+                     └── infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'getrandom'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:92:1
+   │  
+92 │ ╭ getrandom 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+93 │ │ getrandom 0.3.4 registry+https://github.com/rust-lang/crates.io-index
+94 │ │ getrandom 0.4.3 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ getrandom v0.2.17
+     ├── rand_core v0.6.4
+     │   ├── bip39 v2.2.2
+     │   │   └── infraternal-server v0.1.0
+     │   │       ├── infraternal v0.1.0
+     │   │       └── infraternal-fuzz v0.1.0
+     │   ├── crypto-common v0.1.7
+     │   │   ├── aead v0.5.2
+     │   │   │   └── aes-gcm v0.10.3
+     │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+     │   │   ├── cipher v0.4.4
+     │   │   │   ├── aes v0.8.4
+     │   │   │   │   └── aes-gcm v0.10.3 (*)
+     │   │   │   ├── aes-gcm v0.10.3 (*)
+     │   │   │   └── ctr v0.9.2
+     │   │   │       └── aes-gcm v0.10.3 (*)
+     │   │   ├── digest v0.10.7
+     │   │   │   ├── blake2 v0.10.6
+     │   │   │   │   └── argon2 v0.5.3
+     │   │   │   │       └── infraternal-server v0.1.0 (*)
+     │   │   │   ├── hmac v0.12.1
+     │   │   │   │   └── hkdf v0.12.4
+     │   │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+     │   │   │   ├── sha1 v0.10.7
+     │   │   │   │   ├── axum v0.8.9
+     │   │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │   │   └── tungstenite v0.29.0
+     │   │   │   │       └── tokio-tungstenite v0.29.0
+     │   │   │   │           ├── axum v0.8.9 (*)
+     │   │   │   │           └── (dev) infraternal-server v0.1.0 (*)
+     │   │   │   └── sha2 v0.10.9
+     │   │   │       ├── infraternal-plugin-ssh v0.1.0
+     │   │   │       │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   └── infraternal-server v0.1.0 (*)
+     │   │   │       ├── infraternal-server v0.1.0 (*)
+     │   │   │       ├── sqlx-core v0.8.6
+     │   │   │       │   ├── sqlx v0.8.6
+     │   │   │       │   │   ├── infraternal-plugin-api v0.1.0
+     │   │   │       │   │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-agent v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-mesh v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-plugin-mesh v0.1.0
+     │   │   │       │   │   │   │       ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   │       └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-backup v0.1.0
+     │   │   │       │   │   │   │   └── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-relay v0.1.0
+     │   │   │       │   │   │   │   └── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-remote v0.1.0
+     │   │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+     │   │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │   │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+     │   │   │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │   │   │       │   │   └── infraternal-server v0.1.0 (*)
+     │   │   │       │   ├── sqlx-macros v0.8.6
+     │   │   │       │   │   └── sqlx v0.8.6 (*)
+     │   │   │       │   ├── sqlx-macros-core v0.8.6
+     │   │   │       │   │   └── sqlx-macros v0.8.6 (*)
+     │   │   │       │   └── sqlx-sqlite v0.8.6
+     │   │   │       │       ├── sqlx v0.8.6 (*)
+     │   │   │       │       └── sqlx-macros-core v0.8.6 (*)
+     │   │   │       └── sqlx-macros-core v0.8.6 (*)
+     │   │   └── universal-hash v0.5.1
+     │   │       └── polyval v0.6.2
+     │   │           └── ghash v0.5.1
+     │   │               └── aes-gcm v0.10.3 (*)
+     │   ├── password-hash v0.5.0
+     │   │   └── argon2 v0.5.3 (*)
+     │   ├── rand v0.8.8
+     │   │   └── bip39 v2.2.2 (*)
+     │   └── rand_chacha v0.3.1
+     │       └── rand v0.8.8 (*)
+     └── ring v0.17.14
+         ├── quinn-proto v0.11.19
+         │   └── quinn v0.11.12
+         │       ├── infraternal-agent v0.1.0 (*)
+         │       ├── infraternal-plugin-remote v0.1.0 (*)
+         │       └── infraternal-server v0.1.0 (*)
+         ├── rustls v0.23.45
+         │   ├── infraternal-plugin-remote v0.1.0 (*)
+         │   ├── quinn v0.11.12 (*)
+         │   └── quinn-proto v0.11.19 (*)
+         └── rustls-webpki v0.103.15
+             └── rustls v0.23.45 (*)
+   ├ getrandom v0.3.4
+     └── rand_core v0.9.5
+         ├── rand v0.9.5
+         │   ├── infraternal-server v0.1.0
+         │   │   ├── infraternal v0.1.0
+         │   │   └── infraternal-fuzz v0.1.0
+         │   ├── tungstenite v0.29.0
+         │   │   └── tokio-tungstenite v0.29.0
+         │   │       ├── axum v0.8.9
+         │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+         │   │       │   └── infraternal-server v0.1.0 (*)
+         │   │       └── (dev) infraternal-server v0.1.0 (*)
+         │   └── webauthn-rs-core v0.5.5
+         │       └── webauthn-rs v0.5.5
+         │           └── infraternal-server v0.1.0 (*)
+         └── rand_chacha v0.9.0
+             ├── rand v0.9.5 (*)
+             └── webauthn-rs-core v0.5.5 (*)
+   ├ getrandom v0.4.3
+     ├── jobserver v0.1.35
+     │   └── cc v1.6.0
+     │       ├── (build) libfuzzer-sys v0.4.13
+     │       │   └── infraternal-fuzz v0.1.0
+     │       ├── (build) libsqlite3-sys v0.30.1
+     │       │   └── sqlx-sqlite v0.8.6
+     │       │       ├── sqlx v0.8.6
+     │       │       │   ├── infraternal-plugin-api v0.1.0
+     │       │       │   │   ├── infraternal v0.1.0
+     │       │       │   │   ├── infraternal-agent v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-server v0.1.0
+     │       │       │   │   │       ├── infraternal v0.1.0 (*)
+     │       │       │   │   │       └── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   ├── infraternal-mesh v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-plugin-mesh v0.1.0
+     │       │       │   │   │       ├── infraternal v0.1.0 (*)
+     │       │       │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   │       └── infraternal-server v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-backup v0.1.0
+     │       │       │   │   │   └── infraternal v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-relay v0.1.0
+     │       │       │   │   │   └── infraternal v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-remote v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-ssh v0.1.0
+     │       │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   │   └── infraternal-server v0.1.0 (*)
+     │       │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │       │       │   └── infraternal-server v0.1.0 (*)
+     │       │       └── sqlx-macros-core v0.8.6
+     │       │           └── sqlx-macros v0.8.6
+     │       │               └── sqlx v0.8.6 (*)
+     │       ├── openssl-src v300.6.1+3.6.3
+     │       │   └── (build) openssl-sys v0.9.117
+     │       │       ├── axum-server v0.8.0
+     │       │       │   └── infraternal-server v0.1.0 (*)
+     │       │       ├── openssl v0.10.81
+     │       │       │   ├── axum-server v0.8.0 (*)
+     │       │       │   ├── infraternal v0.1.0 (*)
+     │       │       │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+     │       │       │   ├── infraternal-server v0.1.0 (*)
+     │       │       │   ├── tokio-openssl v0.6.5
+     │       │       │   │   ├── axum-server v0.8.0 (*)
+     │       │       │   │   ├── infraternal v0.1.0 (*)
+     │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+     │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+     │       │       │   ├── webauthn-attestation-ca v0.5.5
+     │       │       │   │   └── webauthn-rs-core v0.5.5
+     │       │       │   │       └── webauthn-rs v0.5.5
+     │       │       │   │           └── infraternal-server v0.1.0 (*)
+     │       │       │   └── webauthn-rs-core v0.5.5 (*)
+     │       │       ├── tokio-openssl v0.6.5 (*)
+     │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+     │       │       └── webauthn-rs-core v0.5.5 (*)
+     │       ├── (build) openssl-sys v0.9.117 (*)
+     │       └── (build) ring v0.17.14
+     │           ├── quinn-proto v0.11.19
+     │           │   └── quinn v0.11.12
+     │           │       ├── infraternal-agent v0.1.0 (*)
+     │           │       ├── infraternal-plugin-remote v0.1.0 (*)
+     │           │       └── infraternal-server v0.1.0 (*)
+     │           ├── rustls v0.23.45
+     │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+     │           │   ├── quinn v0.11.12 (*)
+     │           │   └── quinn-proto v0.11.19 (*)
+     │           └── rustls-webpki v0.103.15
+     │               └── rustls v0.23.45 (*)
+     ├── quinn-proto v0.11.19 (*)
+     ├── rand v0.10.3
+     │   └── quinn-proto v0.11.19 (*)
+     └── uuid v1.27.0
+         ├── infraternal v0.1.0 (*)
+         ├── infraternal-agent v0.1.0 (*)
+         ├── infraternal-plugin-ssh v0.1.0 (*)
+         ├── infraternal-server v0.1.0 (*)
+         ├── webauthn-attestation-ca v0.5.5 (*)
+         ├── webauthn-rs v0.5.5 (*)
+         └── webauthn-rs-core v0.5.5 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'hashbrown'
+   ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:98:1
+   │  
+98 │ ╭ hashbrown 0.15.5 registry+https://github.com/rust-lang/crates.io-index
+99 │ │ hashbrown 0.17.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ hashbrown v0.15.5
+     ├── hashlink v0.10.0
+     │   └── sqlx-core v0.8.6
+     │       ├── sqlx v0.8.6
+     │       │   ├── infraternal-plugin-api v0.1.0
+     │       │   │   ├── infraternal v0.1.0
+     │       │   │   ├── infraternal-agent v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   ├── infraternal-fuzz v0.1.0
+     │       │   │   │   └── infraternal-server v0.1.0
+     │       │   │   │       ├── infraternal v0.1.0 (*)
+     │       │   │   │       └── infraternal-fuzz v0.1.0 (*)
+     │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │   │   ├── infraternal-mesh v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   └── infraternal-plugin-mesh v0.1.0
+     │       │   │   │       ├── infraternal v0.1.0 (*)
+     │       │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+     │       │   │   │       └── infraternal-server v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-backup v0.1.0
+     │       │   │   │   └── infraternal v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-relay v0.1.0
+     │       │   │   │   └── infraternal v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-remote v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+     │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │   │   ├── infraternal-plugin-ssh v0.1.0
+     │       │   │   │   ├── infraternal v0.1.0 (*)
+     │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+     │       │   │   │   └── infraternal-server v0.1.0 (*)
+     │       │   │   └── infraternal-server v0.1.0 (*)
+     │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+     │       │   └── infraternal-server v0.1.0 (*)
+     │       ├── sqlx-macros v0.8.6
+     │       │   └── sqlx v0.8.6 (*)
+     │       ├── sqlx-macros-core v0.8.6
+     │       │   └── sqlx-macros v0.8.6 (*)
+     │       └── sqlx-sqlite v0.8.6
+     │           ├── sqlx v0.8.6 (*)
+     │           └── sqlx-macros-core v0.8.6 (*)
+     └── sqlx-core v0.8.6 (*)
+   ├ hashbrown v0.17.1
+     └── indexmap v2.14.2
+         ├── h2 v0.4.19
+         │   ├── hyper v1.11.1
+         │   │   ├── axum v0.8.9
+         │   │   │   ├── infraternal-fuzz v0.1.0
+         │   │   │   └── infraternal-server v0.1.0
+         │   │   │       ├── infraternal v0.1.0
+         │   │   │       └── infraternal-fuzz v0.1.0 (*)
+         │   │   ├── axum-server v0.8.0
+         │   │   │   └── infraternal-server v0.1.0 (*)
+         │   │   ├── hyper-util v0.1.21
+         │   │   │   ├── axum v0.8.9 (*)
+         │   │   │   ├── axum-server v0.8.0 (*)
+         │   │   │   ├── infraternal v0.1.0 (*)
+         │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+         │   │   ├── infraternal v0.1.0 (*)
+         │   │   └── (dev) infraternal-server v0.1.0 (*)
+         │   └── (dev) infraternal-server v0.1.0 (*)
+         └── sqlx-core v0.8.6
+             ├── sqlx v0.8.6
+             │   ├── infraternal-plugin-api v0.1.0
+             │   │   ├── infraternal v0.1.0 (*)
+             │   │   ├── infraternal-agent v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+             │   │   │   └── infraternal-server v0.1.0 (*)
+             │   │   ├── infraternal-fuzz v0.1.0 (*)
+             │   │   ├── infraternal-mesh v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   └── infraternal-plugin-mesh v0.1.0
+             │   │   │       ├── infraternal v0.1.0 (*)
+             │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+             │   │   │       └── infraternal-server v0.1.0 (*)
+             │   │   ├── infraternal-plugin-backup v0.1.0
+             │   │   │   └── infraternal v0.1.0 (*)
+             │   │   ├── infraternal-plugin-host-facts v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   ├── infraternal-agent v0.1.0 (*)
+             │   │   │   └── infraternal-fuzz v0.1.0 (*)
+             │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+             │   │   ├── infraternal-plugin-relay v0.1.0
+             │   │   │   └── infraternal v0.1.0 (*)
+             │   │   ├── infraternal-plugin-remote v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   ├── infraternal-agent v0.1.0 (*)
+             │   │   │   └── infraternal-server v0.1.0 (*)
+             │   │   ├── infraternal-plugin-ssh v0.1.0
+             │   │   │   ├── infraternal v0.1.0 (*)
+             │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+             │   │   │   └── infraternal-server v0.1.0 (*)
+             │   │   └── infraternal-server v0.1.0 (*)
+             │   ├── infraternal-plugin-mesh v0.1.0 (*)
+             │   └── infraternal-server v0.1.0 (*)
+             ├── sqlx-macros v0.8.6
+             │   └── sqlx v0.8.6 (*)
+             ├── sqlx-macros-core v0.8.6
+             │   └── sqlx-macros v0.8.6 (*)
+             └── sqlx-sqlite v0.8.6
+                 ├── sqlx v0.8.6 (*)
+                 └── sqlx-macros-core v0.8.6 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'r-efi'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:196:1
+    │  
+196 │ ╭ r-efi 5.3.0 registry+https://github.com/rust-lang/crates.io-index
+197 │ │ r-efi 6.0.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ r-efi v5.3.0
+      └── getrandom v0.3.4
+          └── rand_core v0.9.5
+              ├── rand v0.9.5
+              │   ├── infraternal-server v0.1.0
+              │   │   ├── infraternal v0.1.0
+              │   │   └── infraternal-fuzz v0.1.0
+              │   ├── tungstenite v0.29.0
+              │   │   └── tokio-tungstenite v0.29.0
+              │   │       ├── axum v0.8.9
+              │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+              │   │       │   └── infraternal-server v0.1.0 (*)
+              │   │       └── (dev) infraternal-server v0.1.0 (*)
+              │   └── webauthn-rs-core v0.5.5
+              │       └── webauthn-rs v0.5.5
+              │           └── infraternal-server v0.1.0 (*)
+              └── rand_chacha v0.9.0
+                  ├── rand v0.9.5 (*)
+                  └── webauthn-rs-core v0.5.5 (*)
+    ├ r-efi v6.0.0
+      └── getrandom v0.4.3
+          ├── jobserver v0.1.35
+          │   └── cc v1.6.0
+          │       ├── (build) libfuzzer-sys v0.4.13
+          │       │   └── infraternal-fuzz v0.1.0
+          │       ├── (build) libsqlite3-sys v0.30.1
+          │       │   └── sqlx-sqlite v0.8.6
+          │       │       ├── sqlx v0.8.6
+          │       │       │   ├── infraternal-plugin-api v0.1.0
+          │       │       │   │   ├── infraternal v0.1.0
+          │       │       │   │   ├── infraternal-agent v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-server v0.1.0
+          │       │       │   │   │       ├── infraternal v0.1.0 (*)
+          │       │       │   │   │       └── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   ├── infraternal-mesh v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-plugin-mesh v0.1.0
+          │       │       │   │   │       ├── infraternal v0.1.0 (*)
+          │       │       │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   │       └── infraternal-server v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-backup v0.1.0
+          │       │       │   │   │   └── infraternal v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-relay v0.1.0
+          │       │       │   │   │   └── infraternal v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-remote v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-ssh v0.1.0
+          │       │       │   │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   │   └── infraternal-server v0.1.0 (*)
+          │       │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+          │       │       │   └── infraternal-server v0.1.0 (*)
+          │       │       └── sqlx-macros-core v0.8.6
+          │       │           └── sqlx-macros v0.8.6
+          │       │               └── sqlx v0.8.6 (*)
+          │       ├── openssl-src v300.6.1+3.6.3
+          │       │   └── (build) openssl-sys v0.9.117
+          │       │       ├── axum-server v0.8.0
+          │       │       │   └── infraternal-server v0.1.0 (*)
+          │       │       ├── openssl v0.10.81
+          │       │       │   ├── axum-server v0.8.0 (*)
+          │       │       │   ├── infraternal v0.1.0 (*)
+          │       │       │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │       │       │   ├── infraternal-server v0.1.0 (*)
+          │       │       │   ├── tokio-openssl v0.6.5
+          │       │       │   │   ├── axum-server v0.8.0 (*)
+          │       │       │   │   ├── infraternal v0.1.0 (*)
+          │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+          │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+          │       │       │   ├── webauthn-attestation-ca v0.5.5
+          │       │       │   │   └── webauthn-rs-core v0.5.5
+          │       │       │   │       └── webauthn-rs v0.5.5
+          │       │       │   │           └── infraternal-server v0.1.0 (*)
+          │       │       │   └── webauthn-rs-core v0.5.5 (*)
+          │       │       ├── tokio-openssl v0.6.5 (*)
+          │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+          │       │       └── webauthn-rs-core v0.5.5 (*)
+          │       ├── (build) openssl-sys v0.9.117 (*)
+          │       └── (build) ring v0.17.14
+          │           ├── quinn-proto v0.11.19
+          │           │   └── quinn v0.11.12
+          │           │       ├── infraternal-agent v0.1.0 (*)
+          │           │       ├── infraternal-plugin-remote v0.1.0 (*)
+          │           │       └── infraternal-server v0.1.0 (*)
+          │           ├── rustls v0.23.45
+          │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │           │   ├── quinn v0.11.12 (*)
+          │           │   └── quinn-proto v0.11.19 (*)
+          │           └── rustls-webpki v0.103.15
+          │               └── rustls v0.23.45 (*)
+          ├── quinn-proto v0.11.19 (*)
+          ├── rand v0.10.3
+          │   └── quinn-proto v0.11.19 (*)
+          └── uuid v1.27.0
+              ├── infraternal v0.1.0 (*)
+              ├── infraternal-agent v0.1.0 (*)
+              ├── infraternal-plugin-ssh v0.1.0 (*)
+              ├── infraternal-server v0.1.0 (*)
+              ├── webauthn-attestation-ca v0.5.5 (*)
+              ├── webauthn-rs v0.5.5 (*)
+              └── webauthn-rs-core v0.5.5 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'rand'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:198:1
+    │  
+198 │ ╭ rand 0.8.8 registry+https://github.com/rust-lang/crates.io-index
+199 │ │ rand 0.9.5 registry+https://github.com/rust-lang/crates.io-index
+200 │ │ rand 0.10.3 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand v0.8.8
+      └── bip39 v2.2.2
+          └── infraternal-server v0.1.0
+              ├── infraternal v0.1.0
+              └── infraternal-fuzz v0.1.0
+    ├ rand v0.9.5
+      ├── infraternal-server v0.1.0
+      │   ├── infraternal v0.1.0
+      │   └── infraternal-fuzz v0.1.0
+      ├── tungstenite v0.29.0
+      │   └── tokio-tungstenite v0.29.0
+      │       ├── axum v0.8.9
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       └── (dev) infraternal-server v0.1.0 (*)
+      └── webauthn-rs-core v0.5.5
+          └── webauthn-rs v0.5.5
+              └── infraternal-server v0.1.0 (*)
+    ├ rand v0.10.3
+      └── quinn-proto v0.11.19
+          └── quinn v0.11.12
+              ├── infraternal-agent v0.1.0
+              │   ├── infraternal v0.1.0
+              │   ├── infraternal-fuzz v0.1.0
+              │   └── infraternal-server v0.1.0
+              │       ├── infraternal v0.1.0 (*)
+              │       └── infraternal-fuzz v0.1.0 (*)
+              ├── infraternal-plugin-remote v0.1.0
+              │   ├── infraternal v0.1.0 (*)
+              │   ├── infraternal-agent v0.1.0 (*)
+              │   └── infraternal-server v0.1.0 (*)
+              └── infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'rand_chacha'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:201:1
+    │  
+201 │ ╭ rand_chacha 0.3.1 registry+https://github.com/rust-lang/crates.io-index
+202 │ │ rand_chacha 0.9.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand_chacha v0.3.1
+      └── rand v0.8.8
+          └── bip39 v2.2.2
+              └── infraternal-server v0.1.0
+                  ├── infraternal v0.1.0
+                  └── infraternal-fuzz v0.1.0
+    ├ rand_chacha v0.9.0
+      ├── rand v0.9.5
+      │   ├── infraternal-server v0.1.0
+      │   │   ├── infraternal v0.1.0
+      │   │   └── infraternal-fuzz v0.1.0
+      │   ├── tungstenite v0.29.0
+      │   │   └── tokio-tungstenite v0.29.0
+      │   │       ├── axum v0.8.9
+      │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   └── infraternal-server v0.1.0 (*)
+      │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   └── webauthn-rs-core v0.5.5
+      │       └── webauthn-rs v0.5.5
+      │           └── infraternal-server v0.1.0 (*)
+      └── webauthn-rs-core v0.5.5 (*)
+
+warning[duplicate]: found 3 duplicate entries for crate 'rand_core'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:203:1
+    │  
+203 │ ╭ rand_core 0.6.4 registry+https://github.com/rust-lang/crates.io-index
+204 │ │ rand_core 0.9.5 registry+https://github.com/rust-lang/crates.io-index
+205 │ │ rand_core 0.10.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ rand_core v0.6.4
+      ├── bip39 v2.2.2
+      │   └── infraternal-server v0.1.0
+      │       ├── infraternal v0.1.0
+      │       └── infraternal-fuzz v0.1.0
+      ├── crypto-common v0.1.7
+      │   ├── aead v0.5.2
+      │   │   └── aes-gcm v0.10.3
+      │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   ├── cipher v0.4.4
+      │   │   ├── aes v0.8.4
+      │   │   │   └── aes-gcm v0.10.3 (*)
+      │   │   ├── aes-gcm v0.10.3 (*)
+      │   │   └── ctr v0.9.2
+      │   │       └── aes-gcm v0.10.3 (*)
+      │   ├── digest v0.10.7
+      │   │   ├── blake2 v0.10.6
+      │   │   │   └── argon2 v0.5.3
+      │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │   ├── hmac v0.12.1
+      │   │   │   └── hkdf v0.12.4
+      │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   │   ├── sha1 v0.10.7
+      │   │   │   ├── axum v0.8.9
+      │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │   └── tungstenite v0.29.0
+      │   │   │       └── tokio-tungstenite v0.29.0
+      │   │   │           ├── axum v0.8.9 (*)
+      │   │   │           └── (dev) infraternal-server v0.1.0 (*)
+      │   │   └── sha2 v0.10.9
+      │   │       ├── infraternal-plugin-ssh v0.1.0
+      │   │       │   ├── infraternal v0.1.0 (*)
+      │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   └── infraternal-server v0.1.0 (*)
+      │   │       ├── infraternal-server v0.1.0 (*)
+      │   │       ├── sqlx-core v0.8.6
+      │   │       │   ├── sqlx v0.8.6
+      │   │       │   │   ├── infraternal-plugin-api v0.1.0
+      │   │       │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-agent v0.1.0
+      │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-mesh v0.1.0
+      │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-plugin-mesh v0.1.0
+      │   │       │   │   │   │       ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-backup v0.1.0
+      │   │       │   │   │   │   └── infraternal v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-relay v0.1.0
+      │   │       │   │   │   │   └── infraternal v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-remote v0.1.0
+      │   │       │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │       │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │       │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │   ├── sqlx-macros v0.8.6
+      │   │       │   │   └── sqlx v0.8.6 (*)
+      │   │       │   ├── sqlx-macros-core v0.8.6
+      │   │       │   │   └── sqlx-macros v0.8.6 (*)
+      │   │       │   └── sqlx-sqlite v0.8.6
+      │   │       │       ├── sqlx v0.8.6 (*)
+      │   │       │       └── sqlx-macros-core v0.8.6 (*)
+      │   │       └── sqlx-macros-core v0.8.6 (*)
+      │   └── universal-hash v0.5.1
+      │       └── polyval v0.6.2
+      │           └── ghash v0.5.1
+      │               └── aes-gcm v0.10.3 (*)
+      ├── password-hash v0.5.0
+      │   └── argon2 v0.5.3 (*)
+      ├── rand v0.8.8
+      │   └── bip39 v2.2.2 (*)
+      └── rand_chacha v0.3.1
+          └── rand v0.8.8 (*)
+    ├ rand_core v0.9.5
+      ├── rand v0.9.5
+      │   ├── infraternal-server v0.1.0
+      │   │   ├── infraternal v0.1.0
+      │   │   └── infraternal-fuzz v0.1.0
+      │   ├── tungstenite v0.29.0
+      │   │   └── tokio-tungstenite v0.29.0
+      │   │       ├── axum v0.8.9
+      │   │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │   └── infraternal-server v0.1.0 (*)
+      │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │   └── webauthn-rs-core v0.5.5
+      │       └── webauthn-rs v0.5.5
+      │           └── infraternal-server v0.1.0 (*)
+      └── rand_chacha v0.9.0
+          ├── rand v0.9.5 (*)
+          └── webauthn-rs-core v0.5.5 (*)
+    ├ rand_core v0.10.1
+      ├── chacha20 v0.10.2
+      │   └── rand v0.10.3
+      │       └── quinn-proto v0.11.19
+      │           └── quinn v0.11.12
+      │               ├── infraternal-agent v0.1.0
+      │               │   ├── infraternal v0.1.0
+      │               │   ├── infraternal-fuzz v0.1.0
+      │               │   └── infraternal-server v0.1.0
+      │               │       ├── infraternal v0.1.0 (*)
+      │               │       └── infraternal-fuzz v0.1.0 (*)
+      │               ├── infraternal-plugin-remote v0.1.0
+      │               │   ├── infraternal v0.1.0 (*)
+      │               │   ├── infraternal-agent v0.1.0 (*)
+      │               │   └── infraternal-server v0.1.0 (*)
+      │               └── infraternal-server v0.1.0 (*)
+      ├── getrandom v0.4.3
+      │   ├── jobserver v0.1.35
+      │   │   └── cc v1.6.0
+      │   │       ├── (build) libfuzzer-sys v0.4.13
+      │   │       │   └── infraternal-fuzz v0.1.0 (*)
+      │   │       ├── (build) libsqlite3-sys v0.30.1
+      │   │       │   └── sqlx-sqlite v0.8.6
+      │   │       │       ├── sqlx v0.8.6
+      │   │       │       │   ├── infraternal-plugin-api v0.1.0
+      │   │       │       │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-mesh v0.1.0
+      │   │       │       │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   │   └── infraternal-plugin-mesh v0.1.0
+      │   │       │       │   │   │       ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-backup v0.1.0
+      │   │       │       │   │   │   └── infraternal v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │   │       │       │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-relay v0.1.0
+      │   │       │       │   │   │   └── infraternal v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-ssh v0.1.0
+      │   │       │       │   │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │       │       │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │       │   │   └── infraternal-server v0.1.0 (*)
+      │   │       │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │       │       │   └── infraternal-server v0.1.0 (*)
+      │   │       │       └── sqlx-macros-core v0.8.6
+      │   │       │           └── sqlx-macros v0.8.6
+      │   │       │               └── sqlx v0.8.6 (*)
+      │   │       ├── openssl-src v300.6.1+3.6.3
+      │   │       │   └── (build) openssl-sys v0.9.117
+      │   │       │       ├── axum-server v0.8.0
+      │   │       │       │   └── infraternal-server v0.1.0 (*)
+      │   │       │       ├── openssl v0.10.81
+      │   │       │       │   ├── axum-server v0.8.0 (*)
+      │   │       │       │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │       │       │   ├── infraternal-server v0.1.0 (*)
+      │   │       │       │   ├── tokio-openssl v0.6.5
+      │   │       │       │   │   ├── axum-server v0.8.0 (*)
+      │   │       │       │   │   ├── infraternal v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │   │       │       │   ├── webauthn-attestation-ca v0.5.5
+      │   │       │       │   │   └── webauthn-rs-core v0.5.5
+      │   │       │       │   │       └── webauthn-rs v0.5.5
+      │   │       │       │   │           └── infraternal-server v0.1.0 (*)
+      │   │       │       │   └── webauthn-rs-core v0.5.5 (*)
+      │   │       │       ├── tokio-openssl v0.6.5 (*)
+      │   │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │   │       │       └── webauthn-rs-core v0.5.5 (*)
+      │   │       ├── (build) openssl-sys v0.9.117 (*)
+      │   │       └── (build) ring v0.17.14
+      │   │           ├── quinn-proto v0.11.19 (*)
+      │   │           ├── rustls v0.23.45
+      │   │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │           │   ├── quinn v0.11.12 (*)
+      │   │           │   └── quinn-proto v0.11.19 (*)
+      │   │           └── rustls-webpki v0.103.15
+      │   │               └── rustls v0.23.45 (*)
+      │   ├── quinn-proto v0.11.19 (*)
+      │   ├── rand v0.10.3 (*)
+      │   └── uuid v1.27.0
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-agent v0.1.0 (*)
+      │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       ├── webauthn-rs v0.5.5 (*)
+      │       └── webauthn-rs-core v0.5.5 (*)
+      ├── rand v0.10.3 (*)
+      └── rand_pcg v0.10.2
+          └── quinn-proto v0.11.19 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'syn'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:247:1
+    │  
+247 │ ╭ syn 2.0.119 registry+https://github.com/rust-lang/crates.io-index
+248 │ │ syn 3.0.6 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ syn v2.0.119
+      ├── asn1-rs-derive v0.5.1
+      │   └── asn1-rs v0.6.2
+      │       ├── der-parser v9.0.0
+      │       │   ├── webauthn-rs-core v0.5.5
+      │       │   │   └── webauthn-rs v0.5.5
+      │       │   │       └── infraternal-server v0.1.0
+      │       │   │           ├── infraternal v0.1.0
+      │       │   │           └── infraternal-fuzz v0.1.0
+      │       │   └── x509-parser v0.16.0
+      │       │       └── webauthn-rs-core v0.5.5 (*)
+      │       ├── oid-registry v0.7.1
+      │       │   └── x509-parser v0.16.0 (*)
+      │       └── x509-parser v0.16.0 (*)
+      ├── asn1-rs-impl v0.2.0
+      │   └── asn1-rs v0.6.2 (*)
+      ├── enum-as-inner v0.6.1
+      │   └── sysctl v0.7.1
+      │       └── infraternal-plugin-host-facts v0.1.0
+      │           ├── infraternal v0.1.0 (*)
+      │           ├── infraternal-agent v0.1.0
+      │           │   ├── infraternal v0.1.0 (*)
+      │           │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           └── infraternal-fuzz v0.1.0 (*)
+      ├── openssl-macros v0.1.1
+      │   └── openssl v0.10.81
+      │       ├── axum-server v0.8.0
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-agent v0.1.0 (*)
+      │       ├── infraternal-plugin-remote v0.1.0
+      │       │   ├── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── tokio-openssl v0.6.5
+      │       │   ├── axum-server v0.8.0 (*)
+      │       │   ├── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── webauthn-attestation-ca v0.5.5
+      │       │   └── webauthn-rs-core v0.5.5 (*)
+      │       └── webauthn-rs-core v0.5.5 (*)
+      ├── sqlx-macros v0.8.6
+      │   └── sqlx v0.8.6
+      │       ├── infraternal-plugin-api v0.1.0
+      │       │   ├── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   ├── infraternal-mesh v0.1.0
+      │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   └── infraternal-plugin-mesh v0.1.0
+      │       │   │       ├── infraternal v0.1.0 (*)
+      │       │   │       ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │       └── infraternal-server v0.1.0 (*)
+      │       │   ├── infraternal-plugin-backup v0.1.0
+      │       │   │   └── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │       │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       │   ├── infraternal-plugin-relay v0.1.0
+      │       │   │   └── infraternal v0.1.0 (*)
+      │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   ├── infraternal-plugin-ssh v0.1.0
+      │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │   └── infraternal-server v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       └── infraternal-server v0.1.0 (*)
+      ├── sqlx-macros-core v0.8.6
+      │   └── sqlx-macros v0.8.6 (*)
+      ├── synstructure v0.13.2
+      │   └── asn1-rs-derive v0.5.1 (*)
+      ├── thiserror-impl v1.0.69
+      │   └── thiserror v1.0.69
+      │       ├── asn1-rs v0.6.2 (*)
+      │       ├── webauthn-rs-core v0.5.5 (*)
+      │       └── x509-parser v0.16.0 (*)
+      ├── tracing-attributes v0.1.31
+      │   └── tracing v0.1.44
+      │       ├── axum v0.8.9
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── axum-core v0.5.6
+      │       │   └── axum v0.8.9 (*)
+      │       ├── h2 v0.4.19
+      │       │   ├── hyper v1.11.1
+      │       │   │   ├── axum v0.8.9 (*)
+      │       │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   ├── hyper-util v0.1.21
+      │       │   │   │   ├── axum v0.8.9 (*)
+      │       │   │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── quinn v0.11.12
+      │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── quinn-proto v0.11.19
+      │       │   └── quinn v0.11.12 (*)
+      │       ├── quinn-udp v0.5.16
+      │       │   └── quinn v0.11.12 (*)
+      │       ├── sqlx-core v0.8.6
+      │       │   ├── sqlx v0.8.6 (*)
+      │       │   ├── sqlx-macros v0.8.6 (*)
+      │       │   ├── sqlx-macros-core v0.8.6 (*)
+      │       │   └── sqlx-sqlite v0.8.6
+      │       │       ├── sqlx v0.8.6 (*)
+      │       │       └── sqlx-macros-core v0.8.6 (*)
+      │       ├── sqlx-sqlite v0.8.6 (*)
+      │       ├── tower v0.5.3
+      │       │   ├── axum v0.8.9 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── tracing-subscriber v0.3.23
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       ├── webauthn-rs v0.5.5 (*)
+      │       └── webauthn-rs-core v0.5.5 (*)
+      └── zerocopy-derive v0.8.60
+          └── zerocopy v0.8.60
+              ├── half v2.7.1
+              │   ├── ciborium-ll v0.2.2
+              │   │   └── ciborium v0.2.2
+              │   │       └── criterion v0.7.0
+              │   │           └── (dev) infraternal-protocol v0.1.0
+              │   │               ├── infraternal-agent v0.1.0 (*)
+              │   │               ├── infraternal-fuzz v0.1.0 (*)
+              │   │               ├── (dev) infraternal-plugin-host-facts v0.1.0 (*)
+              │   │               ├── infraternal-plugin-mesh v0.1.0 (*)
+              │   │               ├── infraternal-plugin-remote v0.1.0 (*)
+              │   │               └── infraternal-server v0.1.0 (*)
+              │   └── serde_cbor_2 v0.13.0
+              │       ├── infraternal-server v0.1.0 (*)
+              │       └── webauthn-rs-core v0.5.5 (*)
+              └── ppv-lite86 v0.2.21
+                  ├── rand_chacha v0.3.1
+                  │   └── rand v0.8.8
+                  │       └── bip39 v2.2.2
+                  │           └── infraternal-server v0.1.0 (*)
+                  └── rand_chacha v0.9.0
+                      ├── rand v0.9.5
+                      │   ├── infraternal-server v0.1.0 (*)
+                      │   ├── tungstenite v0.29.0
+                      │   │   └── tokio-tungstenite v0.29.0
+                      │   │       ├── axum v0.8.9 (*)
+                      │   │       └── (dev) infraternal-server v0.1.0 (*)
+                      │   └── webauthn-rs-core v0.5.5 (*)
+                      └── webauthn-rs-core v0.5.5 (*)
+    ├ syn v3.0.6
+      ├── clap_derive v4.6.7
+      │   └── clap v4.6.7
+      │       ├── criterion v0.7.0
+      │       │   └── (dev) infraternal-protocol v0.1.0
+      │       │       ├── infraternal-agent v0.1.0
+      │       │       │   ├── infraternal v0.1.0
+      │       │       │   ├── infraternal-fuzz v0.1.0
+      │       │       │   └── infraternal-server v0.1.0
+      │       │       │       ├── infraternal v0.1.0 (*)
+      │       │       │       └── infraternal-fuzz v0.1.0 (*)
+      │       │       ├── infraternal-fuzz v0.1.0 (*)
+      │       │       ├── (dev) infraternal-plugin-host-facts v0.1.0
+      │       │       │   ├── infraternal v0.1.0 (*)
+      │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │       │   └── infraternal-fuzz v0.1.0 (*)
+      │       │       ├── infraternal-plugin-mesh v0.1.0
+      │       │       │   ├── infraternal v0.1.0 (*)
+      │       │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │       │   └── infraternal-server v0.1.0 (*)
+      │       │       ├── infraternal-plugin-remote v0.1.0
+      │       │       │   ├── infraternal v0.1.0 (*)
+      │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │       │   └── infraternal-server v0.1.0 (*)
+      │       │       └── infraternal-server v0.1.0 (*)
+      │       └── infraternal v0.1.0 (*)
+      ├── displaydoc v0.2.7
+      │   ├── asn1-rs v0.6.2
+      │   │   ├── der-parser v9.0.0
+      │   │   │   ├── webauthn-rs-core v0.5.5
+      │   │   │   │   └── webauthn-rs v0.5.5
+      │   │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │   │   └── x509-parser v0.16.0
+      │   │   │       └── webauthn-rs-core v0.5.5 (*)
+      │   │   ├── oid-registry v0.7.1
+      │   │   │   └── x509-parser v0.16.0 (*)
+      │   │   └── x509-parser v0.16.0 (*)
+      │   ├── der-parser v9.0.0 (*)
+      │   ├── icu_collections v2.3.0
+      │   │   ├── icu_normalizer v2.3.0
+      │   │   │   └── idna_adapter v1.2.2
+      │   │   │       └── idna v1.1.0
+      │   │   │           └── url v2.5.8
+      │   │   │               ├── infraternal v0.1.0 (*)
+      │   │   │               ├── infraternal-plugin-ssh v0.1.0
+      │   │   │               │   ├── infraternal v0.1.0 (*)
+      │   │   │               │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │               │   └── infraternal-server v0.1.0 (*)
+      │   │   │               ├── infraternal-server v0.1.0 (*)
+      │   │   │               ├── sqlx-core v0.8.6
+      │   │   │               │   ├── sqlx v0.8.6
+      │   │   │               │   │   ├── infraternal-plugin-api v0.1.0
+      │   │   │               │   │   │   ├── infraternal v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-mesh v0.1.0
+      │   │   │               │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │   │               │   │   │   │   └── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-backup v0.1.0
+      │   │   │               │   │   │   │   └── infraternal v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-relay v0.1.0
+      │   │   │               │   │   │   │   └── infraternal v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │   │               │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │   │               │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │               │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   │               │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │               │   ├── sqlx-macros v0.8.6
+      │   │   │               │   │   └── sqlx v0.8.6 (*)
+      │   │   │               │   ├── sqlx-macros-core v0.8.6
+      │   │   │               │   │   └── sqlx-macros v0.8.6 (*)
+      │   │   │               │   └── sqlx-sqlite v0.8.6
+      │   │   │               │       ├── sqlx v0.8.6 (*)
+      │   │   │               │       └── sqlx-macros-core v0.8.6 (*)
+      │   │   │               ├── sqlx-macros-core v0.8.6 (*)
+      │   │   │               ├── sqlx-sqlite v0.8.6 (*)
+      │   │   │               ├── webauthn-rs v0.5.5 (*)
+      │   │   │               ├── webauthn-rs-core v0.5.5 (*)
+      │   │   │               └── webauthn-rs-proto v0.5.5
+      │   │   │                   └── webauthn-rs-core v0.5.5 (*)
+      │   │   └── icu_properties v2.3.0
+      │   │       └── idna_adapter v1.2.2 (*)
+      │   ├── icu_locale_core v2.3.0
+      │   │   ├── icu_properties v2.3.0 (*)
+      │   │   └── icu_provider v2.3.1
+      │   │       ├── icu_normalizer v2.3.0 (*)
+      │   │       └── icu_properties v2.3.0 (*)
+      │   ├── icu_properties v2.3.0 (*)
+      │   ├── icu_provider v2.3.1 (*)
+      │   ├── tinystr v0.8.4
+      │   │   └── icu_locale_core v2.3.0 (*)
+      │   └── zerotrie v0.2.5
+      │       ├── icu_properties v2.3.0 (*)
+      │       └── icu_provider v2.3.1 (*)
+      ├── futures-macro v0.3.34
+      │   └── futures-util v0.3.34
+      │       ├── axum v0.8.9
+      │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   └── infraternal-server v0.1.0 (*)
+      │       ├── futures-executor v0.3.34
+      │       │   └── sqlx-sqlite v0.8.6 (*)
+      │       ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       ├── (dev) infraternal-plugin-ssh v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── js-sys v0.3.106
+      │       │   ├── getrandom v0.2.17
+      │       │   │   ├── rand_core v0.6.4
+      │       │   │   │   ├── bip39 v2.2.2
+      │       │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │   │   ├── crypto-common v0.1.7
+      │       │   │   │   │   ├── aead v0.5.2
+      │       │   │   │   │   │   └── aes-gcm v0.10.3
+      │       │   │   │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │   │   ├── cipher v0.4.4
+      │       │   │   │   │   │   ├── aes v0.8.4
+      │       │   │   │   │   │   │   └── aes-gcm v0.10.3 (*)
+      │       │   │   │   │   │   ├── aes-gcm v0.10.3 (*)
+      │       │   │   │   │   │   └── ctr v0.9.2
+      │       │   │   │   │   │       └── aes-gcm v0.10.3 (*)
+      │       │   │   │   │   ├── digest v0.10.7
+      │       │   │   │   │   │   ├── blake2 v0.10.6
+      │       │   │   │   │   │   │   └── argon2 v0.5.3
+      │       │   │   │   │   │   │       └── infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │   ├── hmac v0.12.1
+      │       │   │   │   │   │   │   └── hkdf v0.12.4
+      │       │   │   │   │   │   │       └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │   ├── sha1 v0.10.7
+      │       │   │   │   │   │   │   ├── axum v0.8.9 (*)
+      │       │   │   │   │   │   │   └── tungstenite v0.29.0
+      │       │   │   │   │   │   │       └── tokio-tungstenite v0.29.0
+      │       │   │   │   │   │   │           ├── axum v0.8.9 (*)
+      │       │   │   │   │   │   │           └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │   └── sha2 v0.10.9
+      │       │   │   │   │   │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   │   │   │   │       ├── infraternal-server v0.1.0 (*)
+      │       │   │   │   │   │       ├── sqlx-core v0.8.6 (*)
+      │       │   │   │   │   │       └── sqlx-macros-core v0.8.6 (*)
+      │       │   │   │   │   └── universal-hash v0.5.1
+      │       │   │   │   │       └── polyval v0.6.2
+      │       │   │   │   │           └── ghash v0.5.1
+      │       │   │   │   │               └── aes-gcm v0.10.3 (*)
+      │       │   │   │   ├── password-hash v0.5.0
+      │       │   │   │   │   └── argon2 v0.5.3 (*)
+      │       │   │   │   ├── rand v0.8.8
+      │       │   │   │   │   └── bip39 v2.2.2 (*)
+      │       │   │   │   └── rand_chacha v0.3.1
+      │       │   │   │       └── rand v0.8.8 (*)
+      │       │   │   └── ring v0.17.14
+      │       │   │       ├── quinn-proto v0.11.19
+      │       │   │       │   └── quinn v0.11.12
+      │       │   │       │       ├── infraternal-agent v0.1.0 (*)
+      │       │   │       │       ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │       │       └── infraternal-server v0.1.0 (*)
+      │       │   │       ├── rustls v0.23.45
+      │       │   │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │       │   ├── quinn v0.11.12 (*)
+      │       │   │       │   └── quinn-proto v0.11.19 (*)
+      │       │   │       └── rustls-webpki v0.103.15
+      │       │   │           └── rustls v0.23.45 (*)
+      │       │   ├── getrandom v0.4.3
+      │       │   │   ├── jobserver v0.1.35
+      │       │   │   │   └── cc v1.6.0
+      │       │   │   │       ├── (build) libfuzzer-sys v0.4.13
+      │       │   │   │       │   └── infraternal-fuzz v0.1.0 (*)
+      │       │   │   │       ├── (build) libsqlite3-sys v0.30.1
+      │       │   │   │       │   └── sqlx-sqlite v0.8.6 (*)
+      │       │   │   │       ├── openssl-src v300.6.1+3.6.3
+      │       │   │   │       │   └── (build) openssl-sys v0.9.117
+      │       │   │   │       │       ├── axum-server v0.8.0
+      │       │   │   │       │       │   └── infraternal-server v0.1.0 (*)
+      │       │   │   │       │       ├── openssl v0.10.81
+      │       │   │   │       │       │   ├── axum-server v0.8.0 (*)
+      │       │   │   │       │       │   ├── infraternal v0.1.0 (*)
+      │       │   │   │       │       │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │   │       │       │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │   │       │       │   ├── infraternal-server v0.1.0 (*)
+      │       │   │   │       │       │   ├── tokio-openssl v0.6.5
+      │       │   │   │       │       │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │   │       │       │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │       │   │   │       │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   │       │       │   ├── webauthn-attestation-ca v0.5.5
+      │       │   │   │       │       │   │   └── webauthn-rs-core v0.5.5 (*)
+      │       │   │   │       │       │   └── webauthn-rs-core v0.5.5 (*)
+      │       │   │   │       │       ├── tokio-openssl v0.6.5 (*)
+      │       │   │   │       │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       │   │   │       │       └── webauthn-rs-core v0.5.5 (*)
+      │       │   │   │       ├── (build) openssl-sys v0.9.117 (*)
+      │       │   │   │       └── (build) ring v0.17.14 (*)
+      │       │   │   ├── quinn-proto v0.11.19 (*)
+      │       │   │   ├── rand v0.10.3
+      │       │   │   │   └── quinn-proto v0.11.19 (*)
+      │       │   │   └── uuid v1.27.0
+      │       │   │       ├── infraternal v0.1.0 (*)
+      │       │   │       ├── infraternal-agent v0.1.0 (*)
+      │       │   │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   │       ├── infraternal-server v0.1.0 (*)
+      │       │   │       ├── webauthn-attestation-ca v0.5.5 (*)
+      │       │   │       ├── webauthn-rs v0.5.5 (*)
+      │       │   │       └── webauthn-rs-core v0.5.5 (*)
+      │       │   ├── web-sys v0.3.106
+      │       │   │   └── plotters v0.3.7
+      │       │   │       └── criterion v0.7.0 (*)
+      │       │   └── web-time v1.1.0
+      │       │       ├── quinn v0.11.12 (*)
+      │       │       ├── quinn-proto v0.11.19 (*)
+      │       │       └── rustls-pki-types v1.15.1
+      │       │           ├── quinn-proto v0.11.19 (*)
+      │       │           ├── rustls v0.23.45 (*)
+      │       │           └── rustls-webpki v0.103.15 (*)
+      │       ├── sqlx-core v0.8.6 (*)
+      │       ├── sqlx-sqlite v0.8.6 (*)
+      │       ├── tokio-tungstenite v0.29.0 (*)
+      │       ├── tower v0.5.3
+      │       │   ├── axum v0.8.9 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       └── tower-http v0.6.11
+      │           └── infraternal-server v0.1.0 (*)
+      ├── serde_derive v1.0.229
+      │   ├── serde v1.0.229
+      │   │   ├── base64urlsafedata v0.5.5
+      │   │   │   ├── webauthn-attestation-ca v0.5.5 (*)
+      │   │   │   ├── webauthn-rs v0.5.5 (*)
+      │   │   │   ├── webauthn-rs-core v0.5.5 (*)
+      │   │   │   └── webauthn-rs-proto v0.5.5 (*)
+      │   │   ├── bip39 v2.2.2 (*)
+      │   │   ├── ciborium v0.2.2
+      │   │   │   └── criterion v0.7.0 (*)
+      │   │   ├── criterion v0.7.0 (*)
+      │   │   ├── either v1.18.0
+      │   │   │   ├── axum-server v0.8.0 (*)
+      │   │   │   ├── itertools v0.13.0
+      │   │   │   │   ├── criterion v0.7.0 (*)
+      │   │   │   │   └── criterion-plot v0.6.0
+      │   │   │   │       └── criterion v0.7.0 (*)
+      │   │   │   ├── rayon v1.12.0
+      │   │   │   │   └── criterion v0.7.0 (*)
+      │   │   │   ├── sqlx-core v0.8.6 (*)
+      │   │   │   └── sqlx-macros-core v0.8.6 (*)
+      │   │   ├── infraternal v0.1.0 (*)
+      │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   ├── infraternal-mesh v0.1.0 (*)
+      │   │   ├── infraternal-plugin-api v0.1.0 (*)
+      │   │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │   ├── infraternal-server v0.1.0 (*)
+      │   │   ├── serde_cbor_2 v0.13.0
+      │   │   │   ├── infraternal-server v0.1.0 (*)
+      │   │   │   └── webauthn-rs-core v0.5.5 (*)
+      │   │   ├── serde_urlencoded v0.7.1
+      │   │   │   ├── axum v0.8.9 (*)
+      │   │   │   └── sqlx-sqlite v0.8.6 (*)
+      │   │   ├── sqlx-core v0.8.6 (*)
+      │   │   ├── sqlx-macros-core v0.8.6 (*)
+      │   │   ├── sqlx-sqlite v0.8.6 (*)
+      │   │   ├── tinytemplate v1.2.1
+      │   │   │   └── criterion v0.7.0 (*)
+      │   │   ├── tracing-serde v0.2.0
+      │   │   │   └── tracing-subscriber v0.3.23
+      │   │   │       └── infraternal-server v0.1.0 (*)
+      │   │   ├── tracing-subscriber v0.3.23 (*)
+      │   │   ├── url v2.5.8 (*)
+      │   │   ├── webauthn-attestation-ca v0.5.5 (*)
+      │   │   ├── webauthn-rs v0.5.5 (*)
+      │   │   ├── webauthn-rs-core v0.5.5 (*)
+      │   │   ├── webauthn-rs-proto v0.5.5 (*)
+      │   │   └── zeroize v1.9.0
+      │   │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │   │       ├── infraternal-server v0.1.0 (*)
+      │   │       ├── rustls v0.23.45 (*)
+      │   │       └── rustls-pki-types v1.15.1 (*)
+      │   └── url v2.5.8 (*)
+      ├── synstructure v0.14.0
+      │   ├── yoke-derive v0.8.4
+      │   │   └── yoke v0.8.3
+      │   │       ├── icu_collections v2.3.0 (*)
+      │   │       ├── icu_provider v2.3.1 (*)
+      │   │       ├── zerotrie v0.2.5 (*)
+      │   │       └── zerovec v0.11.8
+      │   │           ├── icu_collections v2.3.0 (*)
+      │   │           ├── icu_locale_core v2.3.0 (*)
+      │   │           ├── icu_normalizer v2.3.0 (*)
+      │   │           ├── icu_properties v2.3.0 (*)
+      │   │           ├── icu_provider v2.3.1 (*)
+      │   │           ├── potential_utf v0.1.6
+      │   │           │   └── icu_collections v2.3.0 (*)
+      │   │           └── tinystr v0.8.4 (*)
+      │   └── zerofrom-derive v0.1.8
+      │       └── zerofrom v0.1.8
+      │           ├── icu_collections v2.3.0 (*)
+      │           ├── icu_provider v2.3.1 (*)
+      │           ├── yoke v0.8.3 (*)
+      │           ├── zerotrie v0.2.5 (*)
+      │           └── zerovec v0.11.8 (*)
+      ├── thiserror-impl v2.0.21
+      │   └── thiserror v2.0.21
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-mesh v0.1.0 (*)
+      │       ├── infraternal-server v0.1.0 (*)
+      │       ├── quinn v0.11.12 (*)
+      │       ├── quinn-proto v0.11.19 (*)
+      │       ├── sqlx-core v0.8.6 (*)
+      │       ├── sqlx-sqlite v0.8.6 (*)
+      │       ├── sysctl v0.7.1
+      │       │   └── infraternal-plugin-host-facts v0.1.0 (*)
+      │       └── tungstenite v0.29.0 (*)
+      ├── tokio-macros v2.7.2
+      │   └── tokio v1.53.2
+      │       ├── axum v0.8.9 (*)
+      │       ├── axum-server v0.8.0 (*)
+      │       ├── fs-err v3.3.2
+      │       │   └── axum-server v0.8.0 (*)
+      │       ├── h2 v0.4.19
+      │       │   ├── hyper v1.11.1
+      │       │   │   ├── axum v0.8.9 (*)
+      │       │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   ├── hyper-util v0.1.21
+      │       │   │   │   ├── axum v0.8.9 (*)
+      │       │   │   │   ├── axum-server v0.8.0 (*)
+      │       │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   │   ├── infraternal v0.1.0 (*)
+      │       │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │       │   └── (dev) infraternal-server v0.1.0 (*)
+      │       ├── hyper v1.11.1 (*)
+      │       ├── hyper-util v0.1.21 (*)
+      │       ├── (dev) infraternal v0.1.0 (*)
+      │       ├── infraternal-agent v0.1.0 (*)
+      │       ├── infraternal-plugin-api v0.1.0 (*)
+      │       ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       ├── infraternal-plugin-remote v0.1.0 (*)
+      │       ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       ├── (dev) infraternal-server v0.1.0 (*)
+      │       ├── quinn v0.11.12 (*)
+      │       ├── sqlx-core v0.8.6 (*)
+      │       ├── sqlx-macros-core v0.8.6 (*)
+      │       ├── tokio-openssl v0.6.5 (*)
+      │       ├── tokio-stream v0.1.19
+      │       │   └── sqlx-core v0.8.6 (*)
+      │       ├── tokio-tungstenite v0.29.0 (*)
+      │       ├── tokio-util v0.7.19
+      │       │   ├── h2 v0.4.19 (*)
+      │       │   └── tower-http v0.6.11 (*)
+      │       ├── tower v0.5.3 (*)
+      │       └── tower-http v0.6.11 (*)
+      ├── wasm-bindgen-macro-support v0.2.129
+      │   └── wasm-bindgen-macro v0.2.129
+      │       └── wasm-bindgen v0.2.129
+      │           ├── getrandom v0.2.17 (*)
+      │           ├── getrandom v0.4.3 (*)
+      │           ├── js-sys v0.3.106 (*)
+      │           ├── plotters v0.3.7 (*)
+      │           ├── web-sys v0.3.106 (*)
+      │           └── web-time v1.1.0 (*)
+      ├── yoke-derive v0.8.4 (*)
+      ├── zerofrom-derive v0.1.8 (*)
+      └── zerovec-derive v0.11.6
+          └── zerovec v0.11.8 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'synstructure'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:250:1
+    │  
+250 │ ╭ synstructure 0.13.2 registry+https://github.com/rust-lang/crates.io-index
+251 │ │ synstructure 0.14.0 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰─────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ synstructure v0.13.2
+      └── asn1-rs-derive v0.5.1
+          └── asn1-rs v0.6.2
+              ├── der-parser v9.0.0
+              │   ├── webauthn-rs-core v0.5.5
+              │   │   └── webauthn-rs v0.5.5
+              │   │       └── infraternal-server v0.1.0
+              │   │           ├── infraternal v0.1.0
+              │   │           └── infraternal-fuzz v0.1.0
+              │   └── x509-parser v0.16.0
+              │       └── webauthn-rs-core v0.5.5 (*)
+              ├── oid-registry v0.7.1
+              │   └── x509-parser v0.16.0 (*)
+              └── x509-parser v0.16.0 (*)
+    ├ synstructure v0.14.0
+      ├── yoke-derive v0.8.4
+      │   └── yoke v0.8.3
+      │       ├── icu_collections v2.3.0
+      │       │   ├── icu_normalizer v2.3.0
+      │       │   │   └── idna_adapter v1.2.2
+      │       │   │       └── idna v1.1.0
+      │       │   │           └── url v2.5.8
+      │       │   │               ├── infraternal v0.1.0
+      │       │   │               ├── infraternal-plugin-ssh v0.1.0
+      │       │   │               │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   ├── infraternal-fuzz v0.1.0
+      │       │   │               │   └── infraternal-server v0.1.0
+      │       │   │               │       ├── infraternal v0.1.0 (*)
+      │       │   │               │       └── infraternal-fuzz v0.1.0 (*)
+      │       │   │               ├── infraternal-server v0.1.0 (*)
+      │       │   │               ├── sqlx-core v0.8.6
+      │       │   │               │   ├── sqlx v0.8.6
+      │       │   │               │   │   ├── infraternal-plugin-api v0.1.0
+      │       │   │               │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-agent v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-mesh v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-plugin-mesh v0.1.0
+      │       │   │               │   │   │   │       ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   │       ├── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   │       └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-backup v0.1.0
+      │       │   │               │   │   │   │   └── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-relay v0.1.0
+      │       │   │               │   │   │   │   └── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-remote v0.1.0
+      │       │   │               │   │   │   │   ├── infraternal v0.1.0 (*)
+      │       │   │               │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │       │   │               │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   │   ├── infraternal-plugin-ssh v0.1.0 (*)
+      │       │   │               │   │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │       │   │               │   │   └── infraternal-server v0.1.0 (*)
+      │       │   │               │   ├── sqlx-macros v0.8.6
+      │       │   │               │   │   └── sqlx v0.8.6 (*)
+      │       │   │               │   ├── sqlx-macros-core v0.8.6
+      │       │   │               │   │   └── sqlx-macros v0.8.6 (*)
+      │       │   │               │   └── sqlx-sqlite v0.8.6
+      │       │   │               │       ├── sqlx v0.8.6 (*)
+      │       │   │               │       └── sqlx-macros-core v0.8.6 (*)
+      │       │   │               ├── sqlx-macros-core v0.8.6 (*)
+      │       │   │               ├── sqlx-sqlite v0.8.6 (*)
+      │       │   │               ├── webauthn-rs v0.5.5
+      │       │   │               │   └── infraternal-server v0.1.0 (*)
+      │       │   │               ├── webauthn-rs-core v0.5.5
+      │       │   │               │   └── webauthn-rs v0.5.5 (*)
+      │       │   │               └── webauthn-rs-proto v0.5.5
+      │       │   │                   └── webauthn-rs-core v0.5.5 (*)
+      │       │   └── icu_properties v2.3.0
+      │       │       └── idna_adapter v1.2.2 (*)
+      │       ├── icu_provider v2.3.1
+      │       │   ├── icu_normalizer v2.3.0 (*)
+      │       │   └── icu_properties v2.3.0 (*)
+      │       ├── zerotrie v0.2.5
+      │       │   ├── icu_properties v2.3.0 (*)
+      │       │   └── icu_provider v2.3.1 (*)
+      │       └── zerovec v0.11.8
+      │           ├── icu_collections v2.3.0 (*)
+      │           ├── icu_locale_core v2.3.0
+      │           │   ├── icu_properties v2.3.0 (*)
+      │           │   └── icu_provider v2.3.1 (*)
+      │           ├── icu_normalizer v2.3.0 (*)
+      │           ├── icu_properties v2.3.0 (*)
+      │           ├── icu_provider v2.3.1 (*)
+      │           ├── potential_utf v0.1.6
+      │           │   └── icu_collections v2.3.0 (*)
+      │           └── tinystr v0.8.4
+      │               └── icu_locale_core v2.3.0 (*)
+      └── zerofrom-derive v0.1.8
+          └── zerofrom v0.1.8
+              ├── icu_collections v2.3.0 (*)
+              ├── icu_provider v2.3.1 (*)
+              ├── yoke v0.8.3 (*)
+              ├── zerotrie v0.2.5 (*)
+              └── zerovec v0.11.8 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'thiserror'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:253:1
+    │  
+253 │ ╭ thiserror 1.0.69 registry+https://github.com/rust-lang/crates.io-index
+254 │ │ thiserror 2.0.21 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ thiserror v1.0.69
+      ├── asn1-rs v0.6.2
+      │   ├── der-parser v9.0.0
+      │   │   ├── webauthn-rs-core v0.5.5
+      │   │   │   └── webauthn-rs v0.5.5
+      │   │   │       └── infraternal-server v0.1.0
+      │   │   │           ├── infraternal v0.1.0
+      │   │   │           └── infraternal-fuzz v0.1.0
+      │   │   └── x509-parser v0.16.0
+      │   │       └── webauthn-rs-core v0.5.5 (*)
+      │   ├── oid-registry v0.7.1
+      │   │   └── x509-parser v0.16.0 (*)
+      │   └── x509-parser v0.16.0 (*)
+      ├── webauthn-rs-core v0.5.5 (*)
+      └── x509-parser v0.16.0 (*)
+    ├ thiserror v2.0.21
+      ├── infraternal v0.1.0
+      ├── infraternal-mesh v0.1.0
+      │   ├── infraternal v0.1.0 (*)
+      │   └── infraternal-plugin-mesh v0.1.0
+      │       ├── infraternal v0.1.0 (*)
+      │       ├── infraternal-fuzz v0.1.0
+      │       └── infraternal-server v0.1.0
+      │           ├── infraternal v0.1.0 (*)
+      │           └── infraternal-fuzz v0.1.0 (*)
+      ├── infraternal-server v0.1.0 (*)
+      ├── quinn v0.11.12
+      │   ├── infraternal-agent v0.1.0
+      │   │   ├── infraternal v0.1.0 (*)
+      │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   └── infraternal-server v0.1.0 (*)
+      │   ├── infraternal-plugin-remote v0.1.0
+      │   │   ├── infraternal v0.1.0 (*)
+      │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   └── infraternal-server v0.1.0 (*)
+      │   └── infraternal-server v0.1.0 (*)
+      ├── quinn-proto v0.11.19
+      │   └── quinn v0.11.12 (*)
+      ├── sqlx-core v0.8.6
+      │   ├── sqlx v0.8.6
+      │   │   ├── infraternal-plugin-api v0.1.0
+      │   │   │   ├── infraternal v0.1.0 (*)
+      │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │   ├── infraternal-mesh v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-backup v0.1.0
+      │   │   │   │   └── infraternal v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+      │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+      │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-relay v0.1.0
+      │   │   │   │   └── infraternal v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │   │   │   ├── infraternal-plugin-ssh v0.1.0
+      │   │   │   │   ├── infraternal v0.1.0 (*)
+      │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │   │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   │   └── infraternal-server v0.1.0 (*)
+      │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │   │   └── infraternal-server v0.1.0 (*)
+      │   ├── sqlx-macros v0.8.6
+      │   │   └── sqlx v0.8.6 (*)
+      │   ├── sqlx-macros-core v0.8.6
+      │   │   └── sqlx-macros v0.8.6 (*)
+      │   └── sqlx-sqlite v0.8.6
+      │       ├── sqlx v0.8.6 (*)
+      │       └── sqlx-macros-core v0.8.6 (*)
+      ├── sqlx-sqlite v0.8.6 (*)
+      ├── sysctl v0.7.1
+      │   └── infraternal-plugin-host-facts v0.1.0 (*)
+      └── tungstenite v0.29.0
+          └── tokio-tungstenite v0.29.0
+              ├── axum v0.8.9
+              │   ├── infraternal-fuzz v0.1.0 (*)
+              │   └── infraternal-server v0.1.0 (*)
+              └── (dev) infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'thiserror-impl'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:255:1
+    │  
+255 │ ╭ thiserror-impl 1.0.69 registry+https://github.com/rust-lang/crates.io-index
+256 │ │ thiserror-impl 2.0.21 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ thiserror-impl v1.0.69
+      └── thiserror v1.0.69
+          ├── asn1-rs v0.6.2
+          │   ├── der-parser v9.0.0
+          │   │   ├── webauthn-rs-core v0.5.5
+          │   │   │   └── webauthn-rs v0.5.5
+          │   │   │       └── infraternal-server v0.1.0
+          │   │   │           ├── infraternal v0.1.0
+          │   │   │           └── infraternal-fuzz v0.1.0
+          │   │   └── x509-parser v0.16.0
+          │   │       └── webauthn-rs-core v0.5.5 (*)
+          │   ├── oid-registry v0.7.1
+          │   │   └── x509-parser v0.16.0 (*)
+          │   └── x509-parser v0.16.0 (*)
+          ├── webauthn-rs-core v0.5.5 (*)
+          └── x509-parser v0.16.0 (*)
+    ├ thiserror-impl v2.0.21
+      └── thiserror v2.0.21
+          ├── infraternal v0.1.0
+          ├── infraternal-mesh v0.1.0
+          │   ├── infraternal v0.1.0 (*)
+          │   └── infraternal-plugin-mesh v0.1.0
+          │       ├── infraternal v0.1.0 (*)
+          │       ├── infraternal-fuzz v0.1.0
+          │       └── infraternal-server v0.1.0
+          │           ├── infraternal v0.1.0 (*)
+          │           └── infraternal-fuzz v0.1.0 (*)
+          ├── infraternal-server v0.1.0 (*)
+          ├── quinn v0.11.12
+          │   ├── infraternal-agent v0.1.0
+          │   │   ├── infraternal v0.1.0 (*)
+          │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │   │   └── infraternal-server v0.1.0 (*)
+          │   ├── infraternal-plugin-remote v0.1.0
+          │   │   ├── infraternal v0.1.0 (*)
+          │   │   ├── infraternal-agent v0.1.0 (*)
+          │   │   └── infraternal-server v0.1.0 (*)
+          │   └── infraternal-server v0.1.0 (*)
+          ├── quinn-proto v0.11.19
+          │   └── quinn v0.11.12 (*)
+          ├── sqlx-core v0.8.6
+          │   ├── sqlx v0.8.6
+          │   │   ├── infraternal-plugin-api v0.1.0
+          │   │   │   ├── infraternal v0.1.0 (*)
+          │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │   │   │   ├── infraternal-mesh v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-backup v0.1.0
+          │   │   │   │   └── infraternal v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-host-facts v0.1.0
+          │   │   │   │   ├── infraternal v0.1.0 (*)
+          │   │   │   │   ├── infraternal-agent v0.1.0 (*)
+          │   │   │   │   └── infraternal-fuzz v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-relay v0.1.0
+          │   │   │   │   └── infraternal v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │   │   │   ├── infraternal-plugin-ssh v0.1.0
+          │   │   │   │   ├── infraternal v0.1.0 (*)
+          │   │   │   │   ├── infraternal-fuzz v0.1.0 (*)
+          │   │   │   │   └── infraternal-server v0.1.0 (*)
+          │   │   │   └── infraternal-server v0.1.0 (*)
+          │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+          │   │   └── infraternal-server v0.1.0 (*)
+          │   ├── sqlx-macros v0.8.6
+          │   │   └── sqlx v0.8.6 (*)
+          │   ├── sqlx-macros-core v0.8.6
+          │   │   └── sqlx-macros v0.8.6 (*)
+          │   └── sqlx-sqlite v0.8.6
+          │       ├── sqlx v0.8.6 (*)
+          │       └── sqlx-macros-core v0.8.6 (*)
+          ├── sqlx-sqlite v0.8.6 (*)
+          ├── sysctl v0.7.1
+          │   └── infraternal-plugin-host-facts v0.1.0 (*)
+          └── tungstenite v0.29.0
+              └── tokio-tungstenite v0.29.0
+                  ├── axum v0.8.9
+                  │   ├── infraternal-fuzz v0.1.0 (*)
+                  │   └── infraternal-server v0.1.0 (*)
+                  └── (dev) infraternal-server v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'windows-sys'
+    ┌─ /home/kayg/Developer/infraternal/.worktrees/dev-backmerge/Cargo.lock:313:1
+    │  
+313 │ ╭ windows-sys 0.52.0 registry+https://github.com/rust-lang/crates.io-index
+314 │ │ windows-sys 0.61.2 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ windows-sys v0.52.0
+      └── ring v0.17.14
+          ├── quinn-proto v0.11.19
+          │   └── quinn v0.11.12
+          │       ├── infraternal-agent v0.1.0
+          │       │   ├── infraternal v0.1.0
+          │       │   ├── infraternal-fuzz v0.1.0
+          │       │   └── infraternal-server v0.1.0
+          │       │       ├── infraternal v0.1.0 (*)
+          │       │       └── infraternal-fuzz v0.1.0 (*)
+          │       ├── infraternal-plugin-remote v0.1.0
+          │       │   ├── infraternal v0.1.0 (*)
+          │       │   ├── infraternal-agent v0.1.0 (*)
+          │       │   └── infraternal-server v0.1.0 (*)
+          │       └── infraternal-server v0.1.0 (*)
+          ├── rustls v0.23.45
+          │   ├── infraternal-plugin-remote v0.1.0 (*)
+          │   ├── quinn v0.11.12 (*)
+          │   └── quinn-proto v0.11.19 (*)
+          └── rustls-webpki v0.103.15
+              └── rustls v0.23.45 (*)
+    ├ windows-sys v0.61.2
+      ├── anstyle-query v1.1.5
+      │   └── anstream v1.0.0
+      │       └── clap_builder v4.6.7
+      │           └── clap v4.6.7
+      │               ├── criterion v0.7.0
+      │               │   └── (dev) infraternal-protocol v0.1.0
+      │               │       ├── infraternal-agent v0.1.0
+      │               │       │   ├── infraternal v0.1.0
+      │               │       │   ├── infraternal-fuzz v0.1.0
+      │               │       │   └── infraternal-server v0.1.0
+      │               │       │       ├── infraternal v0.1.0 (*)
+      │               │       │       └── infraternal-fuzz v0.1.0 (*)
+      │               │       ├── infraternal-fuzz v0.1.0 (*)
+      │               │       ├── (dev) infraternal-plugin-host-facts v0.1.0
+      │               │       │   ├── infraternal v0.1.0 (*)
+      │               │       │   ├── infraternal-agent v0.1.0 (*)
+      │               │       │   └── infraternal-fuzz v0.1.0 (*)
+      │               │       ├── infraternal-plugin-mesh v0.1.0
+      │               │       │   ├── infraternal v0.1.0 (*)
+      │               │       │   ├── infraternal-fuzz v0.1.0 (*)
+      │               │       │   └── infraternal-server v0.1.0 (*)
+      │               │       ├── infraternal-plugin-remote v0.1.0
+      │               │       │   ├── infraternal v0.1.0 (*)
+      │               │       │   ├── infraternal-agent v0.1.0 (*)
+      │               │       │   └── infraternal-server v0.1.0 (*)
+      │               │       └── infraternal-server v0.1.0 (*)
+      │               └── infraternal v0.1.0 (*)
+      ├── anstyle-wincon v3.0.11
+      │   └── anstream v1.0.0 (*)
+      ├── errno v0.3.14
+      │   └── signal-hook-registry v1.4.8
+      │       └── tokio v1.53.2
+      │           ├── axum v0.8.9
+      │           │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── axum-server v0.8.0
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── fs-err v3.3.2
+      │           │   └── axum-server v0.8.0 (*)
+      │           ├── h2 v0.4.19
+      │           │   ├── hyper v1.11.1
+      │           │   │   ├── axum v0.8.9 (*)
+      │           │   │   ├── axum-server v0.8.0 (*)
+      │           │   │   ├── hyper-util v0.1.21
+      │           │   │   │   ├── axum v0.8.9 (*)
+      │           │   │   │   ├── axum-server v0.8.0 (*)
+      │           │   │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │           │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   └── (dev) infraternal-server v0.1.0 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           ├── hyper v1.11.1 (*)
+      │           ├── hyper-util v0.1.21 (*)
+      │           ├── (dev) infraternal v0.1.0 (*)
+      │           ├── infraternal-agent v0.1.0 (*)
+      │           ├── infraternal-plugin-api v0.1.0
+      │           │   ├── infraternal v0.1.0 (*)
+      │           │   ├── infraternal-agent v0.1.0 (*)
+      │           │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   ├── infraternal-mesh v0.1.0
+      │           │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   └── infraternal-plugin-mesh v0.1.0 (*)
+      │           │   ├── infraternal-plugin-backup v0.1.0
+      │           │   │   └── infraternal v0.1.0 (*)
+      │           │   ├── infraternal-plugin-host-facts v0.1.0 (*)
+      │           │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │           │   ├── infraternal-plugin-relay v0.1.0
+      │           │   │   └── infraternal v0.1.0 (*)
+      │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │           │   ├── infraternal-plugin-ssh v0.1.0
+      │           │   │   ├── infraternal v0.1.0 (*)
+      │           │   │   ├── infraternal-fuzz v0.1.0 (*)
+      │           │   │   └── infraternal-server v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── infraternal-plugin-mesh v0.1.0 (*)
+      │           ├── infraternal-plugin-remote v0.1.0 (*)
+      │           ├── infraternal-plugin-ssh v0.1.0 (*)
+      │           ├── (dev) infraternal-server v0.1.0 (*)
+      │           ├── quinn v0.11.12
+      │           │   ├── infraternal-agent v0.1.0 (*)
+      │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │           │   └── infraternal-server v0.1.0 (*)
+      │           ├── sqlx-core v0.8.6
+      │           │   ├── sqlx v0.8.6
+      │           │   │   ├── infraternal-plugin-api v0.1.0 (*)
+      │           │   │   ├── infraternal-plugin-mesh v0.1.0 (*)
+      │           │   │   └── infraternal-server v0.1.0 (*)
+      │           │   ├── sqlx-macros v0.8.6
+      │           │   │   └── sqlx v0.8.6 (*)
+      │           │   ├── sqlx-macros-core v0.8.6
+      │           │   │   └── sqlx-macros v0.8.6 (*)
+      │           │   └── sqlx-sqlite v0.8.6
+      │           │       ├── sqlx v0.8.6 (*)
+      │           │       └── sqlx-macros-core v0.8.6 (*)
+      │           ├── sqlx-macros-core v0.8.6 (*)
+      │           ├── tokio-openssl v0.6.5
+      │           │   ├── axum-server v0.8.0 (*)
+      │           │   ├── infraternal v0.1.0 (*)
+      │           │   ├── infraternal-agent v0.1.0 (*)
+      │           │   ├── infraternal-plugin-remote v0.1.0 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           ├── tokio-stream v0.1.19
+      │           │   └── sqlx-core v0.8.6 (*)
+      │           ├── tokio-tungstenite v0.29.0
+      │           │   ├── axum v0.8.9 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           ├── tokio-util v0.7.19
+      │           │   ├── h2 v0.4.19 (*)
+      │           │   └── tower-http v0.6.11
+      │           │       └── infraternal-server v0.1.0 (*)
+      │           ├── tower v0.5.3
+      │           │   ├── axum v0.8.9 (*)
+      │           │   └── (dev) infraternal-server v0.1.0 (*)
+      │           └── tower-http v0.6.11 (*)
+      ├── mio v1.2.4
+      │   └── tokio v1.53.2 (*)
+      ├── nu-ansi-term v0.50.3
+      │   └── tracing-subscriber v0.3.23
+      │       └── infraternal-server v0.1.0 (*)
+      ├── quinn-udp v0.5.16
+      │   └── quinn v0.11.12 (*)
+      ├── socket2 v0.6.5
+      │   ├── quinn v0.11.12 (*)
+      │   ├── quinn-udp v0.5.16 (*)
+      │   └── tokio v1.53.2 (*)
+      ├── tokio v1.53.2 (*)
+      └── winapi-util v0.1.11
+          ├── same-file v1.0.6
+          │   └── walkdir v2.5.0
+          │       ├── criterion v0.7.0 (*)
+          │       └── sysctl v0.7.1
+          │           └── infraternal-plugin-host-facts v0.1.0 (*)
+          └── walkdir v2.5.0 (*)
+
+advisories ok, bans ok, licenses ok, sources ok
+
+==> static builds
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-agent)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
+    Finished `release` profile [optimized] target(s) in 3m 37s
+/home/kayg/.cache/codex-scratch/dev-backmerge/target/x86_64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent; size: 20290864 bytes (baseline 16142672 + allowance 262144 = max 16404816)
+binary exceeds the 16404816-byte size budget: 20290864 bytes
+
++---------------------------+--------------+
+| Rust gate                 | Result       |
++---------------------------+--------------+
+| fmt                       | PASS         |
+| VT native fmt             | PASS         |
+| CLI plugin compile-out    | PASS         |
+| clippy                    | PASS         |
+| test                      | FAIL (101)   |
+| cargo-deny                | PASS         |
+| static builds             | FAIL (1)     |
++---------------------------+--------------+

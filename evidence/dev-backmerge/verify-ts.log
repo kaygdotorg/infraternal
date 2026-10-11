@@ -1,0 +1,373 @@
+Running as unit: run-p3382729-i49472787.scope; invocation ID: a4416c81f6e149c69b895e3e8828ec86
+
+==> Vendored Ghostty artifact checksums
+dist/ghostty-web.js: OK
+dist/ghostty-vt.wasm: OK
+dist/index.d.ts: OK
+
+==> TypeScript protocol compiler
+
+==> Tracer compiler, precompression and bundle transfer budget
+bun install v1.4.2 (744846f84)
+
+Checked 38 installs across 69 packages (no changes) [87.00ms]
+$ bun x tsc --project tsconfig.json
+bun test v1.4.2 (744846f84)
+
+precompress.test.ts:
+(pass) text sidecars round-trip deterministically; compressed formats remain identity [29.27ms]
+
+browser-build.test.ts:
+(pass) the browser renderer has no unresolved Vite Node-file shim request [36.73ms]
+
+src/perf-detector.test.ts:
+(pass) FrameDetector > estimates the refresh from the median and snaps it [1.62ms]
+(pass) FrameDetector > nothing is a drop before the rate is known [0.13ms]
+(pass) FrameDetector > a drop is over 1.5 refresh intervals, a freeze over 100 ms [0.25ms]
+(pass) FrameDetector > the refresh only goes up: a slow page is not a slower display [0.25ms]
+(pass) FrameDetector > the first frame after a pause is not an interval [0.12ms]
+(pass) FrameDetector > fps, p95 and window read the ring [0.30ms]
+(pass) FrameDetector > a throttled page (one frame a second) is neither a drop nor a freeze, and neither is its return [0.26ms]
+(pass) FrameDetector > a lone long stall is still a freeze and is not a throttled run [0.11ms]
+
+src/canvas/recency.test.ts:
+(pass) touch moves an item to the front and never duplicates it [0.25ms]
+(pass) repeating the front item changes nothing [0.06ms]
+(pass) the list is capped, so the oldest items fall off [0.07ms]
+(pass) top skips items that are no longer live, without losing them [0.08ms]
+(pass) recentRows: five used windows in reverse order of use, from 54 windows [0.24ms]
+(pass) recentRows: a view with three windows and no use shows them in order [0.04ms]
+(pass) recentRows: used windows lead, the rest fill up to five in window order [0.07ms]
+
+src/canvas/windows/details-facts.test.ts:
+(pass) host facts become plain-language details rows [1.08ms]
+(pass) unknown optional host facts stay absent instead of appearing as placeholders [0.25ms]
+(pass) extended info off: the machine tab shows only the essentials, ungrouped, and there is no More section [0.41ms]
+(pass) extended info on: every fact sits under System, Resources or Access [0.34ms]
+(pass) the header follows the machine's own facts, not the platform the host list guessed [0.20ms]
+(pass) before facts arrive the host's platform names the header [0.10ms]
+(pass) a reported system with no platform mark still names the header and shows no mark [0.09ms]
+
+src/canvas/mesh/protocol.test.ts:
+(pass) the server's own list becomes nodes, tags and grants, by name [1.67ms]
+(pass) without `access` (today's server) the person may view and may not edit [0.37ms]
+(pass) fields the server does not send are absent, never invented [0.23ms]
+(pass) anything that is not a list is refused, whole [6.40ms]
+(pass) a node's own tag list and the tag table agree even when a server sends only one [0.24ms]
+(pass) the subscription's events: a pushed list, a revision that invalidates, and the end of the subscription [0.39ms]
+(pass) answers carry the new revision, and a create the new arrow's id [0.13ms]
+(pass) endpoints go out as the server writes them: a node by id, a tag by name [0.15ms]
+
+src/canvas/mesh/layout.test.ts:
+(pass) a small mesh keeps the approved arrangement: tags down the left, hosts two to a row [1.24ms]
+(pass) the layout is deterministic and does not depend on input order [9.47ms]
+(pass) no two cards overlap, and every card lies inside the graph [27.20ms]
+(pass) the sheet is wider than tall, roughly 16:10 [2.24ms]
+(pass) a pinned node stays where it was put and the others do not move [15.14ms]
+(pass) a pin beyond the sheet grows the graph [0.36ms]
+(pass) a host's other tags do not move it; a tag nobody carries still has its node [0.23ms]
+(pass) 1,000 nodes lay out in a few milliseconds [53.53ms]
+
+src/canvas/layout/stops.test.ts:
+(pass) a view that fits the viewport has one stop, centred [0.48ms]
+(pass) a wide view has one stop per column and the last stop ends at the right edge [0.29ms]
+(pass) a view taller than the viewport is scaled down so it fits [0.05ms]
+(pass) nearestStop picks the stop whose centre is closest [0.18ms]
+(pass) a big graph opens fitted whole, in one stop, and its canvas is free [0.25ms]
+(pass) a small graph keeps one stop per node column [0.11ms]
+(pass) on a narrow screen a big graph does not shrink past where its names can be read: it starts at the top left [0.07ms]
+
+src/canvas/layout/grid.test.ts:
+(pass) split right in a stacked column makes a group: the window's column halves, its neighbours span both halves [1.16ms]
+(pass) closing the new half gives the layout back exactly, in the model [6.25ms]
+(pass) closing the window it came from makes the new half take its band, and the layout is one column again [0.62ms]
+(pass) split right of a spanning window halves its span inside the existing columns, with the footprint unchanged [0.44ms]
+(pass) split down in a group divides only the window's band: the partner window grows to keep its height [0.94ms]
+(pass) closing the window split down gives its band back to the window above and to the partner [0.64ms]
+(pass) a window split down in a plain column stacks under it and moves the windows below down [0.15ms]
+(pass) new window right opens a full-size column after the whole group, never inside it [0.34ms]
+(pass) runs: adjacent columns linked by a spanning window form one group, the rest stay plain [0.08ms]
+(pass) spans are clamped to the columns that exist and a stale row is re-placed, never overlapped [0.12ms]
+(pass) random sequences of split right, split down, new window right and close never break the grid [149.51ms]
+(pass) closing every window of a group returns the view to nothing, with no problem on the way [0.38ms]
+(pass) a full-width band under a group moves nothing and extends the group by one band [0.15ms]
+(pass) a band inserted between two bands of one column grows the windows beside it and moves the rest [0.10ms]
+
+src/canvas/layout/geometry.test.ts:
+(pass) a dropped view pushes the one it lands on along the axis of least overlap, never itself [0.57ms]
+(pass) a chain of neighbours is pushed in turn [0.11ms]
+(pass) snapping rounds to whole cells [0.05ms]
+(pass) reach follows grants through tags and keeps the relay [2.58ms]
+
+src/canvas/sessions/live-inventory.test.ts:
+(pass) inventory remembers a remote session and refuses a cross-host attach [1.13ms]
+
+src/canvas/sessions/details-live.test.ts:
+(pass) a refused host facts action stops its recurring timer [2.87ms]
+(pass) a detected operating system supplies the live popover mark [1.04ms]
+
+src/canvas/sessions/live.test.ts:
+(pass) an enrolled host opens by UUID and splits keep that authority [6.15ms]
+(pass) unknown and ambiguous labels never open an embedded shell [0.19ms]
+(pass) removed hosts disappear from inventory and cannot route a new shell [0.24ms]
+
+src/canvas/sessions/gone-review.test.ts:
+(pass) selecting a known gone session keeps its final exited state [0.47ms]
+(pass) a known retired status survives repeated selection and generic ended answers [0.19ms]
+
+src/canvas/sessions/open-refusal.test.ts:
+(pass) memory refusal retains the reason and current counters [1.95ms]
+(pass) legacy refusals still work and malformed counters never reach the message [0.83ms]
+(pass) product copy names the host and counters and never renders untrusted server text [3.67ms]
+(pass) oversized refusal JSON is ignored before parsing [0.35ms]
+
+src/canvas/model/document.test.ts:
+(pass) a document holds references and layout, never content [0.74ms]
+(pass) a document survives JSON and rebuilds the same columns [1.27ms]
+(pass) a target that no longer exists is dropped, and an emptied column with it [0.23ms]
+(pass) parseDocument rejects anything that is not a document of this format [4.64ms]
+(pass) remote affinity survives reload and invalid UUIDs cannot become local references [0.28ms]
+(pass) a version 1 document from before D212 loads, with its split pair and a full-size window [0.29ms]
+(pass) a grouped view saves its spans and bands and loads back to the same grid (D212) [25.57ms]
+(pass) a plain view is saved without spans or bands, exactly as before D212 [0.14ms]
+
+src/canvas/addhost/real.test.ts:
+(pass) parsing the server's data > a discovery row keeps only known fields and valid ids [0.40ms]
+(pass) parsing the server's data > the server key needs its public key and fingerprint [0.06ms]
+(pass) parsing the server's data > an install command needs a lifetime [0.05ms]
+(pass) a server that lacks an endpoint > serving the web app (200, HTML) for an unknown path is 'not available' [9.12ms]
+(pass) a server that lacks an endpoint > 404 discovery is an empty list; 500 discovery is an error to show [0.61ms]
+(pass) a server that lacks an endpoint > private sign-in stays local until a target-bound socket start [2.01ms]
+(pass) a server that lacks an endpoint > a wrong target consumes the reference without sending private input [0.62ms]
+(pass) a server that lacks an endpoint > a local reference cannot change SSH address while keeping the target id [0.30ms]
+(pass) a server that lacks an endpoint > closing before open discards queued sign-in even if a late open fires [0.20ms]
+(pass) a server that lacks an endpoint > pre-open commands stay bounded and events after close cannot revive a run [0.50ms]
+(pass) a server that lacks an endpoint > trust waits for the exact acknowledgement, and ignores another target [13.22ms]
+
+src/canvas/addhost/authority.on-demand.test.ts:
+(pass) CA wrapping matches the contract's HKDF domain and separates generations [18.22ms]
+
+src/canvas/addhost/model.test.ts:
+(pass) stagesOf > a host with no event is waiting everywhere [0.37ms]
+(pass) stagesOf > check before sign-in is detecting how to sign in [0.22ms]
+(pass) stagesOf > the sign-in report finishes detect and starts the system check [0.15ms]
+(pass) stagesOf > install, facts and connect map to install, enrol and first session [0.20ms]
+(pass) stagesOf > an auth failure before sign-in fails detect and says it in plain words, not the server's [0.22ms]
+(pass) stagesOf > an unsupported host fails the system check, after sign-in [0.07ms]
+(pass) stagesOf > an install failure fails the install stage and keeps the earlier ones done [0.07ms]
+(pass) stagesOf > a new attempt starts over and forgets the old sign-in [0.11ms]
+(pass) authLabel > names the method and a trusted network provider only [0.06ms]
+(pass) guideFor > installation failures never claim that incomplete cleanup succeeded [0.15ms]
+(pass) guideFor > each failure kind names its fix [0.11ms]
+(pass) guideFor > mesh-policy words say possible, not certain [0.03ms]
+(pass) parseTarget > reads user, host and port [0.22ms]
+(pass) parseTarget > refuses what cannot name a host [0.04ms]
+(pass) parseSshConfig > reads aliases with HostName, User and Port, skipping wildcards and Match [1.22ms]
+(pass) parseSshConfig > recognises config text [0.08ms]
+(pass) parseSshConfig > a hostname that is an option is dropped [0.07ms]
+(pass) plain words > an unknown or missing failure gets the generic sentence, never the server's text [0.08ms]
+(pass) plain words > no headline carries an arrow, an id or an API noun [0.24ms]
+(pass) only a completed canonical host identity becomes terminal authority [0.13ms]
+(pass) parseTarget > accepts user@host, host, user@host:port, IPv4 and bracketed IPv6 with an optional port [0.08ms]
+(pass) parseTarget > rejects partial and malformed tokens, so they wait or show the hint [0.08ms]
+(pass) matchListed > a name that is exactly one host's id or address names that host [0.16ms]
+(pass) matchListed > a name that is also the start of another host's name is named but still prefixed [0.04ms]
+(pass) matchListed > a partial name that starts several hosts names none and waits [0.04ms]
+(pass) matchListed > a new name that starts no host is neither named nor waiting [0.07ms]
+(pass) install diagnostics name the failed step and public host error [0.28ms]
+(pass) missing payload tells the operator the architecture and expected server path [0.06ms]
+(pass) an already added host says so and offers opening its existing terminal [0.04ms]
+
+src/canvas/addhost/wizard.test.ts:
+(pass) a saved-key prompt completing after close never starts an SSH attempt [0.76ms]
+(pass) fresh CA requires setup before any SSH attempt and preserves root consent [0.32ms]
+(pass) ready CA begins the requested installation mode without another prompt [0.18ms]
+(pass) closing during CA confirmation never starts an SSH attempt [0.38ms]
+(pass) a typed root login requires explicit consent before any installation [0.18ms]
+
+../../packages/ui/src/spring.test.ts:
+(pass) a missed frame does not stretch a settled spring [5.42ms]
+(pass) motion follows elapsed time across frame rates and damping regimes [1.64ms]
+
+chunk-classes.test.ts:
+(pass) the first screen is critical, the canvas product module and what only it uses are deferred [2.10ms]
+(pass) a chunk that both sides use stays critical [6.27ms]
+(pass) code only an action loads is on demand, even when the lazy canvas is what loads it [0.35ms]
+
+test/recovery-ui.test.ts:
+(pass) compiled recovery UI mode off obeys its URL boundary [13.69ms]
+(pass) compiled recovery UI mode preview obeys its URL boundary [10.27ms]
+(pass) compiled recovery UI mode 1 obeys its URL boundary [3.01ms]
+
+test/recovery-crypto.test.ts:
+(pass) HKDF siblings match independent implementation and bind unwrap to domain, account, kind and version [43.14ms]
+(pass) 100 repeated wrapping operations generate independent salts and nonces [42.20ms]
+
+test/recovery-rotation.test.ts:
+(pass) signed-in rotation sends only a local envelope and verifier after acknowledgement [18.57ms]
+(pass) abandoned word acknowledgement uploads nothing [10.36ms]
+(pass) settled acknowledgement cannot upload later (dismissed) [6.56ms]
+(pass) settled acknowledgement cannot upload later (no acknowledgement) [5.22ms]
+
+test/recovery-wait.test.ts:
+(pass) server remaining wait 0s is accepted through the capability policy maximum [7.52ms]
+(pass) server remaining wait 86400s is accepted through the capability policy maximum [2.55ms]
+(pass) server remaining wait 90000s is accepted through the capability policy maximum [1.90ms]
+(pass) server remaining wait 172800s is accepted through the capability policy maximum [2.47ms]
+(pass) malformed or excessive remaining wait -1 is denied [2.11ms]
+(pass) malformed or excessive remaining wait 0.5 is denied [0.91ms]
+(pass) malformed or excessive remaining wait 172801 is denied [1.52ms]
+(pass) malformed or excessive remaining wait 9007199254740992 is denied [3.68ms]
+(pass) malformed or excessive remaining wait 90000 is denied [4.92ms]
+
+ 154 pass
+ 0 fail
+ 11280 expect() calls
+Ran 154 tests across 26 files. [1163.00ms]
+$ bun run build.ts
+built chunk-st9cmtfv.js, chunk-nha0rj7v.js, chunk-pymxpd8s.js, chunk-frrh7r75.js, chunk-as9ejyv4.js, chunk-9yqtg4bm.js, chunk-5gvm30xx.js, chunk-a895a34j.js, chunk-y9z35mse.js, chunk-gg6f6hz5.js, chunk-7pv2q1pv.js, chunk-fnvcht0d.js, chunk-0g3v75e7.js, main.js, chunk-kdcxvw7m.js, chunk-wn0fy536.js, chunk-gvfq7550.js, chunk-ds5vmej4.js, chunk-1ygheb8n.js, chunk-p07emknq.js, chunk-jkfrj4re.js, chunk-6xbv2xrg.js, chunk-zk8rjff3.js, chunk-axbkkqp1.js, chunk-ax1q0p6f.js, chunk-7eeb0h0x.js, chunk-7v3pzbcy.js, chunk-2fgf8q48.js, chunk-2hyv64vs.js, chunk-v7gpczkt.js, chunk-rp7j0xbt.js, chunk-jc3twpr8.js, chunk-h7qyd8wm.js, chunk-nf3vwrre.js, chunk-9099rps2.js, chunk-yy8tsnxh.js, chunk-m9ftbfk7.js, chunk-fextp724.js, chunk-28rbcdd5.js, chunk-61xwpgvs.js, chunk-ryy15zqq.js, chunk-npbv57fs.js, chunk-hdbnccvd.js, chunk-r2e4y8ht.js, chunk-84c8jnnr.js, chunk-a0k4jng9.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-5hnjht6p.js, chunk-f2r0hhqc.js, chunk-8hdt2fh0.js, chunk-1z46kfv2.js, chunk-9xd3g65e.js
+onDemand chunk-ryy15zqq.js: identity=552 gzip=406 brotli=307 bytes
+critical chunk-ax1q0p6f.js: identity=703957 gzip=203942 brotli=165278 bytes
+critical chunk-28rbcdd5.js: identity=39 gzip=39 brotli=39 bytes
+deferred chunk-v7gpczkt.js: identity=93915 gzip=31921 brotli=28198 bytes
+onDemand chunk-fnvcht0d.js: identity=4563 gzip=1607 brotli=1433 bytes
+critical chunk-8hdt2fh0.js: identity=199 gzip=160 brotli=128 bytes
+onDemand chunk-jc3twpr8.js: identity=540 gzip=353 brotli=313 bytes
+onDemand chunk-2fgf8q48.js: identity=4575 gzip=2013 brotli=1779 bytes
+critical chunk-1ygheb8n.js: identity=590 gzip=326 brotli=304 bytes
+onDemand chunk-fextp724.js: identity=10496 gzip=4087 brotli=3734 bytes
+onDemand chunk-nf3vwrre.js: identity=5359 gzip=2581 brotli=2302 bytes
+onDemand chunk-7eeb0h0x.js: identity=6198 gzip=2791 brotli=2523 bytes
+onDemand chunk-r2e4y8ht.js: identity=6773 gzip=3174 brotli=2888 bytes
+onDemand chunk-a0k4jng9.js: identity=2316 gzip=1032 brotli=865 bytes
+onDemand chunk-9yqtg4bm.js: identity=2188 gzip=1048 brotli=878 bytes
+critical faulty-terminal.worker.js: identity=1086 gzip=558 brotli=486 bytes
+critical backdrop.worker.js: identity=243 gzip=211 brotli=158 bytes
+onDemand chunk-0g3v75e7.js: identity=2108 gzip=1037 brotli=870 bytes
+critical chunk-6xbv2xrg.js: identity=1104 gzip=666 brotli=605 bytes
+onDemand chunk-as9ejyv4.js: identity=3891 gzip=1737 brotli=1521 bytes
+critical chunk-hdbnccvd.js: identity=162 gzip=150 brotli=146 bytes
+onDemand chunk-yy8tsnxh.js: identity=7662 gzip=3396 brotli=2970 bytes
+onDemand chunk-h7qyd8wm.js: identity=11529 gzip=4651 brotli=4250 bytes
+critical chunk-st9cmtfv.js: identity=21235 gzip=6854 brotli=6128 bytes
+onDemand chunk-gg6f6hz5.js: identity=2420 gzip=1197 brotli=1080 bytes
+critical chunk-a895a34j.js: identity=88 gzip=88 brotli=74 bytes
+onDemand chunk-9099rps2.js: identity=4640 gzip=1932 brotli=1705 bytes
+critical chunk-axbkkqp1.js: identity=90 gzip=90 brotli=78 bytes
+critical chunk-kdcxvw7m.js: identity=8377 gzip=3575 brotli=3197 bytes
+onDemand chunk-7pv2q1pv.js: identity=191 gzip=171 brotli=135 bytes
+critical chunk-jkfrj4re.js: identity=386 gzip=237 brotli=196 bytes
+critical chunk-f2r0hhqc.js: identity=128 gzip=109 brotli=111 bytes
+onDemand chunk-7v3pzbcy.js: identity=2824 gzip=1385 brotli=1193 bytes
+critical chunk-9xd3g65e.js: identity=39 gzip=39 brotli=39 bytes
+onDemand chunk-84c8jnnr.js: identity=31920 gzip=12276 brotli=11048 bytes
+deferred chunk-frrh7r75.js: identity=42608 gzip=16270 brotli=14307 bytes
+critical chunk-5hnjht6p.js: identity=9810 gzip=4015 brotli=3454 bytes
+onDemand chunk-m9ftbfk7.js: identity=13351 gzip=5012 brotli=4479 bytes
+critical chunk-ds5vmej4.js: identity=17525 gzip=6115 brotli=5442 bytes
+critical chunk-1z46kfv2.js: identity=41779 gzip=14279 brotli=12777 bytes
+critical chunk-wn0fy536.js: identity=5443 gzip=2604 brotli=2379 bytes
+critical chunk-5gvm30xx.js: identity=707 gzip=368 brotli=311 bytes
+onDemand chunk-zk8rjff3.js: identity=1026 gzip=623 brotli=497 bytes
+critical chunk-nha0rj7v.js: identity=2943 gzip=1315 brotli=1134 bytes
+critical main.js: identity=109195 gzip=39819 brotli=34570 bytes
+onDemand chunk-rp7j0xbt.js: identity=1170 gzip=705 brotli=590 bytes
+critical chunk-p07emknq.js: identity=2519 gzip=1008 brotli=878 bytes
+critical chunk-61xwpgvs.js: identity=49 gzip=49 brotli=49 bytes
+critical chunk-gvfq7550.js: identity=12516 gzip=5003 brotli=4452 bytes
+onDemand chunk-pymxpd8s.js: identity=5745 gzip=2167 brotli=1922 bytes
+onDemand chunk-2hyv64vs.js: identity=1616 gzip=864 brotli=739 bytes
+onDemand chunk-y9z35mse.js: identity=228 gzip=179 brotli=165 bytes
+onDemand chunk-npbv57fs.js: identity=47781 gzip=15015 brotli=13348 bytes
+JavaScript transfer, critical: identity=940209 gzip=291619/307200 brotli=242413/256000 bytes
+JavaScript transfer, deferred: identity=136523 gzip=48191/51200 brotli=42505/45056 bytes
+JavaScript transfer, onDemand: identity=181662 gzip=71439/20480 brotli=63534/18432 bytes
+JavaScript transfer, onDemand largest chunk chunk-npbv57fs.js: gzip=15015/20480 brotli=13348/18432 bytes (class total gzip=71439 brotli=63534, not limited)
+fonts/monaspace-neon/italic.latin.woff2: identity=44324 gzip=44324 brotli=44324 bytes
+fonts/monaspace-neon/roman.latin.woff2: identity=40016 gzip=40016 brotli=40016 bytes
+fonts/jetbrains-mono/italic.latin.woff2: identity=36316 gzip=36316 brotli=36316 bytes
+fonts/jetbrains-mono/roman.latin.woff2: identity=34068 gzip=34068 brotli=34068 bytes
+fonts/source-code-pro/italic.latin.woff2: identity=23612 gzip=23612 brotli=23612 bytes
+fonts/source-code-pro/roman.latin.woff2: identity=22872 gzip=22872 brotli=22872 bytes
+fonts/geist-mono/italic.latin.woff2: identity=21380 gzip=21380 brotli=21380 bytes
+fonts/geist-mono/roman.latin.woff2: identity=19984 gzip=19984 brotli=19981 bytes
+fonts/ibm-plex-mono/italic.latin.woff2: identity=22296 gzip=22296 brotli=22296 bytes
+fonts/ibm-plex-mono/roman.latin.woff2: identity=19048 gzip=19048 brotli=19047 bytes
+fonts/cascadia-code/italic.latin.woff2: identity=44404 gzip=44404 brotli=44404 bytes
+fonts/cascadia-code/roman.latin.woff2: identity=40604 gzip=40604 brotli=40604 bytes
+fonts/maple-mono-nf/italic.latin.woff2: identity=53444 gzip=53444 brotli=53444 bytes
+fonts/maple-mono-nf/roman.latin.woff2: identity=46432 gzip=46432 brotli=46432 bytes
+fonts/nerd-symbols.woff2: identity=223748 gzip=223748 brotli=223748 bytes
+fonts/fira-code/roman.latin.woff2: identity=36756 gzip=36756 brotli=36756 bytes
+fonts/commit-mono/italic-400.latin.woff2: identity=18716 gzip=18716 brotli=18716 bytes
+fonts/commit-mono/italic-700.latin.woff2: identity=18352 gzip=18352 brotli=18352 bytes
+fonts/commit-mono/roman-400.latin.woff2: identity=17484 gzip=17484 brotli=17484 bytes
+fonts/commit-mono/roman-700.latin.woff2: identity=17260 gzip=17260 brotli=17260 bytes
+Font transfer: monaspace-neon=84340/88064 jetbrains-mono=70384/75776 source-code-pro=46484/49152 geist-mono=41364/45056 ibm-plex-mono=41344/45056 cascadia-code=85008/88064 maple-mono-nf=99876/106496 (critical 46432/51200) symbols=223748/235520 fira-code=36756/40960 commit-mono=71812/75776 bytes
+
+==> Rust stream oracle (for the differential test)
+
+==> TypeScript protocol tests
+bun test v1.4.2 (744846f84)
+
+src/mesh-review-revocation.test.ts:
+(pass) review forbidden event cancels pending snapshot publication [11.51ms]
+(pass) subscription forbidden ends delivery before a late refresh rejection [1.64ms]
+(pass) subscription not found ends delivery before a late refresh rejection [1.20ms]
+(pass) subscription invalid input ends delivery before a late refresh rejection [1.24ms]
+(pass) subscription mesh unavailable ends delivery before a late refresh rejection [3.58ms]
+(pass) synchronous subscription refusal releases the transport exactly once [0.24ms]
+
+src/codec.test.ts:
+(pass) wire protocol golden vectors > encodes and decodes each frame exactly as the shared manifest describes [11.01ms]
+(pass) wire protocol golden vectors > returns borrowed payload views and writes into reusable buffers [0.19ms]
+(pass) wire protocol golden vectors > decodes muxed messages split across WebSocket messages [0.71ms]
+(pass) wire protocol golden vectors > rejects oversized, non-canonical, unknown, and malformed frame bytes [0.18ms]
+(pass) split mux header preserves trailing Close [0.16ms]
+
+src/mesh-review-paged-error.test.ts:
+(pass) review earlier snapshot continuation failure cannot replace a newer complete refresh [6.19ms]
+(pass) review earlier snapshot continuation cannot overwrite a delivered revision [2.89ms]
+(pass) a newer paged event owns publication before an earlier refresh resumes [3.11ms]
+
+src/mesh-review-refresh.test.ts:
+(pass) review superseded refresh failure cannot replace authoritative resync [1.43ms]
+(pass) superseded failure preserves a newer pending refresh [7.79ms]
+
+src/stream.test.ts:
+stream differential: 134 streams, 11439 schedules, zero divergences
+(pass) Rust and TypeScript preserve every frame at all boundaries and random multi-splits [4962.19ms]
+(pass) maximum frame size and fragmented oversized prefix obey the allocation boundary [9.81ms]
+
+src/mesh.test.ts:
+(pass) Mesh actions map to their typed action IDs and JSON inputs [1.75ms]
+(pass) Mesh watch coalesces change bursts and never publishes an older revision [4.29ms]
+(pass) Mesh watch forwards server errors and stops delivering after unsubscribe [0.13ms]
+
+src/mesh-review-continuation.test.ts:
+(pass) review continuation stops after stop [1.57ms]
+(pass) review continuation stops after forbidden [1.22ms]
+(pass) review continuation stops after superseded [1.17ms]
+
+src/mesh-pagination.test.ts:
+(pass) list assembles bounded pages using the same filter [0.27ms]
+(pass) a changed revision discards earlier pages before assembling its restart [0.12ms]
+(pass) malformed continuation is refused: {"revision":1,"offset":0} [0.32ms]
+(pass) malformed continuation is refused: {"revision":2,"offset":1} [0.02ms]
+(pass) malformed continuation is refused: {"revision":1,"offset":2}
+(pass) watch never publishes a partial page; withdrawn=false [1.39ms]
+(pass) watch never publishes a partial page; withdrawn=true [1.20ms]
+(pass) a superseding equal-revision resync wins over pending page assembly [1.56ms]
+
+src/mesh-review-resync.test.ts:
+(pass) review watch applies same-revision authoritative resync [0.22ms]
+(pass) authoritative resync keeps priority over an equal-revision pending list [1.47ms]
+
+src/mesh-vectors.test.ts:
+(pass) every shared Mesh action vector passes through the typed client unchanged [1.46ms]
+(pass) shared Mesh event vectors drive the typed watch adapter [7.42ms]
+
+ 36 pass
+ 0 fail
+ 34462 expect() calls
+Ran 36 tests across 10 files. [5.09s]

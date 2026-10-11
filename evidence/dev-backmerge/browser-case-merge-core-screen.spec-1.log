@@ -1,0 +1,58 @@
+Load before: 6.84 14.38 20.15 4/3000 4009020
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p4009021-i50099022.scope; invocation ID: 7593e3c29ff4468daa2cc9fb4477a3cb
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-ayhar9f5.js, chunk-tvynw18r.js, chunk-2dn5cre8.js, chunk-b5qzwpce.js, chunk-bdym8frk.js, chunk-g4ffzbxx.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-zc9ymn27.js, chunk-jbefc7kd.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-xx2z1vx8.js, chunk-7nczvd3c.js, chunk-wajasqrd.js, chunk-6rqa9ntg.js, chunk-yvhhqffe.js, chunk-z80fn73s.js, chunk-b1v74hg1.js, chunk-k16zk6c0.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-4p39tg7n.js, chunk-p6brpr3a.js, chunk-qm2y04mp.js, chunk-t6w5zq54.js, chunk-8gqdshxw.js, chunk-p7zytd4a.js, chunk-fd18mmh4.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-fdca84vk.js, chunk-3khtp13p.js, chunk-237g9npc.js, chunk-c9qww71k.js, chunk-1d0qvnvb.js, chunk-a5pewm17.js, chunk-axbkkqp1.js, chunk-gfk6q0at.js, chunk-669c615d.js, chunk-8y85z1nw.js, chunk-f40sve0m.js, chunk-70ztk0c2.js, chunk-g7965a6j.js, chunk-v86b5paa.js, chunk-zgebs6e3.js, chunk-cdpc986a.js, chunk-x1pbzqfa.js, chunk-kq6bdadr.js, chunk-2e4yh13p.js, chunk-t042pnwz.js, chunk-qt67kzcr.js, chunk-tj3mb0a9.js, chunk-9e5adn90.js, chunk-jwv77snv.js, chunk-hk68pt9b.js, chunk-xb9vwy2r.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-e8jm854g.js, chunk-57k86n6d.js, chunk-0sxn500c.js, chunk-18e4ka0s.js, chunk-jns2k8hy.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:4009250) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/core-screen.spec.ts:150:1 › core screen themes, tree, RTT, mobile tray, and screenshots (16.5s)
+
+
+  1) test/core-screen.spec.ts:150:1 › core screen themes, tree, RTT, mobile tray, and screenshots ──
+
+    Error: expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 4
+    + Received  + 4
+
+      Array [
+    -   251,
+    -   251,
+    -   251,
+    -   0.78,
+    +   0.980622,
+    +   0.000315863,
+    +   0.00124064,
+    +   0.872627,
+      ]
+
+      138 |       return { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow };
+      139 |     });
+    > 140 |     expect(cssChannels(paletteMaterial.background)).toEqual(cssChannels(material.root));
+          |                                                     ^
+      141 |     expect(cssChannels(paletteMaterial.line)).toEqual(cssChannels(material.rootLine));
+      142 |     expect(paletteMaterial.shadow).toBe(sidebarMaterial.shadow);
+      143 |     expect(paletteMaterial.shadow).not.toBe(material.layers[0]!.shadow);
+        at screenshotMatrix (/home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/core-screen.spec.ts:140:53)
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/core-screen.spec.ts:219:27
+
+    attachment #1: tracer-core-1440x900-paper-sidebar-closed (image/png) ───────────────────────────
+    test-results/core-screen-core-screen-th-1b4b8-mobile-tray-and-screenshots/attachments/tracer-core-1440x900-paper-sidebar-closed-f2a69fa10e485509c64325fcfa79abcfc6f00a51.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: tracer-core-1440x900-paper-sidebar-open (image/png) ─────────────────────────────
+    test-results/core-screen-core-screen-th-1b4b8-mobile-tray-and-screenshots/attachments/tracer-core-1440x900-paper-sidebar-open-739a0ffd7d594fe186ccdedf48ad6e50e4aa30b9.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/core-screen-core-screen-th-1b4b8-mobile-tray-and-screenshots/error-context.md
+
+  1 failed
+    test/core-screen.spec.ts:150:1 › core screen themes, tree, RTT, mobile tray, and screenshots ───
+
+Invocation exit: 1
+Load after: 8.23 14.12 19.91 6/3039 4009903

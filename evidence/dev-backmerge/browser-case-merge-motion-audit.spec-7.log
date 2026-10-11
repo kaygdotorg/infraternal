@@ -1,0 +1,42 @@
+Load before: 22.40 25.07 24.00 5/2966 288005
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p288006-i50571671.scope; invocation ID: 3155652ba6a34f8184006fe4a408b8b2
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-s4rf4cwj.js, chunk-tvynw18r.js, chunk-9q2hhbpq.js, chunk-b5qzwpce.js, chunk-5p8ve16p.js, chunk-k0528w6h.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-3rp2hs51.js, chunk-5nhm60j4.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-r0d9g7ch.js, chunk-7nczvd3c.js, chunk-9gkv8zsf.js, chunk-6dyv9zr2.js, chunk-yvhhqffe.js, chunk-d966x8rg.js, chunk-dkhj5km8.js, chunk-yy4kn8mt.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-em73p4c0.js, chunk-fpjyf693.js, chunk-cp55b6zm.js, chunk-k7mpa2fv.js, chunk-8gqdshxw.js, chunk-hvvshmse.js, chunk-xm24bcns.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-cy2s97ne.js, chunk-tfp2kb36.js, chunk-gkvqeh3w.js, chunk-dkbqhk85.js, chunk-1d0qvnvb.js, chunk-h1sxh5pc.js, chunk-axbkkqp1.js, chunk-g18n2fe6.js, chunk-pmf6k8t5.js, chunk-v6cr8hfr.js, chunk-6xhxn03e.js, chunk-e1s5ghxz.js, chunk-4d95rjmh.js, chunk-v86b5paa.js, chunk-jhnggqz6.js, chunk-gnk3718j.js, chunk-y2awd1tm.js, chunk-t215eab3.js, chunk-2e4yh13p.js, chunk-htgnyn2m.js, chunk-tfnht9h3.js, chunk-srp7w54p.js, chunk-yt37nwba.js, chunk-fhwscv6q.js, chunk-yhf75gwx.js, chunk-g7w1bwea.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-shf7kcsj.js, chunk-geemeb7b.js, chunk-0sxn500c.js, chunk-kyxaefs4.js, chunk-87cq6krd.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:288215) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/motion-audit.spec.ts:39:1 › measure deployed motion at 4x CPU and capture production screens (9.3s)
+
+
+  1) test/motion-audit.spec.ts:39:1 › measure deployed motion at 4x CPU and capture production screens 
+
+    Error: expect(received).toBeGreaterThanOrEqual(expected)
+
+    Expected: >= 20
+    Received:    19
+
+      293 |   expect(authIdle.pending).toEqual([]);
+      294 |   expect(authIdle.idleRafFrames).toBe(0);
+    > 295 |   expect(authIdle.shaderFrames).toBeGreaterThanOrEqual(20);
+          |                                 ^
+      296 |   expect(authIdle.shaderFrames).toBeLessThanOrEqual(35);
+      297 |   expect(authIdle.shaderGaps.every((gap) => gap >= 30)).toBe(true);
+      298 |   const shaderSurface = await page.evaluate(() => {
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/motion-audit.spec.ts:295:33
+
+    attachment #1: production setup (image/png) ────────────────────────────────────────────────────
+    test-results/motion-audit-measure-deplo-2b97c--capture-production-screens/attachments/production-setup-f74611237959cea2480bf36cd0f4b956d40b08f4.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/motion-audit-measure-deplo-2b97c--capture-production-screens/error-context.md
+
+  1 failed
+    test/motion-audit.spec.ts:39:1 › measure deployed motion at 4x CPU and capture production screens 
+
+Invocation exit: 1
+Load after: 20.00 24.40 23.80 18/2976 289696

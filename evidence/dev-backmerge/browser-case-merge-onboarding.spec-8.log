@@ -1,0 +1,49 @@
+Load before: 19.79 23.93 23.66 11/2980 292235
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p292236-i50575901.scope; invocation ID: 994e37d8c03c4dcfa54bddeace8256c9
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-bwn660jr.js, chunk-tvynw18r.js, chunk-78230b0w.js, chunk-b5qzwpce.js, chunk-ccy8n293.js, chunk-8wkaxgj7.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-jsmbd5jp.js, chunk-ps1cy5yn.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-tm1cwa79.js, chunk-7nczvd3c.js, chunk-df0x175y.js, chunk-82r7xg3f.js, chunk-yvhhqffe.js, chunk-7d7a4136.js, chunk-8ayb4t2g.js, chunk-7ajfwsjq.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-2ftetdyb.js, chunk-yeje004t.js, chunk-ehc1ysnr.js, chunk-bkxsf6y3.js, chunk-8gqdshxw.js, chunk-tcfca8r0.js, chunk-m4efqm15.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-e568rekz.js, chunk-nnzr2dk5.js, chunk-hbgwavcb.js, chunk-qmr9wjkh.js, chunk-1d0qvnvb.js, chunk-n7jyp7rs.js, chunk-axbkkqp1.js, chunk-qz0twkya.js, chunk-psyrtqp9.js, chunk-ymdpwrqf.js, chunk-w15xrxvm.js, chunk-adsxtjdf.js, chunk-28yjm31q.js, chunk-v86b5paa.js, chunk-0a0rfw19.js, chunk-43y8sgkq.js, chunk-mp4292fj.js, chunk-92xy0bgw.js, chunk-2e4yh13p.js, chunk-xz9qch9h.js, chunk-zzmwj3gb.js, chunk-4rwchwyq.js, chunk-syc6p87w.js, chunk-482nxxra.js, chunk-77mj2nvg.js, chunk-zs3zqf6d.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-yjatfbw4.js, chunk-mq0hasss.js, chunk-0sxn500c.js, chunk-gaexzfyc.js, chunk-wed8tf6y.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:292654) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/onboarding.spec.ts:54:1 › setup, recovery acknowledgement, welcome and returning sign-in match the browser contract (6.8s)
+
+
+  1) test/onboarding.spec.ts:54:1 › setup, recovery acknowledgement, welcome and returning sign-in match the browser contract 
+
+    Error: apiRequestContext.get: socket hang up
+    Call log:
+      - → GET http://localhost:4643/__mock/setup-token
+        - user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36
+        - accept: */*
+        - accept-encoding: gzip,deflate,br
+
+
+      83 |   await installShiftObserver(page);
+      84 |
+    > 85 |   const setupResponse = await context.request.get("/__mock/setup-token");
+         |                                               ^
+      86 |   const setupBody = await setupResponse.json() as { setup_token: string };
+      87 |   await page.locator("#setup-token").fill(setupBody.setup_token);
+      88 |   await page.getByRole("button", { name: "Continue" }).click();
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/onboarding.spec.ts:85:47
+
+    attachment #1: step-1-token-iphone-15 (image/png) ──────────────────────────────────────────────
+    test-results/onboarding-setup-recovery--906cd--match-the-browser-contract/attachments/step-1-token-iphone-15-9ebbdb2bedca0af1424e882cddafaa1fbb79a8f7.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: step-1-token-desktop (image/png) ────────────────────────────────────────────────
+    test-results/onboarding-setup-recovery--906cd--match-the-browser-contract/attachments/step-1-token-desktop-4c129327150e3b080c043d7a43c66e9db92d5b7e.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/onboarding-setup-recovery--906cd--match-the-browser-contract/error-context.md
+
+  1 failed
+    test/onboarding.spec.ts:54:1 › setup, recovery acknowledgement, welcome and returning sign-in match the browser contract 
+
+Invocation exit: 1
+Load after: 18.56 23.44 23.50 12/2988 293266

@@ -1,0 +1,73 @@
+Running as unit: run-p4005070-i50095071.scope; invocation ID: e90347c21fed46718fea0afe75372d84
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.68s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/dev-backmerge/target/debug/deps/infraternal-f8c201387a80cdfb)
+
+running 64 tests
+test cli::actions::tests::registered_actions_include_plugin_permission_contract_fields ... ok
+test cli::actions::tests::enabled_mesh_plugin_registers_its_component_commands ... ok
+test cli::actions::tests::every_registered_action_has_description_and_step_by_step_guidance ... ok
+test cli::command_tree::tests::hidden_session_shim_parser_uses_the_registered_input_schema ... ok
+test cli::command_tree::backmerge_tests::restart_inherits_private_state_before_or_after_the_command ... ok
+test cli::actions::factory_tests::plugin_command_materializes_only_its_owner_and_discovery_remains_complete ... ok
+test cli::command_tree::tests::server_init_parses_confirmation_plan_and_server_configuration ... ok
+test cli::command_tree::backmerge_tests::removal_and_retention_inputs_keep_the_production_runtime_bindings ... ok
+test cli::command_tree::tests::parser_uses_plugin_inputs_and_accepts_json_after_a_leaf_command ... ok
+test cli::actions::tests::hidden_session_shim_is_registered_to_its_runtime_handler ... ok
+test cli::actions::hosted_tests::production_descriptors_share_cli_registry_and_skills ... ok
+test cli::output::tests::json_snapshot_has_stable_versioned_fields_and_omits_absent_details ... ok
+test cli::output::tests::pretty_tables_omit_empty_columns_and_rows ... ok
+test cli::output::tests::non_terminal_pretty_snapshot_has_aligned_details_and_table ... ok
+test cli::output::tests::terminal_snapshot_uses_color_but_still_wraps_to_the_requested_width ... ok
+test cli::command_tree::tests::root_help_uses_registered_descriptions_and_long_action_guidance ... ok
+test cli::output::tests::pretty_snapshot_omits_empty_skill_write_sections ... ok
+test embedded_cli::tests::dispatch_keeps_public_help_operator_modes_and_foreign_commands ... ok
+test cli::skills::tests::generated_skill_contains_front_matter_inputs_outputs_and_safety ... ok
+test dispatch_tests::hidden_session_shim_dispatches_from_the_registered_action ... ok
+test cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes ... ok
+test failure_data_tests::skill_errors_keep_the_registered_result_data_shape ... ok
+test cli::command_tree::tests::skill_parser_accepts_a_multi_part_command_and_write_directory ... ok
+test install::tests::dry_run_prints_a_process_surviving_user_unit ... ok
+test failure_data_tests::unavailable_results_keep_registered_data_shapes ... ok
+test embedded_cli::tests::inherited_flags_keep_public_parser_validation_and_values ... ok
+test remote::tests::preparation_refuses_shared_and_symlinked_data_directories ... ok
+test remote::tests::local_identity_load_refuses_symlink_and_shared_file ... ok
+test remote::tests::oversized_or_invalid_invitation_fails_before_local_state_is_created ... ok
+test remote::tests::uid_and_privilege_mismatch_fails_before_key_generation ... ok
+test failure_data_tests::server_errors_keep_the_registered_result_data_shapes ... ok
+test remote::tests::ssh_installation_can_enroll_before_starting_the_service ... ok
+test remote::tests::ordinary_join_keeps_the_foreground_connection_default ... ok
+test remote_server::tests::missing_ca_refuses_before_database_or_listener_creation ... ok
+test cli::skills::tests::writing_skills_creates_one_file_per_visible_action ... ok
+test remote_server::tests::independent_review_remote_operator_commands_accept_json_output ... ok
+test remote_server::tests::service_dry_run_preserves_remote_listener_and_private_trust_path ... ok
+test remote_server::tests::failed_cold_configuration_still_disposes_handoff_stdin ... ok
+test remote_server::tests::remote_activation_is_explicit_and_ca_override_requires_listener ... ok
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test remote::tests::join_dns_failure_reports_resolution_instead_of_generic_refusal ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test remote::tests::publication_is_private_and_never_replaces_existing_identity ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test remote::tests::renewal_publication_replaces_only_certificate_and_preserves_private_metadata ... ok
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test setup_token_tests::setup_token_command_reads_only_the_expected_socket_response ... ok
+test startup_tests::process_dumpability_is_disabled_before_dispatch ... ok
+test status_tests::custom_named_server_service_is_reported_as_running ... ok
+test status_tests::custom_named_stopped_server_service_is_reported_as_stopped ... ok
+test status_tests::unrelated_services_do_not_appear_as_infraternal_servers ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... ok
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.12s
+

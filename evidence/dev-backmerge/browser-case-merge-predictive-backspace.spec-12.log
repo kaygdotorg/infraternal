@@ -1,0 +1,20 @@
+Load before: 5.95 16.30 20.95 7/2911 341102
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p341103-i50624768.scope; invocation ID: 22c802fe4b67403083f0ef1180903770
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-ycrqm9m4.js, chunk-tvynw18r.js, chunk-et1j6kyn.js, chunk-b5qzwpce.js, chunk-4r1bnasd.js, chunk-9hw30dn4.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-zmcgbj18.js, chunk-2847mnga.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-gkntjarr.js, chunk-7nczvd3c.js, chunk-2vmvnwx8.js, chunk-qv6kq47y.js, chunk-yvhhqffe.js, chunk-6pk9bqn4.js, chunk-dvv094gh.js, chunk-0v5v4hyw.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-yw0t0x6e.js, chunk-ab4cyde4.js, chunk-fnbpr16r.js, chunk-e0dkcahv.js, chunk-8gqdshxw.js, chunk-erq65vhc.js, chunk-96ajv9kt.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-8yaesxnn.js, chunk-98vkp97y.js, chunk-4wxkex5v.js, chunk-bkgf64dr.js, chunk-1d0qvnvb.js, chunk-wkf1dnze.js, chunk-axbkkqp1.js, chunk-ck3fkmjd.js, chunk-a5sfrg2n.js, chunk-ewnm1af0.js, chunk-4rzq5038.js, chunk-yf2k3rtn.js, chunk-qtmhkn2s.js, chunk-v86b5paa.js, chunk-ydedfhs0.js, chunk-g1ndzvhv.js, chunk-kwz4vre9.js, chunk-6zk1ysde.js, chunk-2e4yh13p.js, chunk-ysdt3mme.js, chunk-62naf7eh.js, chunk-4a6zzxrp.js, chunk-rd546868.js, chunk-p3j3zwdy.js, chunk-v3scj528.js, chunk-0zvxp0bh.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-xjaq8v9r.js, chunk-mka9kjjm.js, chunk-0sxn500c.js, chunk-fhhd10q3.js, chunk-f9ky2240.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 2 tests using 1 worker
+
+(node:341367) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/predictive-backspace.spec.ts:169:1 › backspace mixed with typing keeps the predicted cursor on exact cells at DPR 1 (9.2s)
+first-key cost 1.10 ms; rest max 0.60 ms
+  ✓  2 test/predictive-backspace.spec.ts:320:1 › the first predicted key stays within the per-key budget at DPR 1 (7.4s)
+
+  2 passed (23.2s)
+
+Invocation exit: 0
+Load after: 5.43 15.34 20.51 5/2909 341949

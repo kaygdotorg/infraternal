@@ -1,0 +1,39 @@
+Load before: 32.59 25.54 23.94 34/3044 274576
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p274577-i50558242.scope; invocation ID: 2840c2813538451989aae4f387558e69
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-hrvh8qa6.js, chunk-tvynw18r.js, chunk-3q3qn7tr.js, chunk-b5qzwpce.js, chunk-6k3spezy.js, chunk-smjn4956.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-6ggdz7sk.js, chunk-0yrpgjb4.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-predna9p.js, chunk-7nczvd3c.js, chunk-js374zr0.js, chunk-vp3ksxyq.js, chunk-yvhhqffe.js, chunk-p9gesv7n.js, chunk-dmbdq67y.js, chunk-64szpdk6.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-kpwb7kh0.js, chunk-eypfpsn8.js, chunk-nmy7b1qv.js, chunk-behhtcsy.js, chunk-8gqdshxw.js, chunk-jkefj3zg.js, chunk-fq7her68.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-211nfk4v.js, chunk-x7cazc77.js, chunk-np91mjbx.js, chunk-54e022ar.js, chunk-1d0qvnvb.js, chunk-y6ebv6qh.js, chunk-axbkkqp1.js, chunk-gdwytbg0.js, chunk-w5nem76h.js, chunk-kfnxzqb8.js, chunk-t55zr6kj.js, chunk-z05pv1b5.js, chunk-chgfhwwk.js, chunk-v86b5paa.js, chunk-3yjz6794.js, chunk-yz2m6f81.js, chunk-5tjxc1v4.js, chunk-6dz82rhm.js, chunk-2e4yh13p.js, chunk-803s09ab.js, chunk-a3cbq4mz.js, chunk-d5x6fdqj.js, chunk-vcbzypr3.js, chunk-86ts33fc.js, chunk-rfa22k6z.js, chunk-ha62zwpq.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-frzx56wc.js, chunk-22hxkydz.js, chunk-0sxn500c.js, chunk-f7xsy6x5.js, chunk-fkvwxrjc.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:279983) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+MESH-PERF load/core=4.00 {"zoom":{"top":"UpdateLayoutTree=87ms Layout=39ms PrePaint=35ms Paint=94ms Layerize=33ms FireAnimationFrame=35ms EventDispatch=32ms RunTask=344ms","n":10,"p50":27.85,"p95":35.32,"max":35.32,"over8":9},"pan":{"top":"UpdateLayoutTree=94ms Layout=26ms PrePaint=21ms Paint=120ms Layerize=131ms FireAnimationFrame=79ms EventDispatch=17ms RunTask=593ms","n":59,"p50":6.61,"p95":33.39,"max":45.97,"over8":20},"drag":{"top":"UpdateLayoutTree=56ms Layout=20ms PrePaint=37ms Paint=118ms Layerize=311ms FireAnimationFrame=166ms EventDispatch=44ms RunTask=1601ms","n":473,"p50":0.65,"p95":12.11,"max":28.04,"over8":75}}
+  ✘  1 test/mesh-perf.spec.ts:47:1 › 1,000 nodes: the main thread's work per frame of a zoom, a pan and a drag (39.2s)
+
+
+  1) test/mesh-perf.spec.ts:47:1 › 1,000 nodes: the main thread's work per frame of a zoom, a pan and a drag 
+
+    Error: expect(received).toBeGreaterThan(expected)
+
+    Expected: > 10
+    Received:   10
+
+      78 |   const load = loadavg()[0]! / cpus().length;
+      79 |   console.log(`MESH-PERF load/core=${load.toFixed(2)} ${JSON.stringify(out)}`);
+    > 80 |   for (const k of Object.keys(out)) expect(out[k]!.n).toBeGreaterThan(10);
+         |                                                       ^
+      81 |   // The owner's target is 8 ms of work in a frame (#121). A drag meets it; a pan's median does, and a zoom's median is at
+      82 |   // its edge (the browser lays out and paints the page's cards and chips once per frame while the scale changes). The
+      83 |   // bounds are what the build measures today with a margin, so that a regression shows; the target stays in the report.
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/mesh-perf.spec.ts:80:55
+
+    Error Context: test-results/mesh-perf-1-000-nodes-the--12417--of-a-zoom-a-pan-and-a-drag/error-context.md
+
+  1 failed
+    test/mesh-perf.spec.ts:47:1 › 1,000 nodes: the main thread's work per frame of a zoom, a pan and a drag 
+
+Invocation exit: 1
+Load after: 32.00 26.84 24.50 30/3070 287071

@@ -1,0 +1,19 @@
+Load before: 22.61 18.09 22.14 14/2952 239080
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p239081-i50522746.scope; invocation ID: ab453f70287a4ab3a576022181544076
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-ynt0p8dy.js, chunk-tvynw18r.js, chunk-6s8aqqpj.js, chunk-b5qzwpce.js, chunk-xtg43tas.js, chunk-9vf4emf9.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-myqamfze.js, chunk-gaknmpa1.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-wyb9h4ch.js, chunk-7nczvd3c.js, chunk-r6bwnx8f.js, chunk-xb1kvrr9.js, chunk-yvhhqffe.js, chunk-54s96paz.js, chunk-gg697b1v.js, chunk-0n6mngy9.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-h51rwkp8.js, chunk-sajjzz4y.js, chunk-2tj2v5me.js, chunk-3tt9rakj.js, chunk-8gqdshxw.js, chunk-pc3ajqeh.js, chunk-fjmde730.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-45wjh7eg.js, chunk-q13q6g1a.js, chunk-7e075bjz.js, chunk-zdghkgfh.js, chunk-1d0qvnvb.js, chunk-nxf8kh26.js, chunk-axbkkqp1.js, chunk-bzcxsjc0.js, chunk-sevm6mn9.js, chunk-vs37knze.js, chunk-yt3deyxb.js, chunk-8w56mym7.js, chunk-rnja74ha.js, chunk-v86b5paa.js, chunk-fsaxzabx.js, chunk-883fh4rv.js, chunk-t6b8x0n4.js, chunk-q1ngcdsv.js, chunk-2e4yh13p.js, chunk-ekpn7rdt.js, chunk-xdmn28rh.js, chunk-f5kwherb.js, chunk-2x09tp3x.js, chunk-946r0206.js, chunk-4kr83xdt.js, chunk-mx1xdyg1.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-pv11b6c8.js, chunk-kkh05y17.js, chunk-0sxn500c.js, chunk-6yg77mtj.js, chunk-cbf2h28z.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4642
+[WebServer] latency proxy listening on http://localhost:4641; upstream port=4642
+
+Running 2 tests using 1 worker
+
+(node:239407) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further without momentum events (10.4s)
+  ✓  2 test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further with momentum events (12.1s)
+
+  2 passed (32.6s)
+
+Invocation exit: 0
+Load after: 18.71 17.66 21.85 10/2945 239915

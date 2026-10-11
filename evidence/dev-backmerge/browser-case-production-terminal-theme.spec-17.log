@@ -1,0 +1,51 @@
+Load before: 51.63 34.32 25.41 45/3209 418539
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p418541-i50702154.scope; invocation ID: c1bc22424c0b448d8bedc7f465bb0e9c
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-n8ps150c.js, chunk-tvynw18r.js, chunk-61nwwbpr.js, chunk-b5qzwpce.js, chunk-9q81zsd3.js, chunk-c12vypv7.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-dy1rsnjf.js, chunk-7fatp4ad.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-8bg6xjp5.js, chunk-7nczvd3c.js, chunk-75hskk2j.js, chunk-qvbbqm1z.js, chunk-yvhhqffe.js, chunk-vxpwb3xr.js, chunk-jrs2ap2v.js, chunk-6shbpmf1.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-pymvkmg8.js, chunk-v9wz6tpr.js, chunk-gkpnx288.js, chunk-a4z5pdk0.js, chunk-8gqdshxw.js, chunk-zh6drkkm.js, chunk-axt99nax.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-epjw8j56.js, chunk-sn0v051e.js, chunk-cx929y1a.js, chunk-rav8vf1z.js, chunk-1d0qvnvb.js, chunk-1vn07zwe.js, chunk-axbkkqp1.js, chunk-nh0z34f4.js, chunk-3j7g7h1b.js, chunk-y3wchz8a.js, chunk-s0qvmm5t.js, chunk-5k06e57p.js, chunk-b1af70v4.js, chunk-v86b5paa.js, chunk-k1w8whwx.js, chunk-rnhwgm9w.js, chunk-0pg1d28b.js, chunk-2mpn6ajg.js, chunk-2e4yh13p.js, chunk-yweyaehb.js, chunk-x59y3ayn.js, chunk-5vemc6hh.js, chunk-9e2qaz09.js, chunk-81rftv28.js, chunk-9r1rc5bz.js, chunk-czezaxq8.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-qc1qt2wy.js, chunk-8q9xmy0t.js, chunk-0sxn500c.js, chunk-z09mtx5s.js, chunk-yq6f901p.js
+[WebServer] latency proxy listening on http://localhost:4641; upstream port=4642
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4642
+
+Running 1 test using 1 worker
+
+(node:421533) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+theme fixture bytes=605847 metrics={"cols":170,"rows":44,"cellWidth":8,"cellHeight":18,"naturalCellWidth":8,"configuredScrollback":40000000,"cursorX":16,"cursorY":43,"renderCursorX":16,"renderCursorY":43,"renderCursorVisible":true,"themeColorsMs":0,"themeRenderMs":0,"terminalColors":{"background":{"r":246,"g":246,"b":244},"foreground":{"r":29,"g":29,"b":31}},"receivedSequence":"605847","outputSequence":"605847","scrollbackRows":10024,"viewportY":0,"cursorVisible":true,"fontSize":14,"fontFamily":"\"Maple Mono NF\", \"Nerd Symbols\", \"Maple Mono NF Fallback\", ui-monospace, monospace","fontId":"maple-mono-nf","wasmMemoryBytes":35848192}
+theme-switch click-to-full-paint JS ms: n=50 p50=0.600 p99=11.100 max=11.100 long_tasks_gt_50ms=5
+slowest theme samples: [{"sample":1,"click":11.100000023841858,"colors":9.899999976158142,"render":4.199999928474426},{"sample":24,"click":7.600000023841858,"colors":0,"render":4.599999904632568},{"sample":32,"click":6.5,"colors":0,"render":1},{"sample":37,"click":4,"colors":0,"render":4.699999928474426},{"sample":27,"click":3.299999952316284,"colors":0.09999990463256836,"render":23.800000071525574}]
+theme work JS ms: color_setters_p50=0.000 repaint_p50=15.600
+  ✘  1 test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text (18.2s)
+
+
+  1) test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text 
+
+    Error: expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 1
+    + Received  + 7
+
+    - Array []
+    + Array [
+    +   58,
+    +   77,
+    +   89,
+    +   57,
+    +   52,
+    + ]
+
+      288 |   });
+      289 |   expect(p99).toBeLessThan(16.67);
+    > 290 |   expect(longTasks.filter((duration) => duration > 50)).toEqual([]);
+          |                                                         ^
+      291 |   expect(await readSocketCounts(page)).toEqual(socketCounts);
+      292 |   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.scrollbackRows ?? 0)).toBe(scrollbackRowsBefore);
+      293 |   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toBe(historyText);
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/terminal-theme.spec.ts:290:57
+
+    Error Context: test-results/terminal-theme-every-curat-3627b--and-its-existing-ANSI-text/error-context.md
+
+  1 failed
+    test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text 
+
+Invocation exit: 1
+Load after: 42.31 34.04 25.66 41/3135 425381

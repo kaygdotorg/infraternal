@@ -1,0 +1,64 @@
+Load before: 17.72 16.56 21.90 11/2982 237564
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p237565-i50521230.scope; invocation ID: 2e368a66d34148b48205fdf73a034cc4
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-ksk8ngc1.js, chunk-tvynw18r.js, chunk-c6swezt0.js, chunk-b5qzwpce.js, chunk-7nx7ewy1.js, chunk-tese098s.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-nw46vzc9.js, chunk-7mtjewcc.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-afyygz5r.js, chunk-7nczvd3c.js, chunk-zv90e6a8.js, chunk-83k4ms6a.js, chunk-yvhhqffe.js, chunk-enexmxw8.js, chunk-f7v9a6pk.js, chunk-wtf0zcj7.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-wq9wcyn8.js, chunk-wkc0dn9j.js, chunk-tragr1xa.js, chunk-j585vybg.js, chunk-8gqdshxw.js, chunk-kj8a8xvz.js, chunk-zk2eek1f.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-9qb74gat.js, chunk-h0k7pyey.js, chunk-xem89geg.js, chunk-37f3x1yd.js, chunk-1d0qvnvb.js, chunk-q3kxxm83.js, chunk-axbkkqp1.js, chunk-vc9hxzdg.js, chunk-bqbz5fed.js, chunk-bv8r3tzz.js, chunk-nw9ew424.js, chunk-4g14w0h0.js, chunk-ssh7936x.js, chunk-v86b5paa.js, chunk-mr8c8316.js, chunk-jht3a003.js, chunk-yvye2tz4.js, chunk-erhzzpjb.js, chunk-2e4yh13p.js, chunk-zztbn0tt.js, chunk-nvynk4e4.js, chunk-4z2yskav.js, chunk-h8d976qn.js, chunk-9djkz5p4.js, chunk-ggxa97v2.js, chunk-42z1ecz2.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-tnkatwa6.js, chunk-xxb6s9p5.js, chunk-0sxn500c.js, chunk-y4pznnpx.js, chunk-m3vft6h9.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 2 tests using 1 worker
+
+(node:237873) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further without momentum events (15.2s)
+(node:238283) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  2 test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further with momentum events (12.9s)
+
+
+  1) test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further without momentum events 
+
+    Error: windows moved by six swipes
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 6
+    Received: 7
+
+      44 |     await swipes(page, 6, 330, momentum);
+      45 |     const after = (await api("canvasLock")) as { index: number };
+    > 46 |     expect(after.index - lock.index, "windows moved by six swipes").toBe(6);
+         |                                                                     ^
+      47 |   });
+      48 | }
+      49 |
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/clusters-swipes.spec.ts:46:69
+
+    Error Context: test-results/clusters-swipes-six-swipes-64602-her-without-momentum-events/error-context.md
+
+  2) test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further with momentum events 
+
+    Error: windows moved by six swipes
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 6
+    Received: 7
+
+      44 |     await swipes(page, 6, 330, momentum);
+      45 |     const after = (await api("canvasLock")) as { index: number };
+    > 46 |     expect(after.index - lock.index, "windows moved by six swipes").toBe(6);
+         |                                                                     ^
+      47 |   });
+      48 | }
+      49 |
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/merge-isolated/apps/tracer/test/clusters-swipes.spec.ts:46:69
+
+    Error Context: test-results/clusters-swipes-six-swipes-86866-urther-with-momentum-events/error-context.md
+
+  2 failed
+    test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further without momentum events 
+    test/clusters-swipes.spec.ts:33:3 › six swipes in 2 s land six windows further with momentum events 
+
+Invocation exit: 1
+Load after: 22.61 18.09 22.14 11/2950 239075

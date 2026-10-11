@@ -1,0 +1,3 @@
+merge retry test/clusters-swipes.spec.ts: exit 0
+merge retry test/mesh-perf.spec.ts: exit 0
+merge retry test/predictive-echo.spec.ts: exit 1

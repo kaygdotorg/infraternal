@@ -1,0 +1,213 @@
+Load before: 17.35 18.23 26.43 9/2999 3845939
+Running as unit: run-p3845940-i49935968.scope; invocation ID: 057ebb7e3b164193abeb3bd5ec1f4619
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-ka3zczr8.js, chunk-tvynw18r.js, chunk-79ktv0yk.js, chunk-b5qzwpce.js, chunk-qfeh3t8w.js, chunk-wwdxv06d.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-x1wgx6dq.js, chunk-zw8vv5wc.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-sc5fyhca.js, chunk-7nczvd3c.js, chunk-mdz4dq8x.js, chunk-2nf61fyk.js, chunk-yvhhqffe.js, chunk-aqw3bnra.js, chunk-m605xsc1.js, chunk-79y1q2rt.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-4615b7h7.js, chunk-sqsfvbbm.js, chunk-9ettxxy5.js, chunk-m07vk0qa.js, chunk-8gqdshxw.js, chunk-5jf7nk51.js, chunk-vc67mjwr.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-ywqnkv8v.js, chunk-x4jn9vt3.js, chunk-6aehp1nw.js, chunk-ffpkg20c.js, chunk-1d0qvnvb.js, chunk-psf50y58.js, chunk-axbkkqp1.js, chunk-dypsxfaa.js, chunk-e8nrr8jk.js, chunk-2extksc5.js, chunk-4bsrf02x.js, chunk-n7g5q6s6.js, chunk-3mp33erb.js, chunk-v86b5paa.js, chunk-kk9sz5em.js, chunk-5enrz4jr.js, chunk-3s75snb8.js, chunk-xv3g3sp7.js, chunk-2e4yh13p.js, chunk-n61gfr3b.js, chunk-2gdcdd2k.js, chunk-q474j2zn.js, chunk-gef9h1b2.js, chunk-fbvyng3d.js, chunk-35efs8m2.js, chunk-r4atydgt.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-q7gkwk48.js, chunk-k7zsr8pb.js, chunk-0sxn500c.js, chunk-na1yewjc.js, chunk-emr3ntd9.js
+[WebServer] latency proxy listening on http://localhost:4641; upstream port=4642
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4642
+
+Running 16 tests using 1 worker
+
+(node:3846059) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   1 test/clusters-grid.spec.ts:90:3 › split right in a stacked column (D212) › by key: the window's column halves, the windows around it span both halves, the footprint does not change (10.2s)
+(node:3846516) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   2 test/clusters-grid.spec.ts:109:3 › split right in a stacked column (D212) › by ⌘K: Split right on the stacked window gives the same layout (11.2s)
+  ✓   3 test/clusters-grid.spec.ts:128:3 › split right in a stacked column (D212) › by mouse: the header pill's split right on the middle window divides it the same way (10.9s)
+  ✓   4 test/clusters-grid.spec.ts:144:3 › split right in a stacked column (D212) › closing the new half gives back the layout it came from, widths and heights (11.5s)
+  ✘   5 test/clusters-grid.spec.ts:163:3 › split right in a stacked column (D212) › closing the window it came from: the new half takes its band, and the group dissolves (11.5s)
+(node:3847782) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   6 test/clusters-grid.spec.ts:179:3 › split right in a stacked column (D212) › split right of a spanning window halves its span inside the existing columns (10.6s)
+(node:3847993) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   7 test/clusters-grid.spec.ts:194:3 › split right in a stacked column (D212) › new window right after a group opens a plain column after the whole group (10.4s)
+(node:3848195) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   8 test/clusters-grid.spec.ts:207:3 › split right in a stacked column (D212) › new window below in a group grows the column and keeps the windows beside it (11.1s)
+(node:3848501) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘   9 test/clusters-grid.spec.ts:220:3 › split right in a stacked column (D212) › split down in a group divides only the window's band, and the window beside it keeps its height (2.0m)
+(node:3863182) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  10 test/clusters-grid.spec.ts:238:3 › camera and saved layout with a group (D212) › the camera stops of a group are its columns: focusing a window in the new half brings all of it into view (2.0m)
+(node:3876675) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  11 test/clusters-grid.spec.ts:254:3 › camera and saved layout with a group (D212) › the saved document holds the span, so a reload places the group the same way (10.2s)
+  ✓  12 test/clusters-grid.spec.ts:268:3 › phone 393x852 with a group (D212) › split right in a stacked column keeps every window on the screen and never scrolls the page sideways (10.6s)
+  ✓  13 test/clusters-grid.spec.ts:292:3 › moving a window of a group by its pill (D212) › a grouped window dragged to the far column lands there: no overlap, the footprint unchanged, the group closes its hole (15.4s)
+  ✓  14 test/clusters-grid.spec.ts:320:3 › title first in a narrow half (TASTE, D212) › a half too narrow for its actions keeps its title, shows one ⋯, and the menu holds every action (11.5s)
+  ✓  15 test/clusters-grid.spec.ts:343:3 › title first in a narrow half (TASTE, D212) › a wide window keeps its actions in the header, and no ⋯ is shown (8.6s)
+  ✘  16 test/clusters-grid.spec.ts:356:3 › the phone after a split in a group (TASTE: chrome is never clipped) › the new half and the spanning window's header stay on the screen (11.8s)
+
+
+  1) test/clusters-grid.spec.ts:90:3 › split right in a stacked column (D212) › by key: the window's column halves, the windows around it span both halves, the footprint does not change 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 6
+    Received: 5
+
+      94 |     const after = await grid(page);
+      95 |     expect(after.groups, "one group").toBe(1);
+    > 96 |     expect(after.windows).toBe(before.windows + 2);
+         |                           ^
+      97 |     expect(after.total, "footprint").toBe(before.total);
+      98 |     expectNoOverlap(after);
+      99 |     const c2 = after.cols.find((c) => c.wins.some((w) => w.id === "w-nix-cache"))!;
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:96:27
+
+    Error Context: test-results/clusters-grid-split-right--59cd5-e-footprint-does-not-change/error-context.md
+
+  2) test/clusters-grid.spec.ts:163:3 › split right in a stacked column (D212) › closing the window it came from: the new half takes its band, and the group dissolves 
+
+    Error: expect(received).toContain(expected) // indexOf
+
+    Expected value: "w-edge-arm-s2"
+    Received array: ["w-nix-cache", "w-edge-arm-s1"]
+
+      173 |     expectNoOverlap(after);
+      174 |     const c2 = after.cols.find((c) => c.wins.some((w) => w.id === "w-nix-cache"))!;
+    > 175 |     expect(c2.wins.map((w) => w.id)).toContain("w-edge-arm-s2");
+          |                                      ^
+      176 |     expect(c2.w).toBe(459);
+      177 |   });
+      178 |
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:175:38
+
+    Error Context: test-results/clusters-grid-split-right--b1b1e-and-and-the-group-dissolves/error-context.md
+
+  3) test/clusters-grid.spec.ts:179:3 › split right in a stacked column (D212) › split right of a spanning window halves its span inside the existing columns 
+
+    Error: expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 3
+    + Received  + 1
+
+    - Array [
+    -   "w-edge-arm-s1",
+    - ]
+    + Array []
+
+      189 |     expect(after.cols.length, "no new column: the span is halved inside the group").toBe(before.cols.length);
+      190 |     // Only the bottom window still spans: the top one was halved, and nothing outside the group is spanning.
+    > 191 |     expect(after.cols.flatMap((c) => c.wins).filter((w) => w.span > 1).map((w) => w.id)).toEqual(["w-edge-arm-s1"]);
+          |                                                                                          ^
+      192 |   });
+      193 |
+      194 |   test("new window right after a group opens a plain column after the whole group", async ({ page }) => {
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:191:90
+
+    Error Context: test-results/clusters-grid-split-right--4cbaa-inside-the-existing-columns/error-context.md
+
+  4) test/clusters-grid.spec.ts:194:3 › split right in a stacked column (D212) › new window right after a group opens a plain column after the whole group 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 5
+    Received: 4
+
+      200 |     const after = await grid(page);
+      201 |     expect(after.groups, "the group is untouched").toBe(1);
+    > 202 |     expect(after.cols.length).toBe(before.cols.length + 1);
+          |                               ^
+      203 |     expect(after.total).toBe(before.total + before.cols.find((c) => c.wins.some((w) => w.id === "w-edge-arm"))!.w + 12);
+      204 |     expectNoOverlap(after);
+      205 |   });
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:202:31
+
+    Error Context: test-results/clusters-grid-split-right--0ceb9-olumn-after-the-whole-group/error-context.md
+
+  5) test/clusters-grid.spec.ts:207:3 › split right in a stacked column (D212) › new window below in a group grows the column and keeps the windows beside it 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 6
+    Received: 5
+
+      212 |     await press(page, ["Control", "Alt", "KeyD"]);
+      213 |     const after = await grid(page);
+    > 214 |     expect(after.windows).toBe(before.windows + 1);
+          |                           ^
+      215 |     expect(after.total).toBe(before.total);
+      216 |     expectNoOverlap(after);
+      217 |     expect(after.cols.map((c) => c.w)).toEqual(before.cols.map((c) => c.w));
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:214:27
+
+    Error Context: test-results/clusters-grid-split-right--26c7c-keeps-the-windows-beside-it/error-context.md
+
+  6) test/clusters-grid.spec.ts:220:3 › split right in a stacked column (D212) › split down in a group divides only the window's band, and the window beside it keeps its height 
+
+    Test timeout of 120000ms exceeded.
+
+    Error: locator.click: Test timeout of 120000ms exceeded.
+    Call log:
+      - waiting for locator('.cl[data-view="console"] .ui-window[data-window-id="w-edge-arm-s2"] .ui-window-body').first()
+
+
+      60 | }
+      61 |
+    > 62 | const activate = (page: Page, id: string): Promise<void> => page.locator(`${VIEW} .ui-window[data-window-id="${id}"] .ui-window-body`).first().click({ position: { x: 20, y: 40 } }).then(() => page.waitForTimeout(400));
+         |                                                                                                                                                ^
+      63 |
+      64 | async function press(page: Page, chord: string[]): Promise<void> {
+      65 |   for (const k of chord) await page.keyboard.down(k);
+        at activate (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:62:144)
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:223:11
+
+    Error Context: test-results/clusters-grid-split-right--2aab6--beside-it-keeps-its-height/error-context.md
+
+  7) test/clusters-grid.spec.ts:238:3 › camera and saved layout with a group (D212) › the camera stops of a group are its columns: focusing a window in the new half brings all of it into view 
+
+    Test timeout of 120000ms exceeded.
+
+    Error: locator.click: Test timeout of 120000ms exceeded.
+    Call log:
+      - waiting for locator('.cl[data-view="console"] .ui-window[data-window-id="w-edge-arm-s2"] .ui-window-body').first()
+
+
+      60 | }
+      61 |
+    > 62 | const activate = (page: Page, id: string): Promise<void> => page.locator(`${VIEW} .ui-window[data-window-id="${id}"] .ui-window-body`).first().click({ position: { x: 20, y: 40 } }).then(() => page.waitForTimeout(400));
+         |                                                                                                                                                ^
+      63 |
+      64 | async function press(page: Page, chord: string[]): Promise<void> {
+      65 |   for (const k of chord) await page.keyboard.down(k);
+        at activate (/home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:62:144)
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:244:11
+
+    Error Context: test-results/clusters-grid-camera-and-s-e8dec--brings-all-of-it-into-view/error-context.md
+
+  8) test/clusters-grid.spec.ts:356:3 › the phone after a split in a group (TASTE: chrome is never clipped) › the new half and the spanning window's header stay on the screen 
+
+    Error: w-nix-cache right edge
+
+    expect(received).toBeLessThanOrEqual(expected)
+
+    Expected: <= 394
+    Received:    744
+
+      370 |     expect(framed.length).toBeGreaterThan(0);
+      371 |     for (const p of framed) expect(p.headLeft, `${p.id} header left edge`).toBeGreaterThanOrEqual(-1);
+    > 372 |     for (const p of framed) expect(p.right, `${p.id} right edge`).toBeLessThanOrEqual(vw + 1);
+          |                                                                   ^
+      373 |   });
+      374 | });
+      375 |
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/clusters-grid.spec.ts:372:67
+
+    Error Context: test-results/clusters-grid-the-phone-af-6f47e-s-header-stay-on-the-screen/error-context.md
+
+  8 failed
+    test/clusters-grid.spec.ts:90:3 › split right in a stacked column (D212) › by key: the window's column halves, the windows around it span both halves, the footprint does not change 
+    test/clusters-grid.spec.ts:163:3 › split right in a stacked column (D212) › closing the window it came from: the new half takes its band, and the group dissolves 
+    test/clusters-grid.spec.ts:179:3 › split right in a stacked column (D212) › split right of a spanning window halves its span inside the existing columns 
+    test/clusters-grid.spec.ts:194:3 › split right in a stacked column (D212) › new window right after a group opens a plain column after the whole group 
+    test/clusters-grid.spec.ts:207:3 › split right in a stacked column (D212) › new window below in a group grows the column and keeps the windows beside it 
+    test/clusters-grid.spec.ts:220:3 › split right in a stacked column (D212) › split down in a group divides only the window's band, and the window beside it keeps its height 
+    test/clusters-grid.spec.ts:238:3 › camera and saved layout with a group (D212) › the camera stops of a group are its columns: focusing a window in the new half brings all of it into view 
+    test/clusters-grid.spec.ts:356:3 › the phone after a split in a group (TASTE: chrome is never clipped) › the new half and the spanning window's header stay on the screen 
+  8 passed (6.9m)
+
+Invocation exit: 1
+Load after: 29.50 21.34 24.32 36/3112 3885764

@@ -1,0 +1,20 @@
+Load before: 30.22 23.84 23.33 14/3097 265696
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p265697-i50549362.scope; invocation ID: 88aa450f885b4a08b458f6be0a306681
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-4tk3hf8h.js, chunk-tvynw18r.js, chunk-9r8v974v.js, chunk-b5qzwpce.js, chunk-danayrjk.js, chunk-geb6atfa.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-6fn8btjz.js, chunk-ncyh9zh1.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-jqc5cq42.js, chunk-7nczvd3c.js, chunk-sqwzdycr.js, chunk-cx6m4v9h.js, chunk-yvhhqffe.js, chunk-pc0mzxvn.js, chunk-n02rzm4y.js, chunk-zt2vh179.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-ssk0hpb7.js, chunk-zx5asm8j.js, chunk-dq3dgrbp.js, chunk-0dpqwy9a.js, chunk-8gqdshxw.js, chunk-fq6j04p5.js, chunk-wzj7qskm.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-7v65m874.js, chunk-vy41thhm.js, chunk-wtkeaeqk.js, chunk-9ahdr74t.js, chunk-1d0qvnvb.js, chunk-nk9jq9e7.js, chunk-axbkkqp1.js, chunk-xr94mqkh.js, chunk-vcd4xhm2.js, chunk-ya54vdr7.js, chunk-mxxrwdye.js, chunk-n933y3y9.js, chunk-asttz6yh.js, chunk-v86b5paa.js, chunk-qepfg4qd.js, chunk-0p299e5v.js, chunk-gqd3q69a.js, chunk-ka6y5pe1.js, chunk-2e4yh13p.js, chunk-drp1bpa7.js, chunk-0cmyhzyn.js, chunk-s84wf64h.js, chunk-wyvjpn38.js, chunk-y66vj6tv.js, chunk-jya264t9.js, chunk-44xza36g.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-4ck4cnwk.js, chunk-qxgkkwed.js, chunk-0sxn500c.js, chunk-9qt3b77h.js, chunk-nt205cy6.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 1 test using 1 worker
+
+(node:267817) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+FONT_BENCH {"font":"monaspace-neon","dpr":2,"redrawP50Ms":1.5,"redrawP95Ms":2.100000023841858,"load":[32.14,24.88,23.7],"cores":8}
+LINE86 {"font":"monaspace-neon","mapleLoaded":true,"cursorX":86,"renderCursorX":86,"cellWidth":9,"natural":9,"cursorLeft":1548,"lastInk":1545,"inkAfter":0,"barMin":0,"dpr":2,"cellWidthPx":18}
+  ✓  1 test/font-metrics.spec.ts:18:3 › Monaspace Neon: 86-character line keeps the cursor on its cell at DPR 2 (10.5s)
+
+  1 passed (26.7s)
+
+Invocation exit: 0
+Load after: 32.14 24.88 23.70 12/3071 270380

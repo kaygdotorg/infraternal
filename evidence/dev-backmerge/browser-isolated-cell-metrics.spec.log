@@ -1,0 +1,27 @@
+Load before: 21.22 30.70 34.14 11/3111 3780726
+Running as unit: run-p3780727-i49870756.scope; invocation ID: c8db90d98fa64cb6bec5bd00b38a5189
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-6tpxxgwr.js, chunk-tvynw18r.js, chunk-k75jbxnx.js, chunk-b5qzwpce.js, chunk-6c4jfhsq.js, chunk-52a7r6b7.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-gyg0dvbf.js, chunk-z20j4atp.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-pt727f8x.js, chunk-7nczvd3c.js, chunk-kwxew0ft.js, chunk-17rgx0he.js, chunk-yvhhqffe.js, chunk-0edgz4pp.js, chunk-x6fedx01.js, chunk-qwedr313.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-hrzg8b70.js, chunk-1phn2x27.js, chunk-2p3ykn9f.js, chunk-d3kgvrwh.js, chunk-8gqdshxw.js, chunk-3t9mc82v.js, chunk-hx0d9jqj.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-r8c0r5a5.js, chunk-parcp1s3.js, chunk-55ccbmvx.js, chunk-rse8c37f.js, chunk-1d0qvnvb.js, chunk-peqy109a.js, chunk-axbkkqp1.js, chunk-bp3qtw70.js, chunk-3hk2evg5.js, chunk-bkdggr48.js, chunk-d8xz2phg.js, chunk-k808mxtm.js, chunk-q2cbptkj.js, chunk-v86b5paa.js, chunk-q2rr2870.js, chunk-tmdywbs2.js, chunk-7041rmpm.js, chunk-mhn0rydt.js, chunk-2e4yh13p.js, chunk-0ns8cfqr.js, chunk-e3z8j66n.js, chunk-6bjht2ym.js, chunk-erbs4wnd.js, chunk-h2hrc1jq.js, chunk-php6sq67.js, chunk-r07v4n17.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-3sjv1c3y.js, chunk-3jcr1npa.js, chunk-0sxn500c.js, chunk-ba2t9gmf.js, chunk-7c5kee4c.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+
+Running 3 tests using 1 worker
+
+(node:3782689) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+RENDER_ENV {"host":"infraternal-dev","kernel":"6.12.111+deb13-amd64","cpu":"Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz","logicalCpus":8,"totalRamBytes":33591037952,"loadAverage":[20.33,30.2,33.94],"scenario":"desktop-dpr2"}
+CELL_METRICS {"dpr":2,"cols":170,"rows":44,"fontSize":14,"cellWidth":8,"cellHeight":18,"rendererNaturalAdvance":8,"widthAdvance":8,"fontAscent":14,"fontDescent":4,"expectedCellWidth":8,"expectedCellHeight":18,"heightRatio":1.2857142857142858,"canvasWidth":2720,"canvasHeight":1584,"expectedCanvasWidth":2720,"expectedCanvasHeight":1584,"boxSeamInk":[9,9,9],"fontLoaded":true}
+RENDER_BENCH desktop-dpr2 {"redrawP50Ms":1.0999999642372131,"redrawP95Ms":2.300000011920929,"bytes":10000000,"elapsedMs":1029.5,"writeCpuMs":366.1000003218651,"p95FrameMs":16.700000000000728,"maxFrameMs":16.800000000000182,"wasmMemoryBytes":13500416,"effectiveMegabytesPerSecond":9.713453132588635}
+  ✓  1 test/cell-metrics.spec.ts:43:3 › Maple Mono NF cell metrics and box joins at DPR 2 (9.4s)
+RENDER_ENV {"host":"infraternal-dev","kernel":"6.12.111+deb13-amd64","cpu":"Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz","logicalCpus":8,"totalRamBytes":33591037952,"loadAverage":[20.89,29.99,33.83],"scenario":"mobile-dpr3"}
+CELL_METRICS {"dpr":3,"cols":40,"rows":40,"fontSize":13,"cellWidth":8,"cellHeight":17,"rendererNaturalAdvance":8,"widthAdvance":8,"fontAscent":13,"fontDescent":4,"expectedCellWidth":8,"expectedCellHeight":17,"heightRatio":1.3076923076923077,"canvasWidth":960,"canvasHeight":2040,"expectedCanvasWidth":960,"expectedCanvasHeight":2040,"boxSeamInk":[9,9,9],"fontLoaded":true}
+RENDER_BENCH mobile-dpr3 {"redrawP50Ms":1.5,"redrawP95Ms":6.800000011920929,"bytes":10000000,"elapsedMs":1034.199999988079,"writeCpuMs":494.0000002384186,"p95FrameMs":16.700000000000728,"maxFrameMs":33.30000000000018,"wasmMemoryBytes":12713984,"effectiveMegabytesPerSecond":9.66930961140521}
+  ✓  2 test/cell-metrics.spec.ts:43:3 › Maple Mono NF cell metrics and box joins at DPR 3 (8.4s)
+RENDER_ENV {"host":"infraternal-dev","kernel":"6.12.111+deb13-amd64","cpu":"Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz","logicalCpus":8,"totalRamBytes":33591037952,"loadAverage":[20.41,29.74,33.73],"scenario":"desktop-dpr1"}
+CELL_METRICS {"dpr":1,"cols":170,"rows":44,"fontSize":14,"cellWidth":8,"cellHeight":18,"rendererNaturalAdvance":8,"widthAdvance":8,"fontAscent":14,"fontDescent":4,"expectedCellWidth":8,"expectedCellHeight":18,"heightRatio":1.2857142857142858,"canvasWidth":1360,"canvasHeight":792,"expectedCanvasWidth":1360,"expectedCanvasHeight":792,"boxSeamInk":[9,9,9],"fontLoaded":true}
+  ✓  3 test/cell-metrics.spec.ts:43:3 › Maple Mono NF cell metrics and box joins at DPR 1 (8.0s)
+
+  3 passed (33.6s)
+
+Invocation exit: 0
+Load after: 20.54 29.47 33.60 32/3154 3789063

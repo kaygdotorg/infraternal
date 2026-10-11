@@ -1,0 +1,61 @@
+Load before: 20.00 24.40 23.80 18/2976 289696
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p289697-i50573362.scope; invocation ID: 4062bac3159748dca9687238e17996ab
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-jj99cdh2.js, chunk-tvynw18r.js, chunk-xb1tsj6z.js, chunk-b5qzwpce.js, chunk-vjc4wywy.js, chunk-f3dzsfr1.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-66fjc40m.js, chunk-jns5y2tg.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-hxe6d5rr.js, chunk-7nczvd3c.js, chunk-kfaen30b.js, chunk-0p5hrmbm.js, chunk-yvhhqffe.js, chunk-myykkfmn.js, chunk-1581mspp.js, chunk-gpvtdzty.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-pmz3t4fq.js, chunk-hgxnv469.js, chunk-0qaefdzp.js, chunk-q4z7djs6.js, chunk-8gqdshxw.js, chunk-rfrgsn6d.js, chunk-7ke91zv0.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-bn817qma.js, chunk-tpy2v24k.js, chunk-kehwrj4v.js, chunk-4vswnsbd.js, chunk-1d0qvnvb.js, chunk-h9w4h4x4.js, chunk-axbkkqp1.js, chunk-4m8jzs4a.js, chunk-xmww4jaf.js, chunk-bhxywa96.js, chunk-5wwhwxvh.js, chunk-n6gxs4qd.js, chunk-s1xvz5c1.js, chunk-v86b5paa.js, chunk-t63qex7s.js, chunk-2pb5cv0r.js, chunk-bhd4w8ad.js, chunk-t7xshf3m.js, chunk-2e4yh13p.js, chunk-7wh07hys.js, chunk-gk5330gy.js, chunk-r94erxzq.js, chunk-1s2ffqpx.js, chunk-kv5k9hbf.js, chunk-ntf29b7b.js, chunk-cdp65gbf.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-cremkx2p.js, chunk-bqfkxehg.js, chunk-0sxn500c.js, chunk-x0nxnje3.js, chunk-fga95epm.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4642
+[WebServer] latency proxy listening on http://localhost:4641; upstream port=4642
+
+Running 1 test using 1 worker
+
+(node:290584) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+MOTION_AUDIT auth-visible-loop {"rafCallbacks":[],"pending":[],"idleRafFrames":0,"shaderFrames":23,"shaderGaps":[33.299999952316284,41.39999997615814,34.39999997615814,51.10000002384186,49.60000002384186,34.799999952316284,52.40000009536743,44.5,41.39999997615814,34.699999928474426,64.20000004768372,59.39999997615814,57.10000002384186,62.700000047683716,68.19999992847443,84,81.39999997615814,42,60.40000009536743,44.199999928474426,54.200000047683716,36.5],"shaderSurface":{"cssWidth":1280,"cssHeight":720,"dpr":1,"shaderWidth":640,"shaderHeight":360},"hiddenPause":{"paused":true,"resumed":true},"offscreenPause":{"paused":true,"resumed":true}}
+MOTION_AUDIT auth-start [{"selector":"#setup-card","animationName":"auth-card-in","animationDuration":"0.24s","animationDelay":"0s","transitionProperty":"all","transitionDuration":"0s","transitionDelay":"0s","transitionTimingFunction":"ease","transformOrigin":"220px 254px","transform":"matrix(1, 0, 0, 1, 0, 0)","visible":"true"},{"selector":".auth-pane","animationName":"none","animationDuration":"0s","animationDelay":"0s","transitionProperty":"opacity, transform","transitionDuration":"0.24s, 0.24s","transitionDelay":"0s, 0s","transitionTimingFunction":"cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1)","transformOrigin":"187px 130.883px","transform":"none","visible":"true"},{"selector":"#setup-viewport","animationName":"none","animationDuration":"0s","animationDelay":"0s","transitionProperty":"height","transitionDuration":"0.24s","transitionDelay":"0s","transitionTimingFunction":"cubic-bezier(0.23, 1, 0.32, 1)","transformOrigin":"193px 131px","transform":"none","visible":"true"},{"selector":".auth-step-bar","animationName":"none","animationDuration":"0s","animationDelay":"0s","transitionProperty":"all","transitionDuration":"0s","transitionDelay":"0s","transitionTimingFunction":"ease","transformOrigin":"38.3281px 0.5px","transform":"none","visible":"true"},{"selector":"#setup-token","animationName":"none","animationDuration":"0s","animationDelay":"0s","transitionProperty":"all","transitionDuration":"0s","transitionDelay":"0s","transitionTimingFunction":"ease","transformOrigin":"187px 24px","transform":"none","visible":"true"},{"selector":".auth-dot","animationName":"none","animationDuration":"0s","animationDelay":"0s","transitionProperty":"all","transitionDuration":"0s","transitionDelay":"0s","transitionTimingFunction":"ease","transformOrigin":"12px 12px","transform":"none","visible":"true"},{"selector":"#setup-next","animationName":"none","animationDuration":"0s","animationDelay":"0s","transitionProperty":"transform, opacity","transitionDuration":"0.14s, 0.16s","transitionDelay":"0s, 0s","transitionTimingFunction":"cubic-bezier(0.23, 1, 0.32, 1), ease","transformOrigin":"70px 21px","transform":"none","visible":"true"}]
+MOTION_AUDIT keyboard-step-token {"sample":{"frames":25,"dropped":31,"longestGapMs":116.70000000000073},"events":[]}
+MOTION_AUDIT keyboard-step-identity {"sample":{"frames":18,"dropped":7,"longestGapMs":33.399999999999636},"events":[]}
+MOTION_AUDIT create-passkey {"sample":{"frames":33,"dropped":67,"longestGapMs":316.59999999999854},"events":[]}
+MOTION_AUDIT copy-feedback {"sample":{"frames":9,"dropped":25,"longestGapMs":116.79999999999927},"events":[{"label":"copy-feedback","kind":"transition","selector":"svg.is-idle","property":"filter","duration":"0.2s","delay":"0s, 0s, 0s","easing":"cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1)"},{"label":"copy-feedback","kind":"transition","selector":"svg.is-idle","property":"opacity","duration":"0.2s","delay":"0s, 0s, 0s","easing":"cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1)"},{"label":"copy-feedback","kind":"transition","selector":"svg.is-idle","property":"transform","duration":"0.2s","delay":"0s, 0s, 0s","easing":"cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1)"},{"label":"copy-feedback","kind":"transition","selector":"svg.is-done","property":"filter","duration":"0.2s","delay":"0s, 0s, 0s","easing":"cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1)"},{"label":"copy-feedback","kind":"transition","selector":"svg.is-done","property":"opacity","duration":"0.2s","delay":"0s, 0s, 0s","easing":"cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1)"},{"label":"copy-feedback","kind":"transition","selector":"svg.is-done","property":"transform","duration":"0.2s","delay":"0s, 0s, 0s","easing":"cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1), cubic-bezier(0.23, 1, 0.32, 1)"},{"label":"copy-feedback","kind":"transition","selector":"path","property":"stroke-dashoffset","duration":"0.26s","delay":"0.05s","easing":"cubic-bezier(0.23, 1, 0.32, 1)"}],"copyMorph":{"idleFilter":"blur(2px)","idleScale":0.6,"doneFilter":"none"}}
+  ✘  1 test/motion-audit.spec.ts:39:1 › measure deployed motion at 4x CPU and capture production screens (20.6s)
+
+
+  1) test/motion-audit.spec.ts:39:1 › measure deployed motion at 4x CPU and capture production screens 
+
+    Error: expect(locator).toHaveAttribute(expected) failed
+
+    Locator:  locator('#copy-recovery')
+    Expected: ""
+    Received: serializes to the same string
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveAttribute" with timeout 5000ms
+      - waiting for locator('#copy-recovery')
+        13 × locator resolved to <button type="button" id="copy-recovery" class="icon-action" aria-label="Copy recovery key" data-idle-label="Copy recovery key">…</button>
+           - unexpected value "null"
+
+
+      402 |
+      403 |   await page.waitForTimeout(520);
+    > 404 |   await expect(page.locator("#copy-recovery")).toHaveAttribute("data-done", "");
+          |                                                ^
+      405 |   await page.evaluate(() => { window.__motionAudit.label = "copy-feedback-return"; window.__motionAudit.startSample(); });
+      406 |   await page.waitForTimeout(230);
+      407 |   const copyReturn = await sampleAndEvents(page, "copy-feedback-return");
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/motion-audit.spec.ts:404:48
+
+    attachment #1: production setup (image/png) ────────────────────────────────────────────────────
+    test-results/motion-audit-measure-deplo-2b97c--capture-production-screens/attachments/production-setup-12f0fde5620f880820bb2f601a2b1ea59524d45e.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: production recovery (image/png) ─────────────────────────────────────────────────
+    test-results/motion-audit-measure-deplo-2b97c--capture-production-screens/attachments/production-recovery-2a9258fada39eea607dd24ad2781d64b4031073b.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/motion-audit-measure-deplo-2b97c--capture-production-screens/error-context.md
+
+  1 failed
+    test/motion-audit.spec.ts:39:1 › measure deployed motion at 4x CPU and capture production screens 
+
+Invocation exit: 1
+Load after: 19.79 23.93 23.66 11/2980 292235

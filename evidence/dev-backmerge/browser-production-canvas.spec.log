@@ -1,0 +1,115 @@
+Load before: 18.76 25.72 33.89 17/3148 3709239
+Running as unit: run-p3709240-i49799269.scope; invocation ID: bd8e35f76748438e9e32cc5bc5edf03a
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-j6pajvh4.js, chunk-tvynw18r.js, chunk-rkxf5zt7.js, chunk-b5qzwpce.js, chunk-8ap0fn6c.js, chunk-k7cc9y6p.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-1dw8f4qn.js, chunk-4a6wg3dz.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-xjwmmt0g.js, chunk-7nczvd3c.js, chunk-pbqr23sf.js, chunk-ksderj7f.js, chunk-yvhhqffe.js, chunk-1gnz3y3y.js, chunk-bccrb4py.js, chunk-nv546zym.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-p13qmhy6.js, chunk-gdf9fydm.js, chunk-24wthyx2.js, chunk-y34fz13y.js, chunk-8gqdshxw.js, chunk-hggwh20k.js, chunk-j5g4s49t.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-396kas3j.js, chunk-wtw1s8jn.js, chunk-n9ez8yyz.js, chunk-6w8gcgww.js, chunk-1d0qvnvb.js, chunk-fv211sdm.js, chunk-axbkkqp1.js, chunk-prdg26mf.js, chunk-36gjcvye.js, chunk-87y0fekk.js, chunk-23ce3ze7.js, chunk-x8z4c8yf.js, chunk-vdkdpfqm.js, chunk-v86b5paa.js, chunk-p5s32z76.js, chunk-gzc616hf.js, chunk-af4byekz.js, chunk-s9rgtv77.js, chunk-2e4yh13p.js, chunk-r9z706j4.js, chunk-gvb02g1s.js, chunk-d1p972dz.js, chunk-34zdrrej.js, chunk-0rzhnb02.js, chunk-2tm048p5.js, chunk-cxfz38m5.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-jkcsjm84.js, chunk-awherk0x.js, chunk-0sxn500c.js, chunk-bjy410vs.js, chunk-ck6pdh9k.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4642
+[WebServer] latency proxy listening on http://localhost:4641; upstream port=4642
+
+Running 38 tests using 1 worker
+
+(node:3710316) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/canvas.spec.ts:30:1 › desktop: horizontal trackpad scrolling pans the canvas over a terminal and rests on whole pixels (9.4s)
+  ✓   2 test/canvas.spec.ts:50:1 › desktop: a click on an inactive window activates it without moving focus into it (9.4s)
+  ✓   3 test/canvas.spec.ts:63:1 › touch: a tap activates without the keyboard, two fingers pan the canvas (11.1s)
+  ✓   4 test/canvas.spec.ts:88:1 › details popover: keys left, values right, each cell copies with a tick (9.3s)
+  ✓   5 test/canvas.spec.ts:111:1 › live terminal: the cursor stays on its text inside the window card (8.9s)
+  ✓   6 test/canvas.spec.ts:124:3 › live terminal: an 86-character line puts the cursor at column 86 with 8 px cells at DPR 1 (a window wide enough for 87 columns) (10.3s)
+  ✓   7 test/canvas.spec.ts:124:3 › live terminal: an 86-character line puts the cursor at column 86 with 8 px cells at DPR 2 (a window wide enough for 87 columns) (11.1s)
+  ✓   8 test/canvas.spec.ts:143:3 › details popover stays inside its window with an equal inset at 1440×900 (8.8s)
+  ✓   9 test/canvas.spec.ts:143:3 › details popover stays inside its window with an equal inset at 393×852 (7.9s)
+  ✓  10 test/canvas.spec.ts:143:3 › details popover stays inside its window with an equal inset at 375×667 (8.7s)
+  ✓  11 test/canvas.spec.ts:172:1 › every floating card uses the one overlay material (7.7s)
+  ✓  12 test/canvas.spec.ts:191:1 › a connection failure shows in the shared toast, never as a floating status box (7.7s)
+  ✓  13 test/canvas.spec.ts:208:1 › desktop: edges and corners resize with the right cursors, neighbours shift and never overlap (8.7s)
+  ✓  14 test/canvas.spec.ts:250:1 › desktop: a window cannot shrink below about 40 columns by 10 rows (9.2s)
+resize frame cost over 40 frames: median 0.90 ms, p95 8.50 ms, max 10.80 ms
+  ✓  15 test/canvas.spec.ts:265:1 › desktop: the live terminal refits once on release, not on every frame, and each frame costs under 16 ms (11.2s)
+  ✘  16 test/canvas.spec.ts:301:1 › touch: press and hold on a header reveals corner handles; a handle resizes; a tap outside ends it (10.2s)
+(node:3740930) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  17 test/canvas.spec.ts:344:1 › sidebar footer: the person and settings pills line up, press, and open Settings with About; no version pill (12.2s)
+  ✓  18 test/canvas.spec.ts:401:1 › palette: About infraternal opens Settings, About, and is found by version, build and commit (10.4s)
+  ✓  19 test/canvas.spec.ts:418:1 › lock: the icon appears near a window's top edge, locks with a click, stays, and unlocks with Ctrl+Shift+L (9.5s)
+  ✓  20 test/canvas.spec.ts:464:1 › lock: wheel and canvas gestures inside the locked window never pan; outside it still does; other windows are ignored (9.6s)
+  ✓  21 test/canvas.spec.ts:494:1 › lock: Ctrl+K reaches the terminal on Linux and Windows while locked, and opens the palette when unlocked (9.8s)
+  ✓  22 test/canvas.spec.ts:522:1 › lock: on macOS, ⌘K still opens the palette while locked and offers Unlock window (10.0s)
+  ✓  23 test/canvas.spec.ts:541:1 › lock (touch): there is no frame lock on a phone; the palette locks (7.7s)
+  ✓  24 test/canvas.spec.ts:552:1 › lock: one click on an unfocused window's lock focuses that window and locks it (9.4s)
+  ✓  25 test/canvas.spec.ts:576:1 › shortcuts: ? morphs the capsule into the list, current area first, one shortcut per action; Esc, ? and a click outside morph it back (10.5s)
+  ✘  26 test/canvas.spec.ts:621:1 › shortcuts: the palette offers Keyboard shortcuts, lock shortcuts are listed, and a Mac sees ⌘K (13.5s)
+(node:3760297) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  27 test/canvas.spec.ts:638:1 › shortcuts (reduced motion): the panel crossfades without any shape travel (8.4s)
+  ✓  28 test/canvas.spec.ts:653:1 › empty canvas: a click in the gap clears the active window and its highlight; keys go to canvas navigation (9.4s)
+  ✓  29 test/canvas.spec.ts:677:1 › empty canvas (touch): a tap in the gap clears the active window (9.1s)
+  ✓  30 test/canvas.spec.ts:695:1 › details popover tabs: the selected capsule glides (does not jump) and the keyboard moves it instantly (10.0s)
+  ✓  31 test/canvas.spec.ts:728:1 › copyable values: the highlight hugs the text with even padding, on keys and right-aligned values (8.1s)
+  ✓  32 test/canvas.spec.ts:751:1 › a normal preview session never writes text bottom left: reload, a failing session check, state messages (16.5s)
+  ✓  33 test/canvas.spec.ts:799:1 › copy works from a plain-http, non-localhost origin: no async clipboard, the fallback copies and the feedback plays (7.1s)
+  ✓  34 test/canvas.spec.ts:840:1 › top pill: the host's operating-system icon replaces the connection dot and follows the active window (7.5s)
+  ✓  35 test/canvas.spec.ts:852:1 › palette (desktop): centred, as tall as its results, never closer than a quarter of the viewport to the top or bottom (8.7s)
+  ✓  36 test/canvas.spec.ts:890:1 › palette (phone): keeps its placement under the top bar, inside the safe area (8.3s)
+  ✓  37 test/canvas.spec.ts:904:1 › palette: Ctrl+K then typing within 20 ms lands every character; arrow selection has no transition (8.4s)
+  ✓  38 test/canvas.spec.ts:925:1 › clear and frosted cards blur what is behind them by more than a line of text, so letters never read through (8.3s)
+
+
+  1) test/canvas.spec.ts:301:1 › touch: press and hold on a header reveals corner handles; a handle resizes; a tap outside ends it 
+
+    Error: expect(received).toBeLessThan(expected)
+
+    Expected: < 564
+    Received:   714
+
+      332 |   await page.waitForTimeout(300);
+      333 |   const after = await windowBox(page, 0);
+    > 334 |   expect(after.height).toBeLessThan(before.height - 150);
+          |                        ^
+      335 |   expect(after.width).toBeLessThan(before.width - 40);
+      336 |   // The mode stays until a tap lands outside the handles.
+      337 |   await expect(window0).toHaveAttribute("data-resize", "touch");
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/canvas.spec.ts:334:24
+
+    Error Context: test-results/canvas-touch-press-and-hol-7d656-sizes-a-tap-outside-ends-it/error-context.md
+
+  2) test/canvas.spec.ts:621:1 › shortcuts: the palette offers Keyboard shortcuts, lock shortcuts are listed, and a Mac sees ⌘K 
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator: locator('.ui-shortcuts').locator('.ui-shortcuts-row').filter({ hasText: 'Lock or unlock' }).locator('kbd')
+    Timeout: 5000ms
+    - Expected  - 2
+    + Received  + 2
+
+      Array [
+    -   "Ctrl",
+    -   "Shift",
+    +   "⌃",
+    +   "⇧",
+        "L",
+      ]
+
+    Call log:
+      - Expect "toHaveText" with timeout 5000ms
+      - waiting for locator('.ui-shortcuts').locator('.ui-shortcuts-row').filter({ hasText: 'Lock or unlock' }).locator('kbd')
+        14 × locator resolved to 3 elements
+
+
+      629 |   const panel = page.locator(".ui-shortcuts");
+      630 |   await expect(panel).toBeVisible();
+    > 631 |   await expect(panel.locator(".ui-shortcuts-row", { hasText: "Lock or unlock" }).locator("kbd")).toHaveText(["Ctrl", "Shift", "L"]);
+          |                                                                                                  ^
+      632 |   await expect(panel.locator(".ui-shortcuts-row", { hasText: "command palette" }).locator("kbd")).toHaveText(["⌘", "K", "⌘", "⇧", "P"]);
+      633 |   await page.keyboard.press("Escape");
+      634 |   await expect(panel).toHaveCount(0);
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/canvas.spec.ts:631:98
+
+    Error Context: test-results/canvas-shortcuts-the-palet-85af2-re-listed-and-a-Mac-sees-⌘K/error-context.md
+
+  2 failed
+    test/canvas.spec.ts:301:1 › touch: press and hold on a header reveals corner handles; a handle resizes; a tap outside ends it 
+    test/canvas.spec.ts:621:1 › shortcuts: the palette offers Keyboard shortcuts, lock shortcuts are listed, and a Mac sees ⌘K 
+  36 passed (6.3m)
+
+Invocation exit: 1
+Load after: 21.22 30.70 34.14 13/3108 3780662

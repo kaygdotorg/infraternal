@@ -1,0 +1,31 @@
+Load before: 41.46 46.70 46.28 38/3227 3610207
+Running as unit: run-p3610208-i49700264.scope; invocation ID: c5c5260822474644a8815ca9a07afd41
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-avrcza95.js, chunk-tvynw18r.js, chunk-ktwrqgdj.js, chunk-b5qzwpce.js, chunk-8cgn999x.js, chunk-m6nzfa53.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-fd5nxkag.js, chunk-sen2ced4.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-z2fzbe14.js, chunk-7nczvd3c.js, chunk-d8wf6ca6.js, chunk-dt5ntnwq.js, chunk-yvhhqffe.js, chunk-1d8yte82.js, chunk-y2rdjk40.js, chunk-n2wg6y3r.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-mc3393gp.js, chunk-6gte6dq8.js, chunk-vs8mf5dn.js, chunk-ky6ekpr0.js, chunk-8gqdshxw.js, chunk-jpptggtf.js, chunk-nsj67hp0.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-jz7v99n9.js, chunk-tw79d97w.js, chunk-gqqsbrvh.js, chunk-rfcp52am.js, chunk-1d0qvnvb.js, chunk-dt4r8g8e.js, chunk-axbkkqp1.js, chunk-405erxfm.js, chunk-1xnnjz6v.js, chunk-1bbrwj7a.js, chunk-df40xwy1.js, chunk-e3zwgtzs.js, chunk-fm2wq10x.js, chunk-v86b5paa.js, chunk-ztsacsv5.js, chunk-pnk9g5td.js, chunk-jgeyjspf.js, chunk-71mnbkaa.js, chunk-2e4yh13p.js, chunk-kvmxdqy2.js, chunk-94q1gs08.js, chunk-4p7m1b4r.js, chunk-s9ttpfta.js, chunk-6p7k27xr.js, chunk-9hp69p7a.js, chunk-hjnwvrxz.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-a1tca5fy.js, chunk-wt32f9mm.js, chunk-0sxn500c.js, chunk-swsyqbxv.js, chunk-1bgy5pew.js
+[WebServer] latency proxy listening on http://localhost:4643; upstream port=4644
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4644
+
+Running 14 tests using 1 worker
+
+(node:3612419) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/addhost-chips.spec.ts:43:1 › typing kayg@o2 and clicking Continue proceeds with that host, with no tick (15.1s)
+  ✓   2 test/addhost-chips.spec.ts:57:1 › a@h1 b@h2,c@h3 gives chips for the ended targets; the last one waits as text until it is ended (15.4s)
+  ✓   3 test/addhost-chips.spec.ts:72:1 › pasting three lines gives three chips (9.9s)
+  ✓   4 test/addhost-chips.spec.ts:82:1 › an invalid token shows the hint and never blocks the chips beside it (14.0s)
+  ✓   5 test/addhost-chips.spec.ts:101:1 › with only an invalid token the hint shows once it is ended, and Continue stays disabled (11.4s)
+  ✓   6 test/addhost-chips.spec.ts:114:1 › a token that names a discovered host chips at once and is ticked in the list (10.8s)
+  ✓   7 test/addhost-chips.spec.ts:125:1 › Backspace on an empty field turns the last chip back into text (10.6s)
+  ✓   8 test/addhost-chips.spec.ts:137:1 › Tab ends a typed token (10.0s)
+  ✓   9 test/addhost-chips.spec.ts:148:1 › a listed host ticked in the list becomes a chip, and removing the chip unticks it (10.5s)
+  -  10 test/addhost-chips.spec.ts:159:5 › captures 1440x900 ink
+  -  11 test/addhost-chips.spec.ts:159:5 › captures 1440x900 paper
+  -  12 test/addhost-chips.spec.ts:159:5 › captures 393x852 ink
+  -  13 test/addhost-chips.spec.ts:159:5 › captures 393x852 paper
+  ✓  14 test/addhost-chips.spec.ts:179:1 › a token typed while the host list is still loading chips when the list arrives (13.2s)
+
+  4 skipped
+  10 passed (2.3m)
+
+Invocation exit: 0
+Load after: 34.11 41.98 44.61 16/3329 3622903

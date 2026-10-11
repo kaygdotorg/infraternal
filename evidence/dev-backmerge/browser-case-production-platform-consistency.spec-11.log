@@ -1,0 +1,41 @@
+Load before: 6.60 17.29 21.39 4/2908 337246
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p337247-i50620912.scope; invocation ID: b623abb2828e403dace32b2615e99f22
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-6sgkch9w.js, chunk-tvynw18r.js, chunk-35e60h15.js, chunk-b5qzwpce.js, chunk-z4r1fx6b.js, chunk-xxhv09ec.js, chunk-987nys91.js, chunk-y3zz095k.js, chunk-y9j7rbfn.js, chunk-yk397s0w.js, chunk-d6k91n8a.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-7wcevm6t.js, chunk-4v5x0hh9.js, chunk-7nczvd3c.js, chunk-wfk7q1mj.js, chunk-jxfb9c0v.js, chunk-yvhhqffe.js, chunk-n3d51b4g.js, chunk-8k6fwjs2.js, chunk-k5ae5pdq.js, chunk-na49xj9e.js, main.js, chunk-bmvvvw5y.js, chunk-cvqd1j3d.js, chunk-pbz4tepw.js, chunk-m4793hvk.js, chunk-y7k9qb6w.js, chunk-v8zrzzq2.js, chunk-8gqdshxw.js, chunk-7534297e.js, chunk-ewkktqde.js, chunk-200yzybn.js, chunk-xcx46cbd.js, chunk-kvapfjqx.js, chunk-qpde2svg.js, chunk-dm052hmy.js, chunk-aaywk480.js, chunk-1d0qvnvb.js, chunk-d2af21t2.js, chunk-axbkkqp1.js, chunk-42as4rct.js, chunk-tj2b0xp1.js, chunk-0pvtcqe6.js, chunk-98db1vnt.js, chunk-q3y68qc5.js, chunk-xm6yvksg.js, chunk-v86b5paa.js, chunk-zbk0dzbm.js, chunk-2nza1p5d.js, chunk-p4kvh439.js, chunk-vr6jdc6y.js, chunk-2e4yh13p.js, chunk-6082t4db.js, chunk-eywed28v.js, chunk-9606ae9q.js, chunk-2n3pcg9p.js, chunk-ve40d6yr.js, chunk-5a19d5vz.js, chunk-37t6chz5.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-426baven.js, chunk-d0jjm7y8.js, chunk-0sxn500c.js, chunk-mvgg75ac.js, chunk-cxc7ssag.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4642
+[WebServer] latency proxy listening on http://localhost:4641; upstream port=4642
+
+Running 3 tests using 1 worker
+
+(node:337733) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/platform-consistency.spec.ts:165:1 › Windows: the shortcuts panel names every key in words, with no Apple glyph (5.2s)
+  ✓  2 test/platform-consistency.spec.ts:183:3 › captures: Windows palette at 393x852, paper: no bar at rest, a thin bar while scrolling (6.0s)
+  ✘  3 test/platform-consistency.spec.ts:183:3 › captures: Windows palette at 375x667, ink: no bar at rest, a thin bar while scrolling (5.7s)
+
+
+  1) test/platform-consistency.spec.ts:183:3 › captures: Windows palette at 375x667, ink: no bar at rest, a thin bar while scrolling 
+
+    Error: expect(received).toBeLessThan(expected)
+
+    Expected: < 6
+    Received:   29
+
+      192 |     await expect(page.locator("#palette")).toBeVisible();
+      193 |     await expect.poll(async () => (await scrollState(page)).overflows).toBe(true);
+    > 194 |     expect(await trackSpread(page)).toBeLessThan(6);
+          |                                     ^
+      195 |     await page.locator("#palette-results").hover();
+      196 |     await page.mouse.wheel(0, 160);
+      197 |     await expect.poll(async () => (await scrollState(page)).scrolling).toBe(true);
+        at /home/kayg/.cache/codex-scratch/dev-backmerge/production-baseline/apps/tracer/test/platform-consistency.spec.ts:194:37
+
+    Error Context: test-results/platform-consistency-captu-c649d--a-thin-bar-while-scrolling/error-context.md
+
+  1 failed
+    test/platform-consistency.spec.ts:183:3 › captures: Windows palette at 375x667, ink: no bar at rest, a thin bar while scrolling 
+  2 passed (22.4s)
+
+Invocation exit: 1
+Load after: 5.95 16.30 20.95 6/2911 341102
