@@ -26,7 +26,7 @@ import { columnsFromDocument, docHasGroups, type DocTarget } from "./model/docum
 import { loadGroups } from "./layout/groups-handle";
 import { LocalCanvasStore } from "./model/store";
 import type { ViewModel, WindowModel } from "./model/types";
-import { createMeshApi } from "./mesh/api";
+import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
@@ -101,7 +101,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const saved = await store.load();
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
-  const mesh = createMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
+  const mesh = createLazyMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
   // A saved layout with a group needs the grouped module before its views are built (D212). Any other canvas starts the
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
