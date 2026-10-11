@@ -98,7 +98,8 @@ impl Release {
         let root =
             PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
                 .join(format!("bucket-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
+        // The same fixture root owns latest-check staging and the payload cache.
+        super::private_directory(&root).unwrap();
         let key = root.join("fixture-key");
         assert!(
             Command::new("ssh-keygen")
