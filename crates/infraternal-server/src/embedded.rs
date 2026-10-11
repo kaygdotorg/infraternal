@@ -1394,15 +1394,33 @@ async fn process_incoming(
                 .await;
             }
             if replay && !attachment.unacknowledged.is_empty() {
-                return write_frame(
-                    connection,
-                    stream_id,
-                    &Frame::Input {
-                        in_seq: in_seq_acked,
-                        bytes: &attachment.unacknowledged,
-                    },
-                )
-                .await;
+                // Retention bounds aggregate payload, while the wire limit
+                // also counts Input's type byte and eight-byte sequence.
+                let mut sequence = in_seq_acked;
+                for bytes in attachment
+                    .unacknowledged
+                    .chunks(MAX_FRAME_LEN - 1 - size_of::<u64>())
+                {
+                    if !write_frame(
+                        connection,
+                        stream_id,
+                        &Frame::Input {
+                            in_seq: sequence,
+                            bytes,
+                        },
+                    )
+                    .await
+                    {
+                        return false;
+                    }
+                    let Ok(length) = u64::try_from(bytes.len()) else {
+                        return false;
+                    };
+                    let Some(next) = sequence.checked_add(length) else {
+                        return false;
+                    };
+                    sequence = next;
+                }
             }
             true
         }

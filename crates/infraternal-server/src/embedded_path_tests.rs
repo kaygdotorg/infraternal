@@ -293,3 +293,65 @@ async fn input_retention_cost_at_200_terminals() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+
+#[tokio::test]
+async fn full_retention_replays_as_legal_frames_with_contiguous_offsets() {
+    let (mut link, mut peer) = connection();
+    let (tx, _output) = mpsc::channel(8);
+    let mut state = attachment(tx);
+    state.awaiting_ack = true;
+    state.replaying = true;
+    let mut attachments = HashMap::from([(1, state)]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut pending = HashMap::new();
+    let bytes = vec![b'x'; MAX_FRAME_LEN / 2];
+    for sequence in [0, (MAX_FRAME_LEN / 2) as u64] {
+        assert!(
+            process_command(
+                input_command(sequence, &bytes),
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut pending
+            )
+            .await
+        );
+    }
+    let reader = tokio::spawn(async move {
+        let mut wire = Vec::new();
+        peer.read_to_end(&mut wire).await.unwrap();
+        wire
+    });
+    let replayed = process_incoming(
+        Incoming::Ack {
+            stream_id: 2,
+            in_seq_acked: 0,
+        },
+        &mut link,
+        &mut attachments,
+        &mut routes,
+        &mut pending,
+    )
+    .await;
+    drop(link);
+    let wire = reader.await.unwrap();
+    assert!(
+        replayed,
+        "retained aggregate must not exceed a single frame payload limit"
+    );
+    let mut remaining = wire.as_slice();
+    let mut offset = 0;
+    while !remaining.is_empty() {
+        let decoded = decode_muxed_frame(remaining).unwrap();
+        assert_eq!(decoded.stream_id, 2);
+        let Frame::Input { in_seq, bytes } = decoded.frame else {
+            panic!("input frame required");
+        };
+        assert_eq!(in_seq, offset);
+        assert!(bytes.iter().all(|byte| *byte == b'x'));
+        offset += bytes.len() as u64;
+        remaining = &remaining[decoded.wire_len..];
+    }
+    assert_eq!(offset, MAX_FRAME_LEN as u64);
+    assert_eq!(attachments[&1].unacknowledged.len(), MAX_FRAME_LEN);
+}
