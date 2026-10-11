@@ -11,6 +11,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/release", default-features = false }
 serde_json.workspace = true
 infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh" }
 infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent", default-features = false, features = ["remote"] }
@@ -148,6 +149,13 @@ bench = false
 [[bin]]
 name = "release_verify"
 path = "fuzz_targets/release_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "release_channel"
+path = "fuzz_targets/release_channel.rs"
 test = false
 doc = false
 bench = false

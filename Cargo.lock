@@ -1373,6 +1373,7 @@ dependencies = [
  "infraternal-plugin-api",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
+ "infraternal-plugin-release",
  "infraternal-plugin-ssh",
  "infraternal-protocol",
  "infraternal-server",
