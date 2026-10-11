@@ -1,0 +1,15 @@
+{
+  "machine": "infraternal-dev",
+  "architecture": "x86_64",
+  "kernel": "6.12.111+deb13-amd64",
+  "logical_cpus": 12,
+  "cpu_model": "Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz",
+  "memory_bytes": 67362422784,
+  "load": "37.44 40.01 31.11 32/1623 259953",
+  "source_head": "2454243662db6ad5a0208b6584fd00f8625c773b",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "profile": "shipping x86_64-unknown-linux-musl release; kernel diagnostic tests/examples debug",
+  "scope": "systemd-run --user --scope -p CPUWeight=10000",
+  "isolation": "disposable user/network namespaces; no induced load; no other host",
+  "own_build_overlap": "proofs start after all own builds/tests finish"
+}

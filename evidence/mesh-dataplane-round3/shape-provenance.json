@@ -1,0 +1,40 @@
+{
+  "head": "66f923792a15edf9482af37bd3c22f972ded1b79",
+  "binaries": {
+    "review_local_delivery": {
+      "source": "/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_local_delivery-4ebb54516bc0d463",
+      "archive": "/home/kayg/.cache/codex-scratch/mesh-dataplane/round3-shape-binaries/review_local_delivery-4ebb54516bc0d463",
+      "sha256": "c47e46f5da79172ce859041d2269f72de6129bb6f41177a6c6764aa887f61604"
+    },
+    "review_route_scope": {
+      "source": "/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_route_scope-d89760d0d5aed745",
+      "archive": "/home/kayg/.cache/codex-scratch/mesh-dataplane/round3-shape-binaries/review_route_scope-d89760d0d5aed745",
+      "sha256": "46c16a7a49437b187b36fa003aab846675d6fbc0f0baa8a8a426ff328957b4f0"
+    },
+    "review_ingress_translation": {
+      "source": "/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_ingress_translation-ab275ab52666b303",
+      "archive": "/home/kayg/.cache/codex-scratch/mesh-dataplane/round3-shape-binaries/review_ingress_translation-ab275ab52666b303",
+      "sha256": "4208e788f5f98fb8a41d73278283646d394c6067353ee06c0a7e1e6709625c57"
+    },
+    "review_endpoint_transaction": {
+      "source": "/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_endpoint_transaction-d3242410fee0f431",
+      "archive": "/home/kayg/.cache/codex-scratch/mesh-dataplane/round3-shape-binaries/review_endpoint_transaction-d3242410fee0f431",
+      "sha256": "bfa46397fdc208a5955930587b1cc221ff8856d0b8cf7f8e598f5fe0e7d69c46"
+    },
+    "review_restart_routes": {
+      "source": "/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_restart_routes-9d2921265144199e",
+      "archive": "/home/kayg/.cache/codex-scratch/mesh-dataplane/round3-shape-binaries/review_restart_routes-9d2921265144199e",
+      "sha256": "e4742c0540b72413b4dc3c34a89134ec44cc05775da6531456aca9276b38accf"
+    },
+    "restart_route_ownership": {
+      "source": "/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/restart_route_ownership-b5af3cc2d58d5ae3",
+      "archive": "/home/kayg/.cache/codex-scratch/mesh-dataplane/round3-shape-binaries/restart_route_ownership-b5af3cc2d58d5ae3",
+      "sha256": "d31f2b62896af00566778954154fd6a5746761a9152b6ff5bddf4e1d935c7d4e"
+    },
+    "review_route_inventory": {
+      "source": "/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_route_inventory-410d7d005cea07fc",
+      "archive": "/home/kayg/.cache/codex-scratch/mesh-dataplane/round3-shape-binaries/review_route_inventory-410d7d005cea07fc",
+      "sha256": "45b929c2c6814399cb2f7f0bab1e4d2458531cbf9054b469d7d0ebe0b6a14831"
+    }
+  }
+}
