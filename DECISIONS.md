@@ -2217,3 +2217,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        loopback server refuses any Host other than its own loopback address
        and port (DNS rebinding) and checks Origin on every state-changing
        request.
+     - **What the loopback canvas serves (Q35, owner 2026-10-11):** the
+       binary embeds only the critical canvas (shell, Connection view and
+       sign-in). After sign-in, the rest comes from the signed-in server as
+       its signed web bundle, cached, always matching that server's version
+       (signing in needs the server anyway).
+     - **Address (Q36):** a fixed default loopback port, configurable; if it
+       is taken, the next free one, printed by `infra status`.
