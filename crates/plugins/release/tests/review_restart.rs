@@ -7,6 +7,8 @@ use infraternal_plugin_release::{
     service::ReleaseLookup,
 };
 use std::{
+    io::Write,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -14,6 +16,18 @@ use std::{
 };
 
 struct PartialEngine;
+fn write_metadata(destination: &Path, bytes: &[u8]) {
+    // Match the production downloader's private, newly created regular files,
+    // so a safe restart collector can recognize this fixture as eligible.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+        .unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync_all().unwrap();
+}
 impl ReleaseEngine for PartialEngine {
     fn download<'a>(
         &'a self,
@@ -23,12 +37,12 @@ impl ReleaseEngine for PartialEngine {
     ) -> Operation<'a, Result<(), DownloadError>> {
         Box::pin(async move {
             if address.ends_with("stable.json") {
-                std::fs::write(destination, br#"{"version":"0.1.0"}"#).unwrap();
+                write_metadata(destination, br#"{"version":"0.1.0"}"#);
                 return Ok(());
             }
             // A fully bounded body is on disk while the transport is still pending.
             // The parent stops this process, so Rust destructors cannot reclaim it.
-            std::fs::write(destination, vec![b'x'; 65536]).unwrap();
+            write_metadata(destination, &vec![b'x'; 65536]);
             std::future::pending().await
         })
     }
@@ -103,7 +117,10 @@ async fn restarted_latest_reclaims_metadata_after_process_stop() {
         PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
             .join(format!("review-metadata-{}", uuid::Uuid::new_v4())),
     );
-    std::fs::create_dir(&state.0).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state.0)
+        .unwrap();
     for n in 1..=2 {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "partial_metadata_restart_child", "--ignored"])
