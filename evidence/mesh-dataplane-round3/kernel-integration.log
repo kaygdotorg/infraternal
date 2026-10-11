@@ -1,0 +1,13 @@
+load_before=30.02 27.99 29.41 28/1607 367214
+Running as unit: run-p367215-i367515.scope; invocation ID: e236e15756054b98b3632540b763cb39
+
+running 5 tests
+test created_interface_is_marked_for_restart_adoption ... ok
+test policy_table_route_conflict_is_refused ... ok
+test real_kernel_chunked_peers ... METRIC kernel_peers machine=infraternal-dev peers=1000 apply_us=90925 single_peer_us=41 load=30.02 27.99 29.41 32/1627 367299
+ok
+test real_kernel_ephemeral_identity ... ok
+test retired_host_routes_can_be_replayed ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.33s
+

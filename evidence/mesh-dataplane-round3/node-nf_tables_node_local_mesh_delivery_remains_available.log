@@ -1,0 +1,8 @@
+load=26.73 15.08 6.91 38/1480 95891
+Running as unit: run-p95892-i96192.scope; invocation ID: 0d69177dc5bc44be99b1c11bf9a9f727
+
+running 1 test
+test nf_tables_node_local_mesh_delivery_remains_available ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.63s
+

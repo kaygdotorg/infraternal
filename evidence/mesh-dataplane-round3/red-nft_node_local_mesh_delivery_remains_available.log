@@ -1,0 +1,19 @@
+load=29.18 32.71 38.85 14/3427 3208648
+Running as unit: run-p3208649-i49298763.scope; invocation ID: c3daf163fdb042c296e141cb95f84aca
+
+running 1 test
+test nft_node_local_mesh_delivery_remains_available ... 
+thread 'nft_node_local_mesh_delivery_remains_available' (3208693) panicked at crates/plugins/mesh/tests/review_local_delivery.rs:56:5:
+assertion `left == right` failed: node-local delivery refused
+  left: [None, None]
+ right: [Some(20), Some(20)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    nft_node_local_mesh_delivery_remains_available
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.38s
+
