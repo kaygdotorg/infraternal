@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Real-shim bound, persisted reconnect status and stream-local ended answers [D13,D218], #151."""
 import argparse
-import json
 import os
 from pathlib import Path
 import socket
@@ -25,11 +24,7 @@ def send_shim(peer, body):
 
 
 def ended(client, identity):
-    stream, kind, body = client.read()
-    assert (stream, kind) == (1, 0x33), (stream, kind, body)
-    assert body[:4] == bytes(4)
-    event = json.loads(body[4:])
-    assert event['type'] == 'terminal.exited'
+    event = client.wait_event('terminal.exited')
     assert event['session_id'] == str(identity) and event['status'] == 7
     assert event['final_seq'] > 0
     stream, kind, body = client.read()
@@ -58,19 +53,9 @@ def run(binary):
         client.id = identity
         client.send(1, 0x16, identity.bytes + bytes(16))
         assert client.process(credit=False) == 0x13
-        # The prompt supplies output so the unfunded data link hits its deadline.
-        deadline = time.monotonic() + 5
-        while True:
-            sockets = 0
-            for fd in Path(f'/proc/{shim.pid}/fd').iterdir():
-                try:
-                    sockets += os.readlink(fd).startswith('socket:')
-                except FileNotFoundError:
-                    pass
-            if sockets == 2:
-                break
-            assert time.monotonic() < deadline, 'data link did not detach'
-            time.sleep(.005)
+        # The shim is deliberately non-dumpable, so do not inspect /proc/PID/fd.
+        # A detached relay must reconnect to apply Resize, then acknowledge State.
+        client.wait_for_starvation_detach()
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(5)
             peer.connect(str(path))

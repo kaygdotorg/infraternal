@@ -57,12 +57,7 @@ def run(binary, state, functional=False, seed=20):
         client.until(b'OPEN_OK\r\n')
         client.wait_ack()
         client.input(b'exit 7\n')
-        # Attach emits terminal.replay_complete before this process exits.
-        while not any(event.get('type') == 'terminal.exited' for event in client.events):
-            client.process()
-        terminal_exit = next(
-            event for event in reversed(client.events) if event.get('type') == 'terminal.exited'
-        )
+        terminal_exit = client.wait_event('terminal.exited')
         assert terminal_exit == dict(
             type='terminal.exited', session_id=str(session), status=7, final_seq=client.out
         )

@@ -316,6 +316,14 @@ class Binary:
             raise AssertionError((kind, body))
         return kind
 
+    def wait_event(self, event_type):
+        """Wait for the named event; replay completion can precede lifecycle events."""
+        while True:
+            for event in reversed(self.events):
+                if event.get('type') == event_type:
+                    return event
+            self.process()
+
     def drain_credit(self):
         """Consume the exact funded window; socket silence is not an output fence."""
         while self.credit_available > 0:
@@ -332,7 +340,28 @@ class Binary:
             if frame[:2] == (0, 0x09):
                 assert frame[2] == body
                 return
-            self.process(credit=False, frame=frame)
+                self.process(credit=False, frame=frame)
+
+    def wait_for_starvation_detach(self, cols=80, rows=24, timeout=5):
+        """Prove a zero-credit relay detached by requiring Resize to relink and Ack."""
+        self.send(1, 0x14, struct.pack('<I', 1))
+        deadline = time.monotonic() + timeout
+        while not self.data:
+            self.process(credit=False)
+            assert time.monotonic() < deadline, 'prompt did not produce funded output'
+        assert len(self.data) == 1
+        self.fence()
+        time.sleep(.35)
+
+        prior_ack = self.acked
+        self.send(1, 0x12, struct.pack('<HHHH', cols, rows, 0, 0))
+        deadline = time.monotonic() + timeout
+        while True:
+            frame = self.read()
+            if self.process(credit=False, frame=frame) == 0x13:
+                assert self.acked == prior_ack
+                return
+            assert time.monotonic() < deadline, 'detached relay did not acknowledge its resize'
 
     def until(self, marker, credit=True):
         deadline = time.monotonic() + 20

@@ -92,9 +92,7 @@ def run(binary):
         client.attach()
         counts(1, 0)
         path, pid, started = kill_shell(client.id)
-        while not client.events:
-            client.process()
-        assert client.events[-1]['type'] == 'terminal.exited'
+        client.wait_event('terminal.exited')
         attached_ms = retired(path, pid, started)
         print(f'Local memory refusal, invalid dimensions, detach/reattach counts, exit delivery and registry retirement: PASS; detached={detached_ms:.1f} ms attached={attached_ms:.1f} ms; load={Path("/proc/loadavg").read_text().strip()}')
     finally:
