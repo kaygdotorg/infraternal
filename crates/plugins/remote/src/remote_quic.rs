@@ -243,6 +243,23 @@ impl PeerFreshness {
             }
         }
     }
+    /// Detect a proven mesh interruption from current authenticated ACK/keepalive
+    /// timing. RTT changes update the budget rather than freezing a dial-time timer.
+    /// # Errors
+    /// Returns transport closure or interruption after one RTT plus scheduler margin.
+    pub async fn interrupted_adaptive(&mut self, connection: &quinn::Connection) -> io::Result<()> {
+        let mut observations = tokio::time::interval(std::time::Duration::from_millis(50));
+        observations.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = connection.closed() => return Err(io::ErrorKind::BrokenPipe.into()),
+                _ = observations.tick() => {
+                    let budget = connection.rtt().saturating_add(std::time::Duration::from_millis(200));
+                    if self.silence(connection) >= budget { return Err(io::ErrorKind::TimedOut.into()); }
+                }
+            }
+        }
+    }
 }
 fn authenticated_frames(connection: &quinn::Connection) -> [u64; 24] {
     // Quinn records these only after decryption and packet deduplication. Do
