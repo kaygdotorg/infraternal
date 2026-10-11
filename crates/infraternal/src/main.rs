@@ -1,18 +1,20 @@
 //! Defines the single `infraternal server` and `infraternal agent` entry point [7][20].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+mod component_cli;
 mod embedded_cli;
 mod install;
 mod output;
 #[cfg(feature = "remote")]
 mod remote;
 mod remote_server;
+mod skill_cli;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "infraternal")]
@@ -140,13 +142,35 @@ struct InstallArgs {
     name: String,
 }
 
+// Build public component commands from the same declarations as their skills.
+fn component_command(
+    descriptors: &[&'static infraternal_plugin_api::PluginDescriptor],
+) -> clap::Command {
+    descriptors.iter().fold(
+        Cli::command().subcommand(skill_cli::command()),
+        |command, descriptor| command.subcommand(component_cli::command(descriptor)),
+    )
+}
+
 fn main() -> ExitCode {
     if let Some(result) = embedded_cli::run_if_requested() {
         return result;
     }
     let requested_json = std::env::args_os().any(|argument| argument == "--json");
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
+    let Ok(registry) =
+        infraternal_agent::plugins::registry(infraternal_agent::plugins::ExecutionMode::Embedded)
+    else {
+        return output::refuse(
+            requested_json,
+            "cli",
+            "Compiled component declarations are invalid.",
+            "Use a build with consistent plugin declarations.",
+            1,
+        );
+    };
+    let descriptors = registry.cli_descriptors();
+    let matches = match component_command(&descriptors).try_get_matches() {
+        Ok(matches) => matches,
         Err(error)
             if requested_json
                 && !matches!(
@@ -164,7 +188,19 @@ fn main() -> ExitCode {
         }
         Err(error) => error.exit(),
     };
-    let json = cli.json;
+    let json = matches.get_flag("json");
+    if let Some(("skill", arguments)) = matches.subcommand() {
+        return skill_cli::run(arguments, json);
+    }
+    if let Some((name, arguments)) = matches.subcommand()
+        && let Some(descriptor) = descriptors.iter().find(|descriptor| descriptor.id == name)
+    {
+        return component_cli::run(descriptor, &registry, arguments, json);
+    }
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
     match cli.command {
         Command::Server(args) => run_server(args, json),
         #[cfg(feature = "ssh")]

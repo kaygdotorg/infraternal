@@ -41,6 +41,8 @@ pub mod node;
 
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node_actions;
+#[cfg(all(feature = "agent", target_os = "linux"))]
+mod node_presentation;
 
 #[cfg(feature = "server")]
 pub mod settings;

@@ -241,6 +241,15 @@ impl AgentPlugin for MeshNodePlugin {
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
+    fn has_cli(&self) -> bool {
+        true
+    }
+    fn human_status_action(&self, action: &str) -> Option<&'static str> {
+        matches!(action, "mesh.up" | "mesh.down").then_some("mesh.status")
+    }
+    fn format_human(&self, action: &str, output: &[u8]) -> Result<String, PluginError> {
+        crate::node_presentation::format(action, output)
+    }
     fn control_actions(&self) -> &'static [ActionDef] {
         CONTROL_ACTIONS
     }
@@ -267,7 +276,7 @@ impl AgentPlugin for MeshNodePlugin {
                 json!({"state":"Off","version":null})
             }
             Request::Status => {
-                json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len())})
+                json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy)})
             }
             Request::Configure(chunk) => {
                 let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
