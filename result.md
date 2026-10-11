@@ -1,15 +1,12 @@
-<!-- Records the #158/D206 round-two fixes, verification evidence and remaining gate exception. -->
+<!-- Records the production integration of #151 and #158 under D206, including reproducible gate evidence. -->
 
-Round two addresses all four HOLD findings. Code head: `fbc28c18`.
+Merged `origin/session-bounds` into the production line: merge `026e471c`, fixture follow-up `f2d84235`. The shim’s authenticated saved exit uses `terminal.exited` with status, then the sole final Close 4404. Retired status preserves viewer cursors; live exits retain final-output paint ordering. Both branches’ tests remain; the native completion/drain and interrupted-answer races have regressions.
 
-- DS-03: `d215b3c0` drains queued native final frames before retirement, bounded to one second. `cbabf63e` adds the stuck-peer regression; `3b55079c` fixes its documentation lint.
-- DS-01: `003126ad` keeps known gone inventory records exited when another window selects them.
-- DS-04: `be84bd8f` shares the existing jittered retry policy; `14f0fdca` retries transient shared-stream closes on the same durable writer. `16dc989c` and `fbc28c18` prove stream identity and acknowledged input continuity.
-- DS-02: retained a552bb2e's on-demand logs body. Five fresh default production builds: **44,704 / 44,708 / 44,720 / 44,709 / 44,679 B** deferred Brotli, each below the unchanged **45,056 B** limit.
+Validation: **601 Rust tests passed**, 0 failed, 63 ignored; SB-01 and DS-01..DS-04 pass. Tracer check and **142 src tests**, **36 protocol tests**, **7 production browser tests**, and **7 real-PTY switching tests** pass. Native final-response regressions: **5 passed in 1.05 s**. No load failure was waived.
 
-Imported review tests: `445d4abb`, `48b07c5d`, `796b4f11`, `add06701`, `8cac789a`. Assertions were preserved; inventory, native and transient-browser failures were reproduced before their fixes.
+Three default builds: deferred Brotli **44,773 / 44,705 / 44,734 B**, below unchanged **45,056 B** (D188). Final static x86_64 binary: **19,992,480 B**, versus exact `b373cc4c` **19,904,832 B** (**+87,648 B**); no PT_INTERP. The known **16,404,816 B** limit remains unchanged.
 
-`scripts/verify fast` summary:
+`scripts/verify fast` summary, verbatim:
 
 ```text
 +---------------------------+--------------+
@@ -24,10 +21,8 @@ Imported review tests: `445d4abb`, `48b07c5d`, `796b4f11`, `add06701`, `8cac789a
 +---------------------------+--------------+
 ```
 
-The sole remaining failure is the known static-size overrun: **19,904,800 B**, versus an exact a552bb2e baseline of **19,904,384 B** (**+416 B**); maximum remains 16,404,816 B. No failed test was waived. GNU checks reused this job's locked vendored OpenSSL archive; the static build used the default musl recipe.
+Scale on infraternal-dev, 8 CPUs, CPUWeight=10000, real 80×24 PTYs: **200 recovered / 201 admitted / 200 after reap**. Combined PSS: **341,851 KiB empty** (1,709.26 KiB/session × 200), **3,710,906 KiB filled** (18,554.53 KiB/session × 200); 200 independent owners add no measured PSS. Facts 101 samples: p50 **4.589 ms**, max **44.399 ms**. Load 25.68/27.04/25.28 → 33.93/28.81/25.88.
 
-TypeScript fast passed separately because the static failure stops the combined dispatcher. Tracer check and src tests: **122 passed, 0 failed, 10,862 assertions**. Protocol tests: **36 passed, 34,462 assertions**. Production browser specs on 5791/5792: **4 passed in 58.5 s** (dead-session, detached-output, both transient retry specs). Real QUIC final-close and stuck-peer tests passed.
+Separate 200 sequential final replies: p50 **232 µs**, p99 **700 µs**, max **1,912 µs**, load 46.25/36.84/29.80. Production captures, read-only reviewed: [exit 0](apps/tracer/captures/dead-session/retired-exit-0-1440x900-ink.png), [exit 7](apps/tracer/captures/dead-session/retired-exit-7-1440x900-ink.png).
 
-The isolated real-channel diagnostic preserved all **200 sequential vanished-session replies**, including late Input/Close/Ping fences: **p50 210 µs / p99 4,526 µs / max 4,777 µs**. Local infraternal-dev, eight CPUs, CPUWeight=10000; initial/final load averages **8.14 / 13.87 / 21.11**. This measures sequential refusals, not 200 live PTYs.
-
-Production screenshot: [ended terminal](apps/tracer/captures/dead-session/ended-1440x900-ink.png). Author checklist and raw findings are recorded on [#158](https://git.kayg.org/kayg/infraternal/issues/158); it remains open. Logs and baseline/final binary artifacts are retained under `$HOME/.cache/codex-scratch/fix-dead-session-round2/`; build targets and temporary source checkouts are removed after verification.
+Author checklist and raw findings: [#151](https://git.kayg.org/kayg/infraternal/issues/151), [#158](https://git.kayg.org/kayg/infraternal/issues/158). Logs and binary evidence remain under `$HOME/.cache/codex-scratch/session-bounds-prod/`; temporary targets/checkouts are removed.
