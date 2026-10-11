@@ -484,3 +484,44 @@ int main(void) {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
+    const NAME: &str =
+        "restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer";
+    if let Some(path) = std::env::var_os("INFRATERNAL_REVIEW_FIFO") {
+        let result = crate::restart_binary::Opened::open(PathBuf::from(path));
+        assert!(result.is_err(), "a FIFO is not a replacement executable");
+        return;
+    }
+    let directory = Directory::new();
+    let fifo = directory.0.join("candidate");
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME])
+        .env("INFRATERNAL_REVIEW_FIFO", &fifo)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // A separate process bounds a synchronous open; an async timeout on the
+    // same runtime thread cannot fire while that thread waits inside open(2).
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "invalid replacement must be refused");
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("FIFO validation waited for a writer beyond the 3-second deadline");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
