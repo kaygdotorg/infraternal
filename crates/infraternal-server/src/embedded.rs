@@ -1105,6 +1105,12 @@ enum TerminalNotice {
     },
     #[serde(rename = "terminal.snapshot_unavailable")]
     Unavailable { session_id: String, seq: u64 },
+    #[serde(rename = "terminal.replay_complete")]
+    ReplayComplete {
+        session_id: String,
+        #[serde(deserialize_with = "deserialize_replay_cursor")]
+        out_seq: u64,
+    },
     #[serde(rename = "terminal.exited")]
     Exited {
         session_id: String,
@@ -1131,6 +1137,13 @@ impl TerminalNotice {
                 let _ = seq;
                 session_id
             }
+            Self::ReplayComplete {
+                session_id,
+                out_seq,
+            } => {
+                let _ = out_seq;
+                session_id
+            }
             Self::Exited {
                 session_id,
                 status,
@@ -1142,6 +1155,25 @@ impl TerminalNotice {
             }
         }
     }
+}
+
+/// Replay fences encode their full u64 cursor as canonical decimal JSON text.
+fn deserialize_replay_cursor<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let decimal = String::deserialize(deserializer)?;
+    if decimal.is_empty()
+        || (decimal.len() > 1 && decimal.starts_with('0'))
+        || !decimal.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "invalid replay cursor",
+        ));
+    }
+    decimal
+        .parse::<u64>()
+        .map_err(<D::Error as serde::de::Error>::custom)
 }
 
 // Incoming wire cases share actor-owned sequence accounting and bounded output senders.

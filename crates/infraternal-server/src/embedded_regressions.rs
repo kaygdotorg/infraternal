@@ -39,6 +39,19 @@ fn funded_attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
     }
 }
 
+#[test]
+fn replay_complete_notice_is_accepted_by_embedded_server() {
+    let session_id = "00000000-0000-0000-0000-000000000001";
+    let notice = serde_json::json!({
+        "type": "terminal.replay_complete",
+        "session_id": session_id,
+        "out_seq": "18446744073709551615",
+    });
+    let parsed = serde_json::from_value::<TerminalNotice>(notice)
+        .expect("the embedded server must accept replay completion metadata");
+    assert_eq!(parsed.session_id(), session_id);
+}
+
 #[tokio::test]
 async fn full_output_queue_must_not_block_shared_actor() {
     let (mut link, _peer) = connection();
