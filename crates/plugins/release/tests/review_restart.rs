@@ -98,7 +98,7 @@ impl Drop for State {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn partial_bytes(state: &Path) -> u64 {
+fn partial_paths(state: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(state)
         .unwrap()
         .filter_map(Result::ok)
@@ -107,7 +107,17 @@ fn partial_bytes(state: &Path) -> u64 {
                 .to_string_lossy()
                 .starts_with("release-check-")
         })
-        .map(|e| std::fs::metadata(e.path().join("SHA256SUMS")).map_or(0, |m| m.len()))
+        .filter(|entry| {
+            std::fs::metadata(entry.path().join("SHA256SUMS"))
+                .is_ok_and(|metadata| metadata.len() == 65536)
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+fn partial_bytes(state: &Path) -> u64 {
+    partial_paths(state)
+        .iter()
+        .map(|path| std::fs::metadata(path.join("SHA256SUMS")).map_or(0, |metadata| metadata.len()))
         .sum()
 }
 
@@ -121,7 +131,8 @@ async fn restarted_latest_reclaims_metadata_after_process_stop() {
         .mode(0o700)
         .create(&state.0)
         .unwrap();
-    for n in 1..=2 {
+    for stop in 1..=2 {
+        let previous = partial_paths(&state.0);
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "partial_metadata_restart_child", "--ignored"])
             .env("REVIEW_METADATA_STATE", &state.0)
@@ -130,7 +141,10 @@ async fn restarted_latest_reclaims_metadata_after_process_stop() {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
-        while partial_bytes(&state.0) < n * 65536 {
+        while !partial_paths(&state.0)
+            .iter()
+            .any(|path| !previous.contains(path))
+        {
             assert!(
                 child.try_wait().unwrap().is_none(),
                 "metadata child stopped early"
@@ -144,9 +158,20 @@ async fn restarted_latest_reclaims_metadata_after_process_stop() {
         }
         child.kill().unwrap();
         child.wait().unwrap();
+        let retained = partial_paths(&state.0);
+        assert_eq!(
+            retained.len(),
+            1,
+            "each new lookup must reclaim metadata from the prior stopped process"
+        );
+        println!(
+            "RELEASE_METADATA_STOP stop={stop} retained_paths={} retained_bytes={}",
+            retained.len(),
+            partial_bytes(&state.0)
+        );
     }
     let before = partial_bytes(&state.0);
-    assert_eq!(before, 131072);
+    assert_eq!(before, 65536);
     let restarted = VerifiedLookup::new(
         state.0.clone(),
         "https://fixture.invalid".into(),

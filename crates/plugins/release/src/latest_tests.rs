@@ -6,12 +6,114 @@ use crate::{
 };
 use infraternal_plugin_api::Operation;
 use std::{
-    path::Path,
+    fs::OpenOptions,
+    io::Write,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
+
+fn private_stage(state: &Path, suffix: &str, file_name: &str, mode: u32) -> PathBuf {
+    let path = state.join(format!("release-check-{suffix}"));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .unwrap();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path.join(file_name))
+        .unwrap();
+    file.write_all(b"partial metadata").unwrap();
+    file.sync_all().unwrap();
+    path
+}
+
+#[test]
+fn startup_reclaims_only_owned_inactive_private_metadata() {
+    use nix::fcntl::{Flock, FlockArg};
+    use std::os::unix::fs::symlink;
+
+    let state = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+        .join(format!("release-staging-{}", uuid::Uuid::new_v4()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state)
+        .unwrap();
+    let stale = private_stage(
+        &state,
+        &uuid::Uuid::new_v4().hyphenated().to_string(),
+        "SHA256SUMS",
+        0o600,
+    );
+    let active = private_stage(
+        &state,
+        &uuid::Uuid::new_v4().hyphenated().to_string(),
+        "SHA256SUMS",
+        0o600,
+    );
+    let active_lock = Flock::lock(
+        std::fs::File::open(&active).unwrap(),
+        FlockArg::LockExclusiveNonblock,
+    )
+    .unwrap();
+    let unrelated = private_stage(&state, "not-a-uuid", "SHA256SUMS", 0o600);
+    let linked = private_stage(
+        &state,
+        &uuid::Uuid::new_v4().hyphenated().to_string(),
+        "SHA256SUMS",
+        0o600,
+    );
+    std::fs::hard_link(linked.join("SHA256SUMS"), state.join("retained-link")).unwrap();
+    let unsafe_mode = private_stage(
+        &state,
+        &uuid::Uuid::new_v4().hyphenated().to_string(),
+        "SHA256SUMS",
+        0o644,
+    );
+    let unknown = private_stage(
+        &state,
+        &uuid::Uuid::new_v4().hyphenated().to_string(),
+        "unrelated",
+        0o600,
+    );
+    let symlinked = state.join(format!(
+        "release-check-{}",
+        uuid::Uuid::new_v4().hyphenated()
+    ));
+    symlink(&active, &symlinked).unwrap();
+
+    let _lookup = VerifiedLookup::new(
+        state.clone(),
+        "https://fixture.invalid".into(),
+        Arc::new(Engine {
+            running: Arc::new(AtomicBool::new(false)),
+            started: Arc::new(tokio::sync::Notify::new()),
+        }),
+    );
+
+    assert!(
+        !stale.exists(),
+        "owned abandoned metadata must be reclaimed"
+    );
+    for retained in [&active, &unrelated, &linked, &unsafe_mode, &unknown] {
+        assert!(retained.exists(), "preserve {}", retained.display());
+    }
+    assert!(
+        std::fs::symlink_metadata(&symlinked)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "a prefixed symlink must remain a symlink"
+    );
+    drop(active_lock);
+    std::fs::remove_dir_all(state).unwrap();
+}
+
 struct Engine {
     running: Arc<AtomicBool>,
     started: Arc<tokio::sync::Notify>,
