@@ -96,8 +96,7 @@ def run(binary):
             outputs[stream].extend(body[8:])
         for stream, (_, payload) in payloads.items():
             assert outputs[stream] == payload
-        client.send(0, 0x08, struct.pack('<QQ', 123, 456))
-        assert client.read() == (0, 0x09, struct.pack('<QQ', 123, 456))
+        client.ping(123, 456)
         # A genuinely dead shim must close its own stream, preserving siblings.
         dead = barriers[0]
         with socket.socket(socket.AF_UNIX) as peer:
@@ -108,8 +107,8 @@ def run(binary):
             stream, kind, _ = client.read()
             if stream == 1 and kind == 0x0f:
                 break
-        client.send(0, 0x08, struct.pack('<QQ', 789, 101))
-        assert client.read() == (0, 0x09, struct.pack('<QQ', 789, 101))
+        # Retirement can enqueue a control census before the correlated Pong.
+        client.ping(789, 101)
         print(f'queue overload: 12 streams retired then replayed x 65 Input frames; {sum(len(p) for _, p in payloads.values())} payload bytes exactly once; dead shim isolated; daemon Ping: PASS', flush=True)
     finally:
         for barrier in barriers:
