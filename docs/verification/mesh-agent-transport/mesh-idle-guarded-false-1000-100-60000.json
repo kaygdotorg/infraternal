@@ -1,0 +1,22 @@
+{
+  "client_endpoints": 1000,
+  "clock_ticks_per_second": 100,
+  "connections": 1000,
+  "cpu_ticks": 1230,
+  "freshness_state_bytes": 208,
+  "freshness_watcher_tasks": 0,
+  "idle_ms": 60000,
+  "join_concurrency": 8,
+  "keepalive_ms": 100,
+  "live": 1000,
+  "load": "41.14 30.66 28.90 31/1490 908648",
+  "load_before": "43.69 30.58 28.85 26/1476 903702",
+  "machine": "infraternal-dev",
+  "max_authenticated_silence_us": 416677,
+  "profile": "transport_only",
+  "resident_delta_bytes": 217104384,
+  "setup_cpu_ticks": 459,
+  "timer_datagrams": 146731,
+  "timer_udp_payload_bytes": 5459690,
+  "window_us": 17686239
+}

@@ -1,0 +1,9 @@
+# Optimized public test transcript, issue #129.
+Running as unit: run-p936046-i936346.scope; invocation ID: 7f253838594f4280916b623999767265
+
+running 1 test
+test embedded::regressions::path_tests::input_retention_cost_at_200_terminals ... METRIC input_retention machine=infraternal-dev terminals=200 samples=6200 write_p50_ns=4279 write_p99_ns=18748 peak_buffer_bytes=1600 full_ack_buffer_bytes=0 state_bytes_per_terminal=96 max_buffer_bytes_per_terminal=4194304 load=29.28 31.02 29.37 38/1522 936094
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 308 filtered out; finished in 0.27s
+

@@ -1,0 +1,12 @@
+{
+  "Architecture": "x86_64",
+  "CPU(s)": "12",
+  "Model name": "Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz",
+  "Thread(s) per core": "1",
+  "Core(s) per socket": "12",
+  "Socket(s)": "1",
+  "machine": "infraternal-dev",
+  "kernel": "6.12.111+deb13-amd64",
+  "memory_total": "MemTotal:       65783616 kB",
+  "build_gate_head": "2e2e017d91962c7b286197d323cfb2e25c5c0c99"
+}
