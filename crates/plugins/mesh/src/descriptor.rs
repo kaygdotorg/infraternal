@@ -1,4 +1,4 @@
-//! Declares Mesh coordinator actions, permissions, settings and defaults for every adapter [16,187,198,201,202].
+//! Declares Mesh coordinator actions and node CLI metadata, permissions, settings and defaults [16,187,198,201,202].
 use infraternal_plugin_api::{
     ActionDef, Effect,
     Permission::{Any, One},
@@ -299,3 +299,51 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     unavailable: br#"{"error":"mesh unavailable"}"#,
     unavailable_event: br#"{"type":"error","error":"mesh unavailable"}"#,
 };
+
+/// Bind public node commands and coordinator declarations inside their owning plugin.
+#[must_use]
+pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
+    use infraternal_plugin_api::ActionTarget;
+    #[cfg(all(feature = "agent", target_os = "linux"))]
+    use infraternal_plugin_api::JsonSchema;
+    let mut plugin = DESCRIPTOR.cli_plugin(ActionTarget::Global);
+    #[cfg(all(feature = "agent", target_os = "linux"))]
+    for mut action in crate::node_actions::DESCRIPTOR
+        .cli_plugin(ActionTarget::Host)
+        .actions
+    {
+        action.availability = infraternal_plugin_api::ActionAvailability::Available;
+        action.cli_handler = infraternal_plugin_api::CliHandler::NodeComponent;
+        "Use this action on the running local infraternal agent."
+            .clone_into(&mut action.when_to_use);
+        action.safety.notes.clear();
+        action.input_schema = JsonSchema::object(
+            [
+                (
+                    "state".to_owned(),
+                    JsonSchema::string(
+                        "Private runtime directory of the running infraternal agent.",
+                    ),
+                ),
+                (
+                    "input_stdin".to_owned(),
+                    JsonSchema::boolean("Read bounded action JSON from standard input."),
+                ),
+            ],
+            std::iter::empty(),
+        );
+        if action.command == ["mesh", "up"] {
+            // Preserve the declared SSH request flag; unsupported node inputs
+            // remain refused by the component rather than claiming SSH is live.
+            let declaration = crate::policy::cli::plugin();
+            action.input_schema.properties.insert(
+                "ssh".to_owned(),
+                declaration.actions[0].input_schema.properties["ssh"].clone(),
+            );
+        }
+        plugin.actions.push(action);
+    }
+    #[cfg(not(all(feature = "agent", target_os = "linux")))]
+    plugin.actions.extend(crate::policy::cli::plugin().actions);
+    plugin
+}

@@ -37,6 +37,16 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
     registry_at(mode, None, None)
 }
 
+// Even an empty build keeps the same fallible factory contract as builds with
+// registered plugins; feature selection must not change its caller's API.
+#[cfg_attr(
+    not(any(
+        feature = "plugin-host-facts",
+        feature = "remote",
+        all(feature = "mesh", target_os = "linux")
+    )),
+    allow(clippy::unnecessary_wraps)
+)]
 pub(crate) fn registry_at(
     mode: ExecutionMode,
     state: Option<&std::path::Path>,

@@ -202,7 +202,11 @@ impl Service {
     ) -> io::Result<Self> {
         // Compiled metadata is validated by registry tests; construct its
         // process-owned instances only when a caller needs an action.
-        let registry = Registry::for_mode(state.to_owned(), mode, installation.cloned());
+        #[cfg(feature = "remote")]
+        let installation = installation.cloned();
+        #[cfg(not(feature = "remote"))]
+        let installation = installation.copied();
+        let registry = Registry::for_mode(state.to_owned(), mode, installation);
         let local = Local::bind(state, registry.clone()).await?;
         Ok(Self {
             registry,

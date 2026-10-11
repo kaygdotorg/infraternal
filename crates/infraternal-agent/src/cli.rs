@@ -11,7 +11,7 @@ pub const ID: &str = "agent";
 /// Register the agent component actions exposed by this plugin.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
-    let mut plugin = PluginDefinition::new(
+    let plugin = PluginDefinition::new(
         ID,
         "Manage the infraternal agent component on this node.",
         [
@@ -98,6 +98,8 @@ pub fn plugin() -> PluginDefinition {
             .with_example("agent status", "Check the agent component state."),
         ],
     );
+    #[cfg(feature = "remote")]
+    let mut plugin = plugin;
     #[cfg(feature = "remote")]
     {
         plugin.actions[0].input_schema.properties.insert(

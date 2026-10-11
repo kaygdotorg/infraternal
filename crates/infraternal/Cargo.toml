@@ -39,7 +39,7 @@ infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optiona
 remote = ["plugin-agent", "plugin-server", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-plugin-remote/server", "dep:base64", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:tokio-openssl", "dep:url"]
 ssh = ["plugin-ssh", "plugin-server", "infraternal-server/ssh"]
 default = ["remote", "ssh", "plugin-host-facts", "plugin-agent", "plugin-backup", "plugin-mesh", "plugin-relay", "plugin-server", "plugin-ssh"]
-plugin-agent = ["dep:infraternal-agent"]
+plugin-agent = ["dep:infraternal-agent", "dep:tokio"]
 plugin-backup = ["dep:infraternal-plugin-backup"]
 plugin-mesh = ["dep:infraternal-mesh", "dep:infraternal-plugin-mesh", "infraternal-server?/mesh", "plugin-agent", "infraternal-agent/mesh", "dep:tokio"]
 # Preserve the production feature name without enabling a server role.

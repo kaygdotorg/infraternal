@@ -2,14 +2,14 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 mod cli;
-#[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+#[cfg(all(feature = "plugin-agent", target_os = "linux"))]
 mod component_cli;
 #[cfg(feature = "plugin-agent")]
 mod embedded_cli;
 #[cfg(feature = "remote")]
 mod host_remove;
 
-#[cfg(any(feature = "remote", all(feature = "plugin-mesh", target_os = "linux")))]
+#[cfg(any(feature = "remote", all(feature = "plugin-agent", target_os = "linux")))]
 mod output;
 #[cfg(feature = "remote")]
 mod remote;
@@ -171,11 +171,11 @@ fn dispatch_action(
 ) -> ExitCode {
     match action.cli_handler {
         CliHandler::NodeComponent => {
-            #[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+            #[cfg(all(feature = "plugin-agent", target_os = "linux"))]
             {
                 component_cli::run_action(action, matches, json_output)
             }
-            #[cfg(not(all(feature = "plugin-mesh", target_os = "linux")))]
+            #[cfg(not(all(feature = "plugin-agent", target_os = "linux")))]
             {
                 run_unavailable(action, json_output)
             }
