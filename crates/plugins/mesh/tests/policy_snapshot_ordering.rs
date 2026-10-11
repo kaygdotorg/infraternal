@@ -107,3 +107,35 @@ fn nft_snapshot_cannot_replace_local_node_identity() {
 fn nf_tables_snapshot_cannot_replace_local_node_identity() {
     snapshot_change(true, true);
 }
+
+fn split_replay(fallback: bool) {
+    let (mut node, old) = install(fallback);
+    let mut first = configuration::chunks(None, &old).unwrap().remove(0);
+    first.last = false;
+    let mut last = first.clone();
+    last.index = 1;
+    last.last = true;
+    last.upserted.clear();
+    // Matching version cannot be refused before the complete contents arrive.
+    assert!(!node.chunk(first.clone()).unwrap());
+    assert!(node.chunk(last.clone()).unwrap());
+    assert_eq!(node.config(), Some(&old));
+    first.upserted.get_mut(&NodeId(2)).unwrap().inbound = TrafficPolicy::All;
+    assert!(!node.chunk(first).unwrap());
+    let refused = node.chunk(last);
+    let retained = node.config().unwrap().clone();
+    node.down().unwrap();
+    assert!(refused.is_err(), "conflicting replay was not refused");
+    assert_eq!(retained, old);
+}
+
+#[test]
+#[ignore = "Run in a disposable user/network namespace, #173."]
+fn nft_split_snapshot_replay_requires_complete_identical_contents() {
+    split_replay(false);
+}
+#[test]
+#[ignore = "Run in a disposable user/network namespace, #173."]
+fn nf_tables_split_snapshot_replay_requires_complete_identical_contents() {
+    split_replay(true);
+}
