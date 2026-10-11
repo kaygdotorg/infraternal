@@ -900,3 +900,6 @@ async fn pending_administrator_cannot_replace_the_last_retained_wrapped_copy() {
             .is_ok()
     );
 }
+
+#[path = "ca_unlock_audit_tests.rs"]
+mod audit_tests;
