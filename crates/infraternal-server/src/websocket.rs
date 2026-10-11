@@ -1897,6 +1897,10 @@ fn unix_seconds() -> Result<i64, ()> {
 #[path = "writer_tests.rs"]
 mod writer_tests;
 
+#[cfg(test)]
+#[path = "session_inventory_tests.rs"]
+mod session_inventory_tests;
+
 /// Caller already holds SQLite's writer lock. Production supplies an exact session hash;
 /// storage-only unit tests omit it. Reads do not slide expiry or require a fresh destructive tap.
 async fn require_socket_authority_tx(

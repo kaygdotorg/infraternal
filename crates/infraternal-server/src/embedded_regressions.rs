@@ -340,6 +340,123 @@ async fn real_agent_canonical_uuid_result_is_accepted() {
     assert_eq!(result.await.unwrap(), Ok([1; 16]));
 }
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn agent_link_loss_invalidates_the_last_live_session_snapshot() {
+    let (server, mut agent_peer) = UnixStream::pair().unwrap();
+    let agent = EmbeddedAgent::from_test_socket(server);
+    let mut inventory = agent.session_inventory();
+
+    let mut receive = BytesMut::with_capacity(4096);
+    let mut scratch = [0; 4096];
+    let greeting_seen = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let read = agent_peer.read(&mut scratch).await.unwrap();
+            assert_ne!(read, 0, "actor closed before greeting");
+            receive.extend_from_slice(&scratch[..read]);
+            if let Ok(decoded) = decode_muxed_frame(&receive)
+                && matches!(decoded.frame, Frame::Hello { version: 1, .. })
+            {
+                break true;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(greeting_seen);
+
+    let mut greeting = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "inventory fixture",
+        },
+        &mut greeting,
+    )
+    .unwrap();
+    agent_peer.write_all(&greeting).await.unwrap();
+
+    let session = uuid::Uuid::new_v4();
+    let event = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.sessions.snapshot",
+        "session_ids": [session],
+    }))
+    .unwrap();
+    let mut snapshot = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: &event,
+        },
+        &mut snapshot,
+    )
+    .unwrap();
+    agent_peer.write_all(&snapshot).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), inventory.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &*inventory.borrow(),
+        SessionInventoryState::Available(ids) if ids.as_ref() == [*session.as_bytes()]
+    ));
+
+    // Preserve forward compatibility for unrelated control Events: only this
+    // event type is an inventory, and it must not retire the agent link.
+    let future_event = serde_json::to_vec(&serde_json::json!({
+        "type": "future.control.notice",
+    }))
+    .unwrap();
+    let mut future_frame = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: &future_event,
+        },
+        &mut future_frame,
+    )
+    .unwrap();
+    let next_session = uuid::Uuid::new_v4();
+    let next_event = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.sessions.snapshot",
+        "session_ids": [next_session],
+    }))
+    .unwrap();
+    let mut next_frame = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: &next_event,
+        },
+        &mut next_frame,
+    )
+    .unwrap();
+    future_frame.extend_from_slice(&next_frame);
+    agent_peer.write_all(&future_frame).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), inventory.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &*inventory.borrow(),
+        SessionInventoryState::Available(ids) if ids.as_ref() == [*next_session.as_bytes()]
+    ));
+
+    drop(agent_peer);
+    let invalidated = tokio::time::timeout(Duration::from_millis(100), inventory.changed()).await;
+    assert!(
+        invalidated.is_ok(),
+        "agent link loss must invalidate the previously live snapshot"
+    );
+    assert_eq!(*inventory.borrow(), SessionInventoryState::Unavailable);
+    drop(agent);
+}
+
 /// Recovery notices are ordered terminal traffic, so they cannot retire leg B.
 #[tokio::test]
 async fn recovery_event_then_snapshot_keeps_embedded_connection_live() {
