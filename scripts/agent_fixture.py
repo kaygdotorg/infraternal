@@ -16,6 +16,28 @@ import uuid
 from latency_proxy import LatencyConfig, LatencyDuplex
 
 
+def event_object(body):
+    """Decode a mux Event after checking its reserved event id."""
+    assert body[:4] == bytes(4)
+    return json.loads(body[4:])
+
+
+def replay_complete_cursor(event, session_id):
+    """Validate attach metadata without exposing it as a user-visible event."""
+    assert event.get('type') == 'terminal.replay_complete', event
+    assert event.get('session_id') == str(session_id), event
+    cursor = event.get('out_seq')
+    assert (
+        isinstance(cursor, str)
+        and 1 <= len(cursor) <= 20
+        and cursor.isascii()
+        and cursor.isdecimal()
+    ), event
+    value = int(cursor)
+    assert value < 1 << 64, event
+    return value
+
+
 def fixture_state(label):
     """Return a short per-process private state path for real Unix-socket fixtures."""
     root = Path(os.environ.get(
@@ -214,11 +236,9 @@ class Binary:
             if kind != 0x33:
                 return frame
 
-            assert body[:4] == bytes(4), (stream, kind)
-            event = json.loads(body[4:])
-            assert event.get('type') == 'terminal.replay_complete', (stream, event)
-            assert event.get('session_id') == str(sessions.get(stream)), (stream, event)
-            assert isinstance(event.get('out_seq'), str) and event['out_seq'].isdecimal(), (stream, event)
+            session_id = sessions.get(stream)
+            assert session_id is not None, (stream, kind)
+            replay_complete_cursor(event_object(body), session_id)
 
     def inherit_scope_priority(self, weight=None):
         """Apply this test's CPU weight only to its own transient shim scope."""
@@ -324,8 +344,13 @@ class Binary:
             self.snapshots.append((seq, len(body) - 8))
             self.credit_available -= len(body) - 8
         elif kind == 0x33:
-            assert body[:4] == bytes(4)
-            self.events.append(json.loads(body[4:]))
+            event = event_object(body)
+            if event.get('type') == 'terminal.replay_complete':
+                cursor = replay_complete_cursor(event, self.id)
+                # The writer orders this marker after all replay bytes on the stream.
+                assert cursor == self.out, (cursor, self.out)
+            else:
+                self.events.append(event)
         else:
             raise AssertionError((kind, body))
         return kind
