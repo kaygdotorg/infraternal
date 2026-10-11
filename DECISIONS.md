@@ -1975,3 +1975,41 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      4. **Then the rest, by priority:** NAT traversal and router port
         mapping (D196), subnet routes and exit nodes (D197 M2, M3), and Mac
         nodes (D169).
+228. **Mesh rollout and fallbacks (owner, 2026-10-11, mesh grill M2–M5):**
+     - **Direction:** the mesh becomes stable by replacing the NetBird
+       dependency step by step (NetBird stays until our own iOS and macOS
+       clients are stable), and is improved after that.
+     - **On by default, allow by default (M2):** the mesh is on for every
+       infraternal agent, and the open-source default lets members reach
+       each other (D216). The default is the access policy in Settings →
+       Access.
+     - **First real test (M3):** monitor01 and o1, two public VPSes on
+       different networks.
+     - **No port to open (M4):** nobody opens a firewall port for the mesh.
+       Each node picks a free UDP port itself (never NetBird's 51820), the
+       server learns it through address discovery, and both sides send at
+       once so stateful firewalls let the traffic in.
+     - **No root, no question (M5):** where the infraternal agent cannot
+       create a kernel WireGuard interface, it switches to a userspace
+       tunnel on its own, without asking. In that mode infraternal's own
+       traffic (agent to server, terminals, SSH) uses the mesh; other
+       programs on that host reach mesh addresses only through the
+       agent's local proxy. The canvas says which mode a node runs in.
+229. **`server init` and the user sessions run as (owner, 2026-10-11, Q11):**
+     - `server init` installs a system service that runs as root, with its
+       data in `/var/lib/infraternal` (#34). It is documented on the
+       website under `infraternal.com/docs/edge/…` later.
+     - **Preferred user:** a global setting and a per-host override choose
+       which user terminals open as, because most people don't want root
+       by default.
+     - **A real login:** sessions start as a full login of that user
+       (PAM session, environment, limits, home directory), not a bare
+       process switch.
+     - **The server's own host** is reached through the embedded
+       infraternal agent, the same way as every other host, with no SSH to
+       itself.
+230. **Account names (owner, 2026-10-11, Q12):** setup asks for a username
+     (required; no spaces; it names the passkey and the account) and a
+     display name (optional, a real name). Sign-in asks only for the
+     username, then the passkey. Display name and other details are edited
+     later in Settings → Account.
