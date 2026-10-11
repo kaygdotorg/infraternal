@@ -510,6 +510,11 @@ pub async fn launch(
     if matches!(manager, Manager::Detached) {
         command.arg("--detach");
     }
+    // Resolve host locale in the long-lived launcher and pass only locale
+    // variables through the isolated shim start, avoiding per-PTY probing.
+    for (name, value) in infraternal_shim::session_locale_environment() {
+        command.env(name, value);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
