@@ -1,4 +1,4 @@
-//! Builds the static compiled plugin registry shared by embedded and remote agent runners [D198].
+//! Builds the static compiled plugin registry shared by embedded and remote infraternal agent runners [D198].
 
 use infraternal_plugin_api::{PluginDescriptor, PluginError, PluginRegistry};
 
@@ -7,13 +7,15 @@ const DESCRIPTORS: &[&PluginDescriptor] = &[
     &infraternal_plugin_host_facts::DESCRIPTOR,
     #[cfg(feature = "remote")]
     &infraternal_plugin_remote::DESCRIPTOR,
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    &infraternal_plugin_mesh::node_actions::DESCRIPTOR,
 ];
 #[cfg(feature = "remote")]
 pub(crate) type Installation = infraternal_plugin_remote::uninstall::Context;
 #[cfg(not(feature = "remote"))]
 pub(crate) type Installation = ();
 
-/// Host role bound to one agent process.
+/// Host role bound to one infraternal agent process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionMode {
     /// The server's own host.
@@ -28,20 +30,29 @@ pub fn descriptors() -> &'static [&'static PluginDescriptor] {
     DESCRIPTORS
 }
 
-/// Creates the enabled-by-default registry for an agent execution context.
+/// Creates the enabled-by-default registry for an infraternal agent execution context.
 /// # Errors
 /// Returns an error if the compiled plugin descriptors conflict with the plugin API.
 pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
-    registry_with_installation(mode, None)
+    registry_at(mode, None, None)
 }
 
-pub(crate) fn registry_with_installation(
+pub(crate) fn registry_at(
     mode: ExecutionMode,
+    state: Option<&std::path::Path>,
     installation: Option<&Installation>,
 ) -> Result<PluginRegistry, PluginError> {
-    #[cfg(any(feature = "plugin-host-facts", feature = "remote"))]
+    #[cfg(any(
+        feature = "plugin-host-facts",
+        feature = "remote",
+        all(feature = "mesh", target_os = "linux")
+    ))]
     let mut registry = PluginRegistry::default();
-    #[cfg(not(any(feature = "plugin-host-facts", feature = "remote")))]
+    #[cfg(not(any(
+        feature = "plugin-host-facts",
+        feature = "remote",
+        all(feature = "mesh", target_os = "linux")
+    )))]
     let registry = PluginRegistry::default();
     #[cfg(feature = "plugin-host-facts")]
     {
@@ -71,6 +82,13 @@ pub(crate) fn registry_with_installation(
     }
     #[cfg(not(feature = "remote"))]
     let _ = installation;
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    registry.register(Box::new(state.map_or_else(
+        infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
+        infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
+    )))?;
+    #[cfg(not(all(feature = "mesh", target_os = "linux")))]
+    let _ = state;
     Ok(registry)
 }
 

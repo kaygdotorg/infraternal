@@ -10,6 +10,9 @@ remote = ["dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "d
 default = ["plugin-host-facts"]
 plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
 
+ee = ["infraternal-plugin-mesh?/ee"]
+mesh = ["dep:infraternal-plugin-mesh"]
+
 [dependencies]
 infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", default-features = false, features = ["agent"], optional = true }
 
@@ -27,8 +30,13 @@ openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true, default-features = false, features = ["agent"] }
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+# Paused test time controls frame-expiry ordering without changing runtime timers.
+tokio = { workspace = true, features = ["test-util"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }

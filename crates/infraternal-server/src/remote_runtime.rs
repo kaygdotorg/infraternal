@@ -34,8 +34,11 @@ pub struct RemoteService {
 pub(crate) struct RemoteHosts(
     Arc<Mutex<HashMap<Uuid, Host>>>,
     Option<Arc<dyn crate::ca::CaKeySource>>,
+    Arc<Mutex<crate::plugins::WeakRuntime>>,
 );
 struct Host {
+    ip: std::net::IpAddr,
+    channel: Option<Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>>,
     uid: u32,
     authority: AuthorityGuard,
     actor: EmbeddedAgent,
@@ -55,7 +58,7 @@ impl Drop for Retirement {
 }
 impl RemoteHosts {
     pub(crate) fn from_source(source: Option<Arc<dyn crate::ca::CaKeySource>>) -> Self {
-        Self(Arc::default(), source)
+        Self(Arc::default(), source, Arc::default())
     }
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
         self.0
@@ -73,16 +76,50 @@ impl RemoteHosts {
             .get(&id)
             .map(|host| host.authority.clone())
     }
-    pub(crate) async fn admit(
+    /// Called after plugin settings are loaded; listeners may already have admitted hosts.
+    pub(crate) async fn bind_plugins(
+        &self,
+        runtime: &crate::plugins::PluginRuntime,
+    ) -> io::Result<()> {
+        *self.2.lock().await = runtime.downgrade();
+        let mut hosts = self.0.lock().await;
+        for (id, host) in &mut *hosts {
+            Self::attach(runtime, *id, host).await?;
+        }
+        Ok(())
+    }
+    async fn attach(
+        runtime: &crate::plugins::PluginRuntime,
+        id: Uuid,
+        host: &mut Host,
+    ) -> io::Result<()> {
+        let channel: Arc<dyn infraternal_plugin_api::node_channel::NodeChannel> =
+            Arc::new(crate::node_bridge::NodeBridge {
+                id: id.to_string(),
+                ip: host.ip,
+                server: false,
+                actor: host.actor.clone(),
+                authority: Some(host.authority.clone()),
+            });
+        runtime
+            .attach_node(channel.clone())
+            .await
+            .map_err(|_| io::ErrorKind::Other)?;
+        host.channel = Some(channel);
+        Ok(())
+    }
+    pub(crate) async fn admit_observed(
         &self,
         authority: AuthorityGuard,
         link: RemoteLink,
+        ip: std::net::IpAddr,
     ) -> io::Result<()> {
         if !authority.permits() {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let id = authority.identity.host;
         let uid = authority.identity.execution_uid;
+        let runtime = self.2.lock().await.upgrade();
         let mut hosts = self.0.lock().await;
         if !hosts.contains_key(&id) && hosts.len() >= 10_000 {
             return Err(io::ErrorKind::WouldBlock.into());
@@ -101,6 +138,7 @@ impl RemoteHosts {
             host.retirement =
                 self.retirement(id, generation, authority.clone(), host.actor.clone());
             host.authority = authority;
+            host.ip = ip;
         } else {
             let (actor, accepts) = EmbeddedAgent::remote(uid);
             accepts
@@ -110,6 +148,8 @@ impl RemoteHosts {
             hosts.insert(
                 id,
                 Host {
+                    ip,
+                    channel: None,
                     uid,
                     authority,
                     actor,
@@ -118,6 +158,11 @@ impl RemoteHosts {
                     retirement,
                 },
             );
+        }
+        if let Some(runtime) = runtime
+            && let Some(host) = hosts.get_mut(&id)
+        {
+            Self::attach(&runtime, id, host).await?;
         }
         Ok(())
     }
@@ -131,6 +176,7 @@ impl RemoteHosts {
     ) -> Retirement {
         let registry = Arc::downgrade(&self.0);
         let source = self.1.clone();
+        let plugins = self.2.clone();
         Retirement(tokio::spawn(async move {
             // Healthy idle has only its certificate expiry deadline, never a
             // heartbeat. Ordinary socket loss keeps the actor for offset resume.
@@ -153,7 +199,13 @@ impl RemoteHosts {
             {
                 // Dropping accepts ends the actor and its retained browser
                 // routes. No shim or host-local identity/state is removed here.
-                hosts.remove(&id);
+                let channel = hosts.remove(&id).and_then(|host| host.channel);
+                drop(hosts);
+                if let Some(channel) = channel
+                    && let Some(runtime) = plugins.lock().await.upgrade()
+                {
+                    runtime.detach_node_if(&channel).await;
+                }
             }
         }))
     }

@@ -321,6 +321,8 @@ impl ActionContract {
 pub enum CliHandler {
     /// Report the action's declared unavailable state.
     Unavailable,
+    /// Dispatch a declared node action over its local same-uid socket.
+    NodeComponent,
     /// Inspect the local node and registered components.
     Status,
     /// List or render generated command skills.

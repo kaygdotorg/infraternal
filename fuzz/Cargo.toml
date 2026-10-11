@@ -166,3 +166,14 @@ path = "fuzz_targets/remote_ca_handoff_decode.rs"
 test = false
 doc = false
 bench = false
+
+[features]
+mesh-node = ["infraternal-plugin-mesh/agent"]
+
+[[bin]]
+name = "mesh_node_json"
+path = "fuzz_targets/mesh_node_json.rs"
+required-features = ["mesh-node"]
+test = false
+doc = false
+bench = false

@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on build directory
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-dataplane/crates/plugins/mesh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 12s
+  Executable tests/review_route_inventory.rs (/home/kayg/.cache/codex-scratch/mesh-dataplane/target/debug/deps/review_route_inventory-410d7d005cea07fc)

@@ -162,6 +162,23 @@
         "user_id": "user-1",
         "role": "prod-grants"
       }
+    },
+    {
+      "action": "mesh.default.get",
+      "input": {}
+    },
+    {
+      "action": "mesh.default.preview",
+      "input": {
+        "default_policy": "Deny"
+      }
+    },
+    {
+      "action": "mesh.default.set",
+      "input": {
+        "default_policy": "Deny",
+        "expected_revision": 0
+      }
     }
   ],
   "results": [

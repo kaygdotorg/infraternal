@@ -2,12 +2,14 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 mod cli;
+#[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+mod component_cli;
 #[cfg(feature = "plugin-agent")]
 mod embedded_cli;
 #[cfg(feature = "remote")]
 mod host_remove;
 
-#[cfg(feature = "remote")]
+#[cfg(any(feature = "remote", all(feature = "plugin-mesh", target_os = "linux")))]
 mod output;
 #[cfg(feature = "remote")]
 mod remote;
@@ -168,6 +170,16 @@ fn dispatch_action(
     json_output: bool,
 ) -> ExitCode {
     match action.cli_handler {
+        CliHandler::NodeComponent => {
+            #[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+            {
+                component_cli::run_action(action, matches, json_output)
+            }
+            #[cfg(not(all(feature = "plugin-mesh", target_os = "linux")))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::Unavailable => run_unavailable(action, json_output),
         CliHandler::Status => run_status(registry, json_output),
         CliHandler::Skill => run_skill(registry, matches, json_output),
@@ -342,14 +354,15 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         return ExitCode::SUCCESS;
     }
 
+    if let Some(result) = run_skill_group(registry, &command, json_output) {
+        return result;
+    }
+    let path = command.join(" ");
     let Some(registered) = registry.find(&command) else {
         return report_failure(
             "skill",
             "The requested command has no generated skill in this build.",
-            format!(
-                "No visible action is registered for {:?}.",
-                command.join(" ")
-            ),
+            format!("No visible action is registered for {path:?}."),
             json_output,
         );
     };
@@ -376,10 +389,7 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         let result = CommandResult::new(
             format!("skill {}", command.join(" ")),
             CommandState::Ready,
-            format!(
-                "Generated the skill for `infraternal {}`.",
-                command.join(" ")
-            ),
+            format!("Generated the skill for `infraternal {path}`."),
             json!({"commands": [], "skill": markdown, "files": []}),
         );
         print_result(&result, true, false);
@@ -392,6 +402,38 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         );
     }
     ExitCode::SUCCESS
+}
+
+// Component groups list enabled actions from the same registry as help.
+fn run_skill_group(
+    registry: &ActionRegistry,
+    command: &[&str],
+    json_output: bool,
+) -> Option<ExitCode> {
+    if registry.find(command).is_some() {
+        return None;
+    }
+    let commands = cli::skills::commands(registry)
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .command
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .starts_with(command)
+        })
+        .collect::<Vec<_>>();
+    if commands.is_empty() {
+        return None;
+    }
+    let result = CommandResult::new(
+        format!("skill {}", command.join(" ")),
+        CommandState::Ready,
+        "Enabled commands in this component.",
+        json!({"commands": commands, "skill": "", "files": []}),
+    );
+    print_result(&result, json_output, false);
+    Some(ExitCode::SUCCESS)
 }
 
 fn systemd_server_state() -> Option<bool> {

@@ -61,8 +61,15 @@ async fn a_vanished_session_gets_a_final_close_and_the_channel_stays_up() {
     server.set_nonblocking(true).unwrap();
     let socket = Socket::inherited(agent.into_raw_fd()).unwrap();
     let task_state = state.clone();
-    let task =
-        tokio::spawn(async move { run_channel(&socket, Some(task_state), None, None, None).await });
+    let task = tokio::spawn(async move {
+        let service = crate::plugin_control::Service::start(
+            &task_state,
+            crate::plugins::ExecutionMode::Embedded,
+            None,
+        )
+        .await?;
+        run_channel(&socket, task_state, None, None, service.registry.clone()).await
+    });
     let mut peer = tokio::net::UnixStream::from_std(server).unwrap();
 
     // Startup discovery would clean a stale file up; the shim must die while the

@@ -25,6 +25,7 @@ pub mod cli;
 #[cfg(feature = "remote")]
 pub mod csr;
 mod embedded;
+mod node_bridge;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]
 pub use infraternal_plugin_mesh::api as mesh_api;

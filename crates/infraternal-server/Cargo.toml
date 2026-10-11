@@ -12,6 +12,7 @@ workspace = true
 default = ["mesh", "cli-plugin", "ssh"]
 cli-plugin = []
 mesh = ["dep:infraternal-plugin-mesh"]
+ee = ["infraternal-plugin-mesh?/ee", "infraternal-agent/ee"]
 remote = ["infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
 
 ssh = ["dep:infraternal-plugin-ssh"]

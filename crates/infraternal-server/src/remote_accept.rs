@@ -90,7 +90,7 @@ pub(crate) async fn quic(
                 let fingerprint = remote_quic::peer_fingerprint(&connection)?;
                 let authority = AuthorityGuard::admit(store, fingerprint).await?;
                 let link = RemoteLink::quic(connection.clone()).await?;
-                hosts.admit(authority, link).await?;
+                hosts.admit_observed(authority, link, address).await?;
                 remember(&known, address);
                 Ok::<(), io::Error>(())
             })
@@ -185,7 +185,7 @@ pub(crate) async fn tcp(
             let Ok(link) = RemoteLink::tcp(connection.channel).await else {
                 return;
             };
-            if hosts.admit(authority, link).await.is_ok() {
+            if hosts.admit_observed(authority, link, address).await.is_ok() {
                 remember(&limits.known, address);
             }
         });

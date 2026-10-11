@@ -18,8 +18,15 @@ async fn two_hundred_vanished_sessions_preserve_the_same_channel() {
     server.set_nonblocking(true).unwrap();
     let socket = Socket::inherited(host.into_raw_fd()).unwrap();
     let path = state.clone();
-    let task =
-        tokio::spawn(async move { run_channel(&socket, Some(path), None, None, None).await });
+    let task = tokio::spawn(async move {
+        let service = crate::plugin_control::Service::start(
+            &path,
+            crate::plugins::ExecutionMode::Embedded,
+            None,
+        )
+        .await?;
+        run_channel(&socket, path, None, None, service.registry.clone()).await
+    });
     let mut peer = tokio::net::UnixStream::from_std(server).unwrap();
     let mut buffer = Vec::new();
     let mut samples = Vec::new();

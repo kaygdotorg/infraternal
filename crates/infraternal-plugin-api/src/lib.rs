@@ -11,6 +11,7 @@ pub use action::{
 
 pub mod admission;
 pub mod channel;
+pub mod node_channel;
 pub mod routing;
 
 #[cfg(feature = "socket-host")]
@@ -91,6 +92,10 @@ pub struct PluginDescriptor {
 /// The host retains bearer material; plugins receive only its database hash.
 pub trait SocketHost: Send + Sync {
     fn user_id(&self) -> &str;
+    /// Public node actions may share a namespace with a server feature.
+    fn node_action_declared(&self, _id: &str) -> bool {
+        false
+    }
     fn token_hash(&self) -> &str;
     /// # Errors
     /// Refuses when socket authority ends or the supplied operation fails.
@@ -169,6 +174,13 @@ impl ReplySender {
 #[cfg(feature = "socket-host")]
 pub trait Plugin: Send + Sync {
     fn descriptor(&self) -> &'static PluginDescriptor;
+    /// Optional event-driven work for an admitted node. The runtime owns cancellation.
+    fn node_connected(
+        &self,
+        _channel: Arc<dyn node_channel::NodeChannel>,
+    ) -> Option<Operation<'static, ()>> {
+        None
+    }
     fn run(
         &self,
         host: Arc<dyn SocketHost>,
@@ -437,6 +449,31 @@ pub struct ActionReply {
 pub trait AgentPlugin: Send {
     /// Static action and settings metadata.
     fn descriptor(&self) -> &'static PluginDescriptor;
+    /// Machine-only control actions are omitted from human API/MCP/CLI discovery.
+    /// They still share the same action definitions and bounded dispatcher.
+    fn control_actions(&self) -> &'static [ActionDef] {
+        &[]
+    }
+    /// Drain declared public lifecycle notifications after an action; never private state.
+    fn take_events(&mut self) -> Vec<(&'static str, Vec<u8>)> {
+        Vec::new()
+    }
+    /// Opt into generic component CLI commands generated from public actions.
+    fn has_cli(&self) -> bool {
+        false
+    }
+    /// A write may present a declared read action's current status afterwards.
+    fn human_status_action(&self, _action_id: &str) -> Option<&'static str> {
+        None
+    }
+    /// Render public output inside the plugin, keeping feature fields out of core adapters.
+    /// # Errors
+    /// Rejects malformed public JSON.
+    fn format_human(&self, _action_id: &str, output: &[u8]) -> Result<String, PluginError> {
+        let value: serde_json::Value =
+            serde_json::from_slice(output).map_err(|_| PluginError::Rejected)?;
+        serde_json::to_string_pretty(&value).map_err(|_| PluginError::Rejected)
+    }
     /// Validate and execute one declared action.
     /// # Errors
     /// Returns a bounded plugin error for a rejected action, unknown action, or oversized body.
@@ -502,20 +539,128 @@ impl PluginRegistry {
     /// Rejects unsupported API versions, duplicate ids, or actions outside the plugin namespace.
     pub fn register(&mut self, plugin: Box<dyn AgentPlugin>) -> Result<(), PluginError> {
         let descriptor = plugin.descriptor();
-        if descriptor.api != API_VERSION
+        let controls = PluginDescriptor {
+            actions: plugin.control_actions(),
+            ..*descriptor
+        };
+        let mut seen = HashSet::new();
+        if descriptor.validate().is_err()
+            || controls.validate().is_err()
+            || descriptor.api != API_VERSION
             || self.plugin_ids.contains(descriptor.id)
-            || descriptor.actions.iter().any(|action| {
-                !action.id.starts_with(&format!("{}.", descriptor.id))
-                    || self.action_ids.contains(action.id)
-            })
+            || descriptor
+                .actions
+                .iter()
+                .chain(plugin.control_actions())
+                .any(|action| {
+                    !seen.insert(action.id)
+                        || !action.id.starts_with(&format!("{}.", descriptor.id))
+                        || self.action_ids.contains(action.id)
+                })
         {
             return Err(PluginError::InvalidDescriptor);
         }
         self.plugin_ids.insert(descriptor.id);
-        self.action_ids
-            .extend(descriptor.actions.iter().map(|action| action.id));
+        self.action_ids.extend(
+            descriptor
+                .actions
+                .iter()
+                .chain(plugin.control_actions())
+                .map(|action| action.id),
+        );
         self.plugins.push(plugin);
         Ok(())
+    }
+
+    /// Drain only declared bounded events, rejecting a plugin's invalid notification.
+    /// # Errors
+    /// Rejects undeclared identifiers, invalid JSON or oversized envelopes.
+    pub fn events(&mut self) -> Result<Vec<Vec<u8>>, PluginError> {
+        let mut events = Vec::new();
+        for plugin in &mut self.plugins {
+            let descriptor = plugin.descriptor();
+            for (id, body) in plugin.take_events() {
+                if body.len() > 1024 || !descriptor.events.iter().any(|event| event.id == id) {
+                    return Err(PluginError::Rejected);
+                }
+                let value: serde_json::Value =
+                    serde_json::from_slice(&body).map_err(|_| PluginError::Rejected)?;
+                let envelope=serde_json::to_vec(&serde_json::json!({"type":"plugin.event","plugin":descriptor.id,"id":id,"value":value})).map_err(|_|PluginError::Rejected)?;
+                if envelope.len() > 1024 {
+                    return Err(PluginError::MessageTooLarge);
+                }
+                events.push(envelope);
+            }
+        }
+        Ok(events)
+    }
+    /// Pure CLI declarations; constructing commands never invokes an action.
+    #[must_use]
+    pub fn cli_descriptors(&self) -> Vec<&'static PluginDescriptor> {
+        self.plugins
+            .iter()
+            .filter(|plugin| plugin.has_cli())
+            .map(|plugin| plugin.descriptor())
+            .collect()
+    }
+    /// Resolve an optional public read after a successful operator write.
+    /// # Errors
+    /// Refuses unknown, machine-only, or non-read follow-up actions.
+    pub fn human_status_action(
+        &self,
+        action_id: &str,
+    ) -> Result<Option<&'static str>, PluginError> {
+        let plugin = self.public_plugin(action_id)?;
+        let Some(id) = plugin.human_status_action(action_id) else {
+            return Ok(None);
+        };
+        if !plugin
+            .descriptor()
+            .actions
+            .iter()
+            .any(|action| action.id == id && action.effect == Effect::Read)
+        {
+            return Err(PluginError::Rejected);
+        }
+        Ok(Some(id))
+    }
+    /// Format a bounded public reply with the implementation's pure presenter.
+    /// # Errors
+    /// Refuses private control actions, oversized replies and malformed presentation data.
+    pub fn format_human(&self, action_id: &str, output: &[u8]) -> Result<String, PluginError> {
+        if output.len() > MAX_ACTION_BYTES {
+            return Err(PluginError::MessageTooLarge);
+        }
+        self.public_plugin(action_id)?
+            .format_human(action_id, output)
+    }
+    fn public_plugin(&self, action_id: &str) -> Result<&dyn AgentPlugin, PluginError> {
+        self.plugins
+            .iter()
+            .find(|plugin| {
+                plugin
+                    .descriptor()
+                    .actions
+                    .iter()
+                    .any(|action| action.id == action_id)
+            })
+            .map(std::convert::AsRef::as_ref)
+            .ok_or(PluginError::UnknownAction)
+    }
+    /// Dispatch only public node actions from a local operator surface.
+    /// # Errors
+    /// Machine control actions remain available only through the admitted channel adapter.
+    pub fn call_public(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+        if !self.plugins.iter().any(|plugin| {
+            plugin
+                .descriptor()
+                .actions
+                .iter()
+                .any(|action| action.id == action_id)
+        }) {
+            return Err(PluginError::UnknownAction);
+        }
+        self.call(action_id, input)
     }
 
     /// Executes one declared action while bounding both directions of its JSON body.
@@ -545,6 +690,7 @@ impl PluginRegistry {
                 .descriptor()
                 .actions
                 .iter()
+                .chain(plugin.control_actions())
                 .any(|action| action.id == action_id)
         });
         let Some(plugin) = plugin else {

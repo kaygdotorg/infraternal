@@ -1,0 +1,19 @@
+load=29.18 32.71 38.85 17/3381 3208907
+Running as unit: run-p3208908-i49299022.scope; invocation ID: a22219b143fd46df9a5704c0779a35b7
+
+running 1 test
+test nf_tables_node_local_mesh_delivery_remains_available ... 
+thread 'nf_tables_node_local_mesh_delivery_remains_available' (3209114) panicked at crates/plugins/mesh/tests/review_local_delivery.rs:56:5:
+assertion `left == right` failed: node-local delivery refused
+  left: [None, None]
+ right: [Some(20), Some(20)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    nf_tables_node_local_mesh_delivery_remains_available
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 3.00s
+

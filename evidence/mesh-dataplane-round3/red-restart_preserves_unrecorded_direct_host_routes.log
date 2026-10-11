@@ -1,0 +1,18 @@
+Running as unit: run-p3345655-i49435713.scope; invocation ID: 21322ff725d7463484209941d7b35ffe
+
+running 1 test
+test restart_preserves_unrecorded_direct_host_routes ... 
+thread 'restart_preserves_unrecorded_direct_host_routes' (3345706) panicked at crates/plugins/mesh/tests/review_route_inventory.rs:118:5:
+assertion `left == right` failed: restart claimed routes outside its peer inventory
+  left: [Array [], Array [], Array []]
+ right: [Array [Object {"dev": String("infraternal0"), "dst": String("10.250.0.2"), "flags": Array [], "protocol": String("static"), "scope": String("link")}], Array [Object {"dev": String("infraternal0"), "dst": String("fd02::2"), "flags": Array [], "metric": Number(1024), "pref": String("medium"), "protocol": String("static")}], Array [Object {"dev": String("infraternal0"), "dst": String("fd02::3"), "flags": Array [String("onlink")], "gateway": String("fd01::2"), "metric": Number(1024), "pref": String("medium"), "protocol": String("static")}]]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    restart_preserves_unrecorded_direct_host_routes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.36s
+

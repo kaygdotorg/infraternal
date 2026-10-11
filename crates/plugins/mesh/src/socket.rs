@@ -45,6 +45,17 @@ impl Plugin for MeshPlugin {
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
+    fn node_connected(
+        &self,
+        channel: Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>,
+    ) -> Option<Operation<'static, ()>> {
+        let service = self.mesh.clone();
+        let store = service.dataplane();
+        let work = self.mesh_work.clone();
+        Some(Box::pin(crate::node_coordination::run(
+            store, service, channel, work,
+        )))
+    }
     fn run(
         &self,
         host: Arc<dyn SocketHost>,

@@ -1,4 +1,4 @@
-//! SQLite-backed Mesh inventory, named grants, action authorization, and change revisions [154,163,164,187].
+//! SQLite-backed Mesh inventory, named grants, action authorization, and change revisions [154,163,164,166,187].
 
 use infraternal_mesh::{
     model::{Node, NodeId, PublicKey},
@@ -106,6 +106,8 @@ pub struct MeshFilter {
 /// Validated action request. Parsing is pure so fuzz targets exercise the same boundary as WebSocket calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MeshRequest {
+    /// Owner-only edition fallback and reach-loss preview.
+    Default(crate::settings::Request),
     /// List the caller's permitted Mesh inventory.
     List(MeshFilter),
     /// Enroll a host using its public key.
@@ -317,6 +319,9 @@ impl MeshApiError {
 #[allow(clippy::too_many_lines)]
 pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiError> {
     let request = match action {
+        "mesh.default.get" | "mesh.default.preview" | "mesh.default.set" => {
+            MeshRequest::Default(crate::settings::parse_action(action, input)?)
+        }
         "mesh.list" => MeshRequest::List(parse(input)?),
         "mesh.node.enroll" => MeshRequest::EnrollNode(parse(input)?),
         "mesh.node.observe" => MeshRequest::ObserveNode(parse(input)?),
@@ -336,6 +341,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiEr
         _ => return Err(MeshApiError::InvalidInput),
     };
     match &request {
+        MeshRequest::Default(_) => {}
         MeshRequest::List(filter) => {
             if filter
                 .cursor
@@ -478,6 +484,7 @@ pub struct MeshService {
     updates: broadcast::Sender<MeshChange>,
     // Request-local authority is never installed in the shared service.
     fresh_authority: Option<String>,
+    store: crate::store::Store,
 }
 
 impl MeshService {
@@ -486,9 +493,31 @@ impl MeshService {
     pub fn new(pool: SqlitePool) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
         Self {
+            store: crate::store::Store::new(pool.clone()),
             pool,
             updates,
             fresh_authority: None,
+        }
+    }
+
+    /// Reuse one revision cache for previews and all node workers.
+    #[must_use]
+    pub fn dataplane(&self) -> crate::store::Store {
+        self.store.clone()
+    }
+
+    /// Publish an authenticated binding change after its writer transaction commits.
+    pub async fn invalidate_dataplane(&self) {
+        if let Ok(revision) =
+            sqlx::query_scalar::<_, i64>("SELECT revision FROM mesh_state WHERE singleton=1")
+                .fetch_one(&self.pool)
+                .await
+        {
+            let _ = self.updates.send(MeshChange {
+                revision,
+                scopes: None,
+                liveness_deadline: None,
+            });
         }
     }
 
@@ -598,6 +627,22 @@ impl MeshService {
         now: i64,
     ) -> Result<Value, MeshApiError> {
         match parse_action(action, input)? {
+            MeshRequest::Default(_) => {
+                let value = crate::settings::execute(
+                    &self.pool,
+                    &self.store,
+                    actor,
+                    action,
+                    input,
+                    now,
+                    self.fresh_authority.as_deref(),
+                )
+                .await?;
+                if action == "mesh.default.set" {
+                    self.invalidate_dataplane().await;
+                }
+                Ok(value)
+            }
             MeshRequest::List(filter) => {
                 Ok(serde_json::to_value(self.list(actor, filter, now).await?)
                     .map_err(|_| MeshApiError::Storage)?)
@@ -869,6 +914,19 @@ impl MeshService {
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         let scope_requirements = require_each_scope(&scopes);
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
+        let server: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE id=? AND dataplane_host='server')",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sql_error)?;
+        if server {
+            return Err(MeshApiError::Denied);
+        }
+        // Member removal and its reconnect refusal are one writer transaction.
+        // Public unbound inventory has no host capability to retire.
+        sqlx::query("INSERT INTO mesh_dataplane_removed(host) SELECT dataplane_host FROM mesh_nodes WHERE id=? AND dataplane_host IS NOT NULL ON CONFLICT(host) DO NOTHING").bind(id).execute(&mut *tx).await.map_err(map_sql_error)?;
         let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
             .bind(id.to_string()).bind(id.to_string()).fetch_one(&mut *tx).await.map_err(map_sql_error)?;
         sqlx::query("DELETE FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")

@@ -1759,6 +1759,9 @@ struct PluginHost {
     hash: String,
 }
 impl SocketHost for PluginHost {
+    fn node_action_declared(&self, id: &str) -> bool {
+        self.state.action(id).is_some()
+    }
     fn user_id(&self) -> &str {
         &self.user
     }

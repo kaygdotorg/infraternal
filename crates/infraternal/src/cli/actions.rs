@@ -99,7 +99,43 @@ fn host_plugin() -> PluginDefinition {
 fn mesh_plugin() -> PluginDefinition {
     let mut plugin =
         infraternal_plugin_mesh::descriptor::DESCRIPTOR.cli_plugin(ActionTarget::Global);
-    // Node lifecycle placeholders and hosted server actions share one owner id.
+    #[cfg(target_os = "linux")]
+    for mut action in infraternal_plugin_mesh::node_actions::DESCRIPTOR
+        .cli_plugin(ActionTarget::Host)
+        .actions
+    {
+        action.availability = infraternal_plugin_api::ActionAvailability::Available;
+        action.cli_handler = infraternal_plugin_api::CliHandler::NodeComponent;
+        "Use this action on the running local infraternal agent."
+            .clone_into(&mut action.when_to_use);
+        action.safety.notes.clear();
+        action.input_schema = JsonSchema::object(
+            [
+                (
+                    "state".to_owned(),
+                    JsonSchema::string(
+                        "Private runtime directory of the running infraternal agent.",
+                    ),
+                ),
+                (
+                    "input_stdin".to_owned(),
+                    JsonSchema::boolean("Read bounded action JSON from standard input."),
+                ),
+            ],
+            std::iter::empty(),
+        );
+        if action.command == ["mesh", "up"] {
+            // Preserve the declared SSH request flag; unsupported node inputs
+            // remain refused by the component rather than claiming SSH is live.
+            let declaration = infraternal_mesh::cli::plugin();
+            action.input_schema.properties.insert(
+                "ssh".to_owned(),
+                declaration.actions[0].input_schema.properties["ssh"].clone(),
+            );
+        }
+        plugin.actions.push(action);
+    }
+    #[cfg(not(target_os = "linux"))]
     plugin
         .actions
         .extend(infraternal_mesh::cli::plugin().actions);

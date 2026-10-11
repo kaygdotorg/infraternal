@@ -1,4 +1,6 @@
 //! Discovers compiled plugins and owns cancellable socket work and runtime feature switches [16,198,201].
+#[path = "node_lifecycle.rs"]
+mod node_lifecycle;
 use bytes::Bytes;
 use infraternal_plugin_api::routing::subscription_topic;
 use infraternal_plugin_api::{
@@ -64,11 +66,22 @@ use tokio::{
 pub struct PluginRuntime {
     inner: Arc<Runtime>,
 }
+/// Remote host registries never keep a server plugin runtime alive.
+#[derive(Clone, Default)]
+#[cfg(feature = "remote")]
+pub(crate) struct WeakRuntime(std::sync::Weak<Runtime>);
+#[cfg(feature = "remote")]
+impl WeakRuntime {
+    pub(crate) fn upgrade(&self) -> Option<PluginRuntime> {
+        self.0.upgrade().map(|inner| PluginRuntime { inner })
+    }
+}
 struct Runtime {
     entries: Vec<Arc<Entry>>,
     role: &'static str,
     store: Option<sqlx::SqlitePool>,
     switches: tokio::sync::Mutex<()>,
+    nodes: tokio::sync::Mutex<node_lifecycle::Nodes>,
     changed: watch::Sender<()>,
 }
 struct Entry {
@@ -105,6 +118,11 @@ pub enum PluginError {
     Storage,
 }
 impl PluginRuntime {
+    #[cfg(feature = "remote")]
+    pub(crate) fn downgrade(&self) -> WeakRuntime {
+        WeakRuntime(Arc::downgrade(&self.inner))
+    }
+
     /// Assemble pure declarations; no worker, timer or listener starts here.
     #[must_use]
     pub fn new(plugins: Vec<Arc<dyn Plugin>>, role: &'static str) -> Self {
@@ -134,6 +152,7 @@ impl PluginRuntime {
                 role,
                 store: None,
                 switches: tokio::sync::Mutex::new(()),
+                nodes: tokio::sync::Mutex::new(node_lifecycle::Nodes::default()),
                 changed: watch::channel(()).0,
             }),
         }
@@ -312,7 +331,11 @@ impl PluginRuntime {
             entry.epoch.store(restore_epoch, Ordering::Release);
             entry.enabled.store(true, Ordering::Release);
             self.inner.changed.send_replace(());
+            self.start_nodes(entry).await?;
             return Err(error);
+        }
+        if enabled {
+            self.start_nodes(entry).await?;
         }
         Ok(())
     }
@@ -764,6 +787,11 @@ impl SocketPlugins {
             _ => None,
         };
         let Some(entry) = entry else {
+            if let Frame::Call { action_id, .. } = decoded.frame
+                && self.host.node_action_declared(action_id)
+            {
+                return Dispatch::Unhandled;
+            }
             if let Frame::Call {
                 call_id, action_id, ..
             } = decoded.frame

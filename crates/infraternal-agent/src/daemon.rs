@@ -253,7 +253,14 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
         return Err(sessions::invalid("embedded leg B requires fd 3"));
     }
     let socket = Socket::inherited(fd)?;
-    run_channel(&socket, state, None, None, None).await
+    let state = sessions::state(state)?;
+    let service = crate::plugin_control::Service::start(
+        &state,
+        crate::plugins::ExecutionMode::Embedded,
+        None,
+    )
+    .await?;
+    run_channel(&socket, state, None, None, service.registry.clone()).await
 }
 
 /// Dispatch an admitted remote server connection through the same session and shim path.
@@ -302,10 +309,41 @@ pub async fn run_authenticated_with_installation(
             "enrolled uid differs from infraternal agent uid",
         ));
     }
+    let state = sessions::state(state)?;
+    let service = crate::plugin_control::Service::start(
+        &state,
+        crate::plugins::ExecutionMode::Remote,
+        installation,
+    )
+    .await?;
+    run_authenticated_with_plugins(
+        channel,
+        state,
+        execution_uid,
+        renewal,
+        service.registry.clone(),
+    )
+    .await
+}
+#[cfg(feature = "remote")]
+pub(crate) async fn run_authenticated_with_plugins(
+    channel: &impl Channel,
+    state: PathBuf,
+    execution_uid: u32,
+    renewal: Option<&RenewalIdentity>,
+    plugins: crate::plugin_control::Registry,
+) -> io::Result<()> {
+    if channel.native_stream_id().is_some_and(|writer| writer != 0)
+        || execution_uid != nix::unistd::Uid::effective().as_raw()
+    {
+        return Err(sessions::invalid(
+            "enrolled uid differs from infraternal agent uid",
+        ));
+    }
     // Cancellation retires the authenticated channel as well as its task set;
     // a caller cannot reuse it with detached readers or unfinished wire writes.
     let _retire = RetireChannel(channel);
-    run_channel(channel, state, Some(execution_uid), renewal, installation).await
+    run_channel(channel, state, Some(execution_uid), renewal, plugins).await
 }
 
 #[cfg(feature = "remote")]
@@ -320,19 +358,14 @@ impl<C: Channel> Drop for RetireChannel<'_, C> {
 #[allow(clippy::too_many_lines)]
 async fn run_channel(
     socket: &impl Channel,
-    state: Option<PathBuf>,
+    state: PathBuf,
     execution_uid: Option<u32>,
     renewal: Option<&RenewalIdentity>,
-    installation: Option<&crate::plugins::Installation>,
+    plugins: crate::plugin_control::Registry,
 ) -> io::Result<()> {
-    let state = sessions::state(state)?;
-    let mode = if execution_uid.is_some() {
-        crate::plugins::ExecutionMode::Remote
-    } else {
-        crate::plugins::ExecutionMode::Embedded
-    };
-    let mut plugins = crate::plugins::registry_with_installation(mode, installation)
-        .map_err(|_| sessions::invalid("invalid compiled plugin registry"))?;
+    let mut events = plugins.subscribe();
+    let (plugin_replies, mut results) = mpsc::channel(8);
+    let worker = crate::plugin_control::Worker::start(plugins.clone(), plugin_replies);
     let manager = Manager::detect().await;
     let exe = std::env::current_exe()?;
     let retirements = sessions::SessionEvents::new(&state)?;
@@ -362,10 +395,29 @@ async fn run_channel(
         let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
         let mut renewals = JoinSet::new();
-        let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
+        let mut opens: JoinSet<(
+            u32,
+            u32,
+            Result<Session, infraternal_plugin_api::admission::OpenRefusal>,
+        )> = JoinSet::new();
         loop {
             tokio::select! {
                 changed = retirements.changed() => { changed?; registry.refresh(); }
+                result=results.recv()=> {
+                    let (call_id,result)=result.ok_or_else(||sessions::invalid("plugin worker stopped"))?;
+                    match result {
+                        Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
+                        Err(_)=>reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                    }
+                }
+                event=events.recv()=> {
+                    let event=match event {
+                        Ok(event)=>event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>b"{\"type\":\"plugin.event\",\"id\":\"plugins.resync\"}".to_vec(),
+                        Err(tokio::sync::broadcast::error::RecvError::Closed)=>return Err(sessions::invalid("plugin events stopped")),
+                    };
+                    reply(&control,Message::Event(0,event))?;
+                }
                 result = jobs.join_next(), if !jobs.is_empty() => {
                     let (stream, result) = result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)?;
                     // Close/re-attach may reuse a stream before the old task exits.
@@ -390,14 +442,7 @@ async fn run_channel(
                             registry.insert(&session)?;
                             reply(&control, Message::Result(stream, call_id, true, json))?;
                         }
-                        Err(error) => {
-                            use infraternal_plugin_api::admission::OpenRefusal;
-                            let reason = match error.kind() {
-                                io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
-                                _ => OpenRefusal::ResourceUnavailable,
-                            };
-                            reply(&control, Message::Result(stream, call_id, false, reason.json()?))?;
-                        }
+                        Err(reason) => reply(&control, Message::Result(stream, call_id, false, reason.json()?))?,
                     }
                 }
                 decoded = receive.next(socket) => {
@@ -426,23 +471,28 @@ async fn run_channel(
                             if let Some(input) = input && execution_uid.is_none_or(|uid| input.uid == uid)
                                 && (nix::unistd::Uid::effective().is_root() || input.uid == nix::unistd::Uid::effective().as_raw())
                                 && input.cols > 0 && input.rows > 0 && usize::from(input.cols) * usize::from(input.rows) <= 200_000 {
-                                match plugins.admit("terminal.open", registry.context()) {
-                                    Ok(()) => {
-                                        let exe = exe.clone(); let state = state.clone();
-                                        opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
-                                    }
-                                    Err(reason) => reply(&control, Message::Result(stream, call_id, false, reason.json()?))?,
-                                }
+                                let exe = exe.clone(); let state = state.clone();
+                                let plugins = plugins.clone(); let context = registry.context();
+                                // Admission shares mutable plugin settings with actions, but
+                                // waiting for its worker never parks terminal dispatch.
+                                opens.spawn(async move {
+                                    let result = async {
+                                        plugins.admit("terminal.open", context).await?;
+                                        sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await.map_err(|error| match error.kind() {
+                                            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
+                                            _ => OpenRefusal::ResourceUnavailable,
+                                        })
+                                    }.await;
+                                    (stream, call_id, result)
+                                });
                             } else {
                                 reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
                             }
                         }
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
                             registry.refresh();
-                            plugins.update_context(registry.context());
-                            match plugins.call_with_reply(action_id, input_json) {
-                                Ok(result) => reply(&control, Message::Deferred(0, call_id, result))?,
-                                Err(_) => reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                            if input_json.len()>infraternal_plugin_api::MAX_ACTION_BYTES || action_id.len()>128 || worker.sender.try_send(crate::plugin_control::Request {call_id,action:action_id.to_owned(),input:input_json.to_vec(),context:registry.context()}).is_err() {
+                                reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?;
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {

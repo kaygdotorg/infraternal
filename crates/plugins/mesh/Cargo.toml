@@ -7,7 +7,9 @@ license.workspace = true
 
 [features]
 default = ["server"]
-server = []
+server = ["dep:uuid"]
+ee = []
+agent = ["dep:nix", "dep:openssl", "dep:zeroize"]
 
 [dependencies]
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
@@ -20,5 +22,15 @@ serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 
+nix = { workspace = true, optional = true, features = ["net"] }
+openssl = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
 [lints]
 workspace = true
+
+# The production-schema proof needs coordinator storage, never an agent-only build.
+[[example]]
+name = "coordinator_fixture"
+required-features = ["server"]

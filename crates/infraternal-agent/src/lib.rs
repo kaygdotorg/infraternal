@@ -4,6 +4,7 @@ pub mod channel;
 pub mod cli;
 pub mod daemon;
 mod lifecycle;
+pub mod plugin_control;
 pub mod plugins;
 pub mod relay;
 #[cfg(feature = "remote")]

@@ -1,0 +1,19 @@
+load=29.16 32.64 38.79 18/3542 3209293
+Running as unit: run-p3209294-i49299408.scope; invocation ID: ac1e5b71fe2a4e24b5d16ca351860ec0
+
+running 1 test
+test restart_preserves_operator_gateway_host_route ... 
+thread 'restart_preserves_operator_gateway_host_route' (3209295) panicked at crates/plugins/mesh/tests/review_route_scope.rs:64:5:
+assertion `left == right` failed: restart retired an operator gateway route
+  left: Array []
+ right: Array [Object {"dev": String("infraternal0"), "dst": String("10.250.0.1"), "flags": Array [String("onlink")], "gateway": String("10.254.0.2"), "protocol": String("static")}]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    restart_preserves_operator_gateway_host_route
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+

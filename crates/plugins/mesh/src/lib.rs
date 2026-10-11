@@ -1,4 +1,4 @@
-//! Houses the Mesh coordinator server feature and future node component under one plugin id [198,201].
+//! Houses the Mesh coordinator and Linux node component behind removable plugin features [198,201].
 
 #[cfg(feature = "server")]
 pub mod api;
@@ -12,3 +12,40 @@ pub mod descriptor;
 mod socket;
 #[cfg(feature = "server")]
 pub use socket::{MeshPlugin, parse_subscription};
+
+/// Public-only configuration shared by the coordinator and node component.
+pub mod dataplane;
+
+pub mod configuration;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod netlink;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod wireguard;
+
+#[cfg(feature = "server")]
+pub mod store;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod iptables;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod firewall;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod node_state;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod node;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod node_actions;
+#[cfg(all(feature = "agent", target_os = "linux"))]
+mod node_presentation;
+
+#[cfg(feature = "server")]
+pub mod settings;
+
+#[cfg(feature = "server")]
+pub mod node_coordination;
