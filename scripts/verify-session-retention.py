@@ -25,14 +25,14 @@ def send_shim(peer, body):
 
 
 def ended(client, identity):
-    stream, kind, body = client.read()
+    stream, kind, body = client.read_without_inventory()
     assert (stream, kind) == (1, 0x33), (stream, kind, body)
     assert body[:4] == bytes(4)
     event = json.loads(body[4:])
     assert event['type'] == 'terminal.exited'
     assert event['session_id'] == str(identity) and event['status'] == 7
     assert event['final_seq'] > 0
-    stream, kind, body = client.read()
+    stream, kind, body = client.read_without_inventory()
     assert (stream, kind) == (1, 0x0f)
     assert struct.unpack('<H', body[:2])[0] == 4404 and body[2:] == b'session ended'
     return event
@@ -86,10 +86,9 @@ def run(binary):
         client = Binary(binary, state)
         client.send(1, 0x16, identity.bytes + bytes(16))
         assert ended(client, identity) == first
-        client.send(0, 0x08, struct.pack('<QQ', 151, 0))
-        assert client.read()[:2] == (0, 0x09), 'ended stream closed the channel'
+        client.ping(151, 0)
         client.send(3, 0x16, uuid.uuid4().bytes + bytes(16))
-        stream, kind, body = client.read()
+        stream, kind, body = client.read_without_inventory()
         assert (stream, kind) == (3, 0x0f) and struct.unpack('<H', body[:2])[0] == 4404
         client.kill()
         # Publication precedes peer/listener teardown. Model that overlap with
