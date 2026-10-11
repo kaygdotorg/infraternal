@@ -5,6 +5,7 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
+const SIZES = [["desktop", { width: 1440, height: 900 }, false], ["phone", { width: 393, height: 852 }, true], ["phone-small", { width: 375, height: 667 }, true]] as const;
 const SHOTS = "captures/machine-sections";
 const open = async (page: Page, extended: boolean, mobile: boolean): Promise<void> => {
   await page.addInitScript((on) => { try { localStorage.setItem("tracer.extended-info", on ? "1" : "0"); } catch { /* no storage */ } }, extended);
@@ -21,12 +22,14 @@ const open = async (page: Page, extended: boolean, mobile: boolean): Promise<voi
 };
 const popover = (page: Page) => page.locator(".canvas-popover");
 
-for (const [name, viewport, mobile] of [["desktop", { width: 1440, height: 900 }, false], ["phone", { width: 393, height: 852 }, true]] as const) {
-  for (const extended of [false, true]) {
+for (const [name, viewport, mobile] of SIZES) {
+  for (const extended of name === "phone-small" ? [true] : [false, true]) {
     test(`${name}: machine tab with extended info ${extended ? "on" : "off"}`, async ({ browser }) => {
       const context = await browser.newContext(mobile ? { viewport, deviceScaleFactor: 3, hasTouch: true, isMobile: true } : { viewport, deviceScaleFactor: 1 });
       const page = await context.newPage();
       await open(page, extended, mobile);
+      // The header names the machine as the machine reports it, so it agrees with the System row.
+      await expect(popover(page).locator(".canvas-popover-title")).toHaveText(mobile ? "Ubuntu" : "NixOS");
       await expect(popover(page).getByText("More", { exact: true })).toHaveCount(0);
       await expect(popover(page).getByRole("button", { name: /more/i })).toHaveCount(0);
       const titles = popover(page).locator(".ui-kv-group");

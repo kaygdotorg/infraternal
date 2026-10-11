@@ -105,3 +105,26 @@ test("extended info on: every fact sits under System, Resources or Access", () =
   expect(groups.get("Resources")).toEqual(["CPU", "Uptime"]);
   expect(groups.get("Access")).toEqual(["Infraternal agent", "Engines", "Login", "Address", "Shell", "Locale"]);
 });
+
+test("the header follows the machine's own facts, not the platform the host list guessed", () => {
+  const facts = detailsFacts({
+    host: { name: "build-01", user: "kayg", os: "ubuntu", facts: { ...FULL.host.facts, os: "Debian GNU/Linux", version: "13" } },
+    connection: { state: "connected" },
+  });
+  expect(facts.os).toBe("debian");
+  expect(facts.title).toBe("Debian");
+  expect(facts.subtitle).toBe("kayg@build-01");
+  expect(facts.sections[0]!.rows.find((row) => row.key === "System")!.value).toBe("Debian GNU/Linux 13");
+});
+
+test("before facts arrive the host's platform names the header", () => {
+  const facts = detailsFacts({ host: { name: "build-01", os: "ubuntu" }, connection: { state: "connected" } });
+  expect(facts.os).toBe("ubuntu");
+  expect(facts.title).toBe("Ubuntu");
+});
+
+test("a reported system with no platform mark still names the header and shows no mark", () => {
+  const facts = detailsFacts({ host: { name: "box", facts: { ...FULL.host.facts, os: "Alpine Linux" } }, connection: { state: "connected" } });
+  expect(facts.os).toBeUndefined();
+  expect(facts.title).toBe("Alpine Linux");
+});

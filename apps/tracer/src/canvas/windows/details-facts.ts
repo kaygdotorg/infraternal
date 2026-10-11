@@ -3,7 +3,7 @@
  * numbers come from, never in how the facts are named. Plain wording (#112): "Connection delay", not "round trip"; the
  * technical name is a subtitle on the row. A value that is not known is left out, never shown as a dash or "unknown".
  */
-import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
+import { hostPlatformFromOs, type HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import type { DetailsFacts, HostFactsSnapshot } from "./details-source";
 
 const OS_NAME: Record<HostPlatform, string> = { ubuntu: "Ubuntu", debian: "Debian", redhat: "Red Hat", proxmox: "Proxmox", nixos: "NixOS", apple: "macOS", unknown: "" };
@@ -53,8 +53,11 @@ function uptime(seconds: number | undefined): string {
 export function detailsFacts(input: DetailsInput): DetailsFacts {
   const { host, connection, session } = input;
   const facts = host.facts;
-  const os = host.os && host.os !== "unknown" ? host.os : undefined;
-  const osName = host.os ? OS_NAME[host.os] : "";
+  // What the machine reports about itself wins over the platform the host list guessed; `host.os` is the fallback
+  // before the facts arrive. Title, mark and subtitle must agree with the System row.
+  const platform = facts ? hostPlatformFromOs(facts.os) : host.os;
+  const os = platform && platform !== "unknown" ? platform : undefined;
+  const osName = (platform ? OS_NAME[platform] : "") || (facts ? facts.os : "");
   // Core rows are the essentials; every other row shows only with extended info, and then all rows sit under titles.
   const row = (group: string, core: boolean, key: string, value: string) => ({ key, value, group, core });
   const allHostRows = [
