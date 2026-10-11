@@ -1,0 +1,56 @@
+Running as unit: run-p3631319-i3631619.scope; invocation ID: 4b6a23ff05654ab99c6959d7ca49075b
+machine=infraternal-dev hostname=infraternal-dev CPUWeight=10000 arch=x86_64
+phase=baseline run=1
+
+running 1 test
+inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1793 p99_us=6453 close_200_us=18475 arch=x86_64 cores=12 load=32.60 37.36 37.91 7/1266 3631366
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.35s
+
+
+phase=head run=1
+
+running 1 test
+inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1734 p99_us=2382 close_200_us=22005 arch=x86_64 cores=12 load=32.60 37.36 37.91 7/1258 3631406
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.31s
+
+
+phase=baseline run=2
+
+running 1 test
+inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1877 p99_us=2629 close_200_us=21228 arch=x86_64 cores=12 load=32.60 37.36 37.91 7/1263 3631451
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.34s
+
+
+phase=head run=2
+
+running 1 test
+inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1862 p99_us=2780 close_200_us=20036 arch=x86_64 cores=12 load=32.60 37.36 37.91 6/1263 3631491
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.34s
+
+
+phase=baseline run=3
+
+running 1 test
+inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1848 p99_us=5390 close_200_us=30062 arch=x86_64 cores=12 load=32.60 37.36 37.91 6/1263 3631532
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.35s
+
+
+phase=head run=3
+
+running 1 test
+inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1845 p99_us=2602 close_200_us=18212 arch=x86_64 cores=12 load=32.60 37.36 37.91 6/1263 3631572
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.34s
+
+

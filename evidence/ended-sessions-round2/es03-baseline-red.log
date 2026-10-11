@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "<stdin>", line 8, in <module>
+  File "/home/kayg/.cache/codex-scratch/ended-sessions-round2/baseline/scripts/agent_fixture.py", line 159, in __init__
+    self.start()
+    ~~~~~~~~~~^^
+  File "/home/kayg/.cache/codex-scratch/ended-sessions-round2/baseline/scripts/agent_fixture.py", line 197, in start
+    assert (stream, kind) == (0, 0x09)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
