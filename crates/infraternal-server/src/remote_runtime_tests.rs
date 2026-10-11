@@ -385,3 +385,7 @@ mod candidate_proofs;
 
 #[path = "remote_listener_tests.rs"]
 mod additional_listeners;
+
+#[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
+#[path = "remote_mesh_namespace_tests.rs"]
+mod mesh_namespace;
