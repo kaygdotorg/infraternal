@@ -278,3 +278,21 @@ fn approximate_snapshot_codec_is_bounded_and_canonical() {
         "overflowing additive frame"
     );
 }
+
+#[test]
+fn shared_writer_selector_is_fixed_length_and_fragment_safe() {
+    let wire = [5, 0, 0, 0, 0x1d, 4, 3, 2, 1];
+    let frame = Frame::decode(&wire[4..]).expect("additive shared writer selection");
+    assert_eq!(frame.encode().unwrap(), wire);
+    assert_eq!(FrameRef::decode(&wire[4..]).unwrap().into_owned(), frame);
+    for split in 0..=wire.len() {
+        let mut decoder = Decoder::default();
+        let mut frames = decoder.feed(&wire[..split]).unwrap();
+        frames.extend(decoder.feed(&wire[split..]).unwrap());
+        assert_eq!(frames, vec![frame.clone()]);
+    }
+    for body in [&[0x1d][..], &[0x1d, 1, 2, 3], &[0x1d, 1, 2, 3, 4, 5]] {
+        assert!(Frame::decode(body).is_err());
+        assert!(FrameRef::decode(body).is_err());
+    }
+}

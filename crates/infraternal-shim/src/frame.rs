@@ -13,6 +13,9 @@ pub const SEQUENCED_INPUT: u64 = 1;
 pub const MULTI_WRITER: u64 = 2;
 /// Capability bit 2 selects additive bounded Snapshots with an approximation flag.
 pub const APPROXIMATE_SNAPSHOT: u64 = 4;
+/// Capability bit 3 permits one shared peer for an existing durable writer.
+/// It requires `SEQUENCED_INPUT` and `MULTI_WRITER`; ordinary selection is unchanged.
+pub const SHARED_WRITER: u64 = 8;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,7 +43,7 @@ pub enum Frame {
     ReadFrom(u64),
     SnapshotRequest,
     Snapshot(u64, Vec<u8>),
-    /// Additive 0x1B, legal only after selecting `APPROXIMATE_SNAPSHOT`.
+    /// Additive 0x1C, legal only after selecting `APPROXIMATE_SNAPSHOT`.
     SnapshotWithFlags(u64, u8, Vec<u8>),
     Signal(u8),
     SequencedInput(u64, Vec<u8>),
@@ -48,6 +51,8 @@ pub enum Frame {
     InputStateRequest,
     InputState(u64, u64),
     SelectWriter(u32),
+    /// Additive 0x1D; shares an existing nonzero writer without evicting its ordinary peer.
+    SelectSharedWriter(u32),
     Exited(i32, u64),
     ExitAck,
     Error(u16, String),
@@ -260,6 +265,10 @@ impl Frame {
                 body.push(0x1b);
                 put!(writer);
             }
+            Self::SelectSharedWriter(writer) => {
+                body.push(0x1d);
+                put!(writer);
+            }
             Self::Exited(status, seq) => {
                 body.push(0x20);
                 put!(status);
@@ -315,6 +324,7 @@ impl Frame {
             0x19 => Self::InputStateRequest,
             0x1a => Self::InputState(p.u64()?, p.u64()?),
             0x1b => Self::SelectWriter(u32::from_le_bytes(p.take()?)),
+            0x1d => Self::SelectSharedWriter(u32::from_le_bytes(p.take()?)),
             0x1c => {
                 let seq = p.u64()?;
                 let flags = p.take::<1>()?[0];
