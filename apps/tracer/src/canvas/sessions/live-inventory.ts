@@ -99,8 +99,8 @@ export function createLiveInventory(options: { accountId: string; host: string }
     // A final host answer stays exited even when another window selects the session.
     gone(host, id, status) {
       const s = only(host, id) && records.get(id);
-      awaitingCensus.delete(id);
       if (s && (!s.gone || (status !== undefined && s.exit?.code !== status))) {
+        awaitingCensus.delete(id);
         s.state = "exited";
         s.gone = true;
         if (status !== undefined) s.exit = { code: status };
@@ -146,8 +146,8 @@ export function createLiveInventory(options: { accountId: string; host: string }
         }
       }
       for (const id of live) {
-        awaitingCensus.delete(id);
         if (owners.has(id) && !only(host, id)) continue;
+        awaitingCensus.delete(id);
         owners.set(id, host);
         let record = records.get(id);
         // A final close is monotonic: an older in-flight snapshot cannot revive it.

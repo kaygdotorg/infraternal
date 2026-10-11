@@ -143,3 +143,13 @@ test("a later absence retires a new ID after its first positive census", () => {
   expect(inventory.get("server", "new-id")?.gone).toBe(true);
   inventory.dispose();
 });
+
+for (const event of ["census", "close"] as const) test(`another host's ${event} cannot clear a new shell's census fence`, () => {
+  const inventory = createLiveInventory({ accountId: `host-fence-${event}`, host: "server" });
+  inventory.attach("server", "new-id");
+  if (event === "census") inventory.reconcile("worker", ["new-id"]);
+  else inventory.gone("worker", "new-id");
+  expect(inventory.reconcile("server", [])).toEqual([]);
+  expect(inventory.get("server", "new-id")?.gone).not.toBe(true);
+  inventory.dispose();
+});
