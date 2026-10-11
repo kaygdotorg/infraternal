@@ -143,11 +143,14 @@ class Campaign:
         else:
             proof.run("nft", "flush", "chain", "inet", "infraternal_mesh", "outgoing")
 
-    def apply(self, policy):
+    def apply(self, policy, only_live=False):
         self.version += 1
         self.last_apply_us = []
-        for proc, template in zip((self.left, self.right), self.chunks):
+        for index, (proc, template) in enumerate(zip((self.left, self.right), self.chunks)):
             chunk = copy.deepcopy(template)
+            if only_live:
+                peer = str((2, 1)[index])
+                chunk["upserted"] = {peer: chunk["upserted"][peer]}
             chunk["version"] = self.version
             chunk["from_version"] = self.version - 1 if self.version > 1 else None
             for peer in chunk["upserted"].values():
@@ -388,7 +391,7 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         assert proof.request(self.left, chunk)["applied"]
         self.remove_sender_filter()
 
-    def measure(self):
+    def measure(self, apply_rounds=0):
         """At-scale diagnostic: one real pair and 999 additional public keys per node."""
         for chunk in self.chunks:
             for node in range(3, 1002):
@@ -402,6 +405,26 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         self.apply("All")
         apply_us = (time.monotonic_ns() - started) // 1000
         apply_node_us = self.last_apply_us
+        installed_peers = [len(proof.request(proc, "stats")) for proc in (self.left, self.right)]
+        assert installed_peers == [1000, 1000], "scaled policy measurement has invalid state"
+        if apply_rounds:
+            samples = []
+            for index in range(apply_rounds):
+                for label, policy in [("narrow", {"Ports": [{"protocol": "Udp", "number": 5540}]}),
+                                      ("widen", "All")]:
+                    started = time.monotonic_ns()
+                    self.apply(policy, only_live=True)
+                    samples.append({"iteration": index, "change": label,
+                        "pair_us": (time.monotonic_ns() - started) // 1000,
+                        "node_us": self.last_apply_us,
+                        "load": Path("/proc/loadavg").read_text().strip()})
+            print(json.dumps({"measurement": "grant_replacement", "machine": "infraternal-dev",
+                "kernel": proof.run("uname", "-r").strip(),
+                "cpus": proof.run("getconf", "_NPROCESSORS_ONLN").strip(),
+                "profile": "debug fixture; one-peer delta per node", "peers_per_node": 1000,
+                "live_pairs": 1, "installed_peers": installed_peers, "initial_apply_pair_us": apply_us,
+                "initial_apply_node_us": apply_node_us, "samples": samples}), flush=True)
+            return
         saved = []
         for prefix in [[], ["nsenter", "-t", str(self.child.pid), "-n"]]:
             if self.fallback:
@@ -459,7 +482,7 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         print(json.dumps({"measurement": "policy_path", "machine": "infraternal-dev",
             "kernel": proof.run("uname", "-r").strip(), "cpus": proof.run("getconf", "_NPROCESSORS_ONLN").strip(),
             "profile": "debug fixture; kernel packet path", "peers_per_node": 1000,
-            "live_pairs": 1, "apply_pair_us": apply_us, "apply_node_us": apply_node_us, "rules": counts,
+            "live_pairs": 1, "installed_peers": installed_peers, "apply_pair_us": apply_us, "apply_node_us": apply_node_us, "rules": counts,
             "samples": samples}), flush=True)
 
     def close(self):
@@ -474,8 +497,11 @@ def main():
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--nf-tables", action="store_true")
     parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--apply-rounds", type=int, default=0)
     parser.add_argument("--enrollment-fixture")
     args = parser.parse_args()
+    if args.apply_rounds < 0 or args.apply_rounds and not args.measure:
+        parser.error("--apply-rounds requires --measure and a nonnegative count")
     if Path("/proc/self/uid_map").read_text().split()[2:] != ["1"]:
         parser.error("run inside unshare -Urn")
     os.environ["PATH"] = "/usr/sbin:" + os.environ.get("PATH", "")
@@ -485,7 +511,7 @@ def main():
         campaign = Campaign.__new__(Campaign)
         campaign.__init__(args.fixture, args.nf_tables, args.enrollment_fixture)
         if args.measure:
-            campaign.measure()
+            campaign.measure(args.apply_rounds)
             return 0
         rows = campaign.enrollment_check() if args.enrollment_fixture else campaign.check()
         print(json.dumps({"backend": "nf_tables" if args.nf_tables else "nft",
