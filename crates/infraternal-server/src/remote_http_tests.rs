@@ -103,7 +103,6 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     .await
     .unwrap();
     let token = session(&pool).await;
-    let now = now().unwrap();
     let material = crate::ca::tests::test_material();
     let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
         material.issuer().clone(),
@@ -176,7 +175,7 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     );
     assert_eq!(
         store
-            .admit(&openssl::sha::sha256(&der), now)
+            .admit(&openssl::sha::sha256(&der), now().unwrap())
             .await
             .unwrap()
             .execution_uid,

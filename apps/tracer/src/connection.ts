@@ -34,7 +34,7 @@ export const CONTROL_STREAM = 0;
  * sent one; it never carries input or internal detail.
  */
 export class ActionRefused extends Error {
-  constructor(message = "the server refused the action", readonly reason?: string) { super(message); this.name = "ActionRefused"; }
+  constructor(message = "the server refused the action", readonly reason?: string, readonly memory?: { availableMiB: number; sessionCount: number }) { super(message); this.name = "ActionRefused"; }
 }
 /**
  * The server keeps a writer row for every stream that ever attached on a connection and allows 32. A closed window
@@ -405,7 +405,7 @@ export class MuxConnection {
         const pending = this.calls.get(frame.callId);
         if (!pending) { this.fail("server returned an unexpected action result"); return; }
         this.calls.delete(frame.callId);
-        if (!frame.ok) { pending.reject(new ActionRefused(undefined, refusalReason(frame.json))); return; }
+        if (!frame.ok) { const refusal = refusalReason(frame.json); pending.reject(new ActionRefused(undefined, refusal.reason, refusal.memory)); return; }
         try {
           pending.resolve(asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown));
         } catch { pending.reject(new Error("the server returned an unreadable result")); }
@@ -459,13 +459,20 @@ export class MuxConnection {
   }
 }
 
-/** The `error` word of a refusal body (`{"error":"forbidden"}`), if the body is one. */
-function refusalReason(body: Uint8Array): string | undefined {
+/** Fixed reason codes are additive to the legacy error word; only validated counters reach product copy. */
+function refusalReason(body: Uint8Array): { reason?: string; memory?: { availableMiB: number; sessionCount: number } } {
+  if (body.byteLength > 32 * 1024) return {};
   try {
-    const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown;
-    const reason = typeof parsed === "object" && parsed !== null ? (parsed as { error?: unknown }).error : undefined;
-    return typeof reason === "string" && reason.length <= 64 ? reason : undefined;
-  } catch { return undefined; }
+    const parsed = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown);
+    const reason = parsed.reason ?? parsed.error;
+    if (typeof reason !== "string" || reason.length > 64) return {};
+    const available = parsed.available_mib, count = parsed.session_count;
+    if (reason === "host_memory_low" && typeof available === "number" && Number.isSafeInteger(available) && available >= 0
+      && typeof count === "number" && Number.isSafeInteger(count) && count >= 0) {
+      return { reason, memory: { availableMiB: available, sessionCount: count } };
+    }
+    return { reason };
+  } catch { return {}; }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

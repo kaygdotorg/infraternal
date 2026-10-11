@@ -1,0 +1,44 @@
+/** Action refusals retain validated resource counters while legacy and malformed replies remain safe. */
+import { expect, test } from "bun:test";
+import { ActionRefused, MuxConnection } from "../../connection";
+import type { WireFrame } from "../../../../../packages/protocol/src/codec";
+
+async function refusal(body: unknown): Promise<ActionRefused> {
+  const connection = new MuxConnection();
+  const pending = connection.call("ssh.session.open", {}).catch((error: unknown) => error);
+  (connection as unknown as { control(frame: WireFrame): void }).control({ type: "Result", callId: 1, ok: false, json: new TextEncoder().encode(JSON.stringify(body)) });
+  const error = await pending;
+  expect(error).toBeInstanceOf(ActionRefused);
+  return error as ActionRefused;
+}
+
+test("memory refusal retains the reason and current counters", async () => {
+  const error = await refusal({ error: "terminal unavailable", reason: "host_memory_low", available_mib: 180, session_count: 212 });
+  expect(error.reason).toBe("host_memory_low");
+  expect((error as unknown as { memory: unknown }).memory).toEqual({ availableMiB: 180, sessionCount: 212 });
+});
+
+test("legacy refusals still work and malformed counters never reach the message", async () => {
+  expect((await refusal({ error: "forbidden" })).reason).toBe("forbidden");
+  for (const available of [-1, 1.5, "180", Number.MAX_SAFE_INTEGER + 1]) {
+    const error = await refusal({ reason: "host_memory_low", available_mib: available, session_count: 212 });
+    expect((error as unknown as { memory?: unknown }).memory).toBeUndefined();
+  }
+  const missing = await refusal({ reason: "host_memory_low", available_mib: 180 });
+  expect((missing as unknown as { memory?: unknown }).memory).toBeUndefined();
+});
+
+test("product copy names the host and counters and never renders untrusted server text", async () => {
+  const { terminalRefusal } = await import("../../terminal-refusal");
+  expect(terminalRefusal(await refusal({ reason: "host_memory_low", available_mib: 180, session_count: 212 }), "monitor01")).toEqual({
+    message: "monitor01 is low on memory (180 MiB free, 212 sessions running). Close sessions you no longer need.", sessionList: true,
+  });
+  expect(terminalRefusal(new ActionRefused(undefined, "internal input: do not render"), "monitor01")).toEqual({
+    message: "The server could not open this terminal. Try again.", sessionList: false,
+  });
+  expect(terminalRefusal(new ActionRefused(undefined, "invalid")).sessionList).toBe(false);
+});
+
+test("oversized refusal JSON is ignored before parsing", async () => {
+  expect((await refusal({ reason: "host_memory_low", available_mib: 180, session_count: 212, extra: "x".repeat(32768) })).reason).toBeUndefined();
+});

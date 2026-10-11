@@ -1,5 +1,6 @@
 //! Shares one descriptor between server socket work and node component lifecycle [15,16,28,198,201].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+pub mod admission;
 pub mod channel;
 pub mod routing;
 
@@ -437,6 +438,18 @@ pub trait AgentPlugin: Send {
             after_write: None,
         })
     }
+    /// Apply a compiled resource policy to a core transport action.
+    /// # Errors
+    /// Returns a fixed public refusal without implementation details.
+    fn admit(
+        &self,
+        _action_id: &str,
+        _context: admission::NodeContext,
+    ) -> Result<(), admission::OpenRefusal> {
+        Ok(())
+    }
+    /// Refresh host-owned facts only when a control action requests them.
+    fn update_context(&mut self, _context: admission::NodeContext) {}
 }
 
 /// A bounded registry that dispatches actions only to declared plugin handlers.
@@ -448,6 +461,26 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// Consult resource policies without selecting a feature in core dispatch.
+    /// # Errors
+    /// Returns the first policy refusal.
+    pub fn admit(
+        &self,
+        action_id: &str,
+        context: admission::NodeContext,
+    ) -> Result<(), admission::OpenRefusal> {
+        for plugin in &self.plugins {
+            plugin.admit(action_id, context)?;
+        }
+        Ok(())
+    }
+
+    /// Publish trusted counts before an on-request fact read.
+    pub fn update_context(&mut self, context: admission::NodeContext) {
+        for plugin in &mut self.plugins {
+            plugin.update_context(context);
+        }
+    }
     /// Registers one plugin whose descriptor is internally consistent.
     /// # Errors
     /// Rejects unsupported API versions, duplicate ids, or actions outside the plugin namespace.

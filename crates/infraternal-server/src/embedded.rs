@@ -56,6 +56,9 @@ pub(crate) enum AgentError {
     /// The terminal action was rejected by the embedded infraternal agent.
     #[error("terminal action failed")]
     Rejected,
+    /// A public terminal admission refusal; transport failures remain generic.
+    #[error("terminal open refused")]
+    OpenRefused(infraternal_plugin_api::admission::OpenRefusal),
     /// The remote peer did not negotiate live renewal.
     #[error("remote infraternal agent lacks live renewal")]
     #[cfg(feature = "remote")]
@@ -1107,6 +1110,8 @@ enum TerminalNotice {
         session_id: String,
         status: i32,
         final_seq: u64,
+        #[serde(default)]
+        retired: bool,
     },
 }
 
@@ -1130,8 +1135,9 @@ impl TerminalNotice {
                 session_id,
                 status,
                 final_seq,
+                retired,
             } => {
-                let _ = (status, final_seq);
+                let _ = (status, final_seq, retired);
                 session_id
             }
         }
@@ -1155,7 +1161,14 @@ async fn process_incoming(
             if !ok {
                 match call {
                     PendingCall::Open(reply) => {
-                        let _ = reply.send(Err(AgentError::Rejected));
+                        let error =
+                            if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+                                serde_json::from_slice(&json)
+                                    .map_or(AgentError::Rejected, AgentError::OpenRefused)
+                            } else {
+                                AgentError::Rejected
+                            };
+                        let _ = reply.send(Err(error));
                     }
                     PendingCall::Action(reply) => {
                         let _ = reply.send(Err(AgentError::Rejected));

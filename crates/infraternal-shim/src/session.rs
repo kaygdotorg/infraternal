@@ -3,6 +3,7 @@
 use crate::{
     frame::{
         APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT,
+        SESSION_OWNER,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -32,7 +33,7 @@ use std::{
         },
     },
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 const CHUNK: usize = 16 * 1024;
 const MAX_PEERS: usize = 32;
@@ -95,6 +96,26 @@ struct Peer {
     request: Option<Request>,
 }
 impl Peer {
+    /// Ownership links never enter writer replacement or output backpressure.
+    fn attach(&mut self, caps: u64) -> io::Result<()> {
+        if self.attached {
+            return Err(invalid_input());
+        }
+        self.attached = true;
+        self.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SESSION_OWNER);
+        if self.caps & SESSION_OWNER != 0 {
+            if self.caps != SESSION_OWNER {
+                return Err(invalid_input());
+            }
+            self.writer = None;
+        } else if self.caps & MULTI_WRITER != 0 {
+            if self.caps & SEQUENCED_INPUT == 0 {
+                return Err(invalid_input());
+            }
+            self.writer = None;
+        }
+        Ok(())
+    }
     fn queue(&mut self, frame: &Frame) -> io::Result<()> {
         frame.encode_into(&mut self.pending)?;
         self.written = 0;
@@ -225,17 +246,30 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let path = sessions.join(format!("{id}.sock"));
     // Never remove an existing socket: a second startup must not steal a live
     // session's rendezvous. Stale cleanup belongs to the infraternal agent.
+    if path.with_extension("ended").try_exists()? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "session identity already ended",
+        ));
+    }
     let listener = UnixListener::bind(&path)?;
     let guard = SocketPath(path);
     fs::set_permissions(&guard.0, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     Ok((listener, guard))
 }
-/// Run one Linux session until an authenticated peer acknowledges its drained exit.
+/// Run one Linux session through final delivery, owner release or the bounded exit ceiling.
 /// # Errors
 /// Returns invalid startup configuration, account, PTY, socket or resource failures.
+pub fn run(config: Config) -> io::Result<()> {
+    run_with_retention(config, crate::ended::MAX_RETENTION)
+}
+
+/// Run with a shortened exit ceiling for deterministic real-PTY verification.
+/// # Errors
+/// Returns the same errors as [`run`]; durations above ten minutes are clamped.
 #[allow(clippy::too_many_lines)]
-pub fn run(mut config: Config) -> io::Result<()> {
+pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result<()> {
     if config.cols == 0
         || config.rows == 0
         || usize::from(config.cols) * usize::from(config.rows) > 200_000
@@ -254,7 +288,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
     mask.thread_block().map_err(io::Error::from)?;
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
-    let (listener, _path) = socket(&config)?;
+    let (listener, path) = socket(&config)?;
     let mut pty = Pty::spawn(config.uid, config.cols, config.rows)?;
     let created = u64::try_from(
         SystemTime::now()
@@ -269,11 +303,13 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let mut cursors = Inputs::default();
     let mut peers: Vec<Peer> = Vec::new();
     let mut exit = None;
+    let mut exit_deadline = None;
     let mut drained = false;
     loop {
         if exit.is_none()
             && let Some(status) = pty.child.try_wait()?
         {
+            exit_deadline = Some(Instant::now() + retention.min(crate::ended::MAX_RETENTION));
             exit = Some(
                 status
                     .code()
@@ -326,18 +362,35 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
             }
         }
+        // Ownership is independent of data peers: an unfunded window releases
+        // its data link but retains this small control link until ordered delivery
+        // or close. The one-shot deadline cannot be renewed by another attach.
+        let expired = exit_deadline.is_some_and(|deadline| Instant::now() >= deadline);
+        let owned = peers.iter().any(|p| p.attached && p.caps == SESSION_OWNER);
+        if let Some(status) = exit
+            && (expired
+                || (drained
+                    && !owned
+                    && peers
+                        .iter()
+                        .filter(|p| p.cursor.is_some())
+                        .all(|p| p.exited_sent && p.pending.is_empty())))
+        {
+            crate::ended::record(&path.0, status, ring.head())?;
+            return Ok(());
+        }
         // Borrow descriptors only through poll. Every queue and ownership
         // mutation happens after this scope, so replacement cannot leave a
         // PollFd referring to a closed/reused file descriptor.
+        // A fast viewer permits PTY progress. Lagging viewers catch up from
+        // the ring or a snapshot; when every viewer stalls the old bounded
+        // backpressure rule still applies until their daemon links detach.
+        let can_read = !drained
+            && (!peers.iter().any(|p| p.cursor.is_some())
+                || peers.iter().any(|p| {
+                    p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
+                }));
         let ready = {
-            // A fast viewer permits PTY progress. Lagging viewers catch up from
-            // the ring or a snapshot; when every viewer stalls the old bounded
-            // backpressure rule still applies until their daemon links detach.
-            let can_read = !drained
-                && (peers.is_empty()
-                    || peers.iter().any(|p| {
-                        p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
-                    }));
             let has_input = !input.is_empty();
             // Stack slots preserve the allocation-free readiness loop. Disabled
             // PTYs are omitted because level-triggered HUP would otherwise spin.
@@ -369,7 +422,22 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
                 fds[index + 3] = PollFd::new(p.stream.as_fd(), flags);
             }
-            match poll(&mut fds[..peers.len() + 3], None::<u16>) {
+            // Once the owned child exits, a descendant may hold the slave open
+            // without producing a readiness event. Probe the nonblocking master
+            // immediately, while retaining viewer backpressure during the drain.
+            let timeout = if exit.is_some() && can_read {
+                nix::poll::PollTimeout::ZERO
+            } else {
+                exit_deadline.map_or(nix::poll::PollTimeout::NONE, |deadline| {
+                    // Round upward: a submillisecond remainder must not busy-loop.
+                    nix::poll::PollTimeout::try_from(
+                        deadline.saturating_duration_since(Instant::now())
+                            + Duration::from_millis(1),
+                    )
+                    .unwrap_or(nix::poll::PollTimeout::MAX)
+                })
+            };
+            match poll(&mut fds[..peers.len() + 3], timeout) {
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
@@ -409,7 +477,10 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
-                            caps: SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT,
+                            caps: SEQUENCED_INPUT
+                                | MULTI_WRITER
+                                | APPROXIMATE_SNAPSHOT
+                                | SESSION_OWNER,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -443,7 +514,10 @@ pub fn run(mut config: Config) -> io::Result<()> {
                 }
             }
         }
-        if ready.2.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) && !drained {
+        if !drained
+            && (ready.2.intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
+                || (exit.is_some() && can_read))
+        {
             let mut bytes = [0; CHUNK];
             let limit = CHUNK.min(config.ring_capacity);
             let mut used = 0;
@@ -466,7 +540,13 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         drained = true;
                         break;
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // Background descendants may keep the slave open after
+                        // the owned shell exits. Drain ready bytes, never wait
+                        // indefinitely for an unrelated descendant to close it.
+                        drained = exit.is_some();
+                        break;
+                    }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) => return Err(e),
                 }
@@ -511,10 +591,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
                             Ok(())
                         });
                         p.decoder = decoder;
-                        if result.is_err() {
+                        if result.is_err() || acknowledged_exit {
                             disconnect = true;
-                        } else if acknowledged_exit {
-                            return Ok(());
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -559,18 +637,17 @@ fn handle<'a>(
     };
     let frame = frame.into();
     if let FrameRef::Owned(Frame::Attach(caps)) = frame {
-        if p.attached {
-            return Err(invalid());
-        }
-        p.attached = true;
-        p.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT);
-        if p.caps & MULTI_WRITER != 0 {
-            if p.caps & SEQUENCED_INPUT == 0 {
-                return Err(invalid());
-            }
-            p.writer = None;
-        }
+        p.attach(caps)?;
         return Ok(false);
+    }
+    if p.attached && p.caps == SESSION_OWNER {
+        // A fixed zero State reply is a handshake barrier, never writer state.
+        // It proves ownership was installed before the data link may detach.
+        if matches!(frame, FrameRef::Owned(Frame::InputStateRequest)) && p.pending.is_empty() {
+            p.queue(&Frame::InputState(0, 0))?;
+            return Ok(false);
+        }
+        return Err(invalid());
     }
     if !p.attached
         || (p.writer.is_none() && !matches!(&frame, FrameRef::Owned(Frame::SelectWriter(_))))

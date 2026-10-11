@@ -1,6 +1,6 @@
 //! Secure rendezvous discovery and init-independent shim launch [9][13][18].
 //!
-//! Discovery admits at most 128 sockets and connects concurrently, each
+//! Discovery recovers every live socket with bounded concurrent handshakes, each
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
 
@@ -30,8 +30,9 @@ use tokio::{
     time::timeout,
 };
 
-/// Session admission bound, also bounding startup concurrency and process tasks.
-pub use infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS as MAX_SESSIONS;
+// A malformed shim can require MAX_FRAME receive bytes. Limit recovery work
+// to 32 MiB while allowing any number of live sessions (D214).
+const DISCOVERY_HANDSHAKES: usize = 32 * 1024 * 1024 / MAX_FRAME;
 const HANDSHAKE: Duration = Duration::from_secs(2);
 
 struct Watch(Inotify);
@@ -87,6 +88,8 @@ pub struct Session {
     pub pid: u32,
     /// Selected capabilities, never inferred from the binary version.
     pub caps: u64,
+    /// Advertised ownership support; data Attach never selects this bit.
+    pub supports_owner: bool,
 }
 
 /// Reusable receive storage, bounded by the frozen shim frame limit.
@@ -221,6 +224,25 @@ pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Res
     Ok(session)
 }
 
+/// Keep ownership independent of the replaceable, credit-funded data link.
+/// # Errors
+/// Returns authentication/handshake failures. Old shims select no owner capability.
+pub async fn own(path: PathBuf, id: [u8; 16]) -> io::Result<Option<Session>> {
+    timeout(HANDSHAKE, async {
+        let mut owner = connect_with(path, id, infraternal_shim::frame::SESSION_OWNER).await?;
+        if owner.caps == 0 {
+            return Ok(None);
+        }
+        send(&mut owner.peer, &Frame::InputStateRequest).await?;
+        if Reader::default().read(&mut owner.peer).await? != Frame::InputState(0, 0) {
+            return Err(invalid("invalid shim ownership confirmation"));
+        }
+        Ok(Some(owner))
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
 async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
     timeout(HANDSHAKE, async {
         let mut peer = UnixStream::connect(&path).await?;
@@ -244,6 +266,7 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
         if session != id || start > head {
             return Err(invalid("shim identity or ring range mismatch"));
         }
+        let supports_owner = caps & infraternal_shim::frame::SESSION_OWNER != 0;
         let caps = caps & requested;
         send(&mut peer, &Frame::Attach(caps)).await?;
         Ok(Session {
@@ -253,6 +276,7 @@ async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result
             head,
             pid,
             caps,
+            supports_owner,
         })
     })
     .await
@@ -278,11 +302,12 @@ pub fn gone(error: &io::Error) -> bool {
     )
 }
 
-/// Discover socket identities with bounded parallel handshakes; refuse excess.
+/// Discover every socket identity with bounded parallel handshakes.
 /// # Errors
-/// Returns directory errors, resource overflow or a live shim handshake failure.
+/// Returns directory errors or a live shim handshake failure.
 pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
     let mut tasks = JoinSet::new();
+    let mut sessions = Vec::new();
     for entry in fs::read_dir(state.join("sessions"))? {
         let entry = entry?;
         let path = entry.path();
@@ -295,34 +320,112 @@ pub async fn discover(state: &Path) -> io::Result<Vec<Session>> {
         let id = uuid::Uuid::parse_str(name)
             .map_err(|_| invalid("invalid shim socket identity"))?
             .into_bytes();
-        let meta = fs::symlink_metadata(&path)?;
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
         if !std::os::unix::fs::FileTypeExt::is_socket(&meta.file_type())
             || meta.uid() != Uid::effective().as_raw()
             || meta.mode() & 0o777 != 0o600
         {
             return Err(invalid("invalid shim socket permissions"));
         }
-        if tasks.len() == MAX_SESSIONS {
-            return Err(io::Error::other("infraternal session limit reached"));
+        if tasks.len() == DISCOVERY_HANDSHAKES
+            && let Some(result) = tasks.join_next().await
+            && let Some(session) = result.map_err(io::Error::other)??
+        {
+            sessions.push(session);
         }
         tasks.spawn(async move {
             match connect(path.clone(), id).await {
                 Ok(session) => Ok(Some(session)),
                 Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                    fs::remove_file(path)?;
+                    match fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
                     Ok(None)
                 }
-                Err(error) => Err(error),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => {
+                    // The sealed exit can precede listener teardown. A known
+                    // ended session cannot make restart fail on its last EOF;
+                    // unknown or insecure records retain the strict error path.
+                    if infraternal_shim::ended::read(&path)?.is_some() {
+                        Ok(None)
+                    } else {
+                        Err(error)
+                    }
+                }
             }
         });
     }
-    let mut sessions = Vec::with_capacity(tasks.len());
     while let Some(result) = tasks.join_next().await {
         if let Some(session) = result.map_err(io::Error::other)?? {
             sessions.push(session);
         }
     }
     Ok(sessions)
+}
+
+/// Extract the live process birth tick from a bounded kernel stat record.
+/// The command field can contain spaces, parentheses or non-UTF8 bytes; field
+/// 22 is counted from its final delimiter. Dead states never supply an identity.
+#[must_use]
+pub fn process_birth_ticks(record: &[u8]) -> Option<u64> {
+    if record.len() > 4096 {
+        return None;
+    }
+    let open = record.windows(2).position(|pair| pair == b" (")?;
+    let end = record.windows(2).rposition(|pair| pair == b") ")?;
+    if open + 2 > end {
+        return None;
+    }
+    let pid = std::str::from_utf8(&record[..open]).ok()?;
+    if !pid.as_bytes().iter().all(u8::is_ascii_digit) || pid.parse::<u32>().ok()? == 0 {
+        return None;
+    }
+    let mut fields = std::str::from_utf8(&record[end + 2..])
+        .ok()?
+        .split_ascii_whitespace();
+    let state = fields.next()?;
+    if state.len() != 1
+        || !state.as_bytes()[0].is_ascii_alphabetic()
+        || matches!(state, "Z" | "X" | "x")
+    {
+        return None;
+    }
+    let birth = fields.nth(18)?;
+    if !birth.as_bytes().iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    birth.parse().ok()
+}
+
+/// Directory retirement events keep the registry fresh without idle timers.
+pub(crate) struct SessionEvents(tokio::io::unix::AsyncFd<Watch>);
+impl SessionEvents {
+    pub(crate) fn new(state: &Path) -> io::Result<Self> {
+        let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
+            .map_err(io::Error::from)?;
+        watch
+            .add_watch(state.join("sessions").as_path(), AddWatchFlags::IN_DELETE)
+            .map_err(io::Error::from)?;
+        Ok(Self(tokio::io::unix::AsyncFd::new(Watch(watch))?))
+    }
+    pub(crate) async fn changed(&self) -> io::Result<()> {
+        loop {
+            let mut ready = self.0.readable().await?;
+            if let Ok(result) =
+                ready.try_io(|fd| fd.get_ref().0.read_events().map_err(io::Error::from))
+            {
+                result?;
+                return Ok(());
+            }
+        }
+    }
 }
 
 // std::process pre_exec would require unsafe code to mark an inherited raw fd

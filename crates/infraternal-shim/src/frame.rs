@@ -13,6 +13,9 @@ pub const SEQUENCED_INPUT: u64 = 1;
 pub const MULTI_WRITER: u64 = 2;
 /// Capability bit 2 selects additive bounded Snapshots with an approximation flag.
 pub const APPROXIMATE_SNAPSHOT: u64 = 4;
+/// Capability bit 3 selects an ownership-only link. It neither selects a writer
+/// nor reads output; closing it releases the window independently of data credit.
+pub const SESSION_OWNER: u64 = 8;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]

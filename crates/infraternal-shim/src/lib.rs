@@ -4,6 +4,7 @@
 //! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+pub mod ended;
 pub mod frame;
 mod pty;
 pub mod ring;
@@ -17,4 +18,4 @@ pub fn detach() -> std::io::Result<bool> {
 mod session;
 mod terminal;
 mod terminal_native;
-pub use session::{Config, run};
+pub use session::{Config, run, run_with_retention};

@@ -44,7 +44,7 @@ export interface LiveSessionsOptions {
   /** Called when the window shows a session (restored or new). */
   onSessionCreated?: (sessionId: string) => void;
   /** The host no longer has a window's session (#158): the inventory marks it ended and the window paints that. */
-  onSessionGone?: (host: string, sessionId: string) => void;
+  onSessionGone?: (host: string, sessionId: string, status?: number) => void;
 }
 
 export interface LiveSessions extends SessionService {
@@ -90,7 +90,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
-    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined) {}
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -155,7 +155,14 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
-        onSessionGone: () => options.onSessionGone?.(this.model.host, this.model.sessionId ?? ""),
+        onSessionGone: (status) => options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status),
+        onOpenRefused: (message, sessionList) => {
+          if (this.disposed) return true;
+          core.toast.show({ message, tone: "error", ...(sessionList ? { duration: 0 } : {}),
+            ...(sessionList && this.showSessions ? { action: { label: "Sessions", onSelect: this.showSessions } } : {}),
+          });
+          return true;
+        },
         onSessionCreated: (id) => {
           this.model.sessionId = id;
           this.changed();
@@ -169,6 +176,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         if (this.disposed) return;
         const client = await TerminalClient.open({
           host: hostEl,
+          hostName: this.model.host,
           screen: core.stage,
           status: this.status.element,
           theme: core.theme(),
@@ -246,7 +254,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
   return {
     bind(model, env): SessionBinding {
-      const b = new Binding(model, env.changed, env.exited);
+      const b = new Binding(model, env.changed, env.exited, env.showSessions);
       bindings.add(b);
       return b;
     },

@@ -10,6 +10,8 @@ struct Exit {
     session_id: uuid::Uuid,
     status: i32,
     final_seq: u64,
+    #[serde(default)]
+    retired: bool,
 }
 
 /// The caller binds the notice to its admitted attachment and ordered output cursor.
@@ -32,7 +34,8 @@ pub(crate) async fn record(
     let exit: Exit = serde_json::from_value(value).map_err(|_| ())?;
     if exit.kind != "terminal.exited"
         || exit.session_id.as_bytes() != session
-        || exit.final_seq != cursor
+        // Saved status is authoritative without asserting delivery of missing bytes.
+        || if exit.retired { exit.final_seq < cursor } else { exit.final_seq != cursor }
     {
         return Err(());
     }

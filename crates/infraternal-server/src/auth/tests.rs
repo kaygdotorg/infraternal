@@ -3297,3 +3297,5 @@ mod ca_administration_tests;
 #[cfg(feature = "remote")]
 #[path = "remote_removal_tests.rs"]
 mod remote_removal_tests;
+#[path = "terminal_refusal_tests.rs"]
+mod terminal_refusal_tests;

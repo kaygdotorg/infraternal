@@ -144,3 +144,10 @@ path = "fuzz_targets/remote_removal_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "terminal_admission"
+path = "fuzz_targets/terminal_admission.rs"
+test = false
+doc = false
+bench = false
