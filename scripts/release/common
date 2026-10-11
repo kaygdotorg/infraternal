@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared version, transport and immutable-release checks for D213/D224 publication.
+# Shared version, transport and immutable-release checks for D213/D224/D226 publication.
 set +x
 set -euo pipefail
 release_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,7 +17,7 @@ if [[ -n "${RELEASE_TEST_ORIGIN:-}" ]]; then
     release_signer="$RELEASE_TEST_ORIGIN/signer"
     release_api="$RELEASE_TEST_ORIGIN/api"
 fi
-valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; }
+valid_version() { [[ "$1" =~ ^([0-9]+\.[0-9]+\.[0-9]+|edge-[0-9]{8}T[0-9]{6}Z)$ ]]; }
 request() {
     local token="$1"; shift
     # curl reads its authorization header from a pipe, never argv or a file.
@@ -27,8 +27,8 @@ request() {
         curl --config - --silent --show-error --fail --connect-timeout 10 --max-time 180 \
             --user-agent "infraternal-release/$release_version" "$@"
 }
-workspace_version() {
-    valid_version "$1" && [[ "$1" == "$release_version" ]] || { printf 'version must match workspace version %s\n' "$release_version" >&2; exit 2; }
+publication_version() {
+    valid_version "$1" || { printf 'version must be x.y.z or edge-YYYYMMDDTHHMMSSZ\n' >&2; exit 2; }
 }
 verify_download() {
     local version="$1" directory="$2"

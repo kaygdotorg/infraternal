@@ -3,7 +3,7 @@
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/common"
 [[ $# == 1 ]] || { printf 'usage: scripts/release/publish VERSION\n' >&2; exit 2; }
-workspace_version "$1"
+publication_version "$1"
 : "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in the environment}"
 : "${RELEASE_CALLER_TOKEN:?set RELEASE_CALLER_TOKEN in the environment}"
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID in the environment}"
