@@ -33,9 +33,15 @@ Definition of Done (it is in every job prompt):
 1. The contract is followed. Contract changes are proposed on the issue
    before the code changes, and they are additive where the contract is
    frozen.
-2. Atomic commits. Each commit builds and passes `scripts/verify fast`. The
-   commit body gives the why, the rejected alternatives, and the decision or
-   issue references.
+2. Atomic commits. Each commit builds, is formatted and lint-clean
+   (`cargo fmt --check`, `cargo clippy` for the touched crates, `bun run
+   check` for touched TypeScript) and passes the tests of the code it
+   touches. The full `scripts/verify fast` (static builds included) runs at
+   milestones and always on the branch head before it is handed to review,
+   pushed for integration or merged; its output is quoted verbatim on the
+   issue. The commit body gives the why, the rejected alternatives, and the
+   decision or issue references. (Owner, 2026-10-11: the full gate on every
+   commit cost about half of each job's time on the shared build host.)
 3. Tests against real engines (real PTY, real sshd, real Docker or Podman).
    Parsers have fuzz targets. Each bug that is found gets a failing test
    first.
