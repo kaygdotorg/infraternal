@@ -7,6 +7,7 @@
 mod binding;
 #[path = "../bootstrap_authorization.rs"]
 mod bootstrap_authorization;
+pub(crate) mod cookies;
 mod crypto;
 mod devices;
 mod http;

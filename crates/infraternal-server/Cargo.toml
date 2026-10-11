@@ -59,6 +59,8 @@ nix = { workspace = true, features = ["time"] }
 tower.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true
+# Exercise the existing server HTTP/2 and OpenSSL stack over real TLS in auth tests.
+h2 = "0.4"
 
 [[example]]
 name = "remote_ca_bench"
