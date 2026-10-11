@@ -11,6 +11,7 @@
  * at once, through the same actions the command palette uses.
  */
 import { createCapsuleTabs } from "./capsule-tabs";
+import { ICONS } from "./icons";
 import { createKeyValueList } from "./kv-list";
 import { enhanceSwitch } from "./switch";
 import { mountConfirmTip } from "./tooltip";
@@ -247,7 +248,6 @@ const DEVICE_ICON: Record<DeviceKind, string> = {
 export const deviceIcon = (kind: DeviceKind): string => DEVICE_ICON[kind];
 
 const ICON_JUMP = '<path d="M7 17 17 7M9 7h8v8"/>';
-const ICON_OUT = '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10M14 8l4 4-4 4M18 12H9"/>';
 
 /** The signed-in devices: name, type, last seen, current view, online; jump to its view, sign it out (with the compact confirmation). */
 export function renderDevices(container: HTMLElement, api: DevicesApi): () => void {
@@ -284,7 +284,7 @@ export function renderDevices(container: HTMLElement, api: DevicesApi): () => vo
         actions.append(b);
       };
       button("Jump to its view", ICON_JUMP, () => api.jump(d.view));
-      if (!d.current) button("Sign out this device", ICON_OUT, (b) => mountConfirmTip(b, {
+      if (!d.current) button("Sign out this device", ICONS.signOut, (b) => mountConfirmTip(b, {
         label: `Sign out ${d.name}`, title: `Sign out ${d.name}?`, effect: "That device will be signed out and will need your passkey to sign in again.",
         named: true, confirmLabel: "Sign out device", cancelLabel: "Keep signed in", onConfirm: () => { api.signOut(d); paint(); },
       }));
@@ -295,12 +295,11 @@ export function renderDevices(container: HTMLElement, api: DevicesApi): () => vo
   return () => root.remove();
 }
 
-/** A window of facts (Account, About-like placeholders): a key/value list under a heading. */
-export function renderFacts(container: HTMLElement, label: string, groups: Array<{ title: string; rows: Array<{ key: string; value: string }> }>): () => void {
-  const root = document.createElement("div");
-  root.className = "ui-sp";
-  container.append(root);
-  const lists = groups.map((g) => {
+type FactGroup = { title: string; rows: Array<{ key: string; value: string }> };
+
+/** The titled key/value groups of a facts window, appended to `root`. */
+function factSections(root: HTMLElement, label: string, groups: FactGroup[]): Array<{ dispose(): void }> {
+  return groups.map((g) => {
     const section = document.createElement("section");
     section.append(heading(g.title));
     const list = createKeyValueList(`${label}: ${g.title}`);
@@ -309,5 +308,48 @@ export function renderFacts(container: HTMLElement, label: string, groups: Array
     root.append(section);
     return list;
   });
+}
+
+/** A window of facts (placeholders): a key/value list under a heading. */
+export function renderFacts(container: HTMLElement, label: string, groups: FactGroup[]): () => void {
+  const root = document.createElement("div");
+  root.className = "ui-sp";
+  container.append(root);
+  const lists = factSections(root, label, groups);
+  return () => { for (const l of lists) l.dispose(); root.remove(); };
+}
+
+export interface AccountApi {
+  /** Facts the product knows about the account, shown above the device group. */
+  groups?: FactGroup[];
+  /** Signs this device out. The product asks first (the compact confirmation) at `anchor`, the button that was pressed. */
+  signOut(anchor: HTMLElement): void;
+}
+
+/** Settings, Account (D230): the person's own details, and the way out of this device. */
+export function renderAccount(container: HTMLElement, api: AccountApi): () => void {
+  const root = document.createElement("div");
+  root.className = "ui-sp";
+  container.append(root);
+  const lists = factSections(root, "Account", api.groups ?? []);
+  const block = document.createElement("section");
+  block.dataset.kind = "this-device";
+  block.append(heading("This device"));
+  const row = document.createElement("div");
+  row.className = "ui-sp-row ui-sp-status";
+  row.innerHTML = '<span class="ui-sp-names"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span>';
+  (row.querySelector(".ui-sp-label") as HTMLElement).textContent = "Sign out of this device";
+  (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = "You will need your passkey to sign in again";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ui-window-action";
+  button.dataset.action = "sign-out";
+  button.setAttribute("aria-label", "Sign out");
+  button.dataset.tip = "Sign out";
+  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS.signOut}</svg>`;
+  button.addEventListener("click", () => api.signOut(button));
+  row.append(button);
+  block.append(row);
+  root.append(block);
   return () => { for (const l of lists) l.dispose(); root.remove(); };
 }

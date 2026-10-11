@@ -406,6 +406,8 @@
   /* The mark names the machine's system and leads the pill on a phone, whatever the width (TASTE: the window pill names the machine by its system). */
   @media (pointer: fine) { .ui-window-mark { display: none; } }
 }
+/* The anchored popover (anchored-popover.ts) floats inside its stage at the coordinates the placement computes. */
+.ui-anchored-popover { position: absolute; z-index: 6; overflow: hidden; border-radius: 14px; }
 .ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 168px; padding: 6px; }
 .ui-window-menu-item {
   display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: 10px;

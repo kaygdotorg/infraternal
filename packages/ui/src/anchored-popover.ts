@@ -25,6 +25,16 @@ export interface AnchoredPopoverOptions {
   className?: string;
   /** Which anchor edge the popover lines up with. Default `start`. */
   align?: "start" | "end";
+  /**
+   * Which side of the anchor it opens on. Default `below`. `above` is for an anchor at the bottom of its screen (the
+   * sidebar's profile pill): the popover grows upward from the anchor and keeps the same gap.
+   */
+  side?: "below" | "above";
+  /**
+   * Size to the content (a short menu) instead of the full `maxWidth`; `maxWidth` still caps it. The popover is
+   * measured after the caller has filled it, so call `place()` again once the rows are in.
+   */
+  hug?: boolean;
   maxWidth?: number;
   /** The y below which the popover must not reach (a key tray's top); read on every placement. */
   bottomLimit?(): number | undefined;
@@ -50,22 +60,37 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-label", options.label);
 
+  const above = options.side === "above";
   const place = (): void => {
     const box = anchor.getBoundingClientRect();
-    const win = anchor.closest(".ui-window")?.getBoundingClientRect() ?? box;
+    const host = anchor.closest(".ui-window");
     const screen = stage.getBoundingClientRect();
-    const frame = parseFloat(getComputedStyle(anchor.closest(".ui-window") ?? anchor).borderLeftWidth) || 0;
+    // An anchor outside any window (the sidebar's footer) is bounded by the screen it floats over.
+    const win = host?.getBoundingClientRect() ?? (above ? screen : box);
+    const frame = parseFloat(getComputedStyle(host ?? anchor).borderLeftWidth) || 0;
     const inset = INSET + frame;
-    const width = Math.min(options.maxWidth ?? 400, win.width - inset * 2);
+    const room = Math.min(options.maxWidth ?? 400, win.width - inset * 2);
+    if (options.hug) { root.style.width = ""; root.style.maxWidth = `${Math.round(room)}px`; }
+    const width = options.hug ? Math.min(room, root.offsetWidth) : room;
     const wanted = options.align === "end" ? box.right - width : box.left;
     const left = Math.round(Math.max(win.left + inset, Math.min(wanted, win.right - inset - width)));
+    root.style.left = `${left - screen.left}px`;
+    if (!options.hug) root.style.width = `${Math.round(room)}px`;
+    const x = Math.round(box.left + box.width / 2 - left);
+    if (above) {
+      const bottom = Math.round(box.top - INSET);
+      const limit = Math.max(win.top + inset, screen.top + INSET);
+      root.style.top = "auto";
+      root.style.bottom = `${Math.round(screen.bottom - bottom)}px`;
+      root.style.maxHeight = `${Math.max(0, Math.floor(bottom - limit))}px`;
+      root.style.transformOrigin = `${x}px 100%`;
+      return;
+    }
     const top = Math.round(box.bottom + INSET);
     const bottom = Math.min(win.bottom - inset, options.bottomLimit?.() ?? screen.bottom, (window.visualViewport?.height ?? innerHeight) - INSET);
-    root.style.left = `${left - screen.left}px`;
     root.style.top = `${top - screen.top}px`;
-    root.style.width = `${Math.round(width)}px`;
     root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
-    root.style.transformOrigin = `${Math.round(box.left + box.width / 2 - left)}px 0`;
+    root.style.transformOrigin = `${x}px 0`;
   };
   // Placed before it is attached: the measurements are read while no new content is pending, so the browser
   // lays out once, after the single write below.
@@ -73,7 +98,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   stage.append(root);
   if (source === "pointer") {
     if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
-    else root.animate([{ opacity: 0, transform: "translateY(-4px) scale(0.96)" }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
+    else root.animate([{ opacity: 0, transform: `translateY(${above ? 4 : -4}px) scale(0.96)` }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
   }
   anchor.setAttribute("aria-expanded", "true");
 
@@ -87,7 +112,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     const done = (): void => { root.remove(); onClosed(); };
     if (how === "keyboard" || reduced()) { done(); return; }
     root.style.pointerEvents = "none";
-    root.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-2px) scale(0.98)" }],
+    root.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateY(${above ? 2 : -2}px) scale(0.98)` }],
       { duration: 130, easing: EASE, fill: "forwards" }).onfinish = done;
   };
   // A confirmation anchored inside the popover lives on the body; pressing it must not dismiss the popover.
