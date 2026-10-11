@@ -7,7 +7,7 @@ import { terminalTouch } from "./terminal-touch";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
-import { MuxConnection, type StreamHandler } from "./connection";
+import { MuxConnection, reconnectDelay, STABLE_CONNECTION_MS, type StreamHandler } from "./connection";
 
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
@@ -251,6 +251,10 @@ export class TerminalClient {
   private exitReported = false;
   /** The server's final answer that the session is gone: no attach is ever sent for it again. */
   private sessionGone = false;
+  /** Armed only after a transient shared-stream Close; live idle terminals have no retry timer. */
+  private streamRetryTimer = 0;
+  private streamRetryAttempt = 0;
+  private attachedAt = 0;
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
@@ -680,6 +684,7 @@ export class TerminalClient {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.cancelStreamRetry();
     this.disposeTouch();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
@@ -704,6 +709,7 @@ export class TerminalClient {
     return {
       onSocketOpen: (resuming) => {
         if (this.closed || this.pendingExit || this.sessionGone) return;
+        this.cancelStreamRetry();
         this.connectionIsResume = this.sessionId !== undefined;
         if (this.sessionId && resuming) {
           this.attachRequested = true;
@@ -714,6 +720,7 @@ export class TerminalClient {
       },
       onWelcome: (resumed) => {
         if (this.closed || this.pendingExit || this.sessionGone) return;
+        this.cancelStreamRetry();
         // A connection the server does not know starts every writer at zero, like a page reload.
         if (!resumed && this.hasAttached) this.restartCursors();
         if (!this.sessionId) this.openSession();
@@ -724,6 +731,7 @@ export class TerminalClient {
       },
       onFrame: (frame, message, receivedAt) => this.handleTerminalFrame(frame, message, receivedAt),
       onDisconnected: (forced) => {
+        this.cancelStreamRetry();
         if (this.closed || this.exitReported || this.sessionGone) return;
         this.attached = false;
         this.attachRequested = false;
@@ -796,12 +804,37 @@ export class TerminalClient {
       case "Close":
         if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
         this.setStatus(plainCloseReason(frame.reason));
-        // On a connection of its own a closed stream restarts it; on a shared one the others keep running.
         if (this.ownsConnection) this.conn.forceClose();
+        else this.retryStream();
         return;
       default:
         this.protocolFailure("server sent an invalid terminal-stream frame");
     }
+  }
+
+  /** Retain this stream's writer/cursors while siblings continue on the healthy shared socket. */
+  private retryStream(): void {
+    if (this.attached) this.conn.streamAttached(false);
+    this.attached = false;
+    this.attachRequested = false;
+    if (this.closed || this.pendingExit || this.sessionGone || this.streamRetryTimer !== 0) return;
+    if (performance.now() - this.attachedAt >= STABLE_CONNECTION_MS) this.streamRetryAttempt = 0;
+    this.config.hooks?.onDisconnected?.(false);
+    const delay = reconnectDelay(this.streamRetryAttempt++);
+    this.streamRetryTimer = window.setTimeout(() => {
+      this.streamRetryTimer = 0;
+      if (this.closed || this.pendingExit || this.sessionGone || !this.conn.isWelcomed) return;
+      // Reuse the stream id: the server's durable writer owns the acknowledged
+      // input cursor. A new stream would start a different writer at zero.
+      this.connectionIsResume = true;
+      this.attachRequested = true;
+      this.tryAttach();
+    }, delay);
+  }
+
+  private cancelStreamRetry(): void {
+    window.clearTimeout(this.streamRetryTimer);
+    this.streamRetryTimer = 0;
   }
 
   private openSession(): void {
@@ -834,6 +867,7 @@ export class TerminalClient {
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.attachRequested = false;
     this.attached = true;
+    this.attachedAt = performance.now();
     this.sendFrame(this.streamId, {
       type: "AttachTerm",
       sessionId: this.sessionId,
@@ -888,6 +922,8 @@ export class TerminalClient {
 
   /** Moves this terminal to a fresh stream for `sessionId`, or for a new session when there is none. */
   private restartOn(sessionId: Uint8Array | undefined): void {
+    this.cancelStreamRetry();
+    this.streamRetryAttempt = 0;
     if (this.attached) this.conn.streamAttached(false);
     this.conn.closeStream(this.streamId);
     this.attached = false;
@@ -915,6 +951,7 @@ export class TerminalClient {
   private endSession(): void {
     if (this.sessionGone || this.closed) return;
     this.sessionGone = true;
+    this.cancelStreamRetry();
     if (this.attached) this.conn.streamAttached(false);
     this.attached = false;
     this.attachRequested = false;
@@ -1151,6 +1188,7 @@ export class TerminalClient {
     const exit = this.pendingExit;
     if (!exit || this.exitReported || this.lastOutSeq < exit.finalSeq || this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.exitReported = true;
+    this.cancelStreamRetry();
     this.setStatus(exit.status === 0 ? "Shell exited." : `Shell exited with status ${exit.status}. Open a new shell to continue.`);
     this.config.hooks?.onExited?.(exit.status);
   }
