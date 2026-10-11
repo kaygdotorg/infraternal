@@ -213,11 +213,10 @@ impl Local {
             // Sequential connections bound resources and preserve operator action order.
             while let Ok((mut socket, _)) = listener.accept().await {
                 if socket.peer_cred().is_ok_and(|peer| peer.uid() == uid) {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        serve(&mut socket, &registry),
-                    )
-                    .await;
+                    // Request framing and reply writes have deadlines in serve.
+                    // An accepted transaction owns its completion: kernel RCU
+                    // cleanup at scale may outlive a transport framing deadline.
+                    let _ = serve(&mut socket, &registry).await;
                 }
             }
         });
@@ -300,7 +299,12 @@ async fn serve(socket: &mut UnixStream, registry: &Registry) -> io::Result<()> {
         &mut reply_wire,
     )
     .map_err(|_| io::ErrorKind::InvalidData)?;
-    socket.write_all(&reply_wire).await
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        socket.write_all(&reply_wire),
+    )
+    .await
+    .map_err(|_| io::ErrorKind::TimedOut)?
 }
 
 /// Call the running infraternal agent's local public control surface.
@@ -317,7 +321,7 @@ pub async fn call(state: &Path, action: &str, input: &[u8]) -> io::Result<Vec<u8
     if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let mut socket = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut socket = UnixStream::connect(state.join("plugins.sock")).await?;
         if socket.peer_cred()?.uid() != uid {
             return Err(io::ErrorKind::PermissionDenied.into());
@@ -334,24 +338,30 @@ pub async fn call(state: &Path, action: &str, input: &[u8]) -> io::Result<Vec<u8
         )
         .map_err(|_| io::ErrorKind::InvalidData)?;
         socket.write_all(&wire).await?;
-        let reply = read_one(&mut socket).await?;
-        let decoded = decode_muxed_frame(&reply).map_err(|_| io::ErrorKind::InvalidData)?;
-        match decoded.frame {
-            Frame::Result {
-                call_id: 1,
-                ok: true,
-                json,
-            } if json.len() <= MAX_ACTION_BYTES => Ok(json.to_vec()),
-            Frame::Result {
-                call_id: 1,
-                ok: false,
-                ..
-            } => Err(io::ErrorKind::PermissionDenied.into()),
-            _ => Err(io::ErrorKind::InvalidData.into()),
-        }
+        Ok::<_, io::Error>(socket)
     })
     .await
-    .map_err(|_| io::ErrorKind::TimedOut)?
+    .map_err(|_| io::ErrorKind::TimedOut)??;
+    // Waiting for an accepted transaction is event-driven and owns no timer.
+    // Once a reply begins, retain the whole-frame deadline against partial input.
+    socket.readable().await?;
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), read_one(&mut socket))
+        .await
+        .map_err(|_| io::ErrorKind::TimedOut)??;
+    let decoded = decode_muxed_frame(&reply).map_err(|_| io::ErrorKind::InvalidData)?;
+    match decoded.frame {
+        Frame::Result {
+            call_id: 1,
+            ok: true,
+            json,
+        } if json.len() <= MAX_ACTION_BYTES => Ok(json.to_vec()),
+        Frame::Result {
+            call_id: 1,
+            ok: false,
+            ..
+        } => Err(io::ErrorKind::PermissionDenied.into()),
+        _ => Err(io::ErrorKind::InvalidData.into()),
+    }
 }
 
 #[cfg(test)]
@@ -405,7 +415,7 @@ mod tests {
             if input == b"{\"hold\":true}" {
                 self.started.notify_one();
                 self.release
-                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .recv_timeout(std::time::Duration::from_secs(30))
                     .map_err(|_| PluginError::Rejected)?;
             }
             Ok(input.to_vec())
@@ -465,6 +475,29 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         release.send(()).unwrap();
         assert!(call.await.unwrap().is_ok());
+    }
+    #[tokio::test]
+    async fn accepted_public_transaction_outlives_the_framing_deadline() {
+        let directory = Directory::new();
+        let (registry, started, release) = registry();
+        let _local = Local::bind(&directory.0, registry).await.unwrap();
+        let path = directory.0.clone();
+        let pending =
+            tokio::spawn(async move { call(&path, "fixture.read", b"{\"hold\":true}").await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        // A valid accepted operation may wait for kernel cleanup. Its framing
+        // deadline cannot turn successful completion into an apparent refusal.
+        tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        let remained_pending = !pending.is_finished();
+        release.send(()).unwrap();
+        let result = pending.await.unwrap();
+        assert!(
+            remained_pending,
+            "accepted transaction timed out before completion"
+        );
+        assert_eq!(result.unwrap(), b"{\"hold\":true}");
     }
     #[tokio::test]
     async fn local_public_actions_refuse_controls_and_active_socket_replacement() {
