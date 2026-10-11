@@ -3,6 +3,7 @@ import { ActionRefused, type MuxConnection } from "../../connection";
 import { hostPlatformFromOs } from "../../../../../packages/ui/src/host-icons";
 import type { DetailsSource, HostFactsSnapshot } from "../windows/details-source";
 import { detailsFacts } from "../windows/details-facts";
+import { readExtendedInfo } from "../windows/extended-info";
 import type { SessionInventory } from "./inventory";
 
 export function createLiveDetails(options: {
@@ -22,6 +23,7 @@ export function createLiveDetails(options: {
       const delay = roundTrip();
       const facts = snapshots.get(rec.model.id);
       return detailsFacts({
+        extended: readExtendedInfo(),
         host: {
           name: rec.model.host,
           ...(host.user ? { user: host.user } : {}),

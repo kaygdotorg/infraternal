@@ -11,16 +11,32 @@
  */
 import { FONTS } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
-import { renderAppearance, renderWindowSizes, type AppearanceApi, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import { renderAppearance, renderHosts, renderWindowSizes, type AppearanceApi, type HostsApi, type StatusActionPref, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import type { AuthorityControl } from "../addhost/authority-unlock";
 import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
 import type { Ctx } from "../context";
 import { el } from "../dom";
+import { EXTENDED_INFO_EVENT, readExtendedInfo, writeExtendedInfo } from "../windows/extended-info";
 
 /** Account- and instance-level panels. Each returns what to run when its window goes away. */
 export interface SettingsSource {
   /** Section ids this source renders (besides the four built-in ones). */
   sections: readonly string[];
   render(section: string, pane: HTMLElement, cx: Ctx): (() => void) | void;
+}
+
+/** The host-connection lock as a Settings group: plain words for the state, and the button only for an administrator while it is locked. */
+function authorityPref(control: AuthorityControl): StatusActionPref {
+  return {
+    id: "host-connections", title: "Host connections",
+    text: () => control.state() === "unknown" ? undefined
+      : control.state() === "unlocked" ? "Unlocked"
+      : "Locked until an administrator confirms with a passkey",
+    action: () => control.state() === "locked" && control.canUnlock() ? "Unlock" : undefined,
+    act: () => { void control.unlock(); },
+    refresh: () => { void control.refresh(); },
+    onChange: (listener) => control.onChange(listener),
+  };
 }
 
 export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement): () => void {
@@ -50,6 +66,14 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     set: (group, option) => { if (group === "phone") writeSize("phone", option as PhoneSize); else writeSize("desktop", option as DesktopSize); },
     onChange(listener) { window.addEventListener(SIZE_EVENT, listener); return () => window.removeEventListener(SIZE_EVENT, listener); },
   };
+  const hosts: HostsApi = {
+    switches: [{
+      id: "extended-info", title: "Details", label: "Extended info", hint: "System, resources and access facts in each window's details",
+      get: readExtendedInfo, set: writeExtendedInfo,
+      onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
+    }],
+    ...(cx.adapters.authority ? { statuses: [authorityPref(cx.adapters.authority)] } : {}),
+  };
   const pane = el("div", "ui-settings-pane");
   pane.setAttribute("role", "region");
   pane.setAttribute("aria-label", section);
@@ -58,6 +82,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     switch (section) {
       case "appearance": return renderAppearance(pane, appearance);
       case "windows": return renderWindowSizes(pane, windowSizes);
+      case "hosts": return renderHosts(pane, hosts);
       case "toolbar": return core.settingsPanels.toolbar.render(pane);
       case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
       case "about": return core.settingsPanels.about.render(pane);

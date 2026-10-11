@@ -371,6 +371,14 @@ button { color: inherit; }
 .terminal-screen[data-sidebar-open] .sidebar-toggle { transform: translate(calc(var(--sb-w) - 9px - var(--pill-h)), var(--sb-head-y)); }
 .terminal-screen[data-sidebar-open] .sidebar-toggle:active:not(:disabled) { transform: translate(calc(var(--sb-w) - 9px - var(--pill-h)), var(--sb-head-y)) scale(0.97); }
 .sidebar-toggle.instant { transition: none; }
+/* Something waits in the inbox (D234) while the sidebar is closed: a small accent dot on the toggle's corner. It rides
+   the toggle's own transform, and fades (opacity only) when the sidebar opens, where the card itself is visible. */
+.sidebar-toggle::after {
+  content: ""; position: absolute; top: 3px; right: 3px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 2px var(--bg); opacity: 0; transition: opacity 160ms var(--ease-out);
+}
+.sidebar-toggle[data-pending]::after { opacity: 1; }
+.terminal-screen[data-sidebar-open] .sidebar-toggle[data-pending]::after { opacity: 0; }
 .keybar button:active { transform: scale(var(--ui-press-scale)); }
 .capsule {
   justify-self: center; min-width: min(var(--capsule-min), 100%); padding: 0 8px 0 14px; justify-content: flex-start;

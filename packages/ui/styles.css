@@ -163,7 +163,18 @@
 .ui-toast-marker .tick svg { width: 14px; height: 14px; stroke: var(--bg); }
 .ui-toast-action { min-height: 32px; flex: none; padding: 0 8px; border-radius: 8px; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-marker .tick { width: 18px; height: 18px; }
+/* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
+.ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }
+.ui-toast-glyph[hidden] { display: none; }
+.ui-toast-glyph svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-toast[data-icon="true"] .ui-toast-marker { display: none; }
+/* The optional dismiss control: a quiet icon, the same height as the action. */
+.ui-toast-close { display: grid; width: 32px; min-height: 32px; flex: none; place-items: center; padding: 0; border-radius: 8px; color: var(--fg-3); }
+.ui-toast-close[hidden] { display: none; }
+.ui-toast-close svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+@media (hover: hover) and (pointer: fine) { .ui-toast-close:hover { background: var(--hover); color: var(--fg); } }
 @media (pointer: coarse) {
+  .ui-toast-close { width: 44px; min-height: 44px; }
   .ui-toast { min-height: 54px; gap: 12px; padding: 7px 9px 7px 12px; border-radius: 15px; }
   .ui-toast-action { min-height: 44px; padding: 0 10px; }
   .ui-toast-marker .tick { width: 20px; height: 20px; }
@@ -427,6 +438,10 @@
   min-height: var(--ui-row-h); padding: 4px 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
+/* Titled sections inside one list: the quiet eyebrow of the settings headings, no box or rule of its own. */
+.ui-kv-section + .ui-kv-section { margin-top: 12px; }
+.ui-kv-rows { display: flex; flex-direction: column; }
+.ui-kv-group { padding: 6px 0 2px; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
   display: block; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
   transition: transform 140ms var(--ease-out, ease-out);
@@ -788,6 +803,14 @@
 .ui-sp-kind svg { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-sp-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
 .ui-sp-dot[data-online="false"] { background: var(--fg-3); }
+/* A static row (a fact and its action): no press scale or hover fill, because the row itself does nothing. The action fades
+   instead of vanishing so the words keep their place. */
+.ui-sp-status { cursor: default; min-height: var(--ui-row-h, 32px); }
+.ui-sp-status:active { transform: none; }
+@media (hover: hover) and (pointer: fine) { .ui-sp-status:hover { background: none; } }
+.ui-sp-status-action { flex: none; transition: opacity 160ms ease, background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-status-action[data-shown="false"] { opacity: 0; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .ui-sp-status-action { transition: none; } }
 .ui-sp-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
 .ui-sp-name-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 6px; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
@@ -869,3 +892,25 @@
 @media (prefers-reduced-motion: reduce) {
   :where(*:not(.terminal-host)), *:not(.terminal-host)::-webkit-scrollbar-thumb { transition: none; }
 }
+
+/* Inbox (inbox.ts): the sidebar's card of things that wait on the person. It sits above the footer, inside the
+   sidebar's 8 px padding, as a quiet tinted card (no second glass layer inside the glass). Items stack; each is a
+   sentence, a quiet line and one action. Only opacity and transform move, and the transform is cleared at rest. */
+.ui-inbox {
+  display: grid; flex: none; gap: 8px; margin: auto 0 8px; padding: 10px;
+  border-radius: calc(var(--r-lg, 18px) - 8px); background: color-mix(in oklab, var(--accent) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent);
+  transition: opacity 160ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
+}
+/* A card of its own, like the toast: the glass halo would only smear its glyphs (and the solid action takes none). */
+.ui-inbox, .ui-inbox * { text-shadow: none; }
+.ui-inbox[hidden] { display: none; }
+.ui-inbox[data-open="false"] { opacity: 0; transform: translateY(6px); pointer-events: none; }
+.ui-inbox ~ .ui-sidebar-foot { margin-top: 0; }
+.ui-inbox-item { display: grid; gap: 8px; }
+.ui-inbox-text { display: grid; gap: 2px; min-width: 0; }
+.ui-inbox-title { color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-label); line-height: 1.4; }
+.ui-inbox-detail { color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
+.ui-inbox-action { --ui-button-height: 28px; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); justify-self: stretch; min-height: 28px; padding: 0 12px; border-radius: 8px; }
+@media (pointer: coarse) { .ui-inbox-action { --ui-button-height: 44px; min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .ui-inbox, .ui-inbox[data-open="false"] { transform: none; transition: opacity 150ms ease; } }

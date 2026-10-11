@@ -125,6 +125,8 @@ export interface Adapters {
   details?: import("./windows/details-source").DetailsSourceLoader;
   /** Starts the add-host flow (#78); absent until it exists, and the empty-state button is then not drawn. */
   addHost?: () => void;
+  /** The lock on host connections (D168, D217): its state, the palette row and Settings → Hosts; absent when the server has none. */
+  authority?: import("./addhost/authority-unlock").AuthorityControl;
 }
 
 export interface Ctx {

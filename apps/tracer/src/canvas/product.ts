@@ -16,6 +16,7 @@ import { ConnectionPool, MuxConnection } from "../connection";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
 import { createAddHost } from "./addhost";
+import { createAuthorityControl } from "./addhost/authority-unlock";
 import { createOverlayFlowHost } from "./addhost/flow-host";
 import type { ProvisioningService } from "./addhost/service";
 import { createWindowFlowHost } from "./addhost/window-host";
@@ -25,7 +26,7 @@ import { columnsFromDocument, docHasGroups, type DocTarget } from "./model/docum
 import { loadGroups } from "./layout/groups-handle";
 import { LocalCanvasStore } from "./model/store";
 import type { ViewModel, WindowModel } from "./model/types";
-import { createMeshApi } from "./mesh/api";
+import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
@@ -88,6 +89,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     } },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
+  const authority = createAuthorityControl(core, { service: loadProvisioning });
   let readyRemoval: import("./context").Adapters["hostRemoval"];
   const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), remove: (id, name, anchor) => readyRemoval?.remove(id, name, anchor) };
   // Registry metadata is optional chrome: load it without delaying the first terminal.
@@ -99,12 +101,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const saved = await store.load();
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
   const savedMesh = saved?.views.find((v) => v.id === "mesh");
-  const mesh = createMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
+  const mesh = createLazyMeshApi({ transport: connectionTransport(connection), pins: savedMesh?.layout.type === "graph" ? savedMesh.layout.pinned : {} });
   // A saved layout with a group needs the grouped module before its views are built (D212). Any other canvas starts the
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
-    adapters: { sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => addHost.open() },
+    adapters: { sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => addHost.open(), authority },
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
@@ -137,6 +139,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     dispose() {
       canvas.flush();
       offRoundTrip();
+      authority.dispose();
       offMeshView();
       addHost.dispose();
       canvas.dispose();
