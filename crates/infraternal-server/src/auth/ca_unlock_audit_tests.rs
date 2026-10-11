@@ -23,7 +23,6 @@ impl<'a> MakeWriter<'a> for Capture {
 }
 
 #[test]
-#[ignore = "CA-02 failing-before audit event regression; enable with the instrumentation commit"]
 fn unlock_audit_records_principal_time_outcome_without_material() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
@@ -70,6 +69,25 @@ fn unlock_audit_records_principal_time_outcome_without_material() {
                         .await
                         .is_err()
                 );
+                let start = f.administration.start(&f.auth.session, NOW).await.unwrap();
+                let proof = f.auth.software.login(&start, ORIGIN, true);
+                let transaction = f.auth.auth.pool.begin().await.unwrap();
+                let cancelled = tokio::time::timeout(
+                    Duration::from_millis(50),
+                    f.administration.finish(
+                        &f.auth.session,
+                        str_field(&start, "ceremony"),
+                        proof,
+                        Zeroizing::new([7; 32]),
+                        NOW,
+                    ),
+                )
+                .await;
+                assert!(
+                    cancelled.is_err(),
+                    "writer must keep the proof pending until cancellation"
+                );
+                transaction.rollback().await.unwrap();
                 let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
                 let events: Vec<Value> = text
                     .lines()
@@ -78,7 +96,7 @@ fn unlock_audit_records_principal_time_outcome_without_material() {
                     .collect();
                 assert_eq!(
                     events.len(),
-                    3,
+                    4,
                     "each completed unlock attempt must have one audit event"
                 );
                 assert_eq!(events[0]["fields"]["user"], f.auth.user);
@@ -87,6 +105,8 @@ fn unlock_audit_records_principal_time_outcome_without_material() {
                 assert_eq!(events[1]["fields"]["outcome"], "refused");
                 assert_eq!(events[2]["fields"]["outcome"], "refused");
                 assert_eq!(events[2]["fields"]["user"], f.auth.user);
+                assert_eq!(events[3]["fields"]["outcome"], "cancelled");
+                assert_eq!(events[3]["fields"]["user"], f.auth.user);
                 assert!(
                     !text.contains(&f.auth.session),
                     "session must not enter audit"
