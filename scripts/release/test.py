@@ -20,6 +20,26 @@ class ReleaseScripts(unittest.TestCase):
         for name in ('build', 'publish', 'verify'):
             self.assertTrue((ROOT / 'scripts/release' / name).is_file(), name)
 
+    def test_release_json_rejects_duplicates_at_every_depth(self):
+        # The same decoder checks storage preflight, upload answers and Worker
+        # answers; nested objects must be as unambiguous as the outer envelope.
+        for mode, body in (
+            ('empty-prefix', '{"success":true,"result":[{"key":"existing"}],"result":[]}'),
+            ('empty-prefix', '{"success":false,"success":true,"result":[]}'),
+            ('empty-prefix', '{"success":true,"result":[],"result_info":{"is_truncated":true,"is_truncated":false}}'),
+            ('uploaded', '{"success":true,"result":{"key":"first","key":"second"}}'),
+            ('signed', '{"version":"first","version":"second"}'),
+            ('signed', '{"index":[{"version":"first","version":"second"}]}'),
+        ):
+            with self.subTest(mode=mode, body=body):
+                result = subprocess.run(
+                    ['python3', str(ROOT / 'scripts/release/response.py'), mode],
+                    input=body, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(result.stderr, 'duplicate JSON fields in the release response\n')
+
     def test_local_publication_is_verified_and_immutable(self):
         scratch = Path(os.environ.get('CARGO_TARGET_DIR', Path.home() / '.cache/codex-scratch/release-pipeline/target'))
         scratch.mkdir(parents=True, exist_ok=True)
