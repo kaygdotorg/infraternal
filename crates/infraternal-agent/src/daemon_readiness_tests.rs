@@ -27,6 +27,38 @@ async fn replay_complete_preserves_the_full_output_cursor_as_decimal() {
     assert_eq!(event["out_seq"], u64::MAX.to_string());
 }
 
+#[test]
+fn fixture_fence_processes_messages_before_the_control_pong() {
+    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let source = r#"
+import struct
+import sys
+sys.path.insert(0, sys.argv[1])
+from agent_fixture import Binary
+binary = object.__new__(Binary)
+binary.fence_nonce = 0
+preceding = (1, 0x11, struct.pack("<Q", 0) + b"x")
+frames = iter([preceding, (0, 0x09, struct.pack("<QQ", 1, 0))])
+binary.read = lambda: next(frames)
+binary.send = lambda *args: None
+seen = []
+binary.process = lambda credit=True, frame=None: seen.append(frame)
+binary.fence()
+assert seen == [preceding], seen
+"#;
+    let result = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(source)
+        .arg(scripts)
+        .output()
+        .expect("Python must be available for the real-binary fixture tests");
+    assert!(
+        result.status.success(),
+        "fixture fence discarded a preceding frame: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 #[cfg(feature = "remote")]
 struct StalledWriter {
     input: Mutex<(Vec<u8>, usize)>,

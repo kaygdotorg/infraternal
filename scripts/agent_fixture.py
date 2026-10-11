@@ -379,7 +379,8 @@ class Binary:
             if frame[:2] == (0, 0x09):
                 assert frame[2] == body
                 return
-                self.process(credit=False, frame=frame)
+            # The Pong fences earlier writer traffic; keep it in socket order without refunding credit.
+            self.process(credit=False, frame=frame)
 
     def wait_for_starvation_detach(self, cols=80, rows=24, timeout=5):
         """Prove a zero-credit relay detached by requiring Resize to relink and Ack."""
