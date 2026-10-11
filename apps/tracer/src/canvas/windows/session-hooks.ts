@@ -56,6 +56,8 @@ export function createSessionHooks(cx: Ctx): SessionUi {
     if (cx.signal.aborted) return;
     for (const rec of windows()) if (isTerminal(rec)) { cx.win.syncSession(rec); paint(rec); }
     cx.tree.render();
+    // The Console count leaves out sessions that ended. Inventory changes come after setup, so the pill exists.
+    cx.pill.paint();
     part?.render();
   });
   cx.signal.addEventListener("abort", () => off(), { once: true });

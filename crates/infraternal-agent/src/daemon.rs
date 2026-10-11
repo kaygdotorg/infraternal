@@ -8,7 +8,8 @@
 //! first at frame boundaries; reply overload retires the channel without stalling dispatch. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
-//! A closed shim or failed terminal task closes only its mux stream.
+//! A closed shim or failed terminal task closes only its mux stream. A session
+//! whose shim is gone answers its stream with the final Close 4404 (#158).
 use crate::{
     channel::Channel,
     relay,
@@ -67,6 +68,8 @@ enum Message {
     Event(u32, Vec<u8>),
     Pong(u64, u64),
     Close(u32, &'static str),
+    /// The session's shim is gone: a final stream close, never retried (wire §4).
+    Ended(u32),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,6 +196,13 @@ async fn writer(
             Message::Close(stream, reason) => {
                 tx.send(socket, stream, &Frame::Close { code: 1, reason })
                     .await?;
+            }
+            Message::Ended(stream) => {
+                let frame = Frame::Close {
+                    code: infraternal_protocol::CLOSE_SESSION_GONE,
+                    reason: infraternal_protocol::SESSION_GONE_REASON,
+                };
+                tx.send(socket, stream, &frame).await?;
             }
         }
     }
@@ -402,7 +412,11 @@ async fn run_channel(
                             if streams.len() >= sessions::MAX_SESSIONS || streams.contains_key(&stream) {
                                 return Err(sessions::invalid("terminal stream already attached or limit reached"));
                             }
-                            let path = registry.get(session_id).ok_or_else(|| sessions::invalid("unknown terminal session"))?.clone();
+                            // The registry only caches shims this process has seen. A miss is not
+                            // proof of death, and never a reason to drop every sibling stream: the
+                            // rendezvous derives from the id alone, and `terminal` answers a final
+                            // Close when no shim listens there (#158).
+                            let path = registry.get(session_id).cloned().unwrap_or_else(|| sessions::rendezvous(&state, *session_id));
                             let id = *session_id;
                             let (commands, rx) = session_commands::channel();
                             let (cancel, cancelled) = oneshot::channel();
@@ -482,9 +496,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     })
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-    let path = state
-        .join("sessions")
-        .join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()));
+    let path = sessions::rendezvous(&state, id);
     let (tx, rx) = mpsc::channel(8);
     let (commands, command_rx) = mpsc::channel(8);
     let dispatch = async {
@@ -512,10 +524,21 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
                 .map_err(|_| sessions::invalid("native terminal command queue unavailable"))?;
         }
     };
+    let writer = writer(channel, rx, None, false, false);
+    tokio::pin!(writer);
     tokio::select! {
         result = dispatch => result,
-        result = writer(channel, rx, None, false, false) => result,
-        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => result,
+        result = &mut writer => result,
+        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => {
+            result?;
+            // Successful terminal returns can queue a final Close (gone session,
+            // unsupported shim or refused request). Its sole sender is now gone:
+            // drain the FIFO before RetireChannel cancels the native writes.
+            // Bound the whole drain so an unread peer cannot pin this stream.
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer)
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+        },
     }
 }
 
@@ -573,6 +596,26 @@ async fn input_state(link: &mut Link) -> io::Result<u64> {
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim input state timed out"))?
 }
 
+/// Connects this stream to its session's shim. When nothing listens at the
+/// rendezvous the shim is gone, and so is the session: the stream gets one
+/// final Close and the caller ends quietly, keeping the channel and every
+/// sibling stream (wire §4, #158). Other failures stay errors and transient.
+async fn relink(
+    path: &std::path::Path,
+    id: [u8; 16],
+    stream: u32,
+    tx: &mpsc::Sender<Message>,
+) -> io::Result<Option<Link>> {
+    match Link::connect(path.to_path_buf(), id, stream).await {
+        Ok(link) => Ok(Some(link)),
+        Err(error) if sessions::gone(&error) => {
+            emit(tx, Message::Ended(stream)).await?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn terminal(
     path: PathBuf,
@@ -583,7 +626,10 @@ async fn terminal(
     mut commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
-    let mut session = Some(Link::connect(path.clone(), id, stream).await?);
+    let Some(first) = relink(&path, id, stream, &tx).await? else {
+        return Ok(());
+    };
+    let mut session = Some(first);
     if session
         .as_ref()
         .is_none_or(|s| s.session.caps & SEQUENCED_INPUT == 0)
@@ -691,7 +737,9 @@ async fn terminal(
             }
         }
         if output.needs_snapshot() && session.is_none() {
-            let mut next = Link::connect(path.clone(), id, stream).await?;
+            let Some(mut next) = relink(&path, id, stream, &tx).await? else {
+                return Ok(());
+            };
             let written = input_state(&mut next).await?;
             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
             // A credit deadline discards only the daemon's pending frame,
@@ -709,7 +757,7 @@ async fn terminal(
                     other => {
                         let detached = session.is_none();
                         if detached {
-                            let mut next = Link::connect(path.clone(), id, stream).await?;
+                            let Some(mut next) = relink(&path, id, stream, &tx).await? else { return Ok(()); };
                                             input_state(&mut next).await?;
                             session = Some(next);
                         }
@@ -771,3 +819,7 @@ mod remote_tests;
 #[cfg(test)]
 #[path = "daemon_readiness_tests.rs"]
 mod readiness_tests;
+
+#[cfg(test)]
+#[path = "daemon_gone_tests.rs"]
+mod gone_tests;

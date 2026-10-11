@@ -1,6 +1,7 @@
 /**
- * The body of a logs window: it behaves like `tail -f`. The window shows a backlog that fills it, new lines are appended
- * as they arrive, and the view stays pinned to the newest line unless the person scrolled up to read; then a small
+ * The body of a logs window, loaded on demand with the first one (D188): it behaves like `tail -f`. The window
+ * shows a backlog that fills it, new lines are appended as they arrive, and the view stays pinned to the newest
+ * line unless the person scrolled up to read; then a small
  * "Jump to latest" button appears, and a press (or scrolling back to the end) pins it again. A line is
  * `time  source  message`; a message that starts with `WARN` or `ERROR` is tinted.
  *

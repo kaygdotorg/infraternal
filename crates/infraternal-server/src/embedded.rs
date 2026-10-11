@@ -38,6 +38,11 @@ const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 const INPUT_CAPACITY: usize = 4;
 const READ_CHUNK: usize = 16 * 1024;
 const MAX_BUFFERED_WIRE: usize = MAX_FRAME_LEN + READ_CHUNK + 10;
+/// Reconnect pauses for a lost infraternal agent link, and how long a link must
+/// live before a loss counts as fresh rather than as the same failure again.
+const RECONNECT_FLOOR: Duration = Duration::from_millis(200);
+const RECONNECT_CEILING: Duration = Duration::from_secs(30);
+const STABLE_LINK: Duration = Duration::from_secs(10);
 
 /// Protocol or process failures are deliberately independent of user input and agent log output.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -572,7 +577,8 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
     let mut connection: Option<AgentConnection> = None;
-    let mut backoff = Duration::from_millis(200);
+    let mut backoff = RECONNECT_FLOOR;
+    let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
 
     loop {
@@ -595,7 +601,7 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     continue;
                 }
                 connection = Some(fresh);
-                backoff = Duration::from_millis(200);
+                connected_at = std::time::Instant::now();
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -629,7 +635,7 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
                 }
@@ -639,7 +645,7 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
                     continue;
@@ -648,12 +654,25 @@ async fn run_actor(mut source: Source, mut commands: mpsc::Receiver<Command>) {
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
                 }
             }
         }
+    }
+}
+
+/// The pause before the next infraternal agent start after a lost link. A link
+/// that lived for a while starts over at the floor; one that died young doubles
+/// the pause, up to the ceiling. Resetting on every successful connect let a
+/// request that kills each new process (a dead session's re-sent `AttachTerm`
+/// did) restart it about twice a second, forever (#158).
+fn after_loss(backoff: Duration, connected_at: std::time::Instant) -> Duration {
+    if connected_at.elapsed() >= STABLE_LINK {
+        RECONNECT_FLOOR
+    } else {
+        (backoff * 2).min(RECONNECT_CEILING)
     }
 }
 

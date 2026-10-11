@@ -9,6 +9,8 @@
  *   split), end (the compact confirm names what is running) and, once exited, run again or be dismissed. On touch
  *   a row swipes open 1:1 with the finger to show the same actions.
  * - An exited session shows its final screen read-only, with one floating pill: Run again, Dismiss.
+ * - A session the host no longer has (#158) shows the same pill, quieter: "Session ended", New shell (a new shell
+ *   on the same host, in this window) and Close window. There is no exit code or final screen to show.
  * - A session another device typed in last is shown scaled to fit with a quiet "Sized for <device>" badge; typing
  *   or tapping the badge takes the size over (D183).
  *
@@ -33,7 +35,7 @@ import type { Ctx, WinRec } from "../context";
 import { coarse, el, reduced } from "../dom";
 import { byFrecency, type SessionRecord, type SessionState } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
-import { SESSION_ICON } from "../views/icons";
+import { ICON, SESSION_ICON } from "../views/icons";
 
 /** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
 export interface SessionUiPart {
@@ -88,22 +90,30 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         body.append(strip);
       }
       const failed = (s.exit?.code ?? 0) !== 0;
+      const gone = Boolean(s.gone);
       // Rebuilt only when what it says changes, so a refresh never resets a hover or a press on it.
-      const signature = `${s.id}:${s.exit?.code ?? 0}`;
+      const signature = gone ? `${s.id}:gone` : `${s.id}:${s.exit?.code ?? 0}`;
       if (strip.dataset.signature !== signature) {
         strip.dataset.signature = signature;
-        strip.dataset.result = failed ? "fail" : "ok";
-        strip.setAttribute("aria-label", `${s.name} exited with code ${s.exit?.code ?? 0}`);
+        strip.dataset.result = gone ? "ended" : failed ? "fail" : "ok";
+        strip.setAttribute("aria-label", gone ? `${s.name} ended` : `${s.name} exited with code ${s.exit?.code ?? 0}`);
         const mark = el("span", "ui-mark");
-        mark.dataset.mark = failed ? "fail" : "ok";
-        const text = el("span", "cl-sx-strip-text", `Exited ${s.exit?.code ?? 0}`);
+        mark.dataset.mark = gone ? "ended" : failed ? "fail" : "ok";
+        const text = el("span", "cl-sx-strip-text", gone ? "Session ended" : `Exited ${s.exit?.code ?? 0}`);
         const again = el("button", "cl-sx-again");
         again.type = "button";
-        again.innerHTML = `${icon(SESSION_ICON.again)}<span>Run again</span>`;
-        again.addEventListener("click", () => inventory.runAgain(rec.model.host, s.id));
-        const dismiss = button("cl-sx-dismiss", "Dismiss", ICON_X);
+        if (gone) {
+          // The obvious next step: a new shell on the same host, in this same window.
+          again.innerHTML = `${icon(ICON.plus)}<span>New shell</span>`;
+          again.addEventListener("click", () => newShell(rec, s));
+        } else {
+          again.innerHTML = `${icon(SESSION_ICON.again)}<span>Run again</span>`;
+          again.addEventListener("click", () => inventory.runAgain(rec.model.host, s.id));
+        }
+        const dismiss = button("cl-sx-dismiss", gone ? "Close window" : "Dismiss", ICON_X);
+        dismiss.dataset.tip = gone ? "Close window" : "Dismiss";
         dismiss.addEventListener("click", () => dismissSession(rec.model.host, s));
-        strip.replaceChildren(mark, text, again, dismiss);
+        strip.replaceChildren(mark, text, ...(gone && !rec.binding?.openNew ? [] : [again]), dismiss);
       }
     } else strip?.remove();
     // Another device typed last: shown scaled to fit, with a badge that offers the size back.
@@ -182,6 +192,15 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     if (w && !w.owner.view.team) cx.win.close(w);
   };
   const dismissSession = (host: string, s: SessionRecord): void => { inventory.dismiss(host, s.id); closeWindowOf(host, s.id); };
+  /** An ended session's window starts a new shell on the same host in place; the ended record goes. */
+  const newShell = (rec: WinRec, s: SessionRecord): void => {
+    if (!rec.binding?.openNew) return;
+    delete rec.model.sessionId;
+    inventory.dismiss(rec.model.host, s.id);
+    rec.binding.openNew();
+    paint(rec);
+    cx.store.changed();
+  };
 
   // ---- the manager --------------------------------------------------------------------------------
   class Manager {
@@ -274,10 +293,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       li.dataset.state = s.state;
       const current = this.rec.model.sessionId === s.id;
       if (current) li.dataset.current = "";
-      const failed = s.state === "exited" && (s.exit?.code ?? 0) !== 0;
-      const mark = s.state === "exited" ? (failed ? "fail" : "ok") : s.activity;
+      const failed = s.state === "exited" && !s.gone && (s.exit?.code ?? 0) !== 0;
+      const mark = s.gone ? "ended" : s.state === "exited" ? (failed ? "fail" : "ok") : s.activity;
       const detail = [
-        s.state === "exited" ? `exited with code ${s.exit?.code ?? 0}` : s.state === "open" ? (current ? "this window" : "open in another window") : "detached",
+        s.gone ? "ended" : s.state === "exited" ? `exited with code ${s.exit?.code ?? 0}` : s.state === "open" ? (current ? "this window" : "open in another window") : "detached",
         s.running ? `running ${s.running}` : "",
         mark === "output" ? "new output" : mark === "ok" && s.state !== "exited" ? "command finished" : mark === "fail" && s.state !== "exited" ? "command failed" : "",
       ].filter(Boolean).join(", ");
@@ -297,7 +316,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       const meta = el("span", "cl-sx-meta");
       const top = el("span", "cl-sx-meta-top");
       if (s.viewers > 0) top.insertAdjacentHTML("beforeend", `<span class="cl-sx-viewers" aria-label="${s.viewers} viewing">${icon(SESSION_ICON.users)}${s.viewers}</span>`);
-      const age = el("span", failed ? "is-fail" : "", s.state === "exited" ? `exit ${s.exit?.code ?? 0} · ${s.age}` : s.age);
+      const age = el("span", failed ? "is-fail" : "", s.gone ? "ended" : s.state === "exited" ? `exit ${s.exit?.code ?? 0} · ${s.age}` : s.age);
       top.append(age);
       meta.append(top, el("span", "cl-sx-meta-sub", s.size));
       main.append(dot, text, meta);
@@ -309,7 +328,9 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         node.dataset.act = act;
         acts.append(node);
       };
-      if (s.state === "exited") { add("again", "Run again", SESSION_ICON.again); add("dismiss", "Dismiss", ICON_X); }
+      // An ended session has nothing to run again: it can only be dismissed, where the inventory can.
+      if (s.gone) { if (inventory.can?.dismiss !== false) add("dismiss", "Dismiss", ICON_X); }
+      else if (s.state === "exited") { add("again", "Run again", SESSION_ICON.again); add("dismiss", "Dismiss", ICON_X); }
       else {
         const can = inventory.can;
         if (!coarse.matches && !current && !this.rec.owner.view.team) add("beside", "Open beside", SESSION_ICON.beside);

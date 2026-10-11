@@ -888,3 +888,6 @@ mod claude_review_visible_liveness;
 
 #[path = "socket_tests/terminal_exit.rs"]
 mod terminal_exit;
+
+#[path = "socket_tests/session_gone.rs"]
+mod session_gone;
