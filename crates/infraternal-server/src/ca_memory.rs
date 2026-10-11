@@ -5,6 +5,31 @@ use openssl::x509::X509;
 use std::sync::RwLock;
 use tokio::sync::watch;
 
+/// Initialize the provider's persistent private-key storage before any server
+/// key is generated or imported, including the inherited update signer.
+/// # Errors
+/// Root servers refuse missing locking or dump exclusion. Development under an
+/// unprivileged account continues with a warning if OS protection is unavailable.
+pub fn initialize_private_key_memory() -> Result<(), crate::ServerError> {
+    enforce_private_key_memory(
+        infraternal_shim::openssl_secure::initialize(),
+        nix::unistd::geteuid().is_root(),
+    )
+}
+
+fn enforce_private_key_memory(protection: i32, root: bool) -> Result<(), crate::ServerError> {
+    if protection == 1 {
+        return Ok(());
+    }
+    if root {
+        return Err(crate::ServerError::PrivateKeyMemory);
+    }
+    tracing::warn!(
+        "OpenSSL secure heap protection unavailable; non-root server private key pages may be unlocked"
+    );
+    Ok(())
+}
+
 /// Authentication adapter must check current administrator membership and the
 /// successful passkey ceremony before unwrapping that administrator's envelope.
 /// Implementations fail closed on role revocation, bad proof or failed decrypt.
@@ -188,6 +213,33 @@ impl CaKeySource for MemoryCaSource {
 mod tests {
     use super::*;
     use crate::ca::{CaError, CaKeySource, CaMaterial, CertificateAuthority};
+
+    #[test]
+    fn unavailable_secure_heap_refuses_root_and_warns_for_nonroot() {
+        const NAME: &str =
+            "ca_memory::tests::unavailable_secure_heap_refuses_root_and_warns_for_nonroot";
+        if std::env::var_os("INFRATERNAL_CA_HEAP_ZERO_LOCK").is_some() {
+            let protection = infraternal_shim::openssl_secure::initialize();
+            assert_eq!(protection, 2, "heap exists but OS locking is unavailable");
+            assert!(enforce_private_key_memory(protection, true).is_err());
+            assert!(enforce_private_key_memory(0, true).is_err());
+            assert!(enforce_private_key_memory(protection, false).is_ok());
+            assert_eq!(
+                initialize_private_key_memory().is_err(),
+                nix::unistd::geteuid().is_root()
+            );
+            return;
+        }
+        let output = std::process::Command::new("python3")
+            .args(["-c", "import os,resource,sys; resource.setrlimit(resource.RLIMIT_MEMLOCK,(0,0)); os.environ['INFRATERNAL_CA_HEAP_ZERO_LOCK']='1'; os.execv(sys.argv[1],[sys.argv[1],'--exact',sys.argv[2],'--nocapture'])"])
+            .arg(std::env::current_exe().unwrap()).arg(NAME)
+            .stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     struct Administrator(bool);
     impl AdministratorCaUnlock for Administrator {

@@ -190,6 +190,12 @@ pub enum ServerError {
     /// The private first-run setup-token control socket could not be created.
     #[error("setup-token control socket failed")]
     SetupTokenSocket(#[source] std::io::Error),
+    /// Root startup requires the private-key heap to be locked and dump-excluded.
+    #[cfg(feature = "remote")]
+    #[error(
+        "OpenSSL secure heap could not be locked and excluded from dumps; check the server memlock limit"
+    )]
+    PrivateKeyMemory,
     /// System time predates the Unix epoch or does not fit the auth API.
     #[error("system clock is invalid")]
     Clock,
@@ -271,6 +277,8 @@ async fn serve_inner(
     catalog: Option<&'static [&'static PluginDescriptor]>,
 ) -> Result<(), ServerError> {
     configure_logging(false);
+    #[cfg(feature = "remote")]
+    crate::ca_memory::initialize_private_key_memory()?;
     let (app, setup_token, _listeners) = build_router_core(
         config.clone(),
         None,

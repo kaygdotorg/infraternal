@@ -3,7 +3,7 @@
 use super::{CaError, CaMaterial};
 use openssl::{
     hash::MessageDigest,
-    pkey::{Id, PKey},
+    pkey::Id,
     symm::{Cipher, Crypter, Mode, encrypt_aead},
     x509::X509,
 };
@@ -92,6 +92,7 @@ impl WrappedCa {
             &mut tag,
         )
         .map_err(|_| CaError)?;
+        drop(seed);
         wrapped.ciphertext.extend_from_slice(&tag);
         Ok(wrapped)
     }
@@ -141,8 +142,8 @@ impl WrappedCa {
         if count != 32 {
             return Err(CaError);
         }
-        let key =
-            PKey::private_key_from_raw_bytes(&seed[..count], Id::ED25519).map_err(|_| CaError)?;
+        let key = CaMaterial::key_from_seed(&seed[..count])?;
+        drop(seed);
         let material = CaMaterial::new(key, issuer.clone());
         super::CertificateAuthority::from_material(material.clone())?;
         Ok(material)
