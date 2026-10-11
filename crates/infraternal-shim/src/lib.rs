@@ -14,6 +14,7 @@ pub mod ring;
 ///
 /// The host locale files and installed locale list are read once per caller
 /// process, so a long-lived session launcher does not repeat discovery per PTY.
+#[must_use]
 pub fn session_locale_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     locale::environment()
 }

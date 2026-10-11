@@ -6,6 +6,10 @@ use std::{
     sync::OnceLock,
 };
 
+// Host locale configuration is stable during the agent lifetime. Cache it so
+// session creation does not repeat filesystem reads or locale inventory work.
+static HOST_LANG: OnceLock<Option<OsString>> = OnceLock::new();
+
 pub(super) fn environment() -> Vec<(OsString, OsString)> {
     let inherited = std::env::vars_os()
         .filter(|(name, _)| is_locale_name(name))
@@ -14,7 +18,6 @@ pub(super) fn environment() -> Vec<(OsString, OsString)> {
         return inherited;
     }
 
-    static HOST_LANG: OnceLock<Option<OsString>> = OnceLock::new();
     let mut variables = inherited;
     if let Some(language) = HOST_LANG
         .get_or_init(|| host_language().map(OsString::from))
@@ -178,10 +181,10 @@ fn select_environment(
     installed: impl FnMut(&str) -> bool,
 ) -> Vec<(OsString, OsString)> {
     inherited.retain(|(name, _)| is_locale_name(name));
-    if !inherited.iter().any(|(name, _)| is_lang_name(name)) {
-        if let Some(language) = select_language(configs, installed) {
-            inherited.push((OsString::from("LANG"), OsString::from(language)));
-        }
+    if !inherited.iter().any(|(name, _)| is_lang_name(name))
+        && let Some(language) = select_language(configs, installed)
+    {
+        inherited.push((OsString::from("LANG"), OsString::from(language)));
     }
     inherited
 }
@@ -233,7 +236,7 @@ mod tests {
         let available = select_environment(Vec::new(), &[], |locale| locale == "C.UTF-8");
         let unavailable = select_environment(Vec::new(), &[], |_| false);
         assert_eq!(available, pairs(&[("LANG", "C.UTF-8")]));
-        assert!(unavailable.is_empty());
+        assert_eq!(unavailable, Vec::new());
     }
 
     #[test]
