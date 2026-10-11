@@ -28,6 +28,15 @@ struct ChannelSet {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Empty {}
+// Keep LTO from cloning these identical schema parsers into the local and socket call futures.
+#[inline(never)]
+fn parse_channel_set(input: &[u8]) -> Result<ChannelSet, serde_json::Error> {
+    serde_json::from_slice(input)
+}
+#[inline(never)]
+fn parse_empty(input: &[u8]) -> Result<Empty, serde_json::Error> {
+    serde_json::from_slice(input)
+}
 impl ReleaseService {
     #[must_use]
     pub fn new(pool: SqlitePool, lookup: Arc<dyn ReleaseLookup>) -> Self {
@@ -61,7 +70,7 @@ impl ReleaseService {
             }
         }
         if action == CHANNEL_SET.id {
-            let setting: ChannelSet = serde_json::from_slice(input).map_err(|_| "invalid input")?;
+            let setting = parse_channel_set(input).map_err(|_| "invalid input")?;
             if !matches!(setting.channel.as_str(), "stable" | "edge") {
                 return Err("invalid input");
             }
@@ -116,7 +125,7 @@ impl ReleaseService {
             tx.commit().await.map_err(|_| "release unavailable")?;
             return Ok(json!({"channel":setting.channel}));
         }
-        serde_json::from_slice::<Empty>(input).map_err(|_| "invalid input")?;
+        parse_empty(input).map_err(|_| "invalid input")?;
         let (enabled, channel): (bool,String) = sqlx::query_as("SELECT enabled,COALESCE(json_extract(settings,'$.channel'),'stable') FROM plugin_settings WHERE role='server' AND plugin='release'")
             .fetch_optional(&self.pool).await.map_err(|_| "release unavailable")?.unwrap_or((true,"stable".into()));
         if !enabled {
