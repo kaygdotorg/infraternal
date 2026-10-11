@@ -29,11 +29,21 @@ async fn terminal_peer(mut socket: UnixStream, snapshot: bool) {
                 caps: 0,
                 client_info: "readiness-peer",
             }),
-            Frame::Call { call_id, .. } => Some(Frame::Result {
+            Frame::Call {
                 call_id,
-                ok: true,
-                json: br#"{"session_id":"11111111111111111111111111111111"}"#,
-            }),
+                action_id,
+                input_json,
+            } => {
+                if action_id == "terminal.open" {
+                    let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+                    assert_eq!(input["readiness"], true, "canary must bypass login startup");
+                }
+                Some(Frame::Result {
+                    call_id,
+                    ok: true,
+                    json: br#"{"session_id":"11111111111111111111111111111111"}"#,
+                })
+            }
             Frame::AttachTerm { .. } => Some(Frame::Ack { in_seq_acked: 0 }),
             _ => None,
         };
@@ -43,9 +53,8 @@ async fn terminal_peer(mut socket: UnixStream, snapshot: bool) {
         }
         if let Frame::Input { bytes, .. } = frame.frame {
             // The controlled peer emits a marker only after the actual actor forwards the input.
-            let command = std::str::from_utf8(bytes).unwrap();
-            let arguments: Vec<_> = command.split('\'').collect();
-            let marker = format!("{}{}", arguments[3], arguments[5]);
+            assert_eq!(bytes, b"\n");
+            let marker = "infraternal-ready";
             let response = if snapshot {
                 Frame::Snapshot {
                     out_seq: marker.len() as u64,

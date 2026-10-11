@@ -280,7 +280,7 @@ fn unavailable() -> Failure {
 async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
     use infraternal_protocol::{Frame, encode_muxed_frame_into};
     let session = actor
-        .open(TerminalSize {
+        .open_readiness(TerminalSize {
             cols: 80,
             rows: 24,
             px_w: 0,
@@ -293,15 +293,10 @@ async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
         .await
         .map_err(|_| unavailable())?
         .split();
-    let marker = format!("infraternal-ready-{}", Uuid::new_v4().simple());
-    let middle = marker.len() / 2;
-    // The two arguments keep the complete marker out of the shell's input echo.
-    // Exit the private canary shell after output, so no readiness PTY stays idle.
-    let command = format!(
-        "printf '%s%s\\n' '{}' '{}'; exit\n",
-        &marker[..middle],
-        &marker[middle..]
-    );
+    let marker = "infraternal-ready";
+    // The fixed non-login command waits for input so its output cannot precede
+    // attachment. No user shell startup or echoed marker supplies readiness.
+    let command = "\n";
     let mut wire = Vec::new();
     for frame in [
         Frame::Credit { bytes: 65536 },

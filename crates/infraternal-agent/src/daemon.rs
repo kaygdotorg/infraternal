@@ -74,6 +74,8 @@ enum Message {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
+    #[serde(default)]
+    readiness: bool,
     uid: u32,
     cols: u16,
     rows: u16,
@@ -397,7 +399,7 @@ async fn run_channel(
                             let input = serde_json::from_slice::<Open>(input_json);
                             if let Ok(input) = input && execution_uid.is_none_or(|uid| input.uid == uid) && registry.len() + opens.len() < sessions::MAX_SESSIONS {
                                 let exe = exe.clone(); let state = state.clone();
-                                opens.spawn(async move { (stream, call_id, sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await) });
+                                opens.spawn(async move { (stream, call_id, sessions::launch_with_readiness(&exe, &state, manager, input.uid, input.cols, input.rows, input.readiness).await) });
                             } else {
                                 reply(&control, Message::Result(stream, call_id, false, b"{\"error\":\"invalid terminal open or session limit\"}".to_vec()))?;
                             }

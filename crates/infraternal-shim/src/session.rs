@@ -42,6 +42,8 @@ use inputs::Inputs;
 /// Startup parameters passed only by the local infraternal agent.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// A private fixed non-login readiness command; no caller-supplied shell text.
+    pub readiness: bool,
     pub session: [u8; 16],
     pub uid: u32,
     pub cols: u16,
@@ -55,6 +57,7 @@ impl Config {
     #[must_use]
     pub fn new(session: [u8; 16], uid: u32) -> Self {
         Self {
+            readiness: false,
             session,
             uid,
             cols: 80,
@@ -255,7 +258,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
     let (listener, _path) = socket(&config)?;
-    let mut pty = Pty::spawn(config.uid, config.cols, config.rows)?;
+    let mut pty =
+        Pty::spawn_with_readiness(config.uid, config.cols, config.rows, config.readiness)?;
     let created = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

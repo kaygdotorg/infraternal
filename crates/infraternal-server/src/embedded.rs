@@ -224,9 +224,27 @@ impl EmbeddedAgent {
 
     /// Open a terminal on the embedded infraternal agent's host.
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+        self.open_with_readiness(size, false).await
+    }
+
+    /// Open a private fixed-command readiness PTY under the enrolled identity.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+        self.open_with_readiness(size, true).await
+    }
+
+    async fn open_with_readiness(
+        &self,
+        size: TerminalSize,
+        readiness: bool,
+    ) -> Result<[u8; 16], AgentError> {
         let (reply, result) = oneshot::channel();
         self.commands
-            .send(Command::Open { size, reply })
+            .send(Command::Open {
+                size,
+                readiness,
+                reply,
+            })
             .await
             .map_err(|_| AgentError::Unavailable)?;
         result.await.map_err(|_| AgentError::Unavailable)?
@@ -322,6 +340,7 @@ enum Command {
     },
     Open {
         size: TerminalSize,
+        readiness: bool,
         reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
     },
     Call {
@@ -816,7 +835,11 @@ async fn process_command(
             pending.insert(call_id, PendingCall::Control(reply));
             true
         }
-        Command::Open { size, reply } => {
+        Command::Open {
+            size,
+            readiness,
+            reply,
+        } => {
             #[cfg(feature = "remote")]
             if let Peer::Remote(link) = &connection.peer
                 && link.admit_operation().await.is_err()
@@ -835,11 +858,14 @@ async fn process_command(
             // The trusted enrolled or local host identity never comes from browser JSON.
             // Pixel geometry is sent later through Resize; the daemon opens a
             // PTY using its approved {uid, cols, rows} action schema [9][13].
-            let request = serde_json::json!({
+            let mut request = serde_json::json!({
                 "uid": connection.execution_uid,
                 "cols": size.cols,
                 "rows": size.rows,
             });
+            if readiness {
+                request["readiness"] = serde_json::Value::Bool(true);
+            }
             let Ok(json) = serde_json::to_vec(&request) else {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;

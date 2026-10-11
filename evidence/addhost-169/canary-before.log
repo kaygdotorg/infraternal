@@ -1,0 +1,30 @@
+
+running 2 tests
+
+thread 'bootstrap_runtime::remote_backend::canary_tests::readiness_accepts_authoritative_snapshot_output' (185523) panicked at crates/infraternal-server/src/bootstrap_canary_tests.rs:35:21:
+assertion `left == right` failed: canary must bypass login startup
+  left: Null
+ right: true
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'bootstrap_runtime::remote_backend::canary_tests::readiness_accepts_authoritative_snapshot_output' (185523) panicked at crates/infraternal-server/src/bootstrap_canary_tests.rs:99:10:
+called `Result::unwrap()` on an `Err` value: Failure { kind: Install, message: "Remote host readiness is unavailable. Check the host's service and try again.", log_tail: [], failed_step: None, already_added: false, missing_binary: None, fingerprints: [], host_key_type: None, host_key_changed: false, choose_method: false, host_key_challenge: None }
+test bootstrap_runtime::remote_backend::canary_tests::readiness_accepts_authoritative_snapshot_output ... FAILED
+
+thread 'bootstrap_runtime::remote_backend::canary_tests::readiness_input_preserves_the_terminal_actor_and_host_connection' (185524) panicked at crates/infraternal-server/src/bootstrap_canary_tests.rs:35:21:
+assertion `left == right` failed: canary must bypass login startup
+  left: Null
+ right: true
+
+thread 'bootstrap_runtime::remote_backend::canary_tests::readiness_input_preserves_the_terminal_actor_and_host_connection' (185524) panicked at crates/infraternal-server/src/bootstrap_canary_tests.rs:79:10:
+called `Result::unwrap()` on an `Err` value: Failure { kind: Install, message: "Remote host readiness is unavailable. Check the host's service and try again.", log_tail: [], failed_step: None, already_added: false, missing_binary: None, fingerprints: [], host_key_type: None, host_key_changed: false, choose_method: false, host_key_challenge: None }
+test bootstrap_runtime::remote_backend::canary_tests::readiness_input_preserves_the_terminal_actor_and_host_connection ... FAILED
+
+failures:
+
+failures:
+    bootstrap_runtime::remote_backend::canary_tests::readiness_accepts_authoritative_snapshot_output
+    bootstrap_runtime::remote_backend::canary_tests::readiness_input_preserves_the_terminal_actor_and_host_connection
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 321 filtered out; finished in 0.04s
+

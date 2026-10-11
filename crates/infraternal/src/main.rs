@@ -77,6 +77,9 @@ enum Command {
         detach: bool,
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         ring_capacity: usize,
+        /// Private fixed-command readiness probe; never reads login startup.
+        #[arg(long)]
+        readiness: bool,
     },
 }
 
@@ -182,6 +185,10 @@ fn run_skill(action: &str, json: bool) -> ExitCode {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep command dispatch and public exit codes together with the private shim readiness option."
+)]
 fn main() -> ExitCode {
     // Installation slots and symlinks must not rename the daemon or its shims
     // in ps/journald. Apply before the embedded dispatcher bypasses clap.
@@ -237,7 +244,17 @@ fn main() -> ExitCode {
             state,
             detach,
             ring_capacity,
-        } => match run_shim(&session, uid, cols, rows, state, detach, ring_capacity) {
+            readiness,
+        } => match run_shim(
+            &session,
+            uid,
+            cols,
+            rows,
+            state,
+            detach,
+            ring_capacity,
+            readiness,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => output::refuse(
                 json,
@@ -602,6 +619,7 @@ fn run_shim(
     state: Option<std::path::PathBuf>,
     detach: bool,
     ring_capacity: usize,
+    readiness: bool,
 ) -> std::io::Result<()> {
     if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(std::io::Error::new(
@@ -624,6 +642,7 @@ fn run_shim(
         rows,
         state,
         ring_capacity,
+        readiness,
     })
 }
 
