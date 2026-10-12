@@ -151,6 +151,12 @@ impl Backend for ObservedBackend {
     ) -> Operation<'a, JoinMaterial> {
         self.0.invitation_with_trust(a, t, c, lookup)
     }
+    fn invitation_registered<'a>(
+        &'a self, a: &'a Authority, t: &'a Target, c: &'a Check,
+        lookup: Option<String>, register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        self.0.invitation_registered(a, t, c, lookup, register)
+    }
     fn resolve<'a>(
         &'a self,
         a: &'a Authority,

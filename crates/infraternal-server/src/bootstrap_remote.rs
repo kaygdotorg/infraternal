@@ -101,33 +101,15 @@ impl RemoteBackend {
             .remove(&host);
         Ok(())
     }
-}
-impl Backend for RemoteBackend {
-    fn resolve<'a>(
-        &'a self,
-        authority: &'a Authority,
-        target: &'a Target,
-        credential: Option<&'a str>,
-    ) -> Operation<'a, Resolved> {
-        Box::pin(async move {
-            self.authorize(authority).await?;
-            self.base.resolve(authority, target, credential).await
-        })
-    }
-    fn invitation<'a>(
-        &'a self,
-        authority: &'a Authority,
-        target: &'a Target,
-        check: &'a Check,
-    ) -> Operation<'a, JoinMaterial> {
-        self.invitation_with_trust(authority, target, check, None)
-    }
-    fn invitation_with_trust<'a>(
+    /// Hand off exact cleanup ownership before the first durable write can run.
+    /// Compatibility callers retain the older post-result ownership boundary.
+    fn issue_attempt<'a>(
         &'a self,
         authority: &'a Authority,
         target: &'a Target,
         check: &'a Check,
         lookup: Option<String>,
+        register: Option<&'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send)>,
     ) -> Operation<'a, JoinMaterial> {
         Box::pin(async move {
             self.authorize(authority).await?;
@@ -197,6 +179,12 @@ impl Backend for RemoteBackend {
                 failure.already_added = true;
                 return Err(failure);
             }
+            if let Some(register) = register {
+                register(host)?;
+                // AttemptResources now owns cleanup even if SQLx commits without
+                // delivering its acknowledgement. Do not discard that journal.
+                unpublished.published = true;
+            }
             let invitation = self
                 .issuer
                 .issue_bootstrap(
@@ -225,6 +213,46 @@ impl Backend for RemoteBackend {
                 stdin: Secret::new(stdin),
             })
         })
+    }
+}
+impl Backend for RemoteBackend {
+    fn resolve<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        credential: Option<&'a str>,
+    ) -> Operation<'a, Resolved> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.base.resolve(authority, target, credential).await
+        })
+    }
+    fn invitation<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+    ) -> Operation<'a, JoinMaterial> {
+        self.invitation_with_trust(authority, target, check, None)
+    }
+    fn invitation_with_trust<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+    ) -> Operation<'a, JoinMaterial> {
+        self.issue_attempt(authority, target, check, lookup, None)
+    }
+    fn invitation_registered<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        self.issue_attempt(authority, target, check, lookup, Some(register))
     }
     fn connected_facts<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
@@ -299,11 +327,27 @@ impl Backend for RemoteBackend {
         Box::pin(async move {
             self.uid(authority, host)?;
             // Logout cannot prevent cleanup of this exact batch's new authority.
-            self.issuer
+            if let Err(error) = self
+                .issuer
                 .store()
                 .revoke(&authority.owner, host, unix_now()?)
                 .await
-                .map_err(|_| unavailable())?;
+            {
+                // Revoke's UPDATE is a writer barrier: a previously queued
+                // commit must release its slot first. Only then may absence
+                // mean that cancelled publication never created this host.
+                let absent = matches!(error, crate::enrollment::EnrollmentError::Denied)
+                    && !sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=?)",
+                    )
+                    .bind(host.as_bytes().as_slice())
+                    .fetch_one(&self.issuer.store().0)
+                    .await
+                    .map_err(|_| unavailable())?;
+                if !absent {
+                    return Err(unavailable());
+                }
+            }
             self.completed_record(authority, host)
         })
     }
@@ -794,7 +838,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "#169 review: cancellation after commit needs pre-registered cleanup"]
     async fn cancelled_invitation_after_commit_retires_its_host_record() {
         let f = fixture(true).await;
         let paused = Arc::new(PausedInvitation {

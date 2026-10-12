@@ -540,9 +540,21 @@ impl Bootstrap {
         check.authorize_mode(target.mode)?;
         restore_previous(batch, target, attempt, started, session.clone()).await?;
         // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
+        // Durable publication can outlive a cancelled acknowledgement. Bind
+        // cleanup ownership before the backend can enqueue its commit.
+        let mut register = |host| {
+            resources.host = Some(host);
+            Ok(())
+        };
         let join = self
             .backend
-            .invitation_with_trust(&batch.authority, target, &check, session.trust_lookup())
+            .invitation_registered(
+                &batch.authority,
+                target,
+                &check,
+                session.trust_lookup(),
+                &mut register,
+            )
             .await?;
         resources.host = Some(join.host);
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
