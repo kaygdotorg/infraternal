@@ -1,0 +1,246 @@
+Running as unit: run-p3321987-i15903218.scope; invocation ID: df9f930327204aa2b3626e68f25554a6
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.60s
+   Compiling crypto-common v0.1.7
+   Compiling tokio v1.53.2
+   Compiling nix v0.30.1
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-server)
+   Compiling inout v0.1.4
+   Compiling opaque-debug v0.3.1
+   Compiling digest v0.10.7
+   Compiling universal-hash v0.5.1
+   Compiling aead v0.5.2
+   Compiling cipher v0.4.4
+   Compiling polyval v0.6.2
+   Compiling sha2 v0.10.9
+   Compiling sha1 v0.10.7
+   Compiling blake2 v0.10.6
+   Compiling hmac v0.12.1
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling ghash v0.5.1
+   Compiling hkdf v0.12.4
+   Compiling tungstenite v0.29.0
+   Compiling argon2 v0.5.3
+   Compiling sqlx-core v0.8.6
+   Compiling aes-gcm v0.10.3
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-shim)
+   Compiling tokio-stream v0.1.19
+   Compiling tokio-openssl v0.6.5
+   Compiling tokio-util v0.7.19
+   Compiling quinn v0.11.12
+   Compiling fs-err v3.3.2
+   Compiling tower v0.5.3
+   Compiling tokio-tungstenite v0.29.0
+   Compiling sqlx-sqlite v0.8.6
+   Compiling h2 v0.4.19
+   Compiling tower-http v0.6.11
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling hyper v1.11.1
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/ssh)
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-mesh)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/remote)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/host-facts)
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/release)
+   Compiling infraternal-plugin-backup v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/backup)
+   Compiling infraternal-plugin-relay v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/relay)
+   Compiling hyper-util v0.1.21
+   Compiling axum-server v0.8.0
+   Compiling axum v0.8.9
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/mesh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-agent)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 55s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal-65a75b63287f870a)
+
+running 71 tests
+test cli::actions::key_memory_registry_tests::key_memory_diagnostic_follows_remote_feature ... ok
+test cli::actions::tests::enabled_mesh_plugin_registers_its_component_commands ... ok
+test cli::actions::release_tests::server_commands_bind_release_without_losing_hosted_skills ... ok
+test cli::actions::tests::every_registered_action_has_description_and_step_by_step_guidance ... ok
+test cli::actions::factory_tests::plugin_command_materializes_only_its_owner_and_discovery_remains_complete ... ok
+test cli::actions::tests::hidden_session_shim_is_registered_to_its_runtime_handler ... ok
+test cli::actions::tests::registered_actions_include_plugin_permission_contract_fields ... ok
+test cli::actions::hosted_tests::production_descriptors_share_cli_registry_and_skills ... ok
+test cli::command_tree::backmerge_tests::restart_inherits_private_state_before_or_after_the_command ... ok
+test cli::command_tree::tests::hidden_session_shim_parser_uses_the_registered_input_schema ... ok
+test cli::command_tree::backmerge_tests::removal_and_retention_inputs_keep_the_production_runtime_bindings ... ok
+test cli::command_tree::tests::parser_uses_plugin_inputs_and_accepts_json_after_a_leaf_command ... ok
+test cli::output::tests::json_snapshot_has_stable_versioned_fields_and_omits_absent_details ... ok
+test cli::output::tests::non_terminal_pretty_snapshot_has_aligned_details_and_table ... ok
+test cli::output::tests::pretty_snapshot_omits_empty_skill_write_sections ... ok
+test cli::output::tests::pretty_tables_omit_empty_columns_and_rows ... ok
+test cli::command_tree::tests::server_init_parses_confirmation_plan_and_server_configuration ... ok
+test cli::output::tests::terminal_snapshot_uses_color_but_still_wraps_to_the_requested_width ... ok
+test cli::command_tree::tests::root_help_uses_registered_descriptions_and_long_action_guidance ... ok
+test cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes ... ok
+test cli::command_tree::tests::skill_parser_accepts_a_multi_part_command_and_write_directory ... ok
+test embedded_cli::tests::dispatch_keeps_public_help_operator_modes_and_foreign_commands ... ok
+test cli::skills::tests::generated_skill_contains_front_matter_inputs_outputs_and_safety ... ok
+test dispatch_tests::hidden_session_shim_dispatches_from_the_registered_action ... ok
+test failure_data_tests::skill_errors_keep_the_registered_result_data_shape ... ok
+test failure_data_tests::unavailable_results_keep_registered_data_shapes ... ok
+test install::tests::dry_run_prints_a_process_surviving_user_unit ... ok
+test failure_data_tests::server_errors_keep_the_registered_result_data_shapes ... ok
+test cli::skills::tests::writing_skills_creates_one_file_per_visible_action ... ok
+test remote::tests::local_identity_load_refuses_symlink_and_shared_file ... ok
+test remote::tests::join_dns_failure_reports_resolution_instead_of_generic_refusal ... ok
+test remote::tests::oversized_or_invalid_invitation_fails_before_local_state_is_created ... ok
+test remote::tests::preparation_refuses_shared_and_symlinked_data_directories ... ok
+test embedded_cli::tests::inherited_flags_keep_public_parser_validation_and_values ... ok
+test remote::tests::ordinary_join_keeps_the_foreground_connection_default ... ok
+test remote::tests::uid_and_privilege_mismatch_fails_before_key_generation ... ok
+test remote::tests::ssh_installation_can_enroll_before_starting_the_service ... ok
+test remote_server::tests::failed_cold_configuration_still_disposes_handoff_stdin ... ok
+test remote_server::tests::independent_review_remote_operator_commands_accept_json_output ... ok
+test remote_server::tests::missing_ca_refuses_before_database_or_listener_creation ... ok
+test remote_server::tests::remote_activation_is_explicit_and_ca_override_requires_listener ... ok
+test remote_server::tests::service_dry_run_preserves_remote_listener_and_private_trust_path ... ok
+test remote::tests::publication_is_private_and_never_replaces_existing_identity ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test remote::tests::renewal_publication_replaces_only_certificate_and_preserves_private_metadata ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... FAILED
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... FAILED
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... FAILED
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... FAILED
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... ignored, unresolved P2 UP-02: opened inode can be rewritten before exec; run explicitly
+test restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode ... FAILED
+test restart_binary::audit_tests::symlink_parent_escape_and_writable_candidates_are_refused ... ok
+test restart_binary::audit_tests::unsigned_or_tampered_replacement_is_refused_before_exec ... ignored, unresolved P1 UP-01: signature hook accepts unsigned replacement; run explicitly
+test restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running ... ignored, unresolved P1 UP-03: exec failure shuts down the running service; run explicitly
+test setup_token_tests::setup_token_command_reads_only_the_expected_socket_response ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... FAILED
+test status_tests::custom_named_server_service_is_reported_as_running ... ok
+test status_tests::custom_named_stopped_server_service_is_reported_as_stopped ... ok
+test status_tests::unrelated_services_do_not_appear_as_infraternal_servers ... ok
+test startup_tests::process_dumpability_is_disabled_before_dispatch ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... FAILED
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+
+failures:
+
+---- restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape stdout ----
+
+thread 'restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape' (3364790) panicked at crates/infraternal/src/restart_tests.rs:186:5:
+assertion failed: escaped.exists()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths stdout ----
+
+thread 'restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths' (3364848) panicked at crates/infraternal/src/restart_tests.rs:154:5:
+assertion failed: executable(&binary).is_ok()
+
+---- restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null stdout ----
+
+thread 'restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null' (3364767) panicked at crates/infraternal/src/restart_tests.rs:622:5:
+stage=before
+
+running 1 test
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... FAILED
+
+failures:
+
+failures:
+    restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.00s
+
+
+
+thread 'restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null' (3364825) panicked at crates/infraternal/src/restart_tests.rs:545:68:
+called `Result::unwrap()` on an `Err` value: Kind(PermissionDenied)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+stage=after
+
+running 1 test
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... FAILED
+
+failures:
+
+failures:
+    restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.00s
+
+
+
+thread 'restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null' (3364894) panicked at crates/infraternal/src/restart_tests.rs:552:74:
+called `Result::unwrap()` on an `Err` value: Kind(PermissionDenied)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin stdout ----
+
+thread 'restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin' (3364793) panicked at crates/infraternal/src/restart_tests.rs:293:5:
+
+running 1 test
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... FAILED
+
+failures:
+
+failures:
+    restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.33s
+
+
+
+---- restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode stdout ----
+
+thread 'restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode' (3364920) panicked at crates/infraternal/src/restart_signature_audit_tests.rs:105:45:
+called `Result::unwrap()` on an `Err` value: Kind(PermissionDenied)
+
+---- restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced stdout ----
+
+thread 'restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced' (3364796) panicked at crates/infraternal/src/restart_tests.rs:372:5:
+
+running 1 test
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... FAILED
+
+failures:
+
+failures:
+    restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.33s
+
+
+
+thread 'restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced' (3364798) panicked at crates/infraternal/src/restart_tests.rs:354:9:
+assertion `left == right` failed
+  left: "/home/kayg/.cache/codex-scratch/bp5/restart-tests/cdcf13c02/installed"
+ right: "/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/state/restart-tests/cdcf13c02/installed"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode stdout ----
+
+thread 'restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode' (3364858) panicked at crates/infraternal/src/restart_tests.rs:221:70:
+called `Result::unwrap()` on an `Err` value: Kind(PermissionDenied)
+
+
+failures:
+    restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null
+    restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape
+    restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin
+    restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced
+    restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths
+    restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode
+    restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode
+
+test result: FAILED. 61 passed; 7 failed; 3 ignored; 0 measured; 0 filtered out; finished in 4.73s
+
+error: test failed, to rerun pass `-p infraternal --bin infraternal`

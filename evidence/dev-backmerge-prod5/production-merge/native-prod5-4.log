@@ -1,0 +1,63 @@
+Running as unit: run-p3396352-i15977581.scope; invocation ID: 41959cbbe9ba4747a5af50c16894db99
+   Compiling serde_core v1.0.229
+    Checking memchr v2.8.3
+    Checking getrandom v0.2.17
+   Compiling serde v1.0.229
+    Checking zeroize v1.9.0
+   Compiling syn v3.0.6
+   Compiling serde_json v1.0.151
+    Checking tracing-core v0.1.36
+   Compiling nix v0.30.1
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-plugin-api)
+   Compiling syn v2.0.119
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-shim)
+    Checking ring v0.17.14
+    Checking rustls-pki-types v1.15.1
+    Checking tracing v0.1.44
+    Checking vte v0.15.0
+    Checking quinn-udp v0.5.16
+    Checking rustls-webpki v0.103.15
+    Checking uuid v1.27.0
+    Checking rustls v0.23.45
+   Compiling openssl-macros v0.1.1
+    Checking openssl v0.10.81
+   Compiling tokio-macros v2.7.2
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.21
+    Checking tokio v1.53.2
+    Checking thiserror v2.0.21
+    Checking quinn-proto v0.11.19
+    Checking infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/host-facts)
+    Checking tokio-openssl v0.6.5
+    Checking quinn v0.11.12
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-agent)
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/remote)
+error: binding's name is too similar to existing binding
+  --> crates/infraternal-agent/src/readiness_exit_tests.rs:81:32
+   |
+81 |     let Some(Message::Event(2, replay)) = messages.recv().await else {
+   |                                ^^^^^^
+   |
+note: existing binding defined here
+  --> crates/infraternal-agent/src/readiness_exit_tests.rs:74:13
+   |
+74 |     let mut relay = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+   |             ^^^^^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+   = note: `-D clippy::similar-names` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::similar_names)]`
+
+error: binding's name is too similar to existing binding
+  --> crates/infraternal-agent/src/readiness_exit_tests.rs:84:9
+   |
+84 |     let replay: serde_json::Value = serde_json::from_slice(&replay).unwrap();
+   |         ^^^^^^
+   |
+note: existing binding defined here
+  --> crates/infraternal-agent/src/readiness_exit_tests.rs:74:13
+   |
+74 |     let mut relay = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+   |             ^^^^^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+
+error: could not compile `infraternal-agent` (lib test) due to 2 previous errors

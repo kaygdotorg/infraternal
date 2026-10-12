@@ -1,0 +1,22 @@
+(node:3886811) Warning: Failed to load the ES module: /home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/evidence/dev-backmerge-prod5/playwright.functional.config.ts. Make sure to set "type": "module" in the nearest package.json file or use the .mjs extension.
+(Use `node --trace-warnings ...` to show where the warning was created)
+/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/evidence/dev-backmerge-prod5/playwright.functional.config.ts:12
+const app = (0, _nodePath.resolve)(import.meta.dirname, "../../apps/tracer");
+                                          ^^^^
+
+SyntaxError: Cannot use 'import.meta' outside a module
+    at wrapSafe (node:internal/modules/cjs/loader:1713:18)
+    at Module._compile (node:internal/modules/cjs/loader:1755:20)
+    at Object.<anonymous> (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Module.require (node:internal/modules/cjs/loader:1527:12)
+    at require (node:internal/modules/helpers:147:16)
+    at requireOrImport (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/apps/tracer/node_modules/playwright/lib/common/index.js:1149:18)
+    at loadUserConfig (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/apps/tracer/node_modules/playwright/lib/common/index.js:1334:52)
+    at loadConfig (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/apps/tracer/node_modules/playwright/lib/common/index.js:1341:28)
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at Object.loadConfigFromFile (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/apps/tracer/node_modules/playwright/lib/common/index.js:1553:10)
+    at runTests (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/apps/tracer/node_modules/playwright/lib/cli/testActions.js:46:18)
+    at _Command.<anonymous> (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/apps/tracer/node_modules/playwright/lib/program.js:53:7)

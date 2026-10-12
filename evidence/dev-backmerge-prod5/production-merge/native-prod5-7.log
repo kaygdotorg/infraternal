@@ -1,0 +1,247 @@
+Running as unit: run-p3597863-i16179087.scope; invocation ID: 0010e45c4aed49f5b237d331435b28b7
+    Checking nix v0.30.1
+    Checking infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/mesh)
+    Checking infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-shim)
+    Checking infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/release)
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/remote)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/ssh)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-agent)
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 45.36s
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-shim)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/remote)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-agent)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 47s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_server-d4e08d9110a9433d)
+
+running 8 tests
+test auth::migration_compat_tests::dirty_production_migration_is_refused_without_retagging ... ok
+test auth::migration_compat_tests::dev_history_keeps_its_mesh_checksum_and_data ... ok
+test auth::migration_compat_tests::committed_retag_can_resume_after_interruption_and_concurrent_startup ... ok
+test auth::migration_compat_tests::fresh_history_has_unique_versions_and_both_schemas ... ok
+test auth::migration_compat_tests::occupied_destination_leaves_the_production_ledger_unchanged ... ok
+test auth::migration_compat_tests::unrecognized_checksum_is_refused_without_retagging ... ok
+test auth::migration_compat_tests::live_production_retirement_history_survives_dev_upgrade ... ok
+test auth::migration_compat_tests::production_history_keeps_index_checksum_and_data ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 448 filtered out; finished in 0.17s
+
+   Compiling nix v0.30.1
+   Compiling serde v1.0.229
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-plugin-api)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-shim)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.22s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_plugin_api-68f62902e7e43181)
+
+running 20 tests
+test action::tests::command_result_schema_has_required_stable_fields_and_optional_next_step ... ok
+test action::tests::any_of_permissions_are_machine_readable_and_empty_authority_is_rejected ... ok
+test action::tests::only_hidden_internal_routes_may_use_the_reserved_prefix ... ok
+test action::tests::registry_keeps_plugin_ownership_and_exact_command_paths ... ok
+test action::tests::registry_rejects_missing_action_guidance_and_command_collisions ... ok
+test action::tests::registry_rejects_inconsistent_json_schemas ... ok
+test admission::tests::memory_refusal_round_trips_without_losing_legacy_error ... ok
+test action::tests::command_result_schema_keeps_action_data_typed_inside_stable_envelope ... ok
+test component_tests::destructive_actions_require_a_dry_run_and_every_action_has_instructions ... ok
+test release_version::tests::accepts_only_worker_version_forms ... ok
+test routing::tests::topic_is_borrowed_and_other_filter_fields_are_left_to_the_plugin ... ok
+test routing::tests::invalid_or_oversized_topics_are_refused ... ok
+test tests::deferred_plugin_effect_waits_for_successful_reply_and_drops_on_cancellation ... ok
+test tests::machine_actions_are_declared_without_entering_human_discovery ... ok
+test tests::notifications_are_declared_json_bounded_and_drained_once ... ok
+test tests::public_dispatch_cannot_call_a_machine_control_action ... ok
+test component_tests::component_declarations_cannot_create_servers ... ok
+test tests::operator_presentation_cannot_follow_a_private_control_action ... ok
+test tests::registry_rejects_oversized_json_before_plugin_dispatch ... ok
+test tests::registry_routes_only_declared_actions ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/routing_review.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/routing_review-cd48cd925a1ef9ec)
+
+running 2 tests
+test review_topic_borrows_plain_and_owns_escaped ... ok
+test review_topic_refuses_oversize_duplicate_and_deep_input ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_shim-4e05ad555a9cf7c6)
+
+running 92 tests
+test frame::checks::codec_reuse_measurement ... ignored, release codec and allocation-path measurement
+test frame::checks::borrowed_and_owned_decoders_agree_at_every_fragment_boundary ... ok
+test frame::checks::deferred_frame_keeps_its_borrowed_storage_and_ordered_trailing_bytes ... ok
+test frame::checks::golden::every_frozen_message ... ok
+test frame::checks::approximate_snapshot_codec_is_bounded_and_canonical ... ok
+test ended::tests::bounded_record_preserves_status_and_rejects_malformed_or_linked_data ... ok
+test frame::checks::shared_writer_selector_is_fixed_length_and_fragment_safe ... ok
+test frame::checks::tests::golden_and_fragmented ... ok
+test frame::checks::tests::invalid_lengths_types_and_utf8 ... ok
+test locale::tests::configured_locale_is_selected_from_login_locale_files ... ok
+test locale::tests::existing_user_locale_values_are_preserved_without_replacement ... ok
+test locale::tests::invalid_shell_expressions_are_ignored ... ok
+test locale::tests::macos_locale_identifier_gets_a_utf8_codeset ... ok
+test locale::tests::missing_lang_preserves_other_locale_values_and_fills_only_lang ... ok
+test locale::tests::non_locale_values_do_not_cross_the_scrubbed_shell_boundary ... ok
+test locale::tests::unsupported_configured_locale_uses_installed_utf8_fallback ... ok
+test frame::checks::maximum_deferred_frame_retries_without_growing_storage ... ok
+test locked_bytes::tests::anonymous_transfer_pages_are_locked_and_excluded_from_core_dumps ... ok
+test locale::tests::absent_locale_uses_fallback_only_when_it_is_installed ... ok
+test frame::checks::golden::exact_maximum_and_coalesced_frames ... ok
+test pty::child_signal_tests::child_signal_reset_spawn_cost_at_128_children ... ignored, child spawn diagnostic; run locally in a weighted scope without own build overlap
+test ring::checks::tests::wrap_and_exact_offsets ... ok
+test session::inputs::tests::partial_writes_credit_only_the_owner_and_replay_trims_per_writer ... ok
+
+running 1 test
+test pty::child_locale_tests::spawned_login_shell_receives_selected_locale_without_other_host_variables ... ok
+test session::measurements::budgets::input_to_pty_write ... ignored, real-PTY performance measurement; set ZDOTDIR to tests/profile
+test session::measurements::poll_storage_measurement ... ignored, release poll-storage allocation measurement
+test session::inputs::tests::identity_cap_preserves_all_existing_cursors ... ok
+test session::resize_checks::resize_refusal_session_probe ... ignored, isolated session probe invoked by its parent with a controlled shell profile
+test session::measurements::budgets::allowlisted_signal_after_real_pty_exit_keeps_exit_ack_available ... ok
+test session::sequenced_checks::coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss ... ok
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out; finished in 0.00s
+
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... ok
+test session::sequenced_checks::new_frames_roundtrip_and_refuse_noncanonical_payloads ... ok
+test session::sequenced_checks::reusable_encoder_retains_capacity_and_refuses_growth_before_mutation ... ok
+test session::sequenced_checks::trim_duplicates_gaps_overflow_and_capacity_are_transactional ... ok
+test session::sequenced_checks::writer_selection_has_a_frozen_little_endian_layout ... ok
+test session::sequenced_checks::negotiated_queue_deferral_validates_ranges_before_waiting ... ok
+test session::sequenced_checks::a_completed_deferred_frame_gives_its_trailing_input_a_fresh_ticket ... ok
+test terminal::checks::tests::alternate_variants_and_nested_switches_repaint ... ok
+test terminal::checks::approximate_repaint_keeps_complete_pending_syntax_or_omits_it_whole ... ok
+test terminal::checks::tests::byte_budget_prunes_history_and_resize_remains_repaintable ... ok
+test terminal::checks::tests::fixtures_and_continuations_repaint ... ok
+test session::resize_checks::native_resize_refusal_preserves_peer_and_pty ... ok
+test terminal::checks::tests::implicit_hyperlinks_retain_groups_across_rows_and_continuation ... ok
+test terminal::checks::tests::margins_tabs_charsets_and_modes_continue ... ok
+test terminal::checks::tests::partial_csi_and_utf8_continue ... ok
+test terminal::checks::tests::long_unfinished_hyperlink_and_control_strings_continue ... ok
+test terminal::checks::tests::saved_origin_survives_changed_margins ... ok
+test terminal::checks::tests::retained_alternate_saved_cursor_and_keyboard_stack_continue ... ok
+test terminal::fidelity::fidelity_charset_mapped_wide_space_is_explicitly_rejected ... ok
+test terminal::checks::tests::pending_wrap_and_saved_wrap_continue_with_wide_cells ... ok
+test terminal::fidelity::fidelity_diagnostic_fixture ... ignored, diagnostic replay of an explicitly selected fixture file
+test terminal::fidelity::fidelity_cursor ... ok
+test terminal::fidelity::fidelity_extended_nightly ... ignored, nightly expanded differential corpus: 20,000 deterministic cases
+test terminal::fidelity::fidelity_edge ... ok
+test terminal::checks::tests::unfinished_sequence_over_frame_limit_fails_without_losing_runtime_state ... ok
+test terminal::fidelity::fidelity_fresh_c_redraw_default_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_f1_rep ... ok
+test terminal::fidelity::fidelity_inherited_protection_off_mode_is_explicitly_rejected ... ok
+test terminal::fidelity::fidelity_iso_protection_does_not_keep_rep_scratch ... ok
+test terminal::fidelity::fidelity_iso_protection_erase ... ok
+test terminal::checks::approximate_repaint_is_bounded_clips_at_complete_cells_and_preserves_source ... ok
+test terminal::fidelity::fidelity_oracle_detects_hidden_state ... ok
+test terminal::fidelity::fidelity_oracle_observes_archived_cells_with_equal_active_screens ... ok
+test terminal::fidelity::fidelity_orphaned_spacer_head ... ok
+test terminal::fidelity::fidelity_prompt_resize_requires_explicit_rejection ... ok
+test terminal::fidelity::fidelity_mouse_effective_fields_follow_order_independently_of_booleans ... ok
+test terminal::fidelity::fidelity_rejects_unrepresentable_rep_without_mutating_source ... ok
+test terminal::fidelity::fidelity_saved_cursor_over_changed_edge ... ok
+test terminal::fidelity::fidelity_saved_modes_future_restore ... ok
+test terminal::fidelity::fidelity_handwritten ... ok
+test terminal::fidelity::fidelity_seeded_nightly ... ignored, nightly differential corpus: 20,000 deterministic cases
+test terminal::fidelity::fidelity_screen_entry_consumes_inherited_shift_before_saving ... ok
+test terminal::fidelity::fidelity_recorded_corpus ... ok
+test terminal::fidelity::fidelity_semantic_validation_matches_exported_history_extent ... ok
+test terminal::fidelity::fidelity_snapshot_history_tail_contains_no_padding_rows ... ok
+test terminal::fidelity::fidelity_snapshot_resets_stale_viewer_color_overrides ... ok
+test terminal::fidelity::fidelity_single_shift_survives_rep_seed ... ok
+test terminal::fidelity::fidelity_spacer_head_attributes ... ok
+test terminal::fidelity::fidelity_variation_tail_attributes ... ok
+test terminal::fidelity::fresh_captures::fidelity_fresh_real_program_captures ... ignored, manual fresh capture oracle; set VT_CAPTURE_DIR after real program capture
+test terminal::measurements::budgets::snapshot_200x60 ... ignored, performance measurement; run release on the perf host
+test terminal::measurements::memory::measured_terminal_rss ... ignored, RSS measurement; run this filter alone in a fresh release process
+test terminal::measurements::throughput::measured_parser ... ignored, VT observer and history throughput measurement
+test terminal::recovery_measurements::measured_full_ring_reconstruction ... ignored, release reconstruction measurement; old healthy handles permit repeated cleanup
+test terminal::resize_recovery::absent_ring_keeps_last_good_size_and_later_output_usable ... ok
+test terminal::resize_recovery::complete_ring_restores_screens_mouse_and_unfinished_syntax ... ok
+test terminal::resize_recovery::earlier_geometry_changes_require_approximation_even_with_origin_coverage ... ok
+test terminal::resize_recovery::ring_gap_requires_clean_approximate_recovery ... ok
+test terminal_native::allocation::resize_allocation_refusal_retires_native_handle ... ok
+test terminal::fidelity::fidelity_variation_wrap_attributes ... ok
+test terminal::fidelity::fidelity_extended_smoke ... ok
+test terminal::fidelity::fidelity_seeded_smoke ... ok
+
+test result: ok. 79 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 59.68s
+
+     Running tests/detach.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/detach-0a0cc50006df2750)
+
+running 2 tests
+test detached_child_restores_default_signals_without_changing_parent ... ok
+test closed_standard_descriptors_become_dev_null ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.65s
+
+     Running tests/mouse.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/mouse-a415e2a9675d1ee6)
+
+running 1 test
+test faithful_snapshot_preserves_public_mouse_encoder_reports ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+
+     Running tests/process_exit_descriptor.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/process_exit_descriptor-c5e537714415cbc9)
+
+running 2 tests
+test invalid_pid_never_creates_a_descriptor ... ok
+test descriptor_is_cloexec_and_observes_a_real_process_exit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests infraternal_plugin_api
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_shim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling getrandom v0.4.3
+   Compiling clap_derive v4.6.7
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal)
+   Compiling tokio v1.53.2
+   Compiling vt100 v0.16.2
+   Compiling uuid v1.27.0
+   Compiling clap v4.6.7
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.40s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal-d0028d263474a180)
+
+running 25 tests
+test cli::actions::tests::agent_session_integration_target_is_gated_by_agent_plugin ... ok
+test cli::actions::tests::every_registered_action_has_description_and_step_by_step_guidance ... ok
+test cli::actions::key_memory_registry_tests::key_memory_diagnostic_follows_remote_feature ... ok
+test cli::actions::tests::hidden_session_shim_is_registered_to_its_runtime_handler ... ok
+test cli::actions::tests::server_only_dependencies_are_removed_with_server_plugin ... ok
+test cli::actions::tests::no_default_plugins_register_no_component_commands ... ok
+test cli::command_tree::tests::compiled_out_plugin_has_no_help_or_parse_path ... ok
+test cli::command_tree::tests::hidden_session_shim_parser_uses_the_registered_input_schema ... ok
+test cli::output::tests::json_snapshot_has_stable_versioned_fields_and_omits_absent_details ... ok
+test cli::output::tests::non_terminal_pretty_snapshot_has_aligned_details_and_table ... ok
+test cli::output::tests::pretty_snapshot_omits_empty_skill_write_sections ... ok
+test cli::output::tests::pretty_tables_omit_empty_columns_and_rows ... ok
+test cli::command_tree::tests::skill_parser_accepts_a_multi_part_command_and_write_directory ... ok
+test cli::output::tests::registered_action_output_schemas_accept_typed_json_envelopes ... ok
+test cli::command_tree::tests::root_help_uses_registered_descriptions_and_long_action_guidance ... ok
+test cli::output::tests::terminal_snapshot_uses_color_but_still_wraps_to_the_requested_width ... ok
+test failure_data_tests::skill_errors_keep_the_registered_result_data_shape ... ok
+test failure_data_tests::unavailable_results_keep_registered_data_shapes ... ok
+test cli::actions::tests::compiled_out_mesh_has_no_registered_commands ... ok
+test status_tests::custom_named_server_service_is_reported_as_running ... ok
+test status_tests::custom_named_stopped_server_service_is_reported_as_stopped ... ok
+test cli::skills::tests::writing_skills_creates_one_file_per_visible_action ... ok
+test status_tests::unrelated_services_do_not_appear_as_infraternal_servers ... ok
+test startup_tests::process_dumpability_is_disabled_before_dispatch ... ok
+test dispatch_tests::hidden_session_shim_dispatches_from_the_registered_action ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

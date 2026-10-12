@@ -1,0 +1,379 @@
+Running as unit: run-p3414037-i15995266.scope; invocation ID: ea9deecf8028488c9ad0d1ac3ef423a9
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.75s
+   Compiling memchr v2.8.3
+   Compiling serde_core v1.0.229
+   Compiling getrandom v0.2.17
+   Compiling zeroize v1.9.0
+   Compiling tracing-core v0.1.36
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-plugin-api)
+   Compiling tokio v1.53.2
+   Compiling thiserror v2.0.21
+   Compiling openssl v0.10.81
+   Compiling nix v0.30.1
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-shim)
+   Compiling rustls-pki-types v1.15.1
+   Compiling ring v0.17.14
+   Compiling tracing v0.1.44
+   Compiling vte v0.15.0
+   Compiling quinn-udp v0.5.16
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling uuid v1.27.0
+   Compiling rustls-webpki v0.103.15
+   Compiling rustls v0.23.45
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/host-facts)
+   Compiling tokio-openssl v0.6.5
+   Compiling quinn-proto v0.11.19
+   Compiling quinn v0.11.12
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 51.32s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_agent-5b4413ba9e71cc0e)
+
+running 1 test
+test daemon::readiness_exit_tests::ownership_eof_does_not_discard_private_terminal_output ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 60 filtered out; finished in 0.05s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_agent-5b4413ba9e71cc0e)
+
+running 2 tests
+test daemon::gone_tests::scale_review::two_hundred_vanished_sessions_preserve_the_same_channel ... ignored, scale measurement; run alone under CPUWeight=10000
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 59 filtered out; finished in 0.03s
+
+   Compiling nix v0.30.1
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-server)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/mesh)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/remote)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-shim)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/host-facts)
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/release)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge-prod5/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 56s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_agent-d70e10cfc16203b5)
+
+running 61 tests
+test daemon::gone_tests::scale_review::two_hundred_vanished_sessions_preserve_the_same_channel ... ignored, scale measurement; run alone under CPUWeight=10000
+test cli::tests::agent_actions_are_complete_and_unavailable_until_lifecycle_exists ... ok
+test daemon::readiness_tests::a_saturated_census_queue_cannot_establish_the_open_fence ... ok
+test daemon::readiness_tests::census_and_open_result_share_fifo_order ... ok
+test daemon::readiness_tests::control_precedes_bulk_without_reordering_snapshot_notice ... ok
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... ok
+test daemon::census_retry_tests::full_control_lane_retries_retirement_census_on_capacity_without_requests ... ok
+test daemon::readiness_tests::replay_prefix_stops_at_the_shim_hello_head ... ok
+test daemon::readiness_tests::reply_lane_memory_at_1000_channels ... ignored, queue-only scale diagnostic; run alone without build/browser overlap, not whole-daemon memory
+test daemon::readiness_tests::uninstall_handoff_runs_only_after_a_successful_real_socket_write ... ok
+test daemon::session_commands::measurements::command_coordination_cost_against_existing_fifo ... ignored, release command coordination diagnostic, not end-to-end throughput; run without own build overlap
+test daemon::readiness_tests::replay_complete_preserves_the_full_output_cursor_as_decimal ... ok
+test daemon::session_commands::tests::credit_allowance_does_not_cross_ordered_command_barriers ... ok
+test daemon::session_commands::tests::credit_bursts_do_not_consume_ordered_input_capacity ... ok
+test daemon::session_commands::tests::input_and_resize_keep_their_shared_fifo_order_around_credit ... ok
+test daemon::readiness_exit_tests::ownership_eof_does_not_discard_private_terminal_output ... ok
+test daemon::stream_memory_tests::terminal_stream_memory_at_200 ... ignored, weighted release measurement of 200 idle relay tasks
+test lifecycle::tests::directory_inode_changes_do_not_retire_the_same_process ... ok
+test daemon::session_commands::tests::credit_above_one_wire_word_is_exact_and_idle_after_drain ... ok
+test lifecycle::tests::process_birth_parser_handles_command_bytes_and_numeric_bounds ... ok
+test lifecycle::tests::window_ownership_and_process_identity_bound_live_counts ... ok
+test daemon::session_commands::tests::zero_credit_is_idle_and_overflow_refuses_without_mutating_accounting ... ok
+test plugin_control::tests::admission_observes_the_same_plugin_settings_as_actions ... ok
+test lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime ... ok
+test plugin_control::tests::dropping_a_listener_does_not_unlink_a_replacement_file ... ok
+test plugin_control::tests::local_frame_reader_retains_fragmentation_and_refuses_trailing_frames ... ok
+test plugin_control::tests::local_public_actions_refuse_controls_and_active_socket_replacement ... ok
+test plugin_control::tests::retained_path_and_observed_transport_cross_the_lazy_worker ... ok
+test plugin_control::tests::worker_preserves_trusted_context_and_writer_owned_effect ... ok
+test process_exits::platform::tests::resource_failures_do_not_silently_disable_exit_tracking ... ok
+test plugin_control::tests::synchronous_plugin_work_does_not_park_the_current_thread_reactor ... ok
+test process_exits_tests::exited_before_registration_is_not_a_live_registration ... ok
+test process_exits_tests::process_descriptor_is_cloexec_and_rejects_invalid_pid ... ok
+test process_exits_tests::shared_exit_queue_at_200_processes ... ignored, 200 live process lifetimes; run in a weighted benchmark scope
+test process_exits::platform::tests::unavailable_kernel_has_no_timer_or_descriptor ... ok
+test relay::tests::attachment_has_no_implicit_output_or_snapshot_credit ... ok
+test relay::tests::expired_credit_resumes_retained_bytes_at_the_same_cursor ... ok
+test relay::tests::input_overlap_gap_and_restart_from_confirmed_offset ... ok
+test relay::tests::output_partial_credit_and_dedup ... ok
+test relay::tests::output_payload_move_measurement ... ignored, release ownership versus payload-copy measurement
+test relay::tests::overflowing_ranges_never_mutate_cursors ... ok
+test relay::tests::positive_insufficient_credit_arms_a_one_shot_deadline ... ok
+test relay::tests::returned_credit_cancels_starvation_and_state_has_no_payload_buffer ... ok
+test relay::tests::starvation_is_one_shot_and_snapshot_length_does_not_advance_sequence ... ok
+test sessions::tests::borrowed_reader_payload_uses_reusable_cancel_safe_storage ... ok
+test daemon::readiness_tests::fixture_fence_processes_messages_before_the_control_pong ... ok
+test process_exits_tests::shared_queue_detects_exit_and_does_not_repeat_or_retain_descriptors ... ok
+test sessions::tests::ordinary_native_writer_negotiates_queue_backpressure_without_shared_selection ... ok
+test sessions::tests::cancelled_fragmented_shim_read_retains_header_and_body_progress ... ok
+test sessions::tests::reader_borrow_measurement ... ignored, release borrowed versus owned asynchronous receive measurement
+test sessions::tests::post_listen_chmod_wakes_a_connection_refused_at_bind ... ok
+test sessions::tests::refused_socket_is_removed_but_insecure_directory_is_rejected ... ok
+test sessions::tests::shared_writer_helper_negotiates_before_sending_its_selector ... ok
+test sessions::tests::symlink_state_cannot_redirect_private_runtime_storage ... ok
+test sessions::tests::sequenced_attach_intersects_caps_and_legacy_attach_stays_zero ... ok
+test transport::remote_deadline_tests::queued_suffix_cannot_complete_an_expired_cancelled_frame ... ok
+test sessions::tests::bounds::discovery_recovers_more_than_128_authenticated_sockets ... ok
+test transport::remote_deadline_tests::coalesced_partial_suffix_keeps_its_arrival_deadline ... ok
+test transport::remote_deadline_tests::remote_partial_frame_deadline_survives_receive_cancellation ... ok
+test transport::remote_deadline_tests::wholly_idle_remote_channel_has_no_frame_expiry ... ok
+test plugin_control::tests::accepted_public_transaction_outlives_the_framing_deadline ... ok
+
+test result: ok. 54 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 11.07s
+
+     Running tests/transport.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/transport-e32aa112042ccabd)
+
+running 2 tests
+test oversized_header_and_truncated_frame_are_rejected ... ok
+test fragmented_headers_coalesced_frames_and_reusable_transmit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_plugin_api-6883aa424c5eb8cb)
+
+running 20 tests
+test action::tests::command_result_schema_has_required_stable_fields_and_optional_next_step ... ok
+test action::tests::command_result_schema_keeps_action_data_typed_inside_stable_envelope ... ok
+test action::tests::registry_rejects_inconsistent_json_schemas ... ok
+test action::tests::any_of_permissions_are_machine_readable_and_empty_authority_is_rejected ... ok
+test action::tests::only_hidden_internal_routes_may_use_the_reserved_prefix ... ok
+test action::tests::registry_keeps_plugin_ownership_and_exact_command_paths ... ok
+test component_tests::component_declarations_cannot_create_servers ... ok
+test action::tests::registry_rejects_missing_action_guidance_and_command_collisions ... ok
+test component_tests::destructive_actions_require_a_dry_run_and_every_action_has_instructions ... ok
+test admission::tests::memory_refusal_round_trips_without_losing_legacy_error ... ok
+test release_version::tests::accepts_only_worker_version_forms ... ok
+test routing::tests::topic_is_borrowed_and_other_filter_fields_are_left_to_the_plugin ... ok
+test routing::tests::invalid_or_oversized_topics_are_refused ... ok
+test tests::deferred_plugin_effect_waits_for_successful_reply_and_drops_on_cancellation ... ok
+test tests::machine_actions_are_declared_without_entering_human_discovery ... ok
+test tests::registry_rejects_oversized_json_before_plugin_dispatch ... ok
+test tests::notifications_are_declared_json_bounded_and_drained_once ... ok
+test tests::operator_presentation_cannot_follow_a_private_control_action ... ok
+test tests::public_dispatch_cannot_call_a_machine_control_action ... ok
+test tests::registry_routes_only_declared_actions ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/routing_review.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/routing_review-a0ea7a826d6d5bb7)
+
+running 2 tests
+test review_topic_borrows_plain_and_owns_escaped ... ok
+test review_topic_refuses_oversize_duplicate_and_deep_input ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/infraternal_plugin_ssh-83fe7e905bec42e9)
+
+running 13 tests
+test auth_once::tests::caller_cannot_choose_or_extend_the_expiry_clock ... ok
+test cli::tests::ssh_actions_are_complete_and_marked_unavailable ... ok
+test config::tests::configured_private_sources_are_excluded_and_public_trust_is_retained ... ok
+test config::tests::flattened_quoted_public_filenames_are_refused_when_existing_trust_would_be_lost ... ok
+test config::tests::trust_lookup_uses_every_explicit_alias_verbatim ... ok
+test config::tests::malformed_public_policy_is_refused_before_it_can_change_command_arguments ... ok
+test config::tests::unresolved_or_relative_public_paths_cannot_admit_first_contact ... ok
+test manifest::tests::node_provisioning_declares_an_existing_server_and_only_node_components ... ok
+test prompt::tests::reply_fixture ... ignored, private subprocess for the one-reply peer oracle
+test auth_once::tests::invalid_material_is_refused_before_any_helper_or_scheduling ... ok
+test auth_once::tests::each_method_consumes_once_and_expiry_erases_both_methods ... ok
+test transport::secret_tests::secret_input_has_a_fixed_bound_and_accepts_only_strings ... ok
+
+running 1 test
+test prompt::tests::reply_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+test prompt::tests::helper_reply_requires_the_registered_parent_and_is_served_once ... ok
+
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/auth_order.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/auth_order-f72d0b47c7e20c64)
+
+running 6 tests
+test only_exhausted_auth_returns_typed_choose_method ... ok
+test later_command_auth_errors_never_restart_the_selected_method_sequence ... ok
+test authentication_never_replays_a_mutating_first_command_or_reuses_a_failed_scope ... ok
+test trust_network_and_remote_command_failures_stop_without_loading_local_secrets ... ok
+test successful_authentication_is_reported_and_later_secrets_are_never_requested ... ok
+test cancelling_authentication_consumes_the_attempt_without_requesting_secrets ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/build_removal.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/build_removal-09a19d50b00768e7)
+
+running 1 test
+test build_without_default_plugins_excludes_ssh_dependency ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running tests/concurrency.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/concurrency-c5e612dd1b5d1122)
+
+running 7 tests
+test a_thousand_admitted_targets_keep_eight_active_backend_calls ... ignored, explicit CPUWeight10000 scale measurement with a controlled unavailable backend
+test an_interrupted_disable_keeps_admission_closed_until_its_adapter_retires ... ok
+test authenticated_batches_retain_an_opaque_session_for_trusted_issuance ... ok
+test entire_batch_validates_before_start_and_duplicates_are_refused ... ok
+test concurrency_is_eight_across_batches_and_all_ten_hosts_fail_independently ... ok
+test component_off_retires_a_real_native_helper ... ok
+test turning_off_drains_queued_work_and_reenable_never_resumes_old_batches ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/config_isolation.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/config_isolation-9e271c76bd30bad7)
+
+running 2 tests
+test synthetic_master_socket_is_private_at_creation ... ok
+test configured_identity_paths_are_not_inherited_by_the_command_child ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/credentials.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/credentials-b24f6508c41228e1)
+
+running 3 tests
+test password_helpers_prepare_a_fresh_private_root_and_remove_only_their_directory ... ok
+test password_socket_refuses_an_unrelated_same_user_process ... ok
+test credential_helper_refuses_host_trust_and_permission_prompts ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/diagnostics.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/diagnostics-8e6dc36361b79758)
+
+running 8 tests
+test effective_configuration_never_scans_a_proxy_or_invalid_endpoint ... ok
+test dynamic_public_trust_is_retained_without_becoming_file_only_admission ... ok
+test failed_join_retains_only_the_allowlisted_host_dns_error ... ok
+test every_failed_step_names_the_step_and_a_next_action ... ok
+test mesh_policy_requires_both_discovery_facts_and_a_transport_refusal ... ok
+test bootstrap_status_mapping_covers_each_step_and_approved_mode ... ok
+test status_mapping_preserves_authentication_and_missing_payload_classification ... ok
+test remote_command_text_is_not_ssh_authority_and_never_enters_logs ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/event_metadata.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/event_metadata-9600dc1875f20b17)
+
+running 1 test
+test unsupported_host_reports_method_and_retry_never_replays_it_as_current ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/foreground.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/foreground-76c1e82ae7b98362)
+
+running 1 test
+test configured_backgrounding_is_overridden_for_owned_bootstrap_commands ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/host_trust.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/host_trust-07e98c3eb9513d4c)
+
+running 2 tests
+test configured_known_hosts_command_revocation_cannot_offer_first_contact ... ignored, run through research/ssh-client/measure.py with its synthetic public host key
+test first_contact_needs_fresh_authority_and_never_replaces_existing_trust ... ignored, run through research/ssh-client/measure.py --negative-trust-oracle with its memory-held synthetic key
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/install-4d2c7ee0531fb6c5)
+
+running 48 tests
+test acknowledged_linger_noop_does_not_own_later_external_enable ... ok
+test active_transaction_is_live_between_ssh_setup_commands ... ok
+test breakit2_interrupted_lock_creation_allows_cleanup_and_retry ... ok
+test breakit2_stage_refuses_parent_that_cannot_be_rolled_back ... ok
+test breakit2_rollback_preserves_foreign_unit_new ... ok
+test command_failure_names_upload_join_install_and_start_separately ... ok
+test active_service_stop_failure_never_replaces_live_artifacts ... ok
+test earlier_attempt_classification_preserves_status_boundary_and_authentication ... ok
+test earlier_attempt_records_reject_suffixes_truncation_and_unbounded_counts ... ok
+test breakit2_rollback_preserves_foreign_launcher_new ... ok
+test cleanup_receipt_cannot_authorize_a_replaced_unowned_directory ... ok
+test foreign_data_refusal_retains_exit_status_and_actionable_directory ... ok
+test enrollment_process_exit_71_is_not_reported_as_directory_refusal ... ok
+test fresh_cleanup_refuses_a_shared_writable_receipt_parent_before_mutation ... ok
+test denied_linger_request_does_not_undo_a_later_external_enable ... ok
+test fresh_cleanup_resumes_after_base_removal_and_retires_its_receipt ... ok
+test foreign_files_and_another_attempt_lock_are_never_removed ... ok
+test fresh_cleanup_resumes_after_owner_marker_removal_with_a_fresh_session ... ok
+test failed_upgrade_preserves_previous_binary_state_and_unit ... ok
+test fresh_receipt_is_removed_before_transaction_rollback ... ok
+test fresh_rollback_resumes_after_transaction_directory_removal ... ok
+test fresh_runtime_symlink_never_removes_foreign_empty_directories ... ok
+test fresh_runtime_empty_directories_do_not_block_rollback_and_retry ... ok
+test full_stage_frees_payload_before_allocating_a_cleanup_receipt ... ok
+test fresh_failure_removes_owned_artifacts_and_success_can_rejoin ... ok
+test fresh_runtime_unexpected_data_keeps_ownership_and_cleanup_receipt ... ok
+test interrupted_linger_reply_retains_intent_for_cleanup ... ok
+test interrupted_acquisition_cleanup_receipt_can_resume ... ok
+test interrupted_restore_recreates_links_without_deleting_the_original ... ok
+test interrupted_rollback_never_deletes_already_restored_state_on_retry ... ok
+test interrupted_upgrade_after_acknowledged_stop_restarts_the_previous_service ... ok
+test linked_owner_marker_is_refused_before_retiring_the_transaction ... ok
+test payload_reuse_never_adopts_a_foreign_cache_directory ... ok
+test linger_policy_denial_is_a_warning_and_owned_changes_are_reversible ... ok
+test pending_fresh_cleanup_refuses_replacement_staging_until_finished ... ok
+test refused_previous_service_stop_only_removes_staging ... ok
+test retry_cleanup_uses_fresh_session_and_preserves_privilege_consent ... ok
+test malformed_or_exposed_cleanup_receipts_never_remove_the_owned_root ... ok
+test rejoin_preserves_existing_host_identity_in_the_private_staging_state ... ok
+test review_interrupted_transaction_receipt_allows_owned_cleanup ... ok
+test retry_resends_payload_when_cache_content_changes ... ok
+test setup_transaction_holds_a_live_lock_between_shell_commands ... ok
+test retry_reuses_verified_payload_after_owned_rollback ... ok
+test rollback_stop_refusal_retains_artifacts_for_later_cleanup ... ok
+test writable_installation_is_refused_before_upload_or_cleanup ... ok
+test turning_off_paused_host_provisioning_preserves_earlier_leftovers ... ok
+test start_fresh_resumes_the_same_attempt_after_owner_confirmation ... ok
+test stale_previous_attempt_socket_can_be_retired_without_manual_cleanup ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.16s
+
+     Running tests/model.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/model-0fc3bfb036f5f213)
+
+running 6 tests
+test addresses_never_become_options_or_shell_syntax ... ok
+test consent_and_credential_references_are_the_only_request_authority ... ok
+test passwordless_sudo_keeps_default_rootless_without_explicit_consent ... ok
+test check_is_exact_bounded_and_rejects_every_truncation ... ok
+test root_consent_is_required_before_ssh_and_uid_zero_cannot_be_rootless ... ok
+test start_fresh_is_declared_as_an_owned_host_provisioning_action ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/payload_source.rs (/home/kayg/.cache/codex-scratch/dev-backmerge-prod5/build/debug/deps/payload_source-946d2f4e76928db0)
+
+running 2 tests
+test stalled_download_retains_the_named_step_before_the_attempt_deadline ... FAILED
+test verification_failure_names_step_and_stops_before_upload ... FAILED
+
+failures:
+
+---- stalled_download_retains_the_named_step_before_the_attempt_deadline stdout ----
+
+thread 'stalled_download_retains_the_named_step_before_the_attempt_deadline' (3464945) panicked at crates/plugins/ssh/tests/payload_source.rs:36:17:
+assertion `left == right` failed
+  left: "set -eu\nos=$(uname -s)\narch=$(uname -m)\nuid=$(id -u)\ninit=other\n[ ! -d /run/systemd/system ] || init=systemd\nsudo=no\nif [ \"$uid\" = 0 ] || (command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1); then sudo=yes; fi\nuser_systemd=no\nif command -v systemctl >/dev/null 2>&1 && systemctl --user show --property=Version --value >/dev/null 2>&1; then user_systemd=yes; fi\nlinger=no\nif command -v loginctl >/dev/null 2>&1 && [ \"$(loginctl show-user \"$uid\" -p Linger --value 2>/dev/null || :)\" = yes ]; then linger=yes; fi\nexisting=no\nif command -v infraternal >/dev/null 2>&1 || [ -e \"$HOME/.local/share/infraternal/bin/current\" ]; then existing=yes; fi\nprintf 'INFRATERNAL_CHECK_V1\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$init\" \"$uid\" \"$sudo\" \"$user_systemd\" \"$linger\" \"$existing\"\n\nset -euC\numask 077\nhost='00000000000000000000000000000000'\ntransaction='00000000000000000000000000000000'\nbase=\"$HOME/.local/share/infraternal\"\nlauncher=\"$HOME/.local/bin/infraternal\"\nunit=\"$HOME/.config/systemd/user/infraternal-agent.service\"\nmanager='systemctl --user'\nwanted=default.target\n# Existing data must be private to the execution uid before any read or write.\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n# Serialize host provisioning shell commands without creating an unowned lock file.\nsetup_guard() {\n    [ \"${setup_guarded:-no}\" != yes ] || return 0\n    parent=$(dirname \"$base\")\n    if [ -e \"$parent\" ] || [ -L \"$parent\" ]; then\n        [ -d \"$parent\" ] && [ ! -L \"$parent\" ] && [ -O \"$parent\" ] || exit 71\n        permissions=$(stat -c '%a' \"$parent\")\n        [ \"$((0$permissions & 022))\" = 0 ] || exit 71\n        # Every new installer command takes this same directory lock. It leaves\n        # no lock file and serializes admission, recovery and journal mutation.\n        exec 9< \"$parent\"\n        flock -n 9 || exit 73\n        setup_guarded=yes\n    fi\n}\n# A bounded lease holds the transaction directory across SSH command gaps. Its\n# public PID/start-time receipt is not authority by itself: retirement also\n# requires the process's inherited descriptor to refer to this exact directory.\nstart_setup_lease() {\n    exec 7< \"$stage\"\n    flock -n 7 || exit 73\n    (exec 9<&-; exec sleep 180) >/dev/null 2>&1 &\n    lease_pid=$!\n    lease_birth=$(awk '{print $22}' \"/proc/$lease_pid/stat\")\n    printf '%s %s\\n' \"$lease_pid\" \"$lease_birth\" > \"$stage/lease\"\n    exec 7<&-\n}\nretire_setup_lease() {\n    if [ -e \"$stage/lease\" ] || [ -L \"$stage/lease\" ]; then\n        [ -f \"$stage/lease\" ] && [ ! -L \"$stage/lease\" ] && [ -O \"$stage/lease\" ] && [ \"$(stat -c '%a:%h' \"$stage/lease\")\" = 600:1 ] || exit 71\n        [ \"$(stat -c '%s' \"$stage/lease\")\" -le 64 ] || exit 71\n        read -r lease_pid lease_birth extra < \"$stage/lease\"\n        [ -z \"$extra\" ] || exit 71\n        case \"$lease_pid:$lease_birth\" in *[!0-9:]*|:*|*:) exit 71;; esac\n        if [ -r \"/proc/$lease_pid/stat\" ] && [ \"$(awk '{print $22}' \"/proc/$lease_pid/stat\")\" = \"$lease_birth\" ]; then\n            [ \"$(readlink \"/proc/$lease_pid/fd/7\" 2>/dev/null || :)\" = \"$stage\" ] || exit 73\n            kill \"$lease_pid\" || exit 73\n        fi\n    fi\n    # Also detect a holder whose creation was interrupted before PID journaling.\n    # Such an unrecorded lease expires at the same bounded setup deadline.\n    if [ -d \"$stage\" ] && [ ! -L \"$stage\" ]; then\n        exec 7< \"$stage\"\n        flock -w 2 7 || exit 73\n    fi\n}\n# Classify earlier host provisioning using private ownership receipts; never adopt foreign data.\n# This program emits only fixed records and public ids, never process arguments or file contents.\nprivate_file() {\n    [ -f \"$1\" ] && [ ! -L \"$1\" ] && [ -O \"$1\" ] && [ \"$(stat -c '%a:%h' \"$1\")\" = 600:1 ] || exit 71\n    [ \"$(stat -c '%s' \"$1\")\" -le 128 ] || exit 71\n}\nhex_id() {\n    [ \"${#1}\" = 32 ] || exit 75\n    case \"$1\" in *[!0-9a-f]*) exit 75;; esac\n}\nnot_live() {\n    if [ -d \"$base/.bootstrap-lock\" ] && [ ! -L \"$base/.bootstrap-lock\" ]; then\n        exec 8< \"$base/.bootstrap-lock\"\n        flock -n 8 || exit 73\n        exec 8<&-\n    fi\n    [ -r /proc/net/unix ] || exit 75\n    # Match listeners by canonical path or the exact UUID basename. The latter\n    # also covers a listener bound through a relative path or a directory alias.\n    # A collision refuses conservatively; it never authorizes removal.\n    while read -r num refs protocol flags type state inode path; do\n        [ \"$flags\" = 00010000 ] || continue\n        case \"$path\" in \"$base\"/*) exit 73;; esac\n        for entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n            [ -S \"$entry\" ] || continue\n            case \"$path\" in \"${entry##*/}\"|*/\"${entry##*/}\") exit 73;; esac\n        done\n    done < /proc/net/unix\n    # Inspect executable and open-descriptor links in one native traversal,\n    # never argv or environments. Per-link shell subprocesses grow with every\n    # other workload's open files. Bound the process table and refuse paths\n    # that cannot be represented literally by find's link-pattern predicate.\n    case \"$base\" in *[\\*\\?\\[]*) exit 75;; esac\n    set -- /proc/[0-9]*/exe /proc/[0-9]*/fd\n    [ \"$#\" -le 8192 ] || exit 75\n    command -v find >/dev/null 2>&1 || exit 75\n    if live=$(find \"$@\" -maxdepth 1 -lname \"$base/*\" -print -quit 2>/dev/null); then\n        :\n    else\n        # Processes can exit or belong to another uid during traversal. Other\n        # failures (missing utility, oversized argv) cannot prove absence.\n        [ \"$?\" = 1 ] || exit 75\n    fi\n    [ -z \"$live\" ] || exit 73\n\n}\nno_redirect() {\n    # Every directory from / to the setup root must be real, except the home\n    # directory itself or a directory above it (e.g. /home -> /var/home): a\n    # symlink below home could send recovery to leftovers somewhere else (#169).\n    path=\n    rest=${base#/}\n    while [ -n \"$rest\" ]; do\n        part=${rest%%/*}\n        [ \"$part\" = \"$rest\" ] && rest= || rest=${rest#*/}\n        path=\"$path/$part\"\n        if [ -L \"$path\" ]; then\n            case \"$HOME/\" in \"$path\"/*) ;; *) exit 71;; esac\n        fi\n    done\n}\ninspect_previous() {\n    no_redirect\n    setup_guard\n    receipt=\n    for candidate in \"$base\".bootstrap-rollback-*; do\n        [ -e \"$candidate\" ] || [ -L \"$candidate\" ] || continue\n        [ -z \"$receipt\" ] || exit 75\n        receipt=$candidate\n    done\n    if [ -z \"$receipt\" ] && [ ! -e \"$base/.bootstrap-lock\" ] && [ ! -L \"$base/.bootstrap-lock\" ] && [ ! -e \"$base/.bootstrap-acquiring\" ] && [ ! -L \"$base/.bootstrap-acquiring\" ]; then\n        if [ -e \"$base\" ] || [ -L \"$base\" ]; then\n            private_file \"$base/.bootstrap-owner\"\n            [ \"$(stat -c '%s' \"$base/.bootstrap-owner\")\" = 33 ] || exit 75\n            hex_id \"$(cat \"$base/.bootstrap-owner\")\"\n        fi\n        printf 'INFRATERNAL_SETUP_CLEAR\\n'\n        return\n    fi\n    [ -d \"$base\" ] && [ ! -L \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\n    not_live\n    private_file \"$base/.bootstrap-owner\"\n    [ \"$(stat -c '%s' \"$base/.bootstrap-owner\")\" = 33 ] || exit 75\n    previous_host=$(cat \"$base/.bootstrap-owner\")\n    hex_id \"$previous_host\"\n    identity=$(stat -c '%d:%i' \"$base\")\n    if [ -n \"$receipt\" ]; then\n        private_file \"$receipt\"\n        previous_transaction=${receipt#\"$base.bootstrap-rollback-\"}\n        hex_id \"$previous_transaction\"\n        # Old receipts without an inode binding cannot prove which directory\n        # they own. Refuse explicitly rather than reinterpret an older format.\n        [ \"$(cat \"$receipt\")\" = \"$previous_host $previous_transaction fresh $identity\" ] || exit 75\n    else\n        # An interrupted fresh lock is recoverable through its original journal.\n        # An upgrade owns previous enrolled data and is never a start-fresh target.\n        if [ -e \"$base/.bootstrap-acquiring\" ] || [ -L \"$base/.bootstrap-acquiring\" ]; then\n            private_file \"$base/.bootstrap-acquiring\"\n            record=$(cat \"$base/.bootstrap-acquiring\")\n            previous_transaction=${record% fresh}\n            [ \"$record\" = \"$previous_transaction fresh\" ] || exit 75\n        else\n            [ -d \"$base/.bootstrap-lock\" ] && [ ! -L \"$base/.bootstrap-lock\" ] && [ -O \"$base/.bootstrap-lock\" ] && [ \"$(stat -c '%a' \"$base/.bootstrap-lock\")\" = 700 ] || exit 71\n            private_file \"$base/.bootstrap-lock/transaction\"\n            private_file \"$base/.bootstrap-lock/kind\"\n            [ \"$(cat \"$base/.bootstrap-lock/kind\")\" = fresh ] || exit 75\n            previous_transaction=$(cat \"$base/.bootstrap-lock/transaction\")\n        fi\n        hex_id \"$previous_transaction\"\n    fi\n    if [ -e \"$base/.bootstrap-lock\" ] || [ -L \"$base/.bootstrap-lock\" ]; then\n        stage=\"$base/.bootstrap-lock\"\n        [ -d \"$stage\" ] && [ ! -L \"$stage\" ] && [ -O \"$stage\" ] && [ \"$(stat -c '%a' \"$stage\")\" = 700 ] || exit 71\n        # Receipt and any surviving lock must describe the same fresh attempt.\n        if [ -e \"$stage/transaction\" ] || [ -L \"$stage/transaction\" ]; then\n            private_file \"$stage/transaction\"\n            [ \"$(cat \"$stage/transaction\")\" = \"$previous_transaction\" ] || exit 75\n            private_file \"$stage/kind\"\n            [ \"$(cat \"$stage/kind\")\" = fresh ] || exit 75\n            # Fresh acquisition receipts own only these staging artifacts.\n            # More advanced/unknown layouts need their original rollback; do not\n            # recursively delete foreign files just because a lock is marked ours.\n            for entry in \"$stage\"/* \"$stage\"/.[!.]* \"$stage\"/..?*; do\n                [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n                case \"${entry##*/}\" in\n                    transaction|kind) private_file \"$entry\";;\n                    lease) private_file \"$entry\";;\n                    payload)\n                        [ -f \"$entry\" ] && [ ! -L \"$entry\" ] && [ -O \"$entry\" ] || exit 71\n                        case \"$(stat -c '%a' \"$entry\")\" in 600|700) :;; *) exit 71;; esac;;\n                    *) exit 75;;\n                esac\n            done\n        else\n            private_file \"$base/.bootstrap-acquiring\"\n            [ \"$(cat \"$base/.bootstrap-acquiring\")\" = \"$previous_transaction fresh\" ] || exit 75\n            # Only the acquisition journal proves an otherwise empty lock.\n            for entry in \"$stage\"/* \"$stage\"/.[!.]* \"$stage\"/..?*; do\n                [ ! -e \"$entry\" ] && [ ! -L \"$entry\" ] || exit 71\n            done\n        fi\n    fi\n    # A receipt may coexist with interrupted acquisition retirement. Validate\n    # that sibling binding before removing even otherwise-owned sockets.\n    if [ -e \"$base/.bootstrap-acquiring\" ] || [ -L \"$base/.bootstrap-acquiring\" ]; then\n        private_file \"$base/.bootstrap-acquiring\"\n        [ \"$(stat -c '%s' \"$base/.bootstrap-acquiring\")\" = 39 ] || exit 75\n        [ \"$(cat \"$base/.bootstrap-acquiring\")\" = \"$previous_transaction fresh\" ] || exit 75\n    fi\n    # Any unjournaled root entry refuses the entire recovery before mutation,\n    # including sockets elsewhere that would otherwise be safe to retire.\n    for entry in \"$base\"/* \"$base\"/.[!.]* \"$base\"/..?*; do\n        [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n        case \"${entry##*/}\" in\n            .bootstrap-owner|.bootstrap-lock|.bootstrap-acquiring|sessions) :;;\n            .bootstrap-ready)\n                private_file \"$entry\"\n                [ \"$(cat \"$entry\")\" = \"$previous_host\" ] || exit 75;;\n            bin)\n                [ -d \"$entry\" ] && [ ! -L \"$entry\" ] && [ -O \"$entry\" ] && [ \"$(stat -c '%a' \"$entry\")\" = 700 ] || exit 71\n                for child in \"$entry\"/* \"$entry\"/.[!.]* \"$entry\"/..?*; do\n                    [ ! -e \"$child\" ] && [ ! -L \"$child\" ] || exit 71\n                done;;\n            *) exit 71;;\n        esac\n    done\n    # Validate every socket before deleting any. Only these session rendezvous\n    # names and empty directories belong to this legacy fresh-install receipt.\n    sockets=0\n    for directory in \"$base/sessions\" \"$base/sessions/sessions\"; do\n        [ -e \"$directory\" ] || [ -L \"$directory\" ] || continue\n        [ -d \"$directory\" ] && [ ! -L \"$directory\" ] && [ -O \"$directory\" ] && [ \"$(stat -c '%a' \"$directory\")\" = 700 ] || exit 71\n        for entry in \"$directory\"/* \"$directory\"/.[!.]* \"$directory\"/..?*; do\n            [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n            [ \"$entry\" != \"$base/sessions/sessions\" ] || continue\n            [ -S \"$entry\" ] && [ ! -L \"$entry\" ] && [ -O \"$entry\" ] && [ \"$(stat -c '%a' \"$entry\")\" = 600 ] || exit 71\n            name=${entry##*/}\n            socket_id=${name%.sock}\n            [ \"$name\" = \"$socket_id.sock\" ] || exit 71\n            hex_id \"$socket_id\"\n            sockets=$((sockets + 1))\n            [ \"$sockets\" -le 1024 ] || exit 75\n        done\n    done\n    printf 'INFRATERNAL_SETUP_STALE %s %s %s %s\\n' \"$previous_host\" \"$previous_transaction\" \"$identity\" \"$sockets\"\n}\n\ninspect_previous"
+ right: "set -eu\nos=$(uname -s)\narch=$(uname -m)\nuid=$(id -u)\ninit=other\n[ ! -d /run/systemd/system ] || init=systemd\nsudo=no\nif [ \"$uid\" = 0 ] || (command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1); then sudo=yes; fi\nuser_systemd=no\nif command -v systemctl >/dev/null 2>&1 && systemctl --user show --property=Version --value >/dev/null 2>&1; then user_systemd=yes; fi\nlinger=no\nif command -v loginctl >/dev/null 2>&1 && [ \"$(loginctl show-user \"$uid\" -p Linger --value 2>/dev/null || :)\" = yes ]; then linger=yes; fi\nexisting=no\nif command -v infraternal >/dev/null 2>&1 || [ -e \"$HOME/.local/share/infraternal/bin/current\" ]; then existing=yes; fi\nprintf 'INFRATERNAL_CHECK_V1\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$init\" \"$uid\" \"$sudo\" \"$user_systemd\" \"$linger\" \"$existing\"\n"
+
+thread 'stalled_download_retains_the_named_step_before_the_attempt_deadline' (3464945) panicked at crates/plugins/ssh/tests/payload_source.rs:202:6:
+called `Result::unwrap()` on an `Err` value: Elapsed(())
+
+---- verification_failure_names_step_and_stops_before_upload stdout ----
+
+thread 'verification_failure_names_step_and_stops_before_upload' (3464946) panicked at crates/plugins/ssh/tests/payload_source.rs:36:17:
+assertion `left == right` failed
+  left: "set -eu\nos=$(uname -s)\narch=$(uname -m)\nuid=$(id -u)\ninit=other\n[ ! -d /run/systemd/system ] || init=systemd\nsudo=no\nif [ \"$uid\" = 0 ] || (command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1); then sudo=yes; fi\nuser_systemd=no\nif command -v systemctl >/dev/null 2>&1 && systemctl --user show --property=Version --value >/dev/null 2>&1; then user_systemd=yes; fi\nlinger=no\nif command -v loginctl >/dev/null 2>&1 && [ \"$(loginctl show-user \"$uid\" -p Linger --value 2>/dev/null || :)\" = yes ]; then linger=yes; fi\nexisting=no\nif command -v infraternal >/dev/null 2>&1 || [ -e \"$HOME/.local/share/infraternal/bin/current\" ]; then existing=yes; fi\nprintf 'INFRATERNAL_CHECK_V1\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$init\" \"$uid\" \"$sudo\" \"$user_systemd\" \"$linger\" \"$existing\"\n\nset -euC\numask 077\nhost='00000000000000000000000000000000'\ntransaction='00000000000000000000000000000000'\nbase=\"$HOME/.local/share/infraternal\"\nlauncher=\"$HOME/.local/bin/infraternal\"\nunit=\"$HOME/.config/systemd/user/infraternal-agent.service\"\nmanager='systemctl --user'\nwanted=default.target\n# Existing data must be private to the execution uid before any read or write.\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n# Serialize host provisioning shell commands without creating an unowned lock file.\nsetup_guard() {\n    [ \"${setup_guarded:-no}\" != yes ] || return 0\n    parent=$(dirname \"$base\")\n    if [ -e \"$parent\" ] || [ -L \"$parent\" ]; then\n        [ -d \"$parent\" ] && [ ! -L \"$parent\" ] && [ -O \"$parent\" ] || exit 71\n        permissions=$(stat -c '%a' \"$parent\")\n        [ \"$((0$permissions & 022))\" = 0 ] || exit 71\n        # Every new installer command takes this same directory lock. It leaves\n        # no lock file and serializes admission, recovery and journal mutation.\n        exec 9< \"$parent\"\n        flock -n 9 || exit 73\n        setup_guarded=yes\n    fi\n}\n# A bounded lease holds the transaction directory across SSH command gaps. Its\n# public PID/start-time receipt is not authority by itself: retirement also\n# requires the process's inherited descriptor to refer to this exact directory.\nstart_setup_lease() {\n    exec 7< \"$stage\"\n    flock -n 7 || exit 73\n    (exec 9<&-; exec sleep 180) >/dev/null 2>&1 &\n    lease_pid=$!\n    lease_birth=$(awk '{print $22}' \"/proc/$lease_pid/stat\")\n    printf '%s %s\\n' \"$lease_pid\" \"$lease_birth\" > \"$stage/lease\"\n    exec 7<&-\n}\nretire_setup_lease() {\n    if [ -e \"$stage/lease\" ] || [ -L \"$stage/lease\" ]; then\n        [ -f \"$stage/lease\" ] && [ ! -L \"$stage/lease\" ] && [ -O \"$stage/lease\" ] && [ \"$(stat -c '%a:%h' \"$stage/lease\")\" = 600:1 ] || exit 71\n        [ \"$(stat -c '%s' \"$stage/lease\")\" -le 64 ] || exit 71\n        read -r lease_pid lease_birth extra < \"$stage/lease\"\n        [ -z \"$extra\" ] || exit 71\n        case \"$lease_pid:$lease_birth\" in *[!0-9:]*|:*|*:) exit 71;; esac\n        if [ -r \"/proc/$lease_pid/stat\" ] && [ \"$(awk '{print $22}' \"/proc/$lease_pid/stat\")\" = \"$lease_birth\" ]; then\n            [ \"$(readlink \"/proc/$lease_pid/fd/7\" 2>/dev/null || :)\" = \"$stage\" ] || exit 73\n            kill \"$lease_pid\" || exit 73\n        fi\n    fi\n    # Also detect a holder whose creation was interrupted before PID journaling.\n    # Such an unrecorded lease expires at the same bounded setup deadline.\n    if [ -d \"$stage\" ] && [ ! -L \"$stage\" ]; then\n        exec 7< \"$stage\"\n        flock -w 2 7 || exit 73\n    fi\n}\n# Classify earlier host provisioning using private ownership receipts; never adopt foreign data.\n# This program emits only fixed records and public ids, never process arguments or file contents.\nprivate_file() {\n    [ -f \"$1\" ] && [ ! -L \"$1\" ] && [ -O \"$1\" ] && [ \"$(stat -c '%a:%h' \"$1\")\" = 600:1 ] || exit 71\n    [ \"$(stat -c '%s' \"$1\")\" -le 128 ] || exit 71\n}\nhex_id() {\n    [ \"${#1}\" = 32 ] || exit 75\n    case \"$1\" in *[!0-9a-f]*) exit 75;; esac\n}\nnot_live() {\n    if [ -d \"$base/.bootstrap-lock\" ] && [ ! -L \"$base/.bootstrap-lock\" ]; then\n        exec 8< \"$base/.bootstrap-lock\"\n        flock -n 8 || exit 73\n        exec 8<&-\n    fi\n    [ -r /proc/net/unix ] || exit 75\n    # Match listeners by canonical path or the exact UUID basename. The latter\n    # also covers a listener bound through a relative path or a directory alias.\n    # A collision refuses conservatively; it never authorizes removal.\n    while read -r num refs protocol flags type state inode path; do\n        [ \"$flags\" = 00010000 ] || continue\n        case \"$path\" in \"$base\"/*) exit 73;; esac\n        for entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n            [ -S \"$entry\" ] || continue\n            case \"$path\" in \"${entry##*/}\"|*/\"${entry##*/}\") exit 73;; esac\n        done\n    done < /proc/net/unix\n    # Inspect executable and open-descriptor links in one native traversal,\n    # never argv or environments. Per-link shell subprocesses grow with every\n    # other workload's open files. Bound the process table and refuse paths\n    # that cannot be represented literally by find's link-pattern predicate.\n    case \"$base\" in *[\\*\\?\\[]*) exit 75;; esac\n    set -- /proc/[0-9]*/exe /proc/[0-9]*/fd\n    [ \"$#\" -le 8192 ] || exit 75\n    command -v find >/dev/null 2>&1 || exit 75\n    if live=$(find \"$@\" -maxdepth 1 -lname \"$base/*\" -print -quit 2>/dev/null); then\n        :\n    else\n        # Processes can exit or belong to another uid during traversal. Other\n        # failures (missing utility, oversized argv) cannot prove absence.\n        [ \"$?\" = 1 ] || exit 75\n    fi\n    [ -z \"$live\" ] || exit 73\n\n}\nno_redirect() {\n    # Every directory from / to the setup root must be real, except the home\n    # directory itself or a directory above it (e.g. /home -> /var/home): a\n    # symlink below home could send recovery to leftovers somewhere else (#169).\n    path=\n    rest=${base#/}\n    while [ -n \"$rest\" ]; do\n        part=${rest%%/*}\n        [ \"$part\" = \"$rest\" ] && rest= || rest=${rest#*/}\n        path=\"$path/$part\"\n        if [ -L \"$path\" ]; then\n            case \"$HOME/\" in \"$path\"/*) ;; *) exit 71;; esac\n        fi\n    done\n}\ninspect_previous() {\n    no_redirect\n    setup_guard\n    receipt=\n    for candidate in \"$base\".bootstrap-rollback-*; do\n        [ -e \"$candidate\" ] || [ -L \"$candidate\" ] || continue\n        [ -z \"$receipt\" ] || exit 75\n        receipt=$candidate\n    done\n    if [ -z \"$receipt\" ] && [ ! -e \"$base/.bootstrap-lock\" ] && [ ! -L \"$base/.bootstrap-lock\" ] && [ ! -e \"$base/.bootstrap-acquiring\" ] && [ ! -L \"$base/.bootstrap-acquiring\" ]; then\n        if [ -e \"$base\" ] || [ -L \"$base\" ]; then\n            private_file \"$base/.bootstrap-owner\"\n            [ \"$(stat -c '%s' \"$base/.bootstrap-owner\")\" = 33 ] || exit 75\n            hex_id \"$(cat \"$base/.bootstrap-owner\")\"\n        fi\n        printf 'INFRATERNAL_SETUP_CLEAR\\n'\n        return\n    fi\n    [ -d \"$base\" ] && [ ! -L \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\n    not_live\n    private_file \"$base/.bootstrap-owner\"\n    [ \"$(stat -c '%s' \"$base/.bootstrap-owner\")\" = 33 ] || exit 75\n    previous_host=$(cat \"$base/.bootstrap-owner\")\n    hex_id \"$previous_host\"\n    identity=$(stat -c '%d:%i' \"$base\")\n    if [ -n \"$receipt\" ]; then\n        private_file \"$receipt\"\n        previous_transaction=${receipt#\"$base.bootstrap-rollback-\"}\n        hex_id \"$previous_transaction\"\n        # Old receipts without an inode binding cannot prove which directory\n        # they own. Refuse explicitly rather than reinterpret an older format.\n        [ \"$(cat \"$receipt\")\" = \"$previous_host $previous_transaction fresh $identity\" ] || exit 75\n    else\n        # An interrupted fresh lock is recoverable through its original journal.\n        # An upgrade owns previous enrolled data and is never a start-fresh target.\n        if [ -e \"$base/.bootstrap-acquiring\" ] || [ -L \"$base/.bootstrap-acquiring\" ]; then\n            private_file \"$base/.bootstrap-acquiring\"\n            record=$(cat \"$base/.bootstrap-acquiring\")\n            previous_transaction=${record% fresh}\n            [ \"$record\" = \"$previous_transaction fresh\" ] || exit 75\n        else\n            [ -d \"$base/.bootstrap-lock\" ] && [ ! -L \"$base/.bootstrap-lock\" ] && [ -O \"$base/.bootstrap-lock\" ] && [ \"$(stat -c '%a' \"$base/.bootstrap-lock\")\" = 700 ] || exit 71\n            private_file \"$base/.bootstrap-lock/transaction\"\n            private_file \"$base/.bootstrap-lock/kind\"\n            [ \"$(cat \"$base/.bootstrap-lock/kind\")\" = fresh ] || exit 75\n            previous_transaction=$(cat \"$base/.bootstrap-lock/transaction\")\n        fi\n        hex_id \"$previous_transaction\"\n    fi\n    if [ -e \"$base/.bootstrap-lock\" ] || [ -L \"$base/.bootstrap-lock\" ]; then\n        stage=\"$base/.bootstrap-lock\"\n        [ -d \"$stage\" ] && [ ! -L \"$stage\" ] && [ -O \"$stage\" ] && [ \"$(stat -c '%a' \"$stage\")\" = 700 ] || exit 71\n        # Receipt and any surviving lock must describe the same fresh attempt.\n        if [ -e \"$stage/transaction\" ] || [ -L \"$stage/transaction\" ]; then\n            private_file \"$stage/transaction\"\n            [ \"$(cat \"$stage/transaction\")\" = \"$previous_transaction\" ] || exit 75\n            private_file \"$stage/kind\"\n            [ \"$(cat \"$stage/kind\")\" = fresh ] || exit 75\n            # Fresh acquisition receipts own only these staging artifacts.\n            # More advanced/unknown layouts need their original rollback; do not\n            # recursively delete foreign files just because a lock is marked ours.\n            for entry in \"$stage\"/* \"$stage\"/.[!.]* \"$stage\"/..?*; do\n                [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n                case \"${entry##*/}\" in\n                    transaction|kind) private_file \"$entry\";;\n                    lease) private_file \"$entry\";;\n                    payload)\n                        [ -f \"$entry\" ] && [ ! -L \"$entry\" ] && [ -O \"$entry\" ] || exit 71\n                        case \"$(stat -c '%a' \"$entry\")\" in 600|700) :;; *) exit 71;; esac;;\n                    *) exit 75;;\n                esac\n            done\n        else\n            private_file \"$base/.bootstrap-acquiring\"\n            [ \"$(cat \"$base/.bootstrap-acquiring\")\" = \"$previous_transaction fresh\" ] || exit 75\n            # Only the acquisition journal proves an otherwise empty lock.\n            for entry in \"$stage\"/* \"$stage\"/.[!.]* \"$stage\"/..?*; do\n                [ ! -e \"$entry\" ] && [ ! -L \"$entry\" ] || exit 71\n            done\n        fi\n    fi\n    # A receipt may coexist with interrupted acquisition retirement. Validate\n    # that sibling binding before removing even otherwise-owned sockets.\n    if [ -e \"$base/.bootstrap-acquiring\" ] || [ -L \"$base/.bootstrap-acquiring\" ]; then\n        private_file \"$base/.bootstrap-acquiring\"\n        [ \"$(stat -c '%s' \"$base/.bootstrap-acquiring\")\" = 39 ] || exit 75\n        [ \"$(cat \"$base/.bootstrap-acquiring\")\" = \"$previous_transaction fresh\" ] || exit 75\n    fi\n    # Any unjournaled root entry refuses the entire recovery before mutation,\n    # including sockets elsewhere that would otherwise be safe to retire.\n    for entry in \"$base\"/* \"$base\"/.[!.]* \"$base\"/..?*; do\n        [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n        case \"${entry##*/}\" in\n            .bootstrap-owner|.bootstrap-lock|.bootstrap-acquiring|sessions) :;;\n            .bootstrap-ready)\n                private_file \"$entry\"\n                [ \"$(cat \"$entry\")\" = \"$previous_host\" ] || exit 75;;\n            bin)\n                [ -d \"$entry\" ] && [ ! -L \"$entry\" ] && [ -O \"$entry\" ] && [ \"$(stat -c '%a' \"$entry\")\" = 700 ] || exit 71\n                for child in \"$entry\"/* \"$entry\"/.[!.]* \"$entry\"/..?*; do\n                    [ ! -e \"$child\" ] && [ ! -L \"$child\" ] || exit 71\n                done;;\n            *) exit 71;;\n        esac\n    done\n    # Validate every socket before deleting any. Only these session rendezvous\n    # names and empty directories belong to this legacy fresh-install receipt.\n    sockets=0\n    for directory in \"$base/sessions\" \"$base/sessions/sessions\"; do\n        [ -e \"$directory\" ] || [ -L \"$directory\" ] || continue\n        [ -d \"$directory\" ] && [ ! -L \"$directory\" ] && [ -O \"$directory\" ] && [ \"$(stat -c '%a' \"$directory\")\" = 700 ] || exit 71\n        for entry in \"$directory\"/* \"$directory\"/.[!.]* \"$directory\"/..?*; do\n            [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n            [ \"$entry\" != \"$base/sessions/sessions\" ] || continue\n            [ -S \"$entry\" ] && [ ! -L \"$entry\" ] && [ -O \"$entry\" ] && [ \"$(stat -c '%a' \"$entry\")\" = 600 ] || exit 71\n            name=${entry##*/}\n            socket_id=${name%.sock}\n            [ \"$name\" = \"$socket_id.sock\" ] || exit 71\n            hex_id \"$socket_id\"\n            sockets=$((sockets + 1))\n            [ \"$sockets\" -le 1024 ] || exit 75\n        done\n    done\n    printf 'INFRATERNAL_SETUP_STALE %s %s %s %s\\n' \"$previous_host\" \"$previous_transaction\" \"$identity\" \"$sockets\"\n}\n\ninspect_previous"
+ right: "set -eu\nos=$(uname -s)\narch=$(uname -m)\nuid=$(id -u)\ninit=other\n[ ! -d /run/systemd/system ] || init=systemd\nsudo=no\nif [ \"$uid\" = 0 ] || (command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1); then sudo=yes; fi\nuser_systemd=no\nif command -v systemctl >/dev/null 2>&1 && systemctl --user show --property=Version --value >/dev/null 2>&1; then user_systemd=yes; fi\nlinger=no\nif command -v loginctl >/dev/null 2>&1 && [ \"$(loginctl show-user \"$uid\" -p Linger --value 2>/dev/null || :)\" = yes ]; then linger=yes; fi\nexisting=no\nif command -v infraternal >/dev/null 2>&1 || [ -e \"$HOME/.local/share/infraternal/bin/current\" ]; then existing=yes; fi\nprintf 'INFRATERNAL_CHECK_V1\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$init\" \"$uid\" \"$sudo\" \"$user_systemd\" \"$linger\" \"$existing\"\n"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'verification_failure_names_step_and_stops_before_upload' (3464946) panicked at crates/plugins/ssh/tests/payload_source.rs:154:6:
+called `Result::unwrap()` on an `Err` value: Elapsed(())
+
+
+failures:
+    stalled_download_retains_the_named_step_before_the_attempt_deadline
+    verification_failure_names_step_and_stops_before_upload
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test payload_source`
