@@ -513,10 +513,20 @@ async fn expired_local_identity_stops_instead_of_retrying_forever() {
         server_name: "localhost".into(),
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
-    let result = tokio::time::timeout(Duration::from_millis(200), run(&identity, None)).await;
+    let directory = StateDirectory::new();
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        run(&identity, Some(directory.0.clone())),
+    )
+    .await;
     assert!(
         matches!(result, Ok(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied),
         "expired identity kept retrying"
+    );
+    assert_eq!(
+        std::fs::read_dir(&directory.0).unwrap().count(),
+        0,
+        "expired identity must be refused before opening local control or session state"
     );
 }
 

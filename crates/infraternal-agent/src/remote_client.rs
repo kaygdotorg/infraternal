@@ -55,6 +55,13 @@ async fn run_inner(
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
+    // Invalid enrollment must not create local state or start plugin work.
+    // Renewed credentials are authoritative when a renewal owner is present.
+    if let Some(renewal) = renewal {
+        crate::remote_renewal::require_current(&renewal.current()?)?;
+    } else {
+        crate::remote_renewal::require_current(&identity.identity)?;
+    }
     let state = crate::sessions::state(state)?;
     // The host control surface remains available while the authenticated server is offline.
     let service =
