@@ -83,9 +83,14 @@ impl AgentPlugin for Fixture {
     }
 }
 
+struct Accepted {
+    control: std::sync::Arc<NativeChannel>,
+    receive: Receive,
+}
 struct Server {
     endpoint: quinn::Endpoint,
-    accepted: tokio::sync::mpsc::Receiver<()>,
+    accepted: tokio::sync::mpsc::Receiver<Accepted>,
+    parked: tokio::sync::mpsc::Receiver<()>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Server {
@@ -102,6 +107,17 @@ impl Server {
         address: SocketAddr,
         valid: bool,
     ) -> Self {
+        Self::with_options(identity, roots, address, valid, false)
+    }
+    // Keep handshake, parking and connection ownership in one fixture boundary.
+    #[allow(clippy::too_many_lines)]
+    fn with_options(
+        identity: &remote_tls::Identity,
+        roots: &[openssl::x509::X509],
+        address: SocketAddr,
+        valid: bool,
+        standby: bool,
+    ) -> Self {
         let endpoint = quinn::Endpoint::server(
             remote_quic::server_config(identity, roots).unwrap(),
             address,
@@ -109,11 +125,13 @@ impl Server {
         .unwrap();
         let listen = endpoint.clone();
         let (notices, accepted) = tokio::sync::mpsc::channel(8);
+        let (parking, parked) = tokio::sync::mpsc::channel(8);
         let task = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
             while let Some(incoming) = listen.accept().await {
                 while sessions.try_join_next().is_some() {}
                 let notices = notices.clone();
+                let parking = parking.clone();
                 sessions.spawn(async move {
                     let Ok(connection) = incoming.await else {
                         return;
@@ -121,15 +139,16 @@ impl Server {
                     let Ok((send, receive)) = connection.accept_bi().await else {
                         return;
                     };
-                    let control = NativeChannel::control(send, receive).unwrap();
+                    let control =
+                        std::sync::Arc::new(NativeChannel::control(send, receive).unwrap());
                     let mut rx = Receive::default();
-                    let Ok(first) = rx.next(&control).await else {
+                    let Ok(first) = rx.next(control.as_ref()).await else {
                         return;
                     };
                     if let Frame::Ping { nonce, sent_us } = first.frame {
                         Transmit::default()
                             .send(
-                                &control,
+                                control.as_ref(),
                                 0,
                                 &Frame::Pong {
                                     nonce: if valid { nonce } else { nonce.wrapping_add(1) },
@@ -138,9 +157,62 @@ impl Server {
                             )
                             .await
                             .unwrap();
-                        let Ok(hello) = rx.next(&control).await else {
+                        let Ok(hello) = rx.next(control.as_ref()).await else {
                             return;
                         };
+                        if standby
+                            && matches!(
+                                hello.frame,
+                                Frame::Call {
+                                    call_id: 0,
+                                    action_id: "transport.standby",
+                                    input_json: b"{}"
+                                }
+                            )
+                        {
+                            let mut transmit = Transmit::default();
+                            transmit
+                                .send(
+                                    control.as_ref(),
+                                    0,
+                                    &Frame::Result {
+                                        call_id: 0,
+                                        ok: true,
+                                        json: b"{}",
+                                    },
+                                )
+                                .await
+                                .unwrap();
+                            transmit
+                                .send(
+                                    control.as_ref(),
+                                    0,
+                                    &Frame::Hello {
+                                        version: 1,
+                                        caps: remote_quic::REMOTE_WRITER_BINDING
+                                            | infraternal_plugin_api::channel::REMOTE_STANDBY,
+                                        client_info: "fixture",
+                                    },
+                                )
+                                .await
+                                .unwrap();
+                            parking.send(()).await.unwrap();
+                            let Ok(hello) = rx.next(control.as_ref()).await else {
+                                return;
+                            };
+                            if !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
+                                return;
+                            }
+                            notices
+                                .send(Accepted {
+                                    control: control.clone(),
+                                    receive: rx,
+                                })
+                                .await
+                                .unwrap();
+                            let _ = connection.closed().await;
+                            return;
+                        }
                         if !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
                             return;
                         }
@@ -149,17 +221,28 @@ impl Server {
                     }
                     Transmit::default()
                         .send(
-                            &control,
+                            control.as_ref(),
                             0,
                             &Frame::Hello {
                                 version: 1,
-                                caps: remote_quic::REMOTE_WRITER_BINDING,
+                                caps: remote_quic::REMOTE_WRITER_BINDING
+                                    | if standby {
+                                        infraternal_plugin_api::channel::REMOTE_STANDBY
+                                    } else {
+                                        0
+                                    },
                                 client_info: "fixture",
                             },
                         )
                         .await
                         .unwrap();
-                    notices.send(()).await.unwrap();
+                    notices
+                        .send(Accepted {
+                            control: control.clone(),
+                            receive: rx,
+                        })
+                        .await
+                        .unwrap();
                     let _ = connection.closed().await;
                 });
             }
@@ -167,11 +250,21 @@ impl Server {
         Self {
             endpoint,
             accepted,
+            parked,
             task,
         }
     }
     async fn admitted(&mut self) {
+        let _ = self.admitted_channel().await;
+    }
+    async fn admitted_channel(&mut self) -> Accepted {
         tokio::time::timeout(Duration::from_secs(3), self.accepted.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn parked(&mut self) {
+        tokio::time::timeout(Duration::from_secs(3), self.parked.recv())
             .await
             .unwrap()
             .unwrap();
@@ -187,7 +280,7 @@ struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
         let parent = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/mesh-agent-transport");
+            .join(".cache/codex-scratch/mesh-agent-transport-round2");
         std::fs::create_dir_all(&parent).unwrap();
         let path = parent.join(format!(
             "p{}",
@@ -638,7 +731,7 @@ async fn review_silent_mesh_interruption_returns_to_fallback_within_local_reconn
     relay.abort();
     let _ = relay.await;
     assert!(
-        matches!(recovered, Ok(Some(()))),
+        matches!(recovered, Ok(Some(_))),
         "reachable fallback must recover"
     );
     assert_eq!(observed.kind, ServerLinkKind::Fallback);
@@ -653,4 +746,94 @@ async fn review_silent_mesh_interruption_returns_to_fallback_within_local_reconn
         elapsed < Duration::from_millis(300),
         "silent mesh interruption exceeded the local reconnect budget: {elapsed:?}"
     );
+}
+
+/// The server-side transport stays usable through parked activation and a new
+/// mesh proof; the cached greeting must not leak into the next control exchange.
+#[tokio::test]
+async fn parked_fallback_recovers_mesh_and_keeps_control_actions_usable() {
+    let ca = root();
+    let server = leaf(&ca, true);
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut fallback =
+        Server::with_options(&server, roots, "127.0.0.1:0".parse().unwrap(), true, true);
+    let address = fallback.endpoint.local_addr().unwrap();
+    let mesh_address = SocketAddr::new("127.0.0.2".parse().unwrap(), address.port());
+    let mut mesh = Server::with_options(&server, roots, mesh_address, true, true);
+    let identity = RemoteIdentity {
+        identity: leaf(&ca, false),
+        roots: vec![ca.certificate.clone()],
+        endpoint: address,
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let directory = Directory::new();
+    let registry = registry();
+    let control = registry.clone();
+    let state = directory.0.clone();
+    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
+    fallback.admitted().await;
+    preference(&registry, Some(mesh_address.ip())).await;
+    mesh.admitted().await;
+    fallback.parked().await;
+    drop(mesh);
+    let mut active = fallback.admitted_channel().await;
+    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
+    // Quinn's owned driver releases the old fixture socket asynchronously.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match tokio::net::UdpSocket::bind(mesh_address).await {
+                Ok(socket) => {
+                    drop(socket);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(error) => panic!("fixture address refused: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let mut restored = Server::with_options(&server, roots, mesh_address, true, true);
+    let mut active = restored.admitted_channel().await;
+    assert_remote_status(&mut active, ServerLinkKind::Mesh).await;
+    fallback.parked().await;
+    assert_remote_status(&mut active, ServerLinkKind::Mesh).await;
+    assert!(!supervisor.is_finished());
+    supervisor.abort();
+    let _ = supervisor.await;
+}
+
+async fn assert_remote_status(active: &mut Accepted, expected: ServerLinkKind) {
+    Transmit::default()
+        .send(
+            active.control.as_ref(),
+            0,
+            &Frame::Call {
+                call_id: 77,
+                action_id: "path.status",
+                input_json: b"{}",
+            },
+        )
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(
+        Duration::from_secs(3),
+        active.receive.next(active.control.as_ref()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Frame::Result {
+        call_id: 77,
+        ok: true,
+        json,
+    } = reply.frame
+    else {
+        panic!("control action failed");
+    };
+    let status: ServerLink = serde_json::from_slice(json).unwrap();
+    assert_eq!(status.kind, expected);
 }
