@@ -236,3 +236,29 @@ fn status_mapping_preserves_authentication_and_missing_payload_classification() 
         "The matching static infraternal binary is unavailable."
     );
 }
+
+#[test]
+fn failure_diagnostics_distinguish_auth_trust_transport_and_channel_without_raw_text() {
+    use infraternal_plugin_ssh::model::{Failure, FailureKind, InstallStep};
+    assert_eq!(
+        Failure::new(FailureKind::Auth, "static").diagnostic_kind(),
+        "auth"
+    );
+    assert_eq!(
+        Failure::new(FailureKind::HostKey, "static").diagnostic_kind(),
+        "host-key"
+    );
+    assert_eq!(
+        Failure::new(FailureKind::Unreachable, "static").diagnostic_kind(),
+        "transport"
+    );
+    let mut command = Failure::install("static").at_ssh_boundary(true);
+    command.exit_status = Some(1);
+    let command = command.at(InstallStep::Connect);
+    assert_eq!(command.diagnostic_kind(), "channel");
+    assert!(
+        !serde_json::to_string(&command)
+            .unwrap()
+            .contains("private-sentinel")
+    );
+}
