@@ -2251,3 +2251,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      says so: "zellij start skipped: infraternal keeps this session for you ·
      [Use zellij here]"; the button turns the skip off for that host. After
      that, nothing. A global switch exists as well.
+242. **Removing access cuts open connections at once (owner, 2026-10-12, #173;
+     amends D164 and D216):** when a grant is removed, a peer is revoked, or
+     the default policy tightens, connections that the new policy no longer
+     allows are cut immediately on every node, not only new ones. Allowed
+     connections are untouched. The time from the change to the last node
+     refusing traffic is measured and reported with each mesh change.
+243. **Binary size goes down, not up (owner, 2026-10-12):** the static binary
+     must not keep growing towards the size of a typical Go static binary.
+     The size gate is not raised to match today's build. A size-reduction
+     push starts now: measure where the bytes come from, cut, and ratchet the
+     gate down to each new measured size so growth needs a justified,
+     measured exception.
