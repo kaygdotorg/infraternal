@@ -274,19 +274,30 @@ impl Node {
         }
         result
     }
-    fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
+    // Keep enabled-key authority separate from contiguous snapshot staging.
+    fn validate_binding(&self, chunk: &Chunk) -> io::Result<()> {
         if self.identity.is_none() {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        if self
-            .config
-            .as_ref()
-            .is_some_and(|config| config.node != chunk.node)
-        {
-            // A reconnect snapshot may replace peer inventory, never the local
-            // identity whose addresses and grants were already accepted [164,166].
+        if chunk.local_key.is_some_and(|key| {
+            self.identity
+                .as_ref()
+                .is_none_or(|identity| identity.public_key != key)
+        }) || self.config.as_ref().is_some_and(|old| {
+            old.node != chunk.node
+                && (chunk.local_key.is_none()
+                    || chunk.from_version.is_some()
+                    || chunk.version <= old.version)
+        }) {
+            // Only an authenticated full coordinator snapshot, bound to our
+            // enabled kernel key at a newer revision, can authorize replacement.
+            // Unbound snapshots and deltas retain the accepted identity fence.
             return Err(io::ErrorKind::InvalidData.into());
         }
+        Ok(())
+    }
+    fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
+        self.validate_binding(&chunk)?;
         if chunk.index == 0 {
             let current = self.config.as_ref().map(|config| config.version);
             if chunk.from_version.is_some() && chunk.from_version != current
@@ -318,6 +329,7 @@ impl Node {
         }
         let pending = self.pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
         if pending.next != chunk.index
+            || pending.config.local_key != chunk.local_key
             || pending.config.node != chunk.node
             || pending.config.addresses != chunk.addresses
             || pending.version != chunk.version
@@ -376,13 +388,25 @@ impl Node {
         self.apply(config)?;
         Ok(true)
     }
+    // Keep transition ingress protection available before any address mutation.
+    fn apply_fence(&mut self, fence: &Config) -> io::Result<()> {
+        let aliases: Vec<_> = self
+            .config
+            .as_ref()
+            .filter(|old| old.addresses != fence.addresses)
+            .map(|old| old.addresses)
+            .into_iter()
+            .collect();
+        self.firewall.apply_with_aliases(fence, &aliases)?;
+        Ok(())
+    }
     // Keep the apply/fence/rollback transaction and its failure ordering visible together.
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, config: Config) -> io::Result<()> {
         if self
             .config
             .as_ref()
-            .is_some_and(|old| old.addresses != config.addresses)
+            .is_some_and(|old| old.addresses != config.addresses && old.node == config.node)
         {
             // Address transitions require the later overlap barrier, never remove live addresses here [199].
             return Err(io::ErrorKind::Unsupported.into());
@@ -406,7 +430,9 @@ impl Node {
             }
         }
         if let Some(old) = &self.config {
-            let endpoints_only = old.peers.len() == config.peers.len()
+            let endpoints_only = old.node == config.node
+                && old.addresses == config.addresses
+                && old.peers.len() == config.peers.len()
                 && old.default_policy == config.default_policy
                 && config.peers.iter().all(|(id, peer)| {
                     old.peers.get(id).is_some_and(|old| {
@@ -505,9 +531,13 @@ impl Node {
             peer.inbound = crate::policy::rules::TrafficPolicy::None;
             peer.outbound = crate::policy::rules::TrafficPolicy::None;
         }
-        self.firewall.apply(&fence)?;
+        self.apply_fence(&fence)?;
         let result = (|| {
-            if self.config.is_none() {
+            if self
+                .config
+                .as_ref()
+                .is_none_or(|old| old.addresses != config.addresses)
+            {
                 Device::addresses(config.addresses)?;
             }
             self.client
@@ -536,8 +566,11 @@ impl Node {
         if let Err(error) = result {
             // Saving can fail after the permissive policy transaction. Reinstall
             // the fence before rollback so any later error still denies NEW traffic.
-            self.firewall.apply(&fence)?;
+            self.apply_fence(&fence)?;
             if let Some(old) = &self.config {
+                if old.addresses != config.addresses {
+                    Device::addresses(old.addresses)?;
+                }
                 let restore: Vec<_> = old.peers.values().map(|peer| peer.peer.clone()).collect();
                 // If rollback itself fails the restrictive fence remains. Never report an applied version.
                 self.client
