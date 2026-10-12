@@ -469,3 +469,20 @@ test("a setup that is still running: wait, then try again", async ({ page }) => 
   await page.locator(".ah-job-retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`connect failure has one summary and distinct Details at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "connectfail.lab");
+    await expect(page.getByRole("heading", { name: "Setting up connectfail.lab didn't finish" })).toBeVisible();
+    await expect(wizard(page).locator(".ah-lede")).toHaveText("Connecting to the host failed.");
+    await expect(wizard(page).getByText("dropped", { exact: false })).toHaveCount(0);
+    await wizard(page).locator(".ah-details summary").click();
+    const details = wizard(page).locator(".ah-details pre");
+    await expect(details).toContainText("The SSH connection setup failed.");
+    await expect(details).not.toContainText("Connecting to the host failed.");
+    await page.screenshot({ path: `../../evidence/addhost-netbird-connect/connect-failure-${viewport.width}.png` });
+  });
+}
