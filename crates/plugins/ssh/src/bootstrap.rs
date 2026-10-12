@@ -100,6 +100,14 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, ()>;
     /// One public failure record per attempt, before cleanup changes its progress phase.
     fn record_failure(&self, _: &Target, _: Option<uuid::Uuid>, _: Step, _: &Failure) {}
+    /// Cut this exact attempt's authority and retain its retirement obligation
+    /// before session or SSH cleanup can await. Durable backends keep the
+    /// writer alive even if the later `failed` acknowledgement is cancelled.
+    /// # Errors
+    /// Refuses foreign attempt ownership or unavailable retirement admission.
+    fn retire_failed(&self, _: &Authority, _: uuid::Uuid) -> Result<(), Failure> {
+        Ok(())
+    }
     /// Finish this attempt's private sessions before SSH rollback stops the service.
     fn cleanup_sessions<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         Box::pin(async { Ok(()) })
@@ -400,6 +408,7 @@ impl Bootstrap {
             self.backend
                 .record_failure(&target, resources.host, phase, failure);
             if let Some(host) = resources.host {
+                let _ = self.backend.retire_failed(&batch.authority, host);
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
                     self.backend.cleanup_sessions(&batch.authority, host),
@@ -626,9 +635,10 @@ impl Bootstrap {
         );
         self.backend.terminal_canary(&batch.authority, host).await?;
         transaction.commit().await?;
-        // This hook releases transient bookkeeping after the durable commit.
-        // A housekeeping failure must never revoke an installed, proven host.
-        let _ = self.backend.completed(&batch.authority, host).await;
+        // Completion also discharges durable retirement ownership. Reporting
+        // Done without that acknowledgement would promise authority that a
+        // subsequent startup correctly retires as unfinished provisioning.
+        self.backend.completed(&batch.authority, host).await?;
         Ok(())
     }
 
