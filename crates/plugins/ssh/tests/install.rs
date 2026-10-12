@@ -45,6 +45,27 @@ impl SshSession for Local {
             } else {
                 script
             };
+            if matches!(&input, Input::Negotiated { .. }) {
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", &script]).env(
+                    "PATH",
+                    format!("{}:/usr/bin:/bin", self.root.join("tools").display()),
+                );
+                let output = infraternal_plugin_ssh::process::execute(
+                    &mut command,
+                    input,
+                    std::time::Duration::from_secs(60),
+                )
+                .await?;
+                if !output.success {
+                    let mut error = Failure::install("The synthetic remote command failed.");
+                    error.exit_status = output.exit_status;
+                    return Err(error);
+                }
+                return Ok(CommandOutput {
+                    stdout: output.stdout,
+                });
+            }
             let mut child = Command::new("/bin/sh")
                 .args(["-c", &script])
                 .env(
@@ -61,6 +82,9 @@ impl SshSession for Local {
             // A refusal may close stdin before consuming an upload. Inspect the
             // command status first; successful commands still require a full write.
             let written = match input {
+                Input::Negotiated { .. } => {
+                    unreachable!("negotiation uses the bounded process helper")
+                }
                 Input::PayloadAndInvitation {
                     payload,
                     invitation,

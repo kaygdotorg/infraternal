@@ -2,6 +2,7 @@
 use super::*;
 use infraternal_plugin_ssh::auth_order::{AuthProvider, AutoAuth, NetworkProvider};
 use infraternal_plugin_ssh::openssh::OpenSsh;
+use infraternal_plugin_ssh::transport::TransferChoice;
 use std::{io::Read, path::PathBuf, time::Instant};
 
 /// The provisioning listener's socket admission is exercised directly below.
@@ -43,7 +44,7 @@ impl SshSession for TimedSession {
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let step = match &input {
-                Input::PayloadAndInvitation { .. } => "upload_setup",
+                Input::Negotiated { .. } | Input::PayloadAndInvitation { .. } => "upload_setup",
                 Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => "upload",
                 Input::File(_) => "upload",
                 Input::Bytes(_) if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1") => "reuse_setup",
@@ -74,7 +75,10 @@ impl SshSession for TimedSession {
                     "The fixture refused its first install boundary.",
                 ));
             }
-            let file_bytes = if let Input::PayloadAndInvitation { payload, .. } = &input {
+            let negotiated_sizes = if let Input::Negotiated { raw, gzip, zstd, .. } = &input {
+                Some((match raw { infraternal_plugin_ssh::transport::PayloadInput::Bytes(bytes) => bytes.len() as u64, infraternal_plugin_ssh::transport::PayloadInput::File { size, .. } => *size }, gzip.map_or(0, |bytes| bytes.len() as u64), zstd.map_or(0, |bytes| bytes.len() as u64)))
+            } else { None };
+            let mut file_bytes = if let Input::PayloadAndInvitation { payload, .. } = &input {
                 Some(match payload {
                     infraternal_plugin_ssh::transport::PayloadInput::Bytes(bytes) => bytes.len() as u64,
                     infraternal_plugin_ssh::transport::PayloadInput::File { size, .. } => *size,
@@ -95,6 +99,10 @@ impl SshSession for TimedSession {
                 .then(|| script.replacen("if sh -c \"$2\"; then", "if [ \"$1\" != install ] && sh -c \"$2\"; then", 1));
             let started = Instant::now();
             let result = self.inner.run(refused.as_deref().unwrap_or(script), input).await;
+            if let (Some((raw, gzip, zstd)), Ok(output)) = (negotiated_sizes, &result) {
+                let choice = output.stdout.split_inclusive(|byte| *byte == b'\n').find_map(TransferChoice::parse);
+                file_bytes = match choice { Some(TransferChoice::Raw) => Some(raw), Some(TransferChoice::Gzip) => Some(gzip), Some(TransferChoice::Zstd) => Some(zstd), _ => None };
+            }
             if let Some(bytes) = file_bytes {
                 println!(
                     "METRIC breakit2 file_input_bytes={bytes} accepted={}",

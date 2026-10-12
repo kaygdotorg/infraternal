@@ -47,7 +47,35 @@ pub enum PayloadInput<'a> {
     File { path: &'a Path, size: u64 },
 }
 
+/// Public transfer choices never convey authority or diagnostic text.
+#[derive(Clone, Copy)]
+pub enum TransferChoice {
+    Raw,
+    Gzip,
+    Zstd,
+    Reuse,
+}
+impl TransferChoice {
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            b"TRANSFER raw\n" => Some(Self::Raw),
+            b"TRANSFER gzip\n" => Some(Self::Gzip),
+            b"TRANSFER zstd\n" => Some(Self::Zstd),
+            b"TRANSFER reuse\n" => Some(Self::Reuse),
+            _ => None,
+        }
+    }
+}
+
 pub enum Input<'a> {
+    /// A fixed public receipt selects a source before any invitation byte is sent.
+    Negotiated {
+        raw: PayloadInput<'a>,
+        gzip: Option<&'a [u8]>,
+        zstd: Option<&'a [u8]>,
+        invitation: &'a [u8],
+    },
     /// Public payload first, then private invitation; never concatenate/copy secrets.
     PayloadAndInvitation {
         payload: PayloadInput<'a>,

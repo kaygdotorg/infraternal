@@ -15,6 +15,7 @@ use infraternal_plugin_ssh::{
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
+    let _ = infraternal_plugin_ssh::transport::TransferChoice::parse(bytes);
     let _ = parse_setup(bytes);
     let _ = parse_transfer_setup(bytes);
     let _ = interrupted_transfer_step(bytes);

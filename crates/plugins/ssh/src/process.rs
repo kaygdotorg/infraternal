@@ -3,7 +3,7 @@
 use crate::{
     model::Failure,
     prompt::PromptParent,
-    transport::{Input, PayloadInput},
+    transport::{Input, PayloadInput, TransferChoice},
 };
 use nix::{
     sys::{
@@ -110,11 +110,21 @@ async fn execute_inner(
         .stderr
         .take()
         .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
+    let negotiated = matches!(&input, Input::Negotiated { .. });
+    let (choice, selected) = tokio::sync::oneshot::channel();
     let operation = async {
-        let write = write_input(stdin, input);
+        let write = write_input(stdin, input, selected);
         let read = async {
-            let (stdout, stderr) =
-                tokio::try_join!(bounded(stdout, stdout_limit), bounded(stderr, 8192))?;
+            let (stdout, stderr) = tokio::try_join!(
+                async {
+                    if negotiated {
+                        negotiated_output(stdout, stdout_limit, choice).await
+                    } else {
+                        bounded(stdout, stdout_limit).await
+                    }
+                },
+                bounded(stderr, 8192)
+            )?;
             Ok::<_, Failure>((stdout, stderr))
         };
         // Retain the unreaped leader identity while inherited pipes are pending.
@@ -233,51 +243,39 @@ async fn bounded(
 async fn write_input(
     mut stdin: tokio::process::ChildStdin,
     input: Input<'_>,
+    selected: tokio::sync::oneshot::Receiver<Option<TransferChoice>>,
 ) -> Result<(), Failure> {
     match input {
+        Input::Negotiated {
+            raw,
+            gzip,
+            zstd,
+            invitation,
+        } => {
+            let payload = match selected.await.ok().flatten() {
+                Some(TransferChoice::Raw) => Some(raw),
+                Some(TransferChoice::Gzip) => Some(PayloadInput::Bytes(gzip.ok_or_else(|| {
+                    Failure::install("The requested payload encoding is unavailable.")
+                })?)),
+                Some(TransferChoice::Zstd) => Some(PayloadInput::Bytes(zstd.ok_or_else(|| {
+                    Failure::install("The requested payload encoding is unavailable.")
+                })?)),
+                Some(TransferChoice::Reuse) => None,
+                None => return Ok(()), // Early fixed refusal retains its numeric command status.
+            };
+            if let Some(payload) = payload {
+                write_payload(&mut stdin, payload).await?;
+            }
+            stdin
+                .write_all(invitation)
+                .await
+                .map_err(|_| Failure::install("The SSH input pipe closed."))?;
+        }
         Input::PayloadAndInvitation {
             payload,
             invitation,
         } => {
-            match payload {
-                PayloadInput::Bytes(bytes) => stdin
-                    .write_all(bytes)
-                    .await
-                    .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
-                PayloadInput::File { path, size } => {
-                    let file = tokio::fs::File::open(path).await.map_err(|_| {
-                        Failure::install("The matching infraternal binary is unavailable.")
-                    })?;
-                    if file
-                        .metadata()
-                        .await
-                        .map_err(|_| Failure::install("The payload metadata is unavailable."))?
-                        .len()
-                        != size
-                    {
-                        return Err(Failure::install(
-                            "The static payload changed before transfer.",
-                        ));
-                    }
-                    let mut frame = file.take(size);
-                    let copied = tokio::io::copy(&mut frame, &mut stdin)
-                        .await
-                        .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
-                    if copied != size
-                        || frame
-                            .get_ref()
-                            .metadata()
-                            .await
-                            .map_err(|_| Failure::install("The payload metadata is unavailable."))?
-                            .len()
-                            != size
-                    {
-                        return Err(Failure::install(
-                            "The static payload changed during transfer.",
-                        ));
-                    }
-                }
-            }
+            write_payload(&mut stdin, payload).await?;
             stdin
                 .write_all(invitation)
                 .await
@@ -310,4 +308,84 @@ async fn write_input(
     // retain the child's bounded diagnostics to classify the real failure.
     let _ = stdin.shutdown().await;
     Ok::<(), Failure>(())
+}
+
+/// Decode exactly two bounded public lines; retain all other bytes for failure classification.
+async fn negotiated_output(
+    mut stdout: tokio::process::ChildStdout,
+    limit: usize,
+    choice: tokio::sync::oneshot::Sender<Option<TransferChoice>>,
+) -> Result<Vec<u8>, Failure> {
+    let mut prefix = Vec::new();
+    let mut lines = 0;
+    for _ in 0..limit.min(64) {
+        let mut byte = [0_u8; 1];
+        if stdout
+            .read(&mut byte)
+            .await
+            .map_err(|_| Failure::install("The SSH output pipe closed."))?
+            == 0
+        {
+            break;
+        }
+        prefix.push(byte[0]);
+        lines += usize::from(byte[0] == b'\n');
+        if lines == 2 {
+            break;
+        }
+    }
+    let selected = prefix
+        .strip_prefix(b"STEP upload\n")
+        .and_then(TransferChoice::parse);
+    let _ = choice.send(selected);
+    let mut rest = bounded(stdout, limit.saturating_sub(prefix.len())).await?;
+    prefix.append(&mut rest);
+    Ok(prefix)
+}
+
+/// Public file framing is shared by both fixed and negotiated input paths.
+async fn write_payload(
+    stdin: &mut tokio::process::ChildStdin,
+    payload: PayloadInput<'_>,
+) -> Result<(), Failure> {
+    match payload {
+        PayloadInput::Bytes(bytes) => stdin
+            .write_all(bytes)
+            .await
+            .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
+        PayloadInput::File { path, size } => {
+            let file = tokio::fs::File::open(path)
+                .await
+                .map_err(|_| Failure::install("The matching infraternal binary is unavailable."))?;
+            if file
+                .metadata()
+                .await
+                .map_err(|_| Failure::install("The payload metadata is unavailable."))?
+                .len()
+                != size
+            {
+                return Err(Failure::install(
+                    "The static payload changed before transfer.",
+                ));
+            }
+            let mut frame = file.take(size);
+            let copied = tokio::io::copy(&mut frame, &mut *stdin)
+                .await
+                .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
+            if copied != size
+                || frame
+                    .get_ref()
+                    .metadata()
+                    .await
+                    .map_err(|_| Failure::install("The payload metadata is unavailable."))?
+                    .len()
+                    != size
+            {
+                return Err(Failure::install(
+                    "The static payload changed during transfer.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }

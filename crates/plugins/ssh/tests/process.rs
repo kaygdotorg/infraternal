@@ -209,3 +209,65 @@ async fn reviewer_ssh_helper_does_not_inherit_server_reload_mask() {
         "an SSH helper must receive SIGHUP normally rather than inherit the server reload mask"
     );
 }
+
+#[tokio::test]
+async fn negotiated_sources_require_an_exact_receipt_before_private_input() {
+    use infraternal_plugin_ssh::transport::{PayloadInput, TransferChoice};
+    for receipt in [
+        "TRANSFER raw\n",
+        "TRANSFER reuse\n",
+        "UNKNOWN\n",
+        "TRANSFER raw\r\n",
+    ] {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!(
+                "printf 'STEP upload\\n'; printf %s {}; cat",
+                shell_quote(receipt)
+            ),
+        ]);
+        let output = execute(
+            &mut command,
+            Input::Negotiated {
+                raw: PayloadInput::Bytes(b"public-frame"),
+                gzip: None,
+                zstd: None,
+                invitation: b"synthetic-invitation",
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        if TransferChoice::parse(receipt.as_bytes()).is_some() {
+            assert!(text.contains("synthetic-invitation"));
+            assert_eq!(text.contains("public-frame"), receipt == "TRANSFER raw\n");
+            assert!(text.contains(receipt));
+        } else {
+            assert!(!text.contains("synthetic-invitation"));
+            assert!(!text.contains("public-frame"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unavailable_negotiated_codec_never_sends_invitation() {
+    use infraternal_plugin_ssh::transport::PayloadInput;
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "printf 'STEP upload\nTRANSFER gzip\n'; cat"]);
+    assert!(
+        execute(
+            &mut command,
+            Input::Negotiated {
+                raw: PayloadInput::Bytes(b"public-frame"),
+                gzip: None,
+                zstd: None,
+                invitation: b"synthetic-invitation",
+            },
+            Duration::from_secs(60)
+        )
+        .await
+        .is_err()
+    );
+}

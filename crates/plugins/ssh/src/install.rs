@@ -174,45 +174,36 @@ impl Installation {
                 "The enrollment invitation belongs to another host.",
             ));
         }
-        let payload = self.prepare_payload(binary).await?;
-        let size = if let Some(bytes) = &payload.packed {
-            bytes.len() as u64
-        } else if payload.reuse {
-            0
-        } else {
-            tokio::fs::metadata(binary)
-                .await
-                .map_err(|_| {
-                    Failure::install("The matching static infraternal binary is unavailable.")
-                })?
-                .len()
-        };
-        let mut body = payload.body.clone();
-        if !payload.reuse {
-            // head consumes exactly the public frame. Decoder EOF cannot eat
-            // the following capability, and raw SHA256 still gates execution.
-            for command in ["cat", "gzip -dc", "zstd -dc"] {
-                let original = format!("{command} > \"$stage/payload\"");
-                let framed = if command == "cat" {
-                    format!("head -c {size} > \"$stage/payload\"")
-                } else {
-                    format!("head -c {size} | {command} > \"$stage/payload\"")
-                };
-                body = body.replacen(&original, &framed, 1);
-            }
-        }
+        let digest = crate::payload::digest(binary)
+            .await
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        let zstd =
+            crate::payload_encoding::encoded(binary, crate::payload_encoding::Codec::Zstd).await?;
+        let gzip =
+            crate::payload_encoding::encoded(binary, crate::payload_encoding::Codec::Gzip).await?;
+        let raw_size = tokio::fs::metadata(binary)
+            .await
+            .map_err(|_| {
+                Failure::install("The matching static infraternal binary is unavailable.")
+            })?
+            .len();
+        let body = format!(
+            "{PAYLOAD_CACHE}\nvalidate_cache\nchoice=raw\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {digest} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then choice=reuse; elif {has_zstd} && command -v zstd >/dev/null 2>&1; then choice=zstd; elif {has_gzip} && command -v gzip >/dev/null 2>&1; then choice=gzip; fi\n{STAGE_TRANSACTION}\nprintf 'TRANSFER %s\\n' \"$choice\"\ncase \"$choice\" in\nreuse) ln \"$cache/payload\" \"$stage/payload\";;\nzstd) head -c {zstd_size} | zstd -dc > \"$stage/payload\";;\ngzip) head -c {gzip_size} | gzip -dc > \"$stage/payload\";;\nraw) head -c {raw_size} > \"$stage/payload\";;\n*) exit 1;;\nesac\nprintf '%s  %s\\n' {digest} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\nif [ \"$choice\" != reuse ]; then\n{PUBLISH_PAYLOAD_CACHE}\nfi",
+            digest = shell_quote(&digest),
+            has_zstd = if zstd.is_some() { "true" } else { "false" },
+            has_gzip = if gzip.is_some() { "true" } else { "false" },
+            zstd_size = zstd.as_ref().map_or(0, |bytes| bytes.len()),
+            gzip_size = gzip.as_ref().map_or(0, |bytes| bytes.len()),
+        );
         let script = self.setup_script(join, Some(&body))?;
-        let input = if payload.reuse {
-            Input::Bytes(join.stdin.expose())
-        } else {
-            Input::PayloadAndInvitation {
-                payload: if let Some(bytes) = &payload.packed {
-                    PayloadInput::Bytes(bytes)
-                } else {
-                    PayloadInput::File { path: binary, size }
-                },
-                invitation: join.stdin.expose(),
-            }
+        let input = Input::Negotiated {
+            raw: PayloadInput::File {
+                path: binary,
+                size: raw_size,
+            },
+            gzip: gzip.as_deref(),
+            zstd: zstd.as_deref(),
+            invitation: join.stdin.expose(),
         };
         let output = self
             .session
@@ -828,6 +819,18 @@ fn parse_steps(bytes: &[u8], upload: bool) -> Result<bool, Failure> {
         if lines.next() != Some(format!("STEP {name}").as_str()) {
             return Err(invalid_setup());
         }
+        if upload
+            && index == 0
+            && lines
+                .clone()
+                .next()
+                .is_some_and(|line| line.starts_with("TRANSFER "))
+        {
+            let choice = format!("{}\n", lines.next().ok_or_else(invalid_setup)?);
+            if crate::transport::TransferChoice::parse(choice.as_bytes()).is_none() {
+                return Err(invalid_setup());
+            }
+        }
         let next = lines.clone().next().ok_or_else(invalid_setup)?;
         if let Some(failed) = next.strip_prefix("FAIL ") {
             let (step, status) = failed.split_once(' ').ok_or_else(invalid_setup)?;
@@ -882,8 +885,11 @@ fn interrupted_steps(bytes: &[u8], upload: bool) -> Option<InstallStep> {
         &["join", "install", "start", "linger"][..]
     };
     let mut last = None;
-    for (index, line) in text.split_terminator('\n').enumerate() {
-        let name = names.get(index).copied()?;
+    let mut lines = text.split_terminator('\n').peekable();
+    for (index, name) in names.iter().copied().enumerate() {
+        let Some(line) = lines.next() else {
+            return last;
+        };
         if line != format!("STEP {name}") {
             return None;
         }
@@ -892,6 +898,18 @@ fn interrupted_steps(bytes: &[u8], upload: bool) -> Option<InstallStep> {
         } else {
             setup_step(index - usize::from(upload))
         });
+        if upload
+            && index == 0
+            && lines
+                .peek()
+                .is_some_and(|line| line.starts_with("TRANSFER "))
+        {
+            let choice = format!("{}\n", lines.next()?);
+            crate::transport::TransferChoice::parse(choice.as_bytes())?;
+        }
+    }
+    if lines.next().is_some() {
+        return None;
     }
     last
 }
