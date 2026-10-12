@@ -162,10 +162,11 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       if (!hostEl) return;
       const first = !firstReported;
       firstReported = true;
+      // A silent attached session needs inventory too; a one-shot grace lets an initial prompt paint first.
       const hooks: TerminalHooks = {
         ...(first ? options.firstHooks : {}),
-        onAttached: (resumed, terminal) => { this.mark("attached"); if (!firstSettled) requestAnimationFrame(() => requestAnimationFrame(settle)); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
-        onPaintedOutput: (bytes, at, sequence) => { settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onAttached: (resumed, terminal) => { this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
+        onPaintedOutput: (bytes, at, sequence) => { if (!firstSettled && this.client?.readScreenText().trim()) settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
         onSessionGone: (status) => { if (first) settle(); options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status); },
