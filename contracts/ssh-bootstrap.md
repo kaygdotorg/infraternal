@@ -95,6 +95,18 @@ Cancellation then serializes revocation behind any in-flight SQLite writer;
 a pre-commit read of absence is not cleanup proof. The default hook preserves
 non-durable backend compatibility.
 
+Durable provisioning records carry an unfinished-attempt retirement intent in
+that same invitation transaction. Failure begins an exact-host transport fence
+and owned retirement writer synchronously through `Backend::retire_failed`,
+before private-session cleanup or SSH rollback awaits. A caller's cleanup
+acknowledgement deadline cannot discard this obligation. The writer retires the
+host record and consumes its intent together, retrying only transient writer
+contention; storage refusal retains the fence and intent. Startup retires
+unfinished intents before enrollment or transport listeners admit connections.
+Proven installation completion must acknowledge removal of its own intent
+through `Backend::completed` before reporting Done. Prior completed host records
+without an unfinished intent remain outside failed-attempt retirement.
+
 The backend waits for that exact host's authenticated transport and collects
 cheap facts over it, then proves a terminal opens through the existing session
 router before marking done. SSH command exit, TCP reachability or redeemed
