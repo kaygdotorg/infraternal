@@ -20,5 +20,6 @@ pub mod probe;
 pub mod process;
 mod prompt;
 mod prompt_image;
+pub mod socket_connector;
 pub mod transport;
 pub mod trust;
