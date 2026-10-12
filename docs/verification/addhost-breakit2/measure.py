@@ -9,7 +9,8 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[3]
-SCRATCH = Path.home() / ".cache/codex-scratch/addhost-breakit2"
+# Each repair run owns its scratch storage; a short alias keeps Unix sockets valid.
+SCRATCH = Path(os.environ.get("BREAKIT2_SCRATCH", str(Path.home() / ".cache/codex-scratch/addhost-breakit2")))
 DOCKER = ["sudo", "-n", "docker"]
 TARGET = "addhost-breakit2-target"
 
