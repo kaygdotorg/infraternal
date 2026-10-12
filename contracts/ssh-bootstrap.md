@@ -248,6 +248,14 @@ compatible with the existing bootstrap contract. One-line offline installation
 continues to require #78's short-lived host-bound invitation; a token never
 enters an URL or argv.
 
+The initial automatic-authentication command is an exact allowlisted generated
+read-only check: the system sniff, the system sniff plus root/rootless earlier
+setup inspection, or the system sniff plus the cleanup-owned clear record.
+Credential fallback may repeat only these fixed checks with empty stdin. Prefix
+matches, appended commands and arbitrary input remain refused. The ownership
+inspection reads existing receipts and locks existing directories; it creates
+no files. This preserves one command round trip when detecting earlier setup.
+
 ## One-use browser credentials [183]
 
 Start accepts per-target `auth_once` material; a retry accepts it only for a
