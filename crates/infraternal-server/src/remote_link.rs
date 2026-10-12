@@ -640,7 +640,7 @@ async fn greeting<C: Channel>(
     if prime {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    Ok((admission.hello(channel, receive).await?, true))
+    Ok((admission.hello(channel, receive, false).await?, true))
 }
 
 async fn pump(

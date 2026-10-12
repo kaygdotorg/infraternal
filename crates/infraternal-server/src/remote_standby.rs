@@ -18,7 +18,7 @@ const MAX_PARKED: usize = 1000;
 #[derive(Default)]
 pub(crate) struct Slots(Mutex<HashSet<Uuid>>);
 
-struct Parking {
+pub(crate) struct Parking {
     slots: Arc<Slots>,
     host: Uuid,
 }
@@ -54,11 +54,13 @@ pub(crate) struct Admission {
     slots: Arc<Slots>,
     pub(crate) priming: Option<Priming>,
 }
-/// Parking and activation ownership used by private actor admission.
+
+/// A primed connection keeps its identity slot until actor promotion or drop.
 pub(crate) struct Priming {
     _parking: Parking,
     pub(crate) activation: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
+
 pub(crate) use crate::remote_standby_request::{activation, wants_prime};
 
 impl Admission {
@@ -75,14 +77,18 @@ impl Admission {
         }
     }
 
-    /// A parked peer owns no actor, plugin worker or terminal. Revocation/expiry
-    /// cancels this owned wait; activation rechecks the exact public ledger identity.
+    /// Basic parking owns no actor/terminal; native priming transfers its slot
+    /// into the same host actor. Both retain revocation and ledger checks.
     pub(crate) async fn hello<C: Channel>(
         &mut self,
         channel: &C,
         receive: &mut Receive,
+        prime: bool,
     ) -> io::Result<Vec<u8>> {
-        let _parking = self.slots.reserve(self.authority.identity.host)?;
+        if prime && channel.native_stream_id().is_none() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let parking = self.slots.reserve(self.authority.identity.host)?;
         self.authority.admit_operation().await?;
         self.permits.take();
         {
@@ -110,7 +116,8 @@ impl Admission {
                         &Frame::Hello {
                             version: 1,
                             caps: infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
-                                | infraternal_plugin_api::channel::REMOTE_STANDBY,
+                                | infraternal_plugin_api::channel::REMOTE_STANDBY
+                                | if prime { infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS } else { 0 },
                             client_info: "infraternal server",
                         },
                     )
@@ -125,13 +132,19 @@ impl Admission {
             () = self.authority.cancelled() => return Err(io::ErrorKind::PermissionDenied.into()),
             hello = receive.next(channel) => {
                 let hello = hello?;
-                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
+                if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if !prime || caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0) {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 encode_muxed_frame_into(0, &hello.frame, &mut prefix).map_err(io::Error::other)?;
             }
         }
         self.authority.admit_operation().await?;
+        if prime {
+            self.priming = Some(Priming {
+                _parking: parking,
+                activation: Mutex::new(None),
+            });
+        }
         Ok(prefix)
     }
 }
