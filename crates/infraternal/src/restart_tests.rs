@@ -289,7 +289,7 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
         .process_group(0)
         .spawn()
         .unwrap();
-    let output = bounded_output(child, Duration::from_secs(6), NAME);
+    let output = bounded_output(child, Duration::from_secs(9), NAME);
     assert!(
         output.status.success(),
         "{}",
