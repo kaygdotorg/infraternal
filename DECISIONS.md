@@ -2291,6 +2291,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      path and expected to be the fastest; it must be measured against the
      glibc helper option on the perf VM (first terminal, later terminals,
      opened in advance). If it is clearly slower, the owner decides again.
+     Measured 2026-10-12 (N=200 p50, perf VM): first terminal 44.6 ms vs
+     production 33.8 ms (once per person per host, usually hidden by opening
+     in advance); later terminals 3.3 ms and opened-in-advance 3.3 ms vs the
+     helper's 6.5/6.2 ms. The owner confirmed the systemd path (2026-10-12).
      Rejected for now: a glibc helper binary next to the static one, and a
      dynamic glibc build of the whole binary.
 248. **Canvas nodes (owner, 2026-10-12, Q20–Q25, #167; builds on D239):**
