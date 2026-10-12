@@ -114,6 +114,8 @@ export interface CoreScreen {
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
+  /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
+  refreshPalette(): void;
   /**
    * Opens the palette limited to `entries` only (a view's windows from its hover card, #121). The same search and
    * keys apply; the next open (⌘K, the capsule) shows the whole palette again.
@@ -589,10 +591,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       else { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); rowCache.delete(entry); }
     }
   };
-  const renderPalette = (query = ""): void => {
+  const renderPalette = (query = "", preserveAction?: string): void => {
     const needle = query.trim().toLocaleLowerCase();
     visibleEntries = (scopedEntries ?? entries).filter((entry) => paletteSearchText.get(entry)?.includes(needle) ?? false);
-    selected = Math.min(selected, Math.max(0, visibleEntries.length - 1));
+    selected = preserveAction === undefined ? Math.min(selected, Math.max(0, visibleEntries.length - 1)) : Math.max(0, visibleEntries.findIndex((entry) => entry.action === preserveAction));
     visibleOptions = [];
     // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
     paletteResults.replaceChildren();
@@ -1489,6 +1491,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     addPaletteProvider(provider) {
       providers.add(provider);
       return () => { providers.delete(provider); };
+    },
+    refreshPalette() {
+      if (palette.hidden || scopedEntries) return;
+      const action = visibleEntries[selected]?.action;
+      refreshEntries();
+      renderPalette(paletteInput.value, action);
     },
     showPalette(only) { setPalette(true, "pointer", only); },
     toast,

@@ -123,5 +123,6 @@ export function installPalette(cx: Ctx): () => void {
     else if (kind === "ctr" && value && cx.adapters.containers) cx.win.open(cx.adapters.containers.host, value);
   };
   window.addEventListener("tracer:canvas-action", onAction, { signal });
-  return removeProvider;
+  const offHosts = cx.adapters.sessions.onChange(() => core.refreshPalette());
+  return () => { offHosts(); removeProvider(); };
 }

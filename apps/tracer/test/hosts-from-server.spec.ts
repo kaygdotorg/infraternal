@@ -40,8 +40,8 @@ test("admitted hosts from another browser remain discoverable without saved wind
   await expect.poll(() => routed).toBe(id);
   await page.request.post("/__mock/drop-sockets");
   await expect.poll(() => reads).toBeGreaterThan(1);
-  await palette(); await expect(row).toHaveCount(1); await page.keyboard.press("Escape");
+  await palette(); await expect(row).toHaveCount(1);
   admitted = false; push?.();
   await expect.poll(() => reads).toBeGreaterThan(2);
-  await palette(); await expect(row).toHaveCount(0);
+  await expect(row).toHaveCount(0);
 });
