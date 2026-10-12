@@ -1,33 +1,33 @@
 usermod: no changes
-ENVIRONMENT machine=infraternal-perf-test cores=4 load=0.72 0.89 0.60 1/302 987195 ssh_server=openssh case=readonly-home user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=1.00 0.68 0.70 1/292 1164322 ssh_server=openssh case=readonly-home user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
 
 running 1 test
-METRIC payload_prepare startup_ms=1353.265
-METRIC breakit2 step=key_sign_in elapsed_ms=1263.446 ok=true
-METRIC breakit2 step=check elapsed_ms=418.245 ok=true
-METRIC breakit2 step=invitation elapsed_ms=1.652 ok=true
-METRIC breakit2 step=upload_setup elapsed_ms=439.194 ok=false
-METRIC breakit2 step=rollback elapsed_ms=347.934 ok=true
+METRIC payload_prepare startup_ms=1353.388
+METRIC breakit2 step=key_sign_in elapsed_ms=1269.883 ok=true
+METRIC breakit2 step=check elapsed_ms=418.975 ok=true
+METRIC breakit2 step=invitation elapsed_ms=1.497 ok=true
+METRIC breakit2 step=upload_setup elapsed_ms=370.672 ok=false
+METRIC breakit2 step=rollback elapsed_ms=361.608 ok=true
 METRIC breakit2 step=authority_retirement elapsed_ms=0.008 ok=true
 METRIC breakit2 event=Check cumulative_ms=0 message=Checking the SSH host.
-METRIC breakit2 event=Install cumulative_ms=1684 message=Installing the infraternal agent.
-METRIC breakit2 event=Failed cumulative_ms=2472 message=Uploading the infraternal binary failed. Check SSH access and free space on the host, then try again.
+METRIC breakit2 event=Install cumulative_ms=1691 message=Installing the infraternal agent.
+METRIC breakit2 event=Failed cumulative_ms=2424 message=Uploading the infraternal binary failed. Check SSH access and free space on the host, then try again.
 METRIC breakit2 failed_step=Some(Upload) status=Some(1)
 LEDGER breakit2 active_hosts=1 prior_hosts=1 unconsumed_live_tokens=0 attempts=0
 test bootstrap_runtime::remote_backend::tests::breakit2_live::breakit2_live_ssh_install_join_and_terminal ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 3.85s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 3.80s
 
 QDISC device=eth0
-qdisc netem 8289: root refcnt 5 limit 1000 delay 75ms seed 3020098555698293159
- Sent 7969 bytes 50 pkt (dropped 0, overlimits 0 requeues 0) 
- backlog 66b 1p requeues 0
+qdisc netem 82f7: root refcnt 5 limit 1000 delay 75ms seed 8106499567946876072
+ Sent 7705 bytes 46 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
- Sent 57758 bytes 73 pkt (dropped 0, overlimits 0 requeues 0) 
+ Sent 47126 bytes 65 pkt (dropped 0, overlimits 0 requeues 0) 
  backlog 0b 0p requeues 0
 QDISC device=ifb0
-qdisc netem 828a: root refcnt 2 limit 1000 delay 75ms seed 4178442883381756019
- Sent 59526 bytes 74 pkt (dropped 0, overlimits 0 requeues 0) 
+qdisc netem 82f8: root refcnt 2 limit 1000 delay 75ms seed 15089173814601240582
+ Sent 48574 bytes 66 pkt (dropped 0, overlimits 0 requeues 0) 
  backlog 0b 0p requeues 0
 CLEANUP base_present=False launcher_present=False unit_present=False foreign_present=False
 CLEANUP live_unit=inactive

@@ -1,0 +1,68 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.14s
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/install-83398bb73440212c)
+
+running 60 tests
+test acknowledged_linger_noop_does_not_own_later_external_enable ... ok
+test active_service_stop_failure_never_replaces_live_artifacts ... ok
+test active_transaction_is_live_between_ssh_setup_commands ... ok
+test breakit2_interrupted_lock_creation_allows_cleanup_and_retry ... ok
+test breakit2_rollback_preserves_foreign_launcher_new ... ok
+test breakit2_rollback_preserves_foreign_unit_new ... ok
+test breakit2_stage_refuses_parent_that_cannot_be_rolled_back ... ok
+test cleanup_receipt_cannot_authorize_a_replaced_unowned_directory ... ok
+test command_failure_names_upload_join_install_and_start_separately ... ok
+test commit_signal_retains_journal_until_proof_and_on_cancel ... ok
+test compound_activation_and_start_failures_keep_exact_step_and_rollback ... ok
+test compound_join_failure_preserves_the_original_status_and_boundary ... ok
+test compound_setup_keeps_owned_rollback_and_linger_warning ... ok
+test compressed_stage_roundtrips_and_rejects_corruption_before_execution ... ok
+test denied_linger_request_does_not_undo_a_later_external_enable ... ok
+test earlier_attempt_classification_preserves_status_boundary_and_authentication ... ok
+test earlier_attempt_records_reject_suffixes_truncation_and_unbounded_counts ... ok
+test enrollment_process_exit_71_is_not_reported_as_directory_refusal ... ok
+test failed_upgrade_preserves_previous_binary_state_and_unit ... ok
+test foreign_data_refusal_retains_exit_status_and_actionable_directory ... ok
+test foreign_files_and_another_attempt_lock_are_never_removed ... ok
+test framed_join_refusal_keeps_status_separate_from_upload ... ok
+test framed_receipts_preserve_upload_failures_and_reject_extra_output ... ok
+test framed_upload_keeps_invitation_after_verified_raw_and_compressed_payloads ... ok
+test fresh_cleanup_refuses_a_shared_writable_receipt_parent_before_mutation ... ok
+test fresh_cleanup_resumes_after_base_removal_and_retires_its_receipt ... ok
+test fresh_cleanup_resumes_after_owner_marker_removal_with_a_fresh_session ... ok
+test fresh_failure_removes_owned_artifacts_and_success_can_rejoin ... ok
+test fresh_receipt_is_removed_before_transaction_rollback ... ok
+test fresh_rollback_resumes_after_transaction_directory_removal ... ok
+test fresh_runtime_empty_directories_do_not_block_rollback_and_retry ... ok
+test fresh_runtime_symlink_never_removes_foreign_empty_directories ... ok
+test fresh_runtime_unexpected_data_keeps_ownership_and_cleanup_receipt ... ok
+test full_stage_frees_payload_before_allocating_a_cleanup_receipt ... ok
+test interrupted_acquisition_cleanup_receipt_can_resume ... ok
+test interrupted_linger_reply_retains_intent_for_cleanup ... ok
+test interrupted_restore_recreates_links_without_deleting_the_original ... ok
+test interrupted_rollback_never_deletes_already_restored_state_on_retry ... ok
+test interrupted_upgrade_after_acknowledged_stop_restarts_the_previous_service ... ok
+test linger_policy_denial_is_a_warning_and_owned_changes_are_reversible ... ok
+test linked_owner_marker_is_refused_before_retiring_the_transaction ... ok
+test malformed_or_exposed_cleanup_receipts_never_remove_the_owned_root ... ok
+test missing_payload_preserves_the_bootstrap_binary_remedy ... ok
+test negotiated_retry_reuses_only_a_verified_cache_after_activation_refusal ... ok
+test payload_reuse_never_adopts_a_foreign_cache_directory ... ok
+test pending_fresh_cleanup_refuses_replacement_staging_until_finished ... ok
+test refused_previous_service_stop_only_removes_staging ... ok
+test rejoin_preserves_existing_host_identity_in_the_private_staging_state ... ok
+test retry_cleanup_uses_fresh_session_and_preserves_privilege_consent ... ok
+test retry_resends_payload_when_cache_content_changes ... ok
+test retry_reuses_verified_payload_after_owned_rollback ... ok
+test review_interrupted_transaction_receipt_allows_owned_cleanup ... ok
+test rollback_stop_refusal_retains_artifacts_for_later_cleanup ... ok
+test setup_receipts_require_exact_order_and_preserve_failure_boundaries ... ok
+test setup_transaction_holds_a_live_lock_between_shell_commands ... ok
+test stale_previous_attempt_socket_can_be_retired_without_manual_cleanup ... ok
+test start_fresh_resumes_the_same_attempt_after_owner_confirmation ... ok
+test successful_stage_releases_the_parent_lock_from_its_lease_child ... ok
+test turning_off_paused_host_provisioning_preserves_earlier_leftovers ... ok
+test writable_installation_is_refused_before_upload_or_cleanup ... ok
+
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.11s
+

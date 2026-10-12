@@ -1,0 +1,22 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.22s
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/install-83398bb73440212c)
+
+running 1 test
+test successful_stage_releases_the_parent_lock_from_its_lease_child ... FAILED
+
+failures:
+
+---- successful_stage_releases_the_parent_lock_from_its_lease_child stdout ----
+
+thread 'successful_stage_releases_the_parent_lock_from_its_lease_child' (3851312) panicked at crates/plugins/ssh/tests/install.rs:365:5:
+a successful upload must not leave its parent guard inherited by the lease
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    successful_stage_releases_the_parent_lock_from_its_lease_child
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 59 filtered out; finished in 1.03s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test install`

@@ -1,0 +1,2 @@
+ec4d870c2e6907dccaa22f9401107f3264e43197cd586666c722c4c4d548999e  /home/kayg/.cache/codex-scratch/addhost-fast/artifacts/compact-setup/controller
+de72ce219f0b33369e7c74c01129a6759c954375323e570ddf9650c65499f99e  /home/kayg/.cache/codex-scratch/addhost-fast/artifacts/compact-setup/infraternal

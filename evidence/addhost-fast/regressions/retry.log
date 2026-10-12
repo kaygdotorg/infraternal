@@ -1,47 +1,47 @@
 usermod: no changes
-ENVIRONMENT machine=infraternal-perf-test cores=4 load=0.77 0.89 0.61 1/302 992784 ssh_server=openssh case=clean user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=1.05 0.75 0.72 1/292 1169915 ssh_server=openssh case=clean user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
 
 running 1 test
-METRIC payload_prepare startup_ms=1326.848
-METRIC breakit2 step=key_sign_in elapsed_ms=1263.677 ok=true
-METRIC breakit2 step=check elapsed_ms=418.293 ok=true
-METRIC breakit2 step=invitation elapsed_ms=1.708 ok=true
+METRIC payload_prepare startup_ms=1350.231
+METRIC breakit2 step=key_sign_in elapsed_ms=1271.595 ok=true
+METRIC breakit2 step=check elapsed_ms=419.794 ok=true
+METRIC breakit2 step=invitation elapsed_ms=1.467 ok=true
 METRIC breakit2 file_input_bytes=4754039 accepted=true
-METRIC breakit2 step=upload_setup elapsed_ms=2279.961 ok=true
-METRIC breakit2 step=rollback elapsed_ms=333.466 ok=true
-METRIC breakit2 step=authority_retirement elapsed_ms=0.007 ok=true
+METRIC breakit2 step=upload_setup elapsed_ms=2273.920 ok=true
+METRIC breakit2 step=rollback elapsed_ms=332.662 ok=true
+METRIC breakit2 step=authority_retirement elapsed_ms=0.008 ok=true
 RETRY breakit2 first_failure_step=Some(Install)
-METRIC breakit2 step=key_sign_in elapsed_ms=1115.944 ok=true
-METRIC breakit2 step=check elapsed_ms=367.997 ok=true
-METRIC breakit2 step=invitation elapsed_ms=1.341 ok=true
-METRIC breakit2 step=upload_setup elapsed_ms=1208.610 ok=true
-METRIC breakit2 step=facts elapsed_ms=357.281 ok=true
-METRIC breakit2 step=readiness elapsed_ms=332.589 ok=true
-METRIC breakit2 step=commit elapsed_ms=846.611 ok=true
-METRIC breakit2 step=authority_commit elapsed_ms=0.319 ok=true
+METRIC breakit2 step=key_sign_in elapsed_ms=1116.106 ok=true
+METRIC breakit2 step=check elapsed_ms=370.621 ok=true
+METRIC breakit2 step=invitation elapsed_ms=1.216 ok=true
+METRIC breakit2 step=upload_setup elapsed_ms=1150.190 ok=true
+METRIC breakit2 step=facts elapsed_ms=356.618 ok=true
+METRIC breakit2 step=readiness elapsed_ms=336.245 ok=true
+METRIC breakit2 step=commit elapsed_ms=849.524 ok=true
+METRIC breakit2 step=authority_commit elapsed_ms=0.313 ok=true
 METRIC breakit2 event=Check cumulative_ms=0 message=Checking the SSH host.
-METRIC breakit2 event=Install cumulative_ms=1684 message=Installing the infraternal agent.
-METRIC breakit2 event=Failed cumulative_ms=4298 message=Installing the infraternal agent failed. Check the host service configuration and existing setup files, then try again.
+METRIC breakit2 event=Install cumulative_ms=1693 message=Installing the infraternal agent.
+METRIC breakit2 event=Failed cumulative_ms=4300 message=Installing the infraternal agent failed. Check the host service configuration and existing setup files, then try again.
 METRIC breakit2 event=Check cumulative_ms=0 message=Checking the SSH host.
-METRIC breakit2 event=Install cumulative_ms=1486 message=Installing the infraternal agent.
-METRIC breakit2 event=Facts cumulative_ms=2695 message=Waiting for authenticated host facts.
-METRIC breakit2 event=Connect cumulative_ms=3052 message=Checking a terminal through the infraternal agent.
-METRIC breakit2 event=Done cumulative_ms=3542 message=The infraternal agent is ready.
+METRIC breakit2 event=Install cumulative_ms=1488 message=Installing the infraternal agent.
+METRIC breakit2 event=Facts cumulative_ms=2639 message=Waiting for authenticated host facts.
+METRIC breakit2 event=Connect cumulative_ms=2996 message=Checking a terminal through the infraternal agent.
+METRIC breakit2 event=Done cumulative_ms=3489 message=The infraternal agent is ready.
 LEDGER breakit2 active_hosts=2 prior_hosts=1 unconsumed_live_tokens=0 attempts=0
 test bootstrap_runtime::remote_backend::tests::breakit2_live::breakit2_live_ssh_install_join_and_terminal ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 9.19s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 9.16s
 
 QDISC device=eth0
-qdisc netem 8293: root refcnt 5 limit 1000 delay 75ms seed 2938488134098061865
- Sent 82815 bytes 891 pkt (dropped 0, overlimits 0 requeues 0) 
+qdisc netem 8301: root refcnt 5 limit 1000 delay 75ms seed 15473669571476800789
+ Sent 82356 bytes 884 pkt (dropped 0, overlimits 0 requeues 0) 
  backlog 0b 0p requeues 0
 qdisc ingress ffff: parent ffff:fff1 ---------------- 
- Sent 4919366 bytes 3481 pkt (dropped 0, overlimits 0 requeues 0) 
+ Sent 4898155 bytes 3465 pkt (dropped 0, overlimits 0 requeues 0) 
  backlog 0b 0p requeues 0
 QDISC device=ifb0
-qdisc netem 8294: root refcnt 2 limit 1000 delay 75ms seed 17077798155021440368
- Sent 5104514 bytes 3482 pkt (dropped 0, overlimits 0 requeues 0) 
+qdisc netem 8302: root refcnt 2 limit 1000 delay 75ms seed 14870933742282820604
+ Sent 5082611 bytes 3466 pkt (dropped 0, overlimits 0 requeues 0) 
  backlog 0b 0p requeues 0
 CLEANUP base_present=True launcher_present=True unit_present=True foreign_present=False
 CLEANUP live_unit=inactive

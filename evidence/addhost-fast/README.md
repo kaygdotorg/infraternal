@@ -20,10 +20,10 @@ Nagle enabled; those numbers are diagnostic. `production-baseline` corrects
 the fixture by calling the actual production acceptor. That window has large
 load outliers and is not a controlled speedup ratio against later windows.
 
-**Acceptance remains open.** The current `quote-safe` pair reaches Check→Done
-p50/p95 **575/645 ms on LAN** and **4977.5/5002 ms at 150 ms RTT**, ten fresh
+**Acceptance remains open.** The current `compact-setup` pair reaches Check→Done
+p50/p95 **575.5/602 ms on LAN** and **4959/4982 ms at 150 ms RTT**, ten fresh
 targets each. LAN meets 1500 ms; RTT does not meet 4000 ms.
-`quote-safe-table.md` and `quote-safe/` contain the current complete table and
+`compact-setup-table.md` and `compact-setup/` contain the current complete table and
 twenty raw logs. The earlier phase named `final` predates the quoting repair.
 
 | Implementation phase | LAN p50 / p95 ms | 150 ms RTT p50 / p95 ms |
@@ -38,6 +38,8 @@ twenty raw logs. The earlier phase named `final` predates the quoting repair.
 | In-channel verified cache negotiation | 571 / 590 | 4969 / 4983 |
 | Rebuilt pair before quoting repair | 567 / 608 | 4961.5 / 4982 |
 | Quoting repair, current runtime | 575 / 645 | 4977.5 / 5002 |
+| Lease descriptor readiness | 1032.5 / 1360 | 5325.5 / 5406 |
+| Shared rootless prelude, current runtime | 575.5 / 602 | 4959 / 4982 |
 
 The later matched remote-step profile uses ten fresh targets per version/link
 with fixed-name target instrumentation: before 885/977 ms LAN and
@@ -45,7 +47,7 @@ with fixed-name target instrumentation: before 885/977 ms LAN and
 `remote-step-table.md` gives upload, join, activation, start and linger p50/p95;
 `steps/` holds all forty logs. `step-shell.sh` logs fixed names, status and
 durations, never argv or stdin. These instrumented totals are a separate
-profile; uninstrumented `quote-safe` determines acceptance. Combined channel
+profile; uninstrumented `compact-setup` determines acceptance. Combined channel
 times include SSH overhead. Commit overlaps facts/proof and is not additive.
 
 The opened-file hash cache benchmark covers ten cold misses and 1600 warm
@@ -83,17 +85,25 @@ Nested quoting exposed a fish regression. The original helper fails a real
 byte-preservation oracle; the repair passes four shells × four nesting levels
 with quotes, backslashes, literal expansion syntax and newlines. See
 `shell-quote-before2.log` and `shell-quote-after.log` for red/green proof.
-All 59 installer tests and strict SSH clippy pass. Negotiated retry tests use
+All 60 installer tests and strict SSH clippy pass. Negotiated retry tests use
 real shell/filesystem steps for intact-cache reuse and corrupt-cache re-upload
 after activation refusal.
+The full gate subsequently found an inherited parent-directory lock in an
+unscheduled lease child, making the following join refuse status 73. The
+delayed-child descriptor oracle is red before and green after the readiness
+barrier (`lease-parent-before.log`, `lease-parent-all-tests.log`). The existing
+recovery receipt precedes bounded readiness checks and exact fd7 validation.
+The rootless prelude is transmitted once; each fresh child still executes all
+ownership/lease checks with errexit. Root privilege wrappers remain separate.
 
-`regressions/` contains thirteen successful real-SSH cases: four login shells,
+`regressions/` contains sixteen successful current real-SSH cases: four login shells,
 direct root setup, tiny disk, read-only home, foreign data, missing user
 manager, noexec temporary storage, linger, verified retry and upload
 cancellation. Each executes exactly one live test. An early wrong-feature
 controller executed zero tests; `regressions-zero-tests/` is excluded. The
 harness now refuses such a binary before creating a target. The existing
 round-3/start-fresh Rust cases also remain in the workspace gate.
+`regressions-quote-safe/` retains the earlier runtime's original thirteen logs.
 `regressions-root/` adds successful setup through password-free sudo and
 refusal when sudo is missing or requires a password. These three cases also
 execute exactly one live test; all sixteen live cases pass.
@@ -114,10 +124,10 @@ judge their visual quality. No physical-iPhone/Safari claim is made.
 The separate TypeScript gates pass 175 tracer/UI and 36 protocol tests,
 compiler checks, production build and transfer budgets.
 
-The milestone full gate passes Rust tests, clippy, formatting and dependency
-checks but fails the existing static-size caps: x86_64 20,474,992 bytes versus
-16,404,816, ARM 18,240,032 versus 13,817,816. The supplied production x86_64
-binary was already 20,329,584 bytes; this milestone's delta is 145,408 bytes.
+The repaired milestone full gate passes Rust tests, clippy, formatting and dependency
+checks but fails the existing static-size caps: x86_64 20,475,248 bytes versus
+16,404,816, ARM 18,240,416 versus 13,817,816. The supplied production x86_64
+binary was already 20,329,584 bytes; this milestone's delta is 145,664 bytes.
 The caps remain unchanged. Static linkage and x86_64 key-memory initialization
 under an 8 MiB memlock limit pass; ARM key-memory runtime is not claimed.
 Final-head gate output and outstanding acceptance are recorded on #190.
