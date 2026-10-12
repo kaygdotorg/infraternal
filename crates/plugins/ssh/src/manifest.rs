@@ -59,7 +59,7 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         ),
         action(
             "ssh.start-fresh",
-            "Start fresh on a host",
+            "Start fresh",
             &[
                 "Select the host with leftovers from an earlier setup.",
                 "Start fresh to remove its proven leftovers and continue the setup steps.",

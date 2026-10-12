@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-start-fresh/crates/plugins/ssh)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.85s

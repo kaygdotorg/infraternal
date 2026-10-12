@@ -52,3 +52,12 @@ Functional logs' durations and incidental counters are not accepted performance
 measurements. Final fast's unchanged 3-sample RTT self-test is delegated to perf
 VM 208 under the shared lock. Static builds and final branch-head gate follow the
 second merge; the issue is the final state of record.
+
+## Later start-fresh merge
+
+The separate merge adds b52d57a1's bound-socket refusal and a83c5d91's shared
+Start fresh label, plus 84be6062's evidence. Production's SF-1 ancestry guard is
+retained. The combined ownership shell passes 16/16; strict SSH Clippy, fmt and
+all SSH tests pass. The standalone gate explicitly enables tokio/test-util for
+the inherited dev paused-clock payload fixture (the workspace graph already
+supplies it); production dependencies and profiles are unchanged.

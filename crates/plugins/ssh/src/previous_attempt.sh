@@ -15,11 +15,12 @@ not_live() {
         exec 8<&-
     fi
     [ -r /proc/net/unix ] || exit 75
-    # Match listeners by canonical path or the exact UUID basename. The latter
+    # Match live socket entries by canonical path or the exact UUID basename. The latter
     # also covers a listener bound through a relative path or a directory alias.
     # A collision refuses conservatively; it never authorizes removal.
     while read -r num refs protocol flags type state inode path; do
-        [ "$flags" = 00010000 ] || continue
+        # A bound socket before listen, or an accepted connection after the
+        # listener closes, is still live. Closed stale files have no kernel row.
         case "$path" in "$base"/*) exit 73;; esac
         for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
             [ -S "$entry" ] || continue

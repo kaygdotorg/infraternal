@@ -1,0 +1,14 @@
+F
+======================================================================
+FAIL: test_foreign_private_root_without_setup_marker_is_refused (__main__.EarlierSetup.test_foreign_private_root_without_setup_marker_is_refused)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/addhost-start-fresh/crates/plugins/ssh/tests/previous_attempt_shell.py", line 152, in test_foreign_private_root_without_setup_marker_is_refused
+    self.assertEqual(self.run_shell('\ninspect_previous').returncode, 71)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 71
+
+----------------------------------------------------------------------
+Ran 1 test in 0.039s
+
+FAILED (failures=1)
