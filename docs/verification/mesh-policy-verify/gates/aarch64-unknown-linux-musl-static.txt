@@ -1,0 +1,42 @@
+/home/kayg/.cache/codex-scratch/mesh-policy-verify/target/aarch64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+
+Elf file type is EXEC (Executable file)
+Entry point 0x657980
+There are 10 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset             VirtAddr           PhysAddr
+                 FileSiz            MemSiz              Flags  Align
+  PHDR           0x0000000000000040 0x0000000000200040 0x0000000000200040
+                 0x0000000000000230 0x0000000000000230  R      0x8
+  LOAD           0x0000000000000000 0x0000000000200000 0x0000000000200000
+                 0x0000000000447950 0x0000000000447950  R      0x10000
+  LOAD           0x0000000000447980 0x0000000000657980 0x0000000000657980
+                 0x0000000000cd7af0 0x0000000000cd7af0  R E    0x10000
+  LOAD           0x000000000111f470 0x000000000133f470 0x000000000133f470
+                 0x00000000000d44a8 0x00000000000d4b90  RW     0x10000
+  LOAD           0x00000000011f3918 0x0000000001423918 0x0000000001423918
+                 0x000000000000d450 0x00000000000124d8  RW     0x10000
+  TLS            0x000000000111f470 0x000000000133f470 0x000000000133f470
+                 0x00000000000000d0 0x0000000000000255  R      0x8
+  GNU_RELRO      0x000000000111f470 0x000000000133f470 0x000000000133f470
+                 0x00000000000d44a8 0x00000000000d4b90  R      0x1
+  GNU_EH_FRAME   0x00000000002a5594 0x00000000004a5594 0x00000000004a5594
+                 0x00000000000356d4 0x00000000000356d4  R      0x4
+  GNU_STACK      0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x0000000000000000 0x0000000000000000  RW     0x0
+  NOTE           0x0000000000447934 0x0000000000647934 0x0000000000647934
+                 0x000000000000001c 0x000000000000001c  R      0x4
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     
+   01     .rodata .gcc_except_table .eh_frame_hdr .eh_frame .note.infraternal 
+   02     .text .init .fini 
+   03     .tdata .fini_array .init_array .data.rel.ro .got .relro_padding 
+   04     .data .bss 
+   05     .tdata .tbss 
+   06     .tdata .fini_array .init_array .data.rel.ro .got .relro_padding 
+   07     .eh_frame_hdr 
+   08     
+   09     .note.infraternal 

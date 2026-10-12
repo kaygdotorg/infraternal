@@ -1,0 +1,45 @@
+/home/kayg/.cache/codex-scratch/mesh-policy-verify/target/x86_64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+
+Elf file type is DYN (Position-Independent Executable file)
+Entry point 0x3d5f40
+There are 11 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset             VirtAddr           PhysAddr
+                 FileSiz            MemSiz              Flags  Align
+  PHDR           0x0000000000000040 0x0000000000000040 0x0000000000000040
+                 0x0000000000000268 0x0000000000000268  R      0x8
+  LOAD           0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x00000000003d4f20 0x00000000003d4f20  R      0x1000
+  LOAD           0x00000000003d4f40 0x00000000003d5f40 0x00000000003d5f40
+                 0x0000000000f99d7a 0x0000000000f99d7a  R E    0x1000
+  LOAD           0x000000000136ecc0 0x0000000001370cc0 0x0000000001370cc0
+                 0x00000000000d7d28 0x00000000000d8340  RW     0x1000
+  LOAD           0x0000000001446a00 0x0000000001449a00 0x0000000001449a00
+                 0x000000000000da10 0x0000000000012ab0  RW     0x1000
+  TLS            0x000000000136ecc0 0x0000000001370cc0 0x0000000001370cc0
+                 0x00000000000000d0 0x0000000000000255  R      0x8
+  DYNAMIC        0x0000000001445598 0x0000000001447598 0x0000000001447598
+                 0x0000000000000130 0x0000000000000130  RW     0x8
+  GNU_RELRO      0x000000000136ecc0 0x0000000001370cc0 0x0000000001370cc0
+                 0x00000000000d7d28 0x00000000000d8340  R      0x1
+  GNU_EH_FRAME   0x0000000000247114 0x0000000000247114 0x0000000000247114
+                 0x000000000003647c 0x000000000003647c  R      0x4
+  GNU_STACK      0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x0000000000000000 0x0000000000000000  RW     0x0
+  NOTE           0x00000000003d4f04 0x00000000003d4f04 0x00000000003d4f04
+                 0x000000000000001c 0x000000000000001c  R      0x4
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     
+   01     .dynsym .gnu.hash .hash .dynstr .relr.dyn .rodata .gcc_except_table .eh_frame_hdr .eh_frame .note.infraternal 
+   02     .text .init .fini 
+   03     .tdata .fini_array .init_array .data.rel.ro .dynamic .got .got.plt .relro_padding 
+   04     .data .bss 
+   05     .tdata .tbss 
+   06     .dynamic 
+   07     .tdata .fini_array .init_array .data.rel.ro .dynamic .got .got.plt .relro_padding 
+   08     .eh_frame_hdr 
+   09     
+   10     .note.infraternal 

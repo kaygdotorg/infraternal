@@ -111,8 +111,8 @@ fragmentation and ICMP to the original 102 checks. The enrollment proof adds
 10 passing packet/control checks. Separate exact namespace tests cover the
 six snapshot cases and existing lifecycle/ownership/recovery regressions.
 The 32 substantive namespace cases pass; the internal shutdown child is a
-helper, not an additional proof. The shipping shutdown budget is run separately
-once the final static binary is available.
+helper, not an additional proof. The shipping static 1,000-peer shutdown
+budget also passes separately (33 substantive namespace cases total).
 
 Eight initial direct-executable namespace runs omitted `CARGO_TARGET_DIR` and
 failed fixture initialization; all eight pass with the required environment.
@@ -213,8 +213,10 @@ protocol tests**, strict compilation, production build and transfer budgets.
 The first qualified run still fails its test row only at the immediate long
 fixture path; the same daemon test passes with the short root. Its x86_64
 static output is **21,318,864 bytes**, versus the unchanged **16,404,816-byte**
-ceiling (base 21,315,280; delta 3,584 bytes). ARM and the final full-head run
-are recorded on #173 at handoff. Partial/failed gate logs remain separate from
+ceiling (base 21,315,280; delta 3,584 bytes). The aarch64 output is **18,879,528 bytes**, versus the unchanged
+**13,817,816-byte** ceiling (base 18,877,112; delta 2,416 bytes). Both are
+static/stripped ELF with no PT_INTERP. The final full-head run is recorded
+on #173 at handoff. Partial/failed gate logs remain separate from
 final-head evidence.
 
 ## Owner question retained
