@@ -49,15 +49,15 @@ test("reach follows grants through tags and keeps the relay", () => {
   expect(reach("db-never", INITIAL_GRANTS, TAGS)).toEqual([]);
 });
 
-test("phone edge to edge leaves the gap and PEEK px of each neighbour, alone or not; full width is the whole area", () => {
+test("phone edge to edge: a lone window is the whole area, in a strip it leaves the gap and PEEK px of each neighbour; full width is the whole area always", () => {
   const edge = metricsFor(393, 700, true);
-  expect(edge.colW).toBe(393 - 2 * (COLUMN_GAP + PEEK));
-  expect(defaultWidth(edge, 1)).toBe(defaultWidth(edge, 3));
+  expect(defaultWidth(edge, 1)).toBe(393);
+  expect(defaultWidth(edge, 3)).toBe(393 - 2 * (COLUMN_GAP + PEEK));
   const full = metricsFor(393, 700, true, { ...DEFAULT_SIZES, phone: "full" });
   expect(full.colW).toBe(393);
   expect(defaultWidth(full, 3)).toBe(393);
-  expect(edge.colW).toBeLessThan(full.colW);
-  expect(isDefaultWidth(edge.colW, edge) && isDefaultWidth(full.colW, full) && !isDefaultWidth(300, edge)).toBe(true);
+  expect(defaultWidth(edge, 3)).toBeLessThan(defaultWidth(full, 3));
+  expect(isDefaultWidth(edge.colW, edge) && isDefaultWidth(edge.peekW, edge) && isDefaultWidth(full.colW, full) && !isDefaultWidth(300, edge)).toBe(true);
 });
 
 test("comfortable phones: a column in a strip leaves PEEK px of each neighbour; a lone one keeps the screen less the margins", () => {

@@ -1,8 +1,8 @@
 /**
  * Window sizes (D191, Settings -> Window Sizes): how wide a terminal window is by default, per kind of device.
  *
- * - Phones: "Edge to edge" (the default: the screen width less, on each side, the gap between columns and a slice of the
- *   neighbour, so a thin slice of each neighbour shows; a lone window keeps the same width, centred), "Full width"
+ * - Phones: "Edge to edge" (the default: a lone window is the screen width; in a strip it is narrower by the gap between
+ *   columns and a slice of the neighbour on each side, so a thin slice of each neighbour shows), "Full width"
  *   (exactly the screen width between the safe areas; no neighbour shows) or "Comfortable" (the earlier phone width: the
  *   screen less the canvas margins).
  * - Desktop: "Comfortable" (one third of the canvas, the earlier width, the default), "Wide" (half) or "Full width"
@@ -47,9 +47,9 @@ export function writeSize<K extends keyof WindowSizes>(kind: K, value: WindowSiz
 export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes): number {
   if (narrow) {
     if (sizes.phone === "comfortable") return Math.max(260, Math.min(520, Math.round(width - 28)));
-    // Full width is the whole area between the safe areas; edge to edge leaves room for the gap and a slice of each
-    // neighbour, so it is never wider than full width (TASTE: full width means full width; edge to edge peeks).
-    return sizes.phone === "full" ? Math.round(width) : Math.round(width - 2 * (COLUMN_GAP + PEEK));
+    // A lone window is the whole area between the safe areas in both settings (TASTE: a lone window keeps the full
+    // phone width). In a strip, edge to edge narrows it by `peekWidth`, so it is never wider than full width.
+    return Math.round(width);
   }
   if (sizes.desktop === "full") return Math.max(480, Math.round(width * 0.99));
   if (sizes.desktop === "wide") return Math.max(480, Math.min(960, Math.round((width - 24) / 2)));
