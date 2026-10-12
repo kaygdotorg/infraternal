@@ -329,6 +329,113 @@ fn framed_receipts_preserve_upload_failures_and_reject_extra_output() {
 }
 
 #[tokio::test]
+async fn missing_payload_preserves_the_bootstrap_binary_remedy() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(&fixture.binary).unwrap();
+    let error = fixture
+        .transaction()
+        .stage(&fixture.binary)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "The matching static infraternal binary is unavailable."
+    );
+    assert!(!fixture.base().exists());
+}
+
+struct NegotiatedChoices {
+    local: Local,
+    choices: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+impl SshSession for NegotiatedChoices {
+    fn setup_steps(&self) -> bool {
+        true
+    }
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            let negotiated = matches!(&input, Input::Negotiated { .. });
+            let output = self.local.run(script, input).await?;
+            if negotiated {
+                let receipt = output
+                    .stdout
+                    .split_inclusive(|byte| *byte == b'\n')
+                    .nth(1)
+                    .unwrap();
+                assert!(
+                    infraternal_plugin_ssh::transport::TransferChoice::parse(receipt).is_some()
+                );
+                self.choices.lock().unwrap().push(receipt.to_vec());
+            }
+            Ok(output)
+        })
+    }
+}
+
+#[tokio::test]
+async fn negotiated_retry_reuses_only_a_verified_cache_after_activation_refusal() {
+    use infraternal_plugin_ssh::model::InstallStep;
+    for corrupt in [false, true] {
+        let fixture = Fixture::new();
+        let choices = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transaction = || {
+            Installation::new(
+                Arc::new(NegotiatedChoices {
+                    local: Local {
+                        root: fixture.root.clone(),
+                    },
+                    choices: choices.clone(),
+                }),
+                &fixture.target,
+                &fixture.join,
+            )
+            .unwrap()
+        };
+        std::fs::write(fixture.root.join("refuse-start"), b"").unwrap();
+        let first = transaction();
+        let error = first
+            .stage_and_setup(&fixture.binary, &fixture.join)
+            .await
+            .unwrap_err();
+        assert!(matches!(error.failed_step, Some(InstallStep::Start)));
+        first.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+        if corrupt {
+            std::fs::write(
+                fixture
+                    .base()
+                    .with_file_name("infraternal.bootstrap-cache")
+                    .join("payload"),
+                b"corrupted public cache",
+            )
+            .unwrap();
+        }
+        std::fs::remove_file(fixture.root.join("refuse-start")).unwrap();
+        let second = transaction();
+        second
+            .stage_and_setup(&fixture.binary, &fixture.join)
+            .await
+            .unwrap();
+        assert_eq!(
+            *choices.lock().unwrap(),
+            [
+                b"TRANSFER raw\n".to_vec(),
+                if corrupt {
+                    b"TRANSFER raw\n".to_vec()
+                } else {
+                    b"TRANSFER reuse\n".to_vec()
+                }
+            ],
+        );
+        assert_eq!(
+            std::fs::read(fixture.base().join("bin/live")).unwrap(),
+            std::fs::read(&fixture.binary).unwrap()
+        );
+        second.rollback().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn compressed_stage_roundtrips_and_rejects_corruption_before_execution() {
     for corrupt in [false, true] {
         let fixture = Fixture::new();
