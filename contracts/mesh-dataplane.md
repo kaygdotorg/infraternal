@@ -17,6 +17,24 @@ until the final chunk, with contiguous version checking. A missing or failed
 chunk leaves the applied view unchanged. Reconnecting requests a snapshot.
 Control chunks fit the existing 8 KiB action-body resource bound.
 
+Full coordinator snapshots may include `local_key`, the public key bound to
+their local inventory identity. It must match the enabled kernel key and stay
+identical across every staged chunk. An accepted local node identity may change
+only in a full snapshot at a newer revision carrying this binding, after an
+authorized re-enrollment. Legacy unbound snapshots and deltas cannot rotate it.
+The `mesh.configure` control action is available only on the authenticated
+coordinator channel, never through the public local CLI registry. Authorized
+replacement reconciles the owned local host addresses, including on restart;
+ordinary same-identity address changes still require the D199 overlap barrier.
+
+Host revocation retires its Mesh membership key, direct node grants and tag
+membership in the same SQLite transaction as the durable authority tombstone.
+A historical tombstone is reconciled during migration. After commit the host
+notifies enabled plugins through the generic lifecycle; Mesh wakes its existing
+coordinator workers and withdraws that member from every peer snapshot. Retired
+WireGuard keys cannot authenticate even an established flow. This differs from
+ordinary grant narrowing, which retains established-flow state as specified below.
+
 The Linux component uses typed route/generic netlink for kernel WireGuard.
 Peer updates are chunked to the netlink datagram bound. It owns only its
 interface and firewall table; disabling removes them and leaves no poller,
