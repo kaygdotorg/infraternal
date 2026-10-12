@@ -1,0 +1,28 @@
+   Compiling linux-exit-readiness-check v0.0.0 (/home/kayg/.cache/codex-scratch/ended-sessions-round3/linux-check)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.59s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round3/linux-target/debug/deps/linux_exit_readiness_check-73e83b5597d954a6)
+
+running 8 tests
+test process_exits_tests::shared_exit_queue_at_200_processes ... ignored, 200 live process lifetimes; run in a weighted benchmark scope
+test pty::child_signal_tests::child_signal_reset_spawn_cost_at_128_children ... ignored, child spawn diagnostic; run locally in a weighted scope without own build overlap
+
+running 1 test
+test process_exits::tests::resource_failures_do_not_silently_disable_exit_tracking ... ok
+test process_exits::tests::unavailable_kernel_has_no_timer_or_descriptor ... ok
+test process_exits_tests::process_descriptor_is_cloexec_and_rejects_invalid_pid ... ok
+test process_exits_tests::exited_before_registration_is_not_a_live_registration ... ok
+test process_exits_tests::shared_queue_detects_exit_and_does_not_repeat_or_retain_descriptors ... ok
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 2.05s
+
+test pty::child_signal_tests::child_reset_restores_ignored_dispositions_and_leaves_parent_mask ... ok
+
+test result: ok. 6 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.33s
+
+   Doc-tests linux_exit_readiness_check
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
