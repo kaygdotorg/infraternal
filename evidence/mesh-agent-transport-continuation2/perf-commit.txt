@@ -1,0 +1,17 @@
+docs(evidence): record locked VM transport recovery and scale acceptance
+
+Finish the outstanding D215 proofs using frozen current-source static
+shipping/test artifacts with remote hash checks and explicit population
+limits. All three real-PTY path lifecycles meet RTT+250ms recovery; local
+mesh echo adds55us. Preserve translated-address, exact4MiB credit, real
+QUIC discard, parser and1000-pair guard proofs with raw public artifacts.
+Distinguish inventory, input states and paired test peers from daemons;
+reject causal CPU-saving claims from differing load and diagnostic costs.
+Original growth attribution remains separate; retain the unchanged size
+limit and first full-gate failure rather than waiving budgets.
+D41, D64, D128, D198, D215, D235; no production source/dependency change.
+Validation:3RTT and2scale exits0; zero byte mismatches/false cuts;
+server38/runtime38/parser1pass; Python syntax and shell syntax checks.
+Final serialized branch-head fast gate follows this evidence checkpoint.
+
+Refs: #129

@@ -1,0 +1,225 @@
+{
+  "role": "Verbatim logs preserved as gzip without changing whitespace or test output",
+  "files": {
+    "latency-ship.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "latency-ship.log.gz"
+    },
+    "agent-perf-dispatch.log": {
+      "bytes": 38,
+      "sha256": "591017bcf6fb3bca83d0af047d89aa5e82346a8e69f2b2a99233f7546d438164",
+      "archive": "agent-perf-dispatch.log.gz"
+    },
+    "embedded-all-current.log": {
+      "bytes": 4108,
+      "sha256": "913451111aa6e56716855a50ac4517d76befe7b21dca92a14e10cf996d1a7b06",
+      "archive": "embedded-all-current.log.gz"
+    },
+    "review-doc-check.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "review-doc-check.log.gz"
+    },
+    "freeze-agent-run.log": {
+      "bytes": 170,
+      "sha256": "363fac44201670488cd34aae3cbfeb0349ee53a78c05e776eb0606f92dbbaeae",
+      "archive": "freeze-agent-run.log.gz"
+    },
+    "remote-artifact-hash.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "remote-artifact-hash.log.gz"
+    },
+    "auth-toolchain-check.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "auth-toolchain-check.log.gz"
+    },
+    "embedded-checkpoint.log": {
+      "bytes": 115,
+      "sha256": "1c43b1af544e0af86ce20d3460324a8b93ddd98353e731add4c8e0518c0d1bc9",
+      "archive": "embedded-checkpoint.log.gz"
+    },
+    "fetch.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "fetch.log.gz"
+    },
+    "review_restart_routes-configured.log": {
+      "bytes": 165,
+      "sha256": "db126c9c7bfa6e33a18ed044eb90b6bda680d341232218371cca1a198bfe6ca6",
+      "archive": "review_restart_routes-configured.log.gz"
+    },
+    "embedded-checkpoint-current.log": {
+      "bytes": 2211,
+      "sha256": "b70fa80b1237778386aa975a85e454f73fc121bab032d411ac5d215140ac1390",
+      "archive": "embedded-checkpoint-current.log.gz"
+    },
+    "review_restart_routes.log": {
+      "bytes": 490,
+      "sha256": "901e01b60812d2a7f8d9c883aa789b44810e56030253a5aeb3b6e7be15fae5f1",
+      "archive": "review_restart_routes.log.gz"
+    },
+    "ship.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "ship.log.gz"
+    },
+    "recovery-push.log": {
+      "bytes": 131,
+      "sha256": "e820efebcc4b413d980e08f803401182d4d1b6b9e0b906253bd8e7149db4fd2a",
+      "archive": "recovery-push.log.gz"
+    },
+    "freeze-run.log": {
+      "bytes": 393,
+      "sha256": "22649c4b3f7f0ba0ad828730e5dd6a9ff90c08931f62cdc2c54feb5ae93d8ba3",
+      "archive": "freeze-run.log.gz"
+    },
+    "recovery-check.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "recovery-check.log.gz"
+    },
+    "review_endpoint_transaction.log": {
+      "bytes": 541,
+      "sha256": "6c7da22267eb75fd21793fb07524842ceb5bdbc33f59d29082c0b322e0b5b57e",
+      "archive": "review_endpoint_transaction.log.gz"
+    },
+    "recovery-commit.log": {
+      "bytes": 4795,
+      "sha256": "1e9265cbe5fb10b6bc0e4a8b9b8aa1ec60b24cce6c342d6a85c9a736c7470687",
+      "archive": "recovery-commit.log.gz"
+    },
+    "server-build.log": {
+      "bytes": 196,
+      "sha256": "68fb3be7ff57adfc0b606b5aa3be123b5ef0ba0a2ce17f4b0ea8c37510f72362",
+      "archive": "server-build.log.gz"
+    },
+    "agent-ship.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "agent-ship.log.gz"
+    },
+    "review_endpoint_transaction-configured.log": {
+      "bytes": 180,
+      "sha256": "4c220e7434a4903b767f3bc0438a769802c6fea81819e296ef839a14d76a2e91",
+      "archive": "review_endpoint_transaction-configured.log.gz"
+    },
+    "tcp-spacing-isolated.log": {
+      "bytes": 1239,
+      "sha256": "05441034ed642c28f4c0be9df316aa658e54aaa85d86ff6ad9b1887211fc4c18",
+      "archive": "tcp-spacing-isolated.log.gz"
+    },
+    "review-doc-push.log": {
+      "bytes": 115,
+      "sha256": "c1b9618bde7e33492b6d202951058d4bb00ebd50679b63aecc8f69b27f3bab3b",
+      "archive": "review-doc-push.log.gz"
+    },
+    "verify-fast-final.log": {
+      "bytes": 129578,
+      "sha256": "3003b5d94289d6a498fdbe55d266d5335aa70c506f0d93d7838a495a323748c0",
+      "archive": "verify-fast-final.log.gz"
+    },
+    "verify-fast.log": {
+      "bytes": 82,
+      "sha256": "09d330150f5658700d3eee82a9b72a3453132a387590c55b7ec51786a654159d",
+      "archive": "verify-fast.log.gz"
+    },
+    "agent-build.log": {
+      "bytes": 2839,
+      "sha256": "720f5a97c11967cc10ae7ff56caa945b411dc48e6b5b0a4cdb078373afd405c5",
+      "archive": "agent-build.log.gz"
+    },
+    "retained-credit-functional.log": {
+      "bytes": 1557,
+      "sha256": "74c99d203c930d5e1e6b665e8b40378e9fd8956080378335d4eaec41c6daaaf6",
+      "archive": "retained-credit-functional.log.gz"
+    },
+    "additional-perf-dispatch.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "additional-perf-dispatch.log.gz"
+    },
+    "mesh-review-build.log": {
+      "bytes": 765,
+      "sha256": "1b7744fe372fdfb7a52c9e510e15ad9706c793835623077bba17065c35181504",
+      "archive": "mesh-review-build.log.gz"
+    },
+    "review-doc-commit.log": {
+      "bytes": 163,
+      "sha256": "4daf1d176cd1f3cd14aa50be16546735f84438d354d548be5e4806b2611ac745",
+      "archive": "review-doc-commit.log.gz"
+    },
+    "review_ingress_translation.log": {
+      "bytes": 230,
+      "sha256": "e9fa2ee11d53205c8ad82668ba88b30eb7dae14059c31e73a2cb3758abcb6e4a",
+      "archive": "review_ingress_translation.log.gz"
+    },
+    "verify-fast-perf-selftest.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive": "verify-fast-perf-selftest.log.gz"
+    },
+    "perf-dispatch.log": {
+      "bytes": 70,
+      "sha256": "8476c36c1ef19f0d4194b7035fc11d8ae9aa0e4fd1b79c54794eeccd5016e694",
+      "archive": "perf-dispatch.log.gz"
+    },
+    "runtime-checkpoint.log": {
+      "bytes": 5199,
+      "sha256": "8b516acdc7d9fa6e6850e5515d050cd059c89ef86e0835d779469468ec375e9c",
+      "archive": "runtime-checkpoint.log.gz"
+    },
+    "perf-selftest-dispatch.log": {
+      "bytes": 150,
+      "sha256": "1a619ee255c063acc70197a916f1ad4017199401c0a929c9f38a7c16650d3660",
+      "archive": "perf-selftest-dispatch.log.gz"
+    },
+    "standby-checkpoint.log": {
+      "bytes": 199,
+      "sha256": "9fea692a65870df6d97e308d8c6db1bbbbe82b6a668f37c9450baed3cb854139",
+      "archive": "standby-checkpoint.log.gz"
+    },
+    "perf-results/tcp-spacing-perf.log": {
+      "bytes": 236,
+      "sha256": "45773ae68159de75a0a1a715a3b4ecdec528f0541d2e7f3254cc8be45a3fe18c",
+      "archive": "perf-results/tcp-spacing-perf.log.gz"
+    },
+    "perf-results/scale-unguarded.log": {
+      "bytes": 337,
+      "sha256": "38e524de381f0c11ce244e3c0645eeb3f7a55a3b703417c7dda6b8bd45d1c8d4",
+      "archive": "perf-results/scale-unguarded.log.gz"
+    },
+    "perf-results/scale.log": {
+      "bytes": 337,
+      "sha256": "622239be2c029dd6ad4bde1a4a56c2de0f474e5baef8b2b241056dce65a2e2d7",
+      "archive": "perf-results/scale.log.gz"
+    },
+    "perf-results/retained-200.log": {
+      "bytes": 463,
+      "sha256": "da0ae6d4698315034449aeeb9a6905adc66d40b696c7728a1ee38873585f3075",
+      "archive": "perf-results/retained-200.log.gz"
+    },
+    "perf-results/review-r5.log": {
+      "bytes": 341,
+      "sha256": "be504708be90477120b7667de2612114bcf0e65acc6a8f52806314a279974731",
+      "archive": "perf-results/review-r5.log.gz"
+    },
+    "perf-results/rtt-0/test.log": {
+      "bytes": 755,
+      "sha256": "5dab3176663925b33327eb9ba5206fc455a9fe8161bcc43e37f004fb7a4f6e52",
+      "archive": "perf-results/rtt-0/test.log.gz"
+    },
+    "perf-results/rtt-150/test.log": {
+      "bytes": 774,
+      "sha256": "11547c5b808ed70d081708f461015c6d5f483335c6c0eaae2bed0965fbd9aacc",
+      "archive": "perf-results/rtt-150/test.log.gz"
+    },
+    "perf-results/rtt-300/test.log": {
+      "bytes": 775,
+      "sha256": "e1771e9dc9b74b309d39eb55c82e0db63a31e0e3d22286fdd1e6960aba281b4d",
+      "archive": "perf-results/rtt-300/test.log.gz"
+    }
+  }
+}
