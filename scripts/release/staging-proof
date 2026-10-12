@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Build and sign throwaway staging images, prove deployment only on the locked perf VM, and remove the run (#188 D1)."""
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import re
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -47,12 +49,21 @@ def bundle(destination, binary, key, version, overlay=b""):
 
 def main():
     os.umask(0o077)
-    scratch = Path.home() / ".cache/codex-scratch/deploy-pipeline"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scratch", type=Path,
+                        default=Path.home() / ".cache/codex-scratch/deploy-pipeline")
+    parser.add_argument("--evidence", type=Path,
+                        default=REPOSITORY / "evidence/deploy-pipeline/staging-proof.txt")
+    options = parser.parse_args()
+    scratch = options.scratch.resolve()
     scratch.mkdir(parents=True, exist_ok=True)
     target = scratch / "target"
+    port = int(os.environ.get("TRACER_TEST_PORT", "4388"))
+    if not 1 <= port <= 65535:
+        raise ValueError("invalid staging test port")
     env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS="2",
                CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0",
-               INFRATERNAL_RELEASE_BUILD="1", TRACER_TEST_PORT="4388")
+               INFRATERNAL_RELEASE_BUILD="1", TRACER_TEST_PORT=str(port))
     with tempfile.TemporaryDirectory(prefix="staging-", dir=scratch) as temporary:
         local = Path(temporary)
         key = local / "signing-key"
@@ -109,8 +120,16 @@ def main():
             shutil.copy2(REPOSITORY / "scripts/release" / name, transfer / name)
         remote = "/root/infraternal-bench/deploy/r" + uuid.uuid4().hex[:8]
         print(f"STAGING run={remote} waiting_for_exclusive_lock=true", flush=True)
-        # The lock surrounds extraction, fixture execution and all teardown. No
-        # file/unit on the VM is created while another benchmark owns the lock.
+        # Upload and extraction use only our unique run directory. D256 reserves
+        # the shared lock for the measurement, never transfer or build work.
+        measurement = f"""set -eu
+printf 'STAGING measurement_lock_acquired=true\\n'
+printf 'STAGING machine='; uname -n
+printf 'STAGING kernel='; uname -r
+printf 'STAGING load_before='; cut -d' ' -f1-3 /proc/loadavg
+INFRATERNAL_DEPLOY_TEST_ROOT={remote} INFRATERNAL_CA_TEST_ROOT={remote}/f TRACER_TEST_PORT={env['TRACER_TEST_PORT']} {remote}/lib/loader --library-path {remote}/lib {remote}/server-tests --ignored --exact auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::signed_deploy_preserves_passkey_ca_and_live_sessions --nocapture --test-threads=1
+printf 'STAGING load_after='; cut -d' ' -f1-3 /proc/loadavg
+"""
         script = f'''set -eu
 umask 077
 mkdir -p {remote}
@@ -129,17 +148,14 @@ ln -s {remote}/releases/A/infraternal {remote}/bin/infraternal
 ln -s {remote}/releases/A/infraternal-x86_64-musl {remote}/bin/infraternal-x86_64-musl
 ln -s {remote}/releases/A/infraternal-aarch64-musl {remote}/bin/infraternal-aarch64-musl
 cp -r {remote}/releases/A/web {remote}/web
-printf 'STAGING machine='; uname -n
-printf 'STAGING kernel='; uname -r
-printf 'STAGING load_before='; cut -d' ' -f1-3 /proc/loadavg
-INFRATERNAL_DEPLOY_TEST_ROOT={remote} INFRATERNAL_CA_TEST_ROOT={remote}/f TRACER_TEST_PORT=4388 {remote}/lib/loader --library-path {remote}/lib {remote}/server-tests --ignored --exact auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::signed_deploy_preserves_passkey_ca_and_live_sessions --nocapture --test-threads=1
-printf 'STAGING load_after='; cut -d' ' -f1-3 /proc/loadavg
+printf 'STAGING artifacts_prepared=true lock_held=false\n'
+flock -w 3600 /var/lock/perf-bench.lock sh -c {shlex.quote(measurement)}
+printf 'STAGING measurement_lock_released=true\n'
 '''
         # Only public fixtures and executables enter this stream, never session,
         # plaintext CA or test signing private material.
-        import shlex
         with subprocess.Popen(["netbird", "ssh", "--no-browser", HOST,
-                "flock -w 1800 /var/lock/perf-bench.lock sh -c " + shlex.quote(script)],
+                "sh -c " + shlex.quote(script)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as child:
             with tarfile.open(fileobj=child.stdin, mode="w|") as archive:
                 for file in sorted(transfer.rglob("*")):
@@ -148,7 +164,8 @@ printf 'STAGING load_after='; cut -d' ' -f1-3 /proc/loadavg
             child.stdin.close()
             transcript = child.stdout.read()
             code = child.wait()
-        evidence = REPOSITORY / "evidence/deploy-pipeline/staging-proof.txt"
+        evidence = options.evidence
+        evidence.parent.mkdir(parents=True, exist_ok=True)
         evidence.write_bytes(transcript)
         print(transcript.decode(), end="")
         if code != 0:
