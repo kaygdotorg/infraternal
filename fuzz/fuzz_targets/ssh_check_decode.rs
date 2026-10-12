@@ -2,6 +2,7 @@
 #![no_main]
 
 use infraternal_plugin_ssh::{
+    auth_evidence::MethodReceipt,
     install::parse_linger,
     model::{Destination, FailureKind, MeshEvidence},
     openssh::{classify, scan_destination},
@@ -11,6 +12,13 @@ use infraternal_plugin_ssh::{
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
+    let mut whole = MethodReceipt::default();
+    whole.feed(bytes);
+    let mut split = MethodReceipt::default();
+    for byte in bytes {
+        split.feed(&[*byte]);
+    }
+    assert_eq!(whole.network(), split.network());
     for ssh_failure in [false, true] {
         for is_peer in [false, true] {
             for reachable_otherwise in [false, true] {
