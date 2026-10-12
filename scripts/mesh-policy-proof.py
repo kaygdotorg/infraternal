@@ -391,10 +391,10 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         assert proof.request(self.left, chunk)["applied"]
         self.remove_sender_filter()
 
-    def measure(self, apply_rounds=0):
+    def measure(self, apply_rounds=0, peers=1000):
         """At-scale diagnostic: one real pair and 999 additional public keys per node."""
         for chunk in self.chunks:
-            for node in range(3, 1002):
+            for node in range(3, peers + 2):
                 # These are synthetic PUBLIC peer identifiers, never private keys.
                 key = list(hashlib.sha256(f"mesh-policy-public-peer-{node}".encode()).digest())
                 chunk["upserted"][str(node)] = {"peer": {"key": key,
@@ -406,7 +406,7 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
         apply_us = (time.monotonic_ns() - started) // 1000
         apply_node_us = self.last_apply_us
         installed_peers = [len(proof.request(proc, "stats")) for proc in (self.left, self.right)]
-        assert installed_peers == [1000, 1000], "scaled policy measurement has invalid state"
+        assert installed_peers == [peers, peers], "scaled policy measurement has invalid state"
         if apply_rounds:
             samples = []
             for index in range(apply_rounds):
@@ -418,10 +418,10 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
                         "pair_us": (time.monotonic_ns() - started) // 1000,
                         "node_us": self.last_apply_us,
                         "load": Path("/proc/loadavg").read_text().strip()})
-            print(json.dumps({"measurement": "grant_replacement", "machine": "infraternal-dev",
+            print(json.dumps({"measurement": "grant_replacement", "machine": socket.gethostname(),
                 "kernel": proof.run("uname", "-r").strip(),
                 "cpus": proof.run("getconf", "_NPROCESSORS_ONLN").strip(),
-                "profile": "debug fixture; one-peer delta per node", "peers_per_node": 1000,
+                "profile": "kernel fixture; one-peer delta per node; artifact profile recorded separately", "peers_per_node": peers,
                 "live_pairs": 1, "installed_peers": installed_peers, "initial_apply_pair_us": apply_us,
                 "initial_apply_node_us": apply_node_us, "samples": samples}), flush=True)
             return
@@ -479,9 +479,9 @@ s.sendto(b'public-baseline',(sys.argv[1],5520))
                                       "p99_ms": sorted(times)[99]}
                 samples.append({"iteration": iteration, "policy_on": policy_on, "rtt": values,
                                 "load": Path("/proc/loadavg").read_text().strip()})
-        print(json.dumps({"measurement": "policy_path", "machine": "infraternal-dev",
+        print(json.dumps({"measurement": "policy_path", "machine": socket.gethostname(),
             "kernel": proof.run("uname", "-r").strip(), "cpus": proof.run("getconf", "_NPROCESSORS_ONLN").strip(),
-            "profile": "debug fixture; kernel packet path", "peers_per_node": 1000,
+            "profile": "kernel fixture; artifact profile recorded separately", "peers_per_node": peers,
             "live_pairs": 1, "installed_peers": installed_peers, "apply_pair_us": apply_us, "apply_node_us": apply_node_us, "rules": counts,
             "samples": samples}), flush=True)
 
@@ -498,6 +498,7 @@ def main():
     parser.add_argument("--nf-tables", action="store_true")
     parser.add_argument("--measure", action="store_true")
     parser.add_argument("--apply-rounds", type=int, default=0)
+    parser.add_argument("--peers", type=int, choices=(10,1000), default=1000)
     parser.add_argument("--enrollment-fixture")
     args = parser.parse_args()
     if args.apply_rounds < 0 or args.apply_rounds and not args.measure:
@@ -511,12 +512,12 @@ def main():
         campaign = Campaign.__new__(Campaign)
         campaign.__init__(args.fixture, args.nf_tables, args.enrollment_fixture)
         if args.measure:
-            campaign.measure(args.apply_rounds)
+            campaign.measure(args.apply_rounds, args.peers)
             return 0
         rows = campaign.enrollment_check() if args.enrollment_fixture else campaign.check()
         print(json.dumps({"backend": "nf_tables" if args.nf_tables else "nft",
                           "checks": len(rows), "failures": sum(r["result"] == "FAIL" for r in rows),
-                          "machine": "infraternal-dev", "load": Path("/proc/loadavg").read_text().strip()}))
+                          "machine": socket.gethostname(), "load": Path("/proc/loadavg").read_text().strip()}))
         return int(any(r["result"] == "FAIL" for r in rows))
     finally:
         if campaign:
