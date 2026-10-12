@@ -355,10 +355,11 @@ export class Wizard {
   }
 
   private typedChip(target: ParsedTarget, base?: Entry): Chip {
-    const id = `${target.user ?? ""}@${target.host}${target.port ? `:${target.port}` : ""}`;
+    const user = target.user ?? base?.user;
+    const id = `${user ?? ""}@${target.host}${target.port ? `:${target.port}` : ""}`;
     let entry = this.typed.find((item) => item.id === id);
     if (!entry) {
-      entry = { id, label: target.host, user: target.user, address: target.host, port: target.port, os: base?.os ?? "unknown", discovered: base?.discovered };
+      entry = { id, label: target.host, user, address: target.host, port: target.port, os: base?.os ?? "unknown", discovered: base?.discovered };
       this.typed = [entry, ...this.typed];
     }
     return this.chipFor(entry);

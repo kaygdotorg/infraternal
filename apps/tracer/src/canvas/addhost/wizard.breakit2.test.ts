@@ -26,8 +26,7 @@ test("breakit2 malformed bracketed IPv6 waits for correction", () => {
   }
 });
 
-const listedUserTest = process.env.ADDHOST_BREAKIT2_RED === "1" ? test : test.skip;
-listedUserTest("listed host plus port retains its saved user in the serialized destination", () => {
+test("listed host plus port retains its saved user in the serialized destination", () => {
   type Entry = { id: string; user?: string; address: string; port?: number };
   const known: Entry = { id: "lab", user: "target", address: "lab" };
   const wizard = Object.assign(Object.create(Wizard.prototype) as {
