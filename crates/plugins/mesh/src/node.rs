@@ -717,3 +717,7 @@ mod tests {
         assert!(!Device::owned().expect("absent owned interface"));
     }
 }
+
+#[cfg(test)]
+#[path = "node_rotation_tests.rs"]
+mod rotation_tests;
