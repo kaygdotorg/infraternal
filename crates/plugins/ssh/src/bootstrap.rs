@@ -6,7 +6,8 @@ use crate::{
     install::{BinaryPaths, Cleanup, Installation, JoinMaterial, PayloadSource},
     lifecycle::Lifecycle,
     model::{Destination, Event, Failure, InstallStep, MeshEvidence, Step, Target, identifier},
-    probe::{CHECK_SCRIPT, Check},
+    previous_attempt::{self, PreviousAttempt},
+    probe::Check,
     transport::{
         ConfirmationAuthority, Credentials, Input, Operation, Secret, SshSession, SshTransport,
     },
@@ -16,7 +17,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, oneshot, watch};
 
 /// Discovery and vault authority are resolved independently of untrusted request fields.
 pub struct Resolved {
@@ -69,6 +70,25 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, JoinMaterial> {
         self.invitation(authority, target, check)
     }
+    /// Durable backends register their exact host before any commit can execute.
+    /// The caller retains cleanup coordinates if the invitation future is cancelled.
+    /// Existing nondurable adapters retain their post-result registration behavior.
+    fn invitation_registered<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+        register: &'a mut (dyn FnMut(uuid::Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move {
+            let join = self
+                .invitation_with_trust(authority, target, check, lookup)
+                .await?;
+            register(join.host)?;
+            Ok(join)
+        })
+    }
     fn connected_facts<'a>(
         &'a self,
         authority: &'a Authority,
@@ -79,8 +99,19 @@ pub trait Backend: Send + Sync {
         authority: &'a Authority,
         host: uuid::Uuid,
     ) -> Operation<'a, ()>;
+    /// Record explicit earlier-attempt recovery using only public coordinates.
+    fn record_start_fresh(&self, _: &Target, _: uuid::Uuid, _: uuid::Uuid, _: &'static str) {}
+
     /// One public failure record per attempt, before cleanup changes its progress phase.
     fn record_failure(&self, _: &Target, _: Option<uuid::Uuid>, _: Step, _: &Failure) {}
+    /// Cut this exact attempt's authority and retain its retirement obligation
+    /// before session or SSH cleanup can await. Durable backends keep the
+    /// writer alive even if the later `failed` acknowledgement is cancelled.
+    /// # Errors
+    /// Refuses foreign attempt ownership or unavailable retirement admission.
+    fn retire_failed(&self, _: &Authority, _: uuid::Uuid) -> Result<(), Failure> {
+        Ok(())
+    }
     /// Finish this attempt's private sessions before SSH rollback stops the service.
     fn cleanup_sessions<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         Box::pin(async { Ok(()) })
@@ -237,6 +268,7 @@ impl Bootstrap {
                         failed: false,
                         cleanup: None,
                         last_failure: None,
+                        start_fresh: None,
                     },
                 )
                 .is_some()
@@ -390,6 +422,7 @@ impl Bootstrap {
             self.backend
                 .record_failure(&target, resources.host, phase, failure);
             if let Some(host) = resources.host {
+                let _ = self.backend.retire_failed(&batch.authority, host);
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
                     self.backend.cleanup_sessions(&batch.authority, host),
@@ -426,6 +459,7 @@ impl Bootstrap {
         }
         let mut states = lock(&batch.states);
         if let Some(state) = states.get_mut(&target.id) {
+            state.start_fresh = None;
             state.running = false;
             state.failed = result.is_err();
             state.last_failure = result.as_ref().err().cloned();
@@ -560,22 +594,51 @@ impl Bootstrap {
             .open(resolved.destination, resolved.credentials, resolved.mesh)
             .await
             .map_err(|error| error.at(InstallStep::Connect))?;
+        let owns_cleanup = lock(&batch.states)
+            .get(&target.id)
+            .is_some_and(|state| state.cleanup.is_some());
+        // Stored coordinates already authorize this attempt's rollback. Restore
+        // it before inspecting earlier attempts; its own lease is not foreign.
+        let script = if owns_cleanup {
+            format!(
+                "{}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'",
+                crate::probe::CHECK_SCRIPT
+            )
+        } else {
+            previous_attempt::check_script(target.mode)
+        };
         let output = session
-            .run(CHECK_SCRIPT, Input::Empty)
+            .run(&script, Input::Empty)
             .await
-            .map_err(|error| error.at(InstallStep::Connect))?;
+            .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
         // Preserve method evidence even if the authenticated host is unsupported.
         // Public metadata only; no provider or private material enters replay state.
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
             metadata.authentication = session.authentication();
         }
-        let check = Check::parse(&output.stdout)?;
+        let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
         check.authorize_mode(target.mode)?;
         restore_previous(batch, target, attempt, started, session.clone()).await?;
+        if let Some(previous) = previous {
+            self.await_start_fresh(batch, target, attempt, started, session.as_ref(), &previous)
+                .await?;
+        }
         // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
+        // Durable publication can outlive a cancelled acknowledgement. Bind
+        // cleanup ownership before the backend can enqueue its commit.
+        let mut register = |host| {
+            resources.host = Some(host);
+            Ok(())
+        };
         let join = self
             .backend
-            .invitation_with_trust(&batch.authority, target, &check, session.trust_lookup())
+            .invitation_registered(
+                &batch.authority,
+                target,
+                &check,
+                session.trust_lookup(),
+                &mut register,
+            )
             .await?;
         resources.host = Some(join.host);
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
@@ -647,9 +710,10 @@ impl Bootstrap {
         );
         self.backend.terminal_canary(&batch.authority, host).await?;
         transaction.commit().await?;
-        // This hook releases transient bookkeeping after the durable commit.
-        // A housekeeping failure must never revoke an installed, proven host.
-        let _ = self.backend.completed(&batch.authority, host).await;
+        // Completion also discharges durable retirement ownership. Reporting
+        // Done without that acknowledgement would promise authority that a
+        // subsequent startup correctly retires as unfinished provisioning.
+        self.backend.completed(&batch.authority, host).await?;
         Ok(())
     }
 
@@ -721,6 +785,104 @@ impl Bootstrap {
         }
     }
 
+    /// Resume only this socket's exact paused observation; no new attempt or identity is issued.
+    /// # Errors
+    /// Refuses foreign owners, expired observations, running nonpaused hosts and reused challenges.
+    pub fn start_fresh(
+        &self,
+        batch: &Batch,
+        owner: &str,
+        id: &str,
+        challenge: uuid::Uuid,
+    ) -> Result<(), Failure> {
+        let _activity = self.activity().map_err(Failure::install)?;
+        if batch.inner.authority.owner != owner || *batch.inner.cancel.borrow() {
+            return Err(Failure::unsupported("The host setup batch is unavailable."));
+        }
+        let mut states = lock(&batch.inner.states);
+        let state = states
+            .get_mut(id)
+            .ok_or_else(|| Failure::unsupported("This host is not in the batch."))?;
+        if !state.running
+            || state
+                .start_fresh
+                .as_ref()
+                .is_none_or(|pending| pending.challenge != challenge)
+        {
+            return Err(Failure::unsupported(
+                "This earlier setup observation is no longer available. Retry the host check.",
+            ));
+        }
+        let pending = state
+            .start_fresh
+            .take()
+            .ok_or_else(|| Failure::unsupported("This host is not waiting to start fresh."))?;
+        pending.resume.send(()).map_err(|()| {
+            Failure::unsupported("This host setup observation expired. Retry the host check.")
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn await_start_fresh(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        session: &dyn SshSession,
+        previous: &PreviousAttempt,
+    ) -> Result<(), Failure> {
+        let challenge = uuid::Uuid::new_v4();
+        let (resume, resumed) = oneshot::channel();
+        {
+            let mut states = lock(&batch.states);
+            let state = states
+                .get_mut(&target.id)
+                .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
+            state.start_fresh = Some(PendingFresh { challenge, resume });
+        }
+        emit_with_leftovers(
+            batch,
+            target,
+            attempt,
+            Step::Check,
+            "This host has leftovers from an earlier setup",
+            started,
+            Some(Failure::new(
+                crate::model::FailureKind::StalePreviousAttempt,
+                "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
+            )),
+            Some(Box::new(previous.findings(target.mode, challenge))),
+        );
+        resumed.await.map_err(|_| {
+            Failure::install("Host provisioning stopped while waiting to start fresh.")
+        })?;
+        self.backend
+            .record_start_fresh(target, previous.host, previous.transaction, "started");
+        let result = previous.start_fresh(session, target).await;
+        self.backend.record_start_fresh(
+            target,
+            previous.host,
+            previous.transaction,
+            if result.is_ok() {
+                "completed"
+            } else {
+                "refused"
+            },
+        );
+        result?;
+        emit(
+            batch,
+            target,
+            attempt,
+            Step::Check,
+            "Earlier setup leftovers removed. Continuing the setup steps.",
+            started,
+            None,
+        );
+        Ok(())
+    }
+
     /// Retry one failed host, keeping its trusted host identity in the backend.
     /// # Errors
     /// Refuses a foreign batch owner, unknown/running/successful host or excessive attempts.
@@ -785,6 +947,11 @@ struct AttemptResources {
     host: Option<uuid::Uuid>,
 }
 
+struct PendingFresh {
+    challenge: uuid::Uuid,
+    resume: oneshot::Sender<()>,
+}
+
 struct HostState {
     target: Target,
     attempt: u32,
@@ -792,6 +959,7 @@ struct HostState {
     failed: bool,
     cleanup: Option<Cleanup>,
     last_failure: Option<Failure>,
+    start_fresh: Option<PendingFresh>,
 }
 /// Shares history's lock: emit must not acquire `HostState` while completion holds
 /// it to order retries. Exactly one current metadata row per bounded target.
@@ -855,6 +1023,22 @@ fn emit(
     started: Instant,
     failure: Option<Failure>,
 ) {
+    emit_with_leftovers(
+        batch, target, attempt, step, message, started, failure, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_with_leftovers(
+    batch: &BatchInner,
+    target: &Target,
+    attempt: u32,
+    step: Step,
+    message: &'static str,
+    started: Instant,
+    failure: Option<Failure>,
+    leftovers: Option<Box<crate::model::Leftovers>>,
+) {
     let mut history = lock(&batch.history);
     history.sequence += 1;
     let sequence = history.sequence;
@@ -887,6 +1071,7 @@ fn emit(
         message,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         log_tail,
+        leftovers,
         authentication: metadata.authentication,
         host_id: metadata.host_id,
         failure,

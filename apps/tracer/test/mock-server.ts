@@ -110,6 +110,8 @@ let session = createSession();
 let unclaimedSessionId: string | undefined = session.sessionIdText;
 /** Sessions the "host" no longer has (`/__mock/end-session`), and every AttachTerm seen, for the dead-session spec (#158). */
 const goneSessions = new Set<string>();
+/** The next `ssh.session.open` is refused as "unavailable" (`/__mock/refuse-next-open`), for the ended-strip spec (#185). */
+let refuseNextOpen = false;
 /** Retained, content-free host exit records; only the retired-exit fixture creates these. */
 const retiredSessions = new Map<string, { status: number; finalSeq: number }>();
 /** Interrupt exactly the first final answer to test recovery between its two ordered frames. */
@@ -533,6 +535,10 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     for (const connection of connections) connection.socket.close(1011, "test-double host restarted");
     return sendJson(response, 200, { session_id: session.sessionIdText });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/refuse-next-open") {
+    refuseNextOpen = true;
+    return sendJson(response, 200, {});
+  }
   if (request.method === "POST" && url.pathname === "/__mock/end-session") {
     goneSessions.add(session.sessionIdText);
     publishSessionInventory();
@@ -786,6 +792,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       }
       if (!connection.welcomed || frame.callId < 1 || frame.actionId !== "ssh.session.open") {
         connection.socket.close(1002, "unexpected test-double action");
+        return;
+      }
+      if (refuseNextOpen) {
+        refuseNextOpen = false;
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unavailable"}') });
         return;
       }
       // A fresh open gets fresh terminal state; only Resume reuses an existing session.
@@ -1137,6 +1148,7 @@ function resetMockState(): void {
   socketOpenCount = 0;
   socketCloseCount = 0;
   goneSessions.clear();
+  refuseNextOpen = false;
   liveSessionIds.clear();
   sessionInventoryAvailable = true;
   retiredSessions.clear();

@@ -1,0 +1,63 @@
+Running as unit: run-p775984-i9163581.scope; invocation ID: f6be55917e994d36ac48714ad7fb65fa
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.72s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_agent-3f7a0f2ea26ce26b)
+
+running 1 test
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_mesh-3f967587718407e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_api-5c728191785f01c7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_host_facts-92fb8980e23d63eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_mesh-65b6dee3ae44f8e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_remote-dbc730f0a98d7ae8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_ssh-22c74ae6b401f3c9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_protocol-e4eeb92d35d69a68)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_server-685b52a1e40e250a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 338 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_shim-8bfb29dafc6ac962)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.00s
+

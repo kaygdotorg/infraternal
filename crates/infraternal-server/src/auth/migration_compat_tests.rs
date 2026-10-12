@@ -226,3 +226,56 @@ async fn committed_retag_can_resume_after_interruption_and_concurrent_startup() 
     );
     upgrade(&pool).await;
 }
+
+/// Live production already applied the retirement journal above the dev-only
+/// migration gap; retagging its index must preserve that journal and checksum.
+#[tokio::test]
+async fn live_production_retirement_history_survives_dev_upgrade() {
+    let pool = database().await;
+    history(&pool, true).await;
+    let mut retirement = sqlx::migrate!("./migrations");
+    retirement
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version < 20 || migration.version == 23);
+    retirement.migrations.to_mut().push(Migration::new(
+        20,
+        "terminal exit snapshot index".into(),
+        MigrationType::Simple,
+        Cow::Borrowed(INDEX),
+        false,
+    ));
+    retirement
+        .migrations
+        .to_mut()
+        .sort_by_key(|migration| migration.version);
+    retirement.run(&pool).await.unwrap();
+    let host = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'history-user','rootless',1002,100)")
+        .bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let checksum: Vec<u8> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version=23")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    upgrade(&pool).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT checksum FROM _sqlx_migrations WHERE version=23")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        checksum
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT host_id FROM remote_bootstrap_retirement_intents")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        host.as_bytes().as_slice()
+    );
+}

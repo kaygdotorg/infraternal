@@ -54,7 +54,7 @@ impl Check {
             "INFRATERNAL_CHECK_V1",
             "Linux",
             arch,
-            "systemd",
+            init,
             uid,
             sudo,
             user_systemd,
@@ -74,14 +74,21 @@ impl Check {
         if parsed_uid.to_string() != *uid {
             return Err(invalid());
         }
-        Ok(Self {
+        let check = Self {
             architecture,
             uid: parsed_uid,
             sudo: flag(sudo)?,
             user_systemd: flag(user_systemd)?,
             linger: flag(linger)?,
             existing: flag(existing)?,
-        })
+        };
+        match *init {
+            "systemd" => Ok(check),
+            "other" => Err(Failure::unsupported(
+                "Host provisioning requires systemd on this target. Use a supported systemd host or add this host for SSH access without installation.",
+            )),
+            _ => Err(invalid()),
+        }
     }
 
     /// Enforce execution identity after the sniff; sudo availability never grants consent.
@@ -110,5 +117,7 @@ fn flag(value: &str) -> Result<bool, Failure> {
     }
 }
 fn invalid() -> Failure {
-    Failure::unsupported("This host did not return a supported Linux system check.")
+    Failure::unsupported(
+        "This host did not return a supported Linux system check. Check the SSH shell startup and run startup programs only in interactive shells, then try again.",
+    )
 }

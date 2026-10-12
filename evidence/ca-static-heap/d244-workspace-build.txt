@@ -1,0 +1,135 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p158787-i8546422.scope; invocation ID: 45eef8afcb3e4bcda75c0a93cb3a358c
+   Compiling getrandom v0.4.3
+    Checking hyper v1.11.1
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-shim)
+    Checking infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-plugin-api)
+    Checking hyper-util v0.1.21
+    Checking uuid v1.27.0
+    Checking infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-protocol)
+    Checking webauthn-attestation-ca v0.5.5
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+    Checking axum v0.8.9
+    Checking webauthn-rs-core v0.5.5
+    Checking axum-server v0.8.0
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
+    Checking webauthn-rs v0.5.5
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.77s
+   Compiling jobserver v0.1.35
+   Compiling crossbeam-utils v0.8.23
+   Compiling either v1.18.0
+   Compiling crossbeam-queue v0.3.14
+   Compiling cc v1.6.0
+   Compiling regex-automata v0.4.18
+   Compiling sqlx-core v0.8.6
+   Compiling openssl-src v300.6.1+3.6.3
+   Compiling openssl-sys v0.9.117
+   Compiling libsqlite3-sys v0.30.1
+   Compiling sqlx-sqlite v0.8.6
+   Compiling ring v0.17.14
+   Compiling sqlx-macros-core v0.8.6
+   Compiling rustls v0.23.45
+   Compiling matchers v0.2.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling rustls-webpki v0.103.15
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/host-facts)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/mesh)
+   Compiling crossbeam-epoch v0.9.21
+   Compiling crossbeam-deque v0.8.8
+   Compiling rayon-core v1.13.0
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling plotters-svg v0.3.7
+   Compiling ciborium-ll v0.2.2
+   Compiling itertools v0.13.0
+   Compiling quinn-proto v0.11.19
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling walkdir v2.5.0
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.6.0
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling regex v1.13.1
+   Compiling tinytemplate v1.2.1
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling criterion v0.7.0
+   Compiling quinn v0.11.12
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-mesh)
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-protocol)
+   Compiling openssl v0.10.81
+   Compiling tokio-openssl v0.6.5
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling webauthn-rs-core v0.5.5
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-shim)
+   Compiling axum-server v0.8.0
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/ssh)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-agent)
+   Compiling webauthn-rs v0.5.5
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11m 52s
+  Executable unittests src/main.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal-90fe82a6b3d59be8)
+  Executable tests/agent_daemon.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_daemon-d42d86a1fe9be4ef)
+  Executable tests/agent_queues.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_queues-a021ec1acb3b3974)
+  Executable tests/agent_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_review-b109dc8c0ea4448a)
+  Executable tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/agent_sessions-51194cc1ad11f060)
+  Executable tests/idle_canary.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/idle_canary-2954b36cc04b68cf)
+  Executable tests/key_memory.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/key_memory-96f797b91fb9551a)
+  Executable tests/remote_output.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/remote_output-7a63ec36fdc42d04)
+  Executable tests/session_bounds_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/session_bounds_review-f381e04914a71be3)
+  Executable tests/session_retention.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/session_retention-872dbdc68c802169)
+  Executable tests/shim.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/shim-6f50c01a34844ce2)
+  Executable tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/ssh_askpass-157e04a7fc7a4e10)
+  Executable tests/vt_credit.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/vt_credit-1abd0a7d7cdd2cf3)
+  Executable tests/vt_reconnect.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/vt_reconnect-5711ec4b49249e36)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_agent-3f7a0f2ea26ce26b)
+  Executable tests/transport.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/transport-7aefc420416659fc)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_mesh-3f967587718407e9)
+  Executable tests/default_arrow.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/default_arrow-312553ba19630584)
+  Executable tests/properties.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/properties-78f35bbe1b57dcd5)
+  Executable tests/rotation_time.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/rotation_time-a58dd287253d611d)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_api-5c728191785f01c7)
+  Executable tests/routing_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/routing_review-9a16e71abd7f4bdb)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_host_facts-92fb8980e23d63eb)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_mesh-65b6dee3ae44f8e9)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_remote-dbc730f0a98d7ae8)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_plugin_ssh-22c74ae6b401f3c9)
+  Executable tests/auth_order.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/auth_order-744d04f93707f5ba)
+  Executable tests/build_removal.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/build_removal-dba195f2ccd51d46)
+  Executable tests/concurrency.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/concurrency-567f2b3209b3d51a)
+  Executable tests/config_isolation.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/config_isolation-c8555d6ef13a9d9c)
+  Executable tests/credentials.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/credentials-a02d677719e12c57)
+  Executable tests/diagnostics.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/diagnostics-a642b26a9490dbef)
+  Executable tests/event_metadata.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/event_metadata-c5bbe67ae20be921)
+  Executable tests/foreground.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/foreground-22ec946b08d93ce7)
+  Executable tests/host_trust.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/host_trust-dcf5ed7cf6caf11b)
+  Executable tests/install.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/install-bf33190c5e4a8f5b)
+  Executable tests/model.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/model-1a416449815ab54c)
+  Executable tests/probe_check.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/probe_check-493058442c42e74a)
+  Executable tests/process.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/process-4491e71fb8358cf3)
+  Executable tests/proxy_policy.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/proxy_policy-30b27e9a0eaf7feb)
+  Executable tests/real_ssh.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/real_ssh-2b6f699fa75f5e16)
+  Executable tests/single_connection.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/single_connection-e97d45463f57ad78)
+  Executable tests/source_completeness.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/source_completeness-0d8606df6a5ada25)
+  Executable tests/trust_round2.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/trust_round2-a58eb97831fbeafe)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_protocol-e4eeb92d35d69a68)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_server-685b52a1e40e250a)
+  Executable tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/catalog_startup-a9efe034d9f2a261)
+  Executable tests/enrollment.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/enrollment-af272401b8c9d4f0)
+  Executable tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_parser-8a67b2a39f6f7035)
+  Executable tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_plugin-90d8c709cba8975d)
+  Executable tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_policy-fc28f342e279d379)
+  Executable tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_role_scope-1953c5dedb623e17)
+  Executable tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_host_review-59b0efd5d2c41a33)
+  Executable tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_settings_review-8eff33044b5ef657)
+  Executable tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/remote_plugin_contract-65fddbff582d4e39)
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_shim-8bfb29dafc6ac962)
+  Executable tests/detach.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/detach-faf5ac0ef89968b5)
+  Executable tests/mouse.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mouse-b7389260a793b88e)

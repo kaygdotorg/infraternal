@@ -7,9 +7,16 @@ use tokio::{
     net::UnixStream,
 };
 
+#[derive(Clone, Copy)]
+enum Retirement {
+    Available,
+    Retired,
+}
+
 async fn terminal_peer(
     mut socket: UnixStream,
     snapshot: bool,
+    retirement: Retirement,
     fail_attach: bool,
     mut cleaned: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
@@ -49,6 +56,14 @@ async fn terminal_peer(
                     json: br#"{"session_id":"11111111111111111111111111111111"}"#,
                 })
             }
+            Frame::AttachTerm { .. }
+                if matches!(retirement, Retirement::Retired) && frame.stream_id == 4 =>
+            {
+                Some(Frame::Close {
+                    code: 1,
+                    reason: "fixture private session retired during attachment",
+                })
+            }
             Frame::AttachTerm { .. } if fail_attach && frame.stream_id == 2 => Some(Frame::Close {
                 code: 1,
                 reason: "fixture attachment failure",
@@ -72,16 +87,7 @@ async fn terminal_peer(
                 if let Some(cleaned) = cleaned.take() {
                     let _ = cleaned.send(());
                 }
-                encode_muxed_frame_into(
-                    4,
-                    &Frame::Event {
-                        sub_id: 0,
-                        event_json: br#"{"type":"terminal.exited","session_id":"11111111111111111111111111111111","status":0,"final_seq":0}"#,
-                    },
-                    &mut reply,
-                )
-                .unwrap();
-                socket.write_all(&reply).await.unwrap();
+                exited_notice(&mut socket, 4).await;
             }
             let marker = "infraternal-ready";
             let response = if snapshot {
@@ -97,15 +103,38 @@ async fn terminal_peer(
             };
             encode_muxed_frame_into(frame.stream_id, &response, &mut reply).unwrap();
             socket.write_all(&reply).await.unwrap();
+            if frame.stream_id == 2 {
+                exited_notice(&mut socket, 2).await;
+            }
         }
         pending.advance(length);
     }
 }
 
+async fn exited_notice(socket: &mut UnixStream, stream: u32) {
+    let mut reply = Vec::new();
+    encode_muxed_frame_into(
+        stream,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: br#"{"type":"terminal.exited","session_id":"11111111111111111111111111111111","status":0,"final_seq":16}"#,
+        },
+        &mut reply,
+    )
+    .unwrap();
+    socket.write_all(&reply).await.unwrap();
+}
+
 #[tokio::test]
 async fn readiness_input_preserves_the_terminal_actor_and_host_connection() {
     let (socket, peer) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(terminal_peer(peer, false, false, None));
+    let task = tokio::spawn(terminal_peer(
+        peer,
+        false,
+        Retirement::Available,
+        false,
+        None,
+    ));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
         .await
@@ -125,7 +154,13 @@ async fn readiness_input_preserves_the_terminal_actor_and_host_connection() {
 #[tokio::test]
 async fn readiness_accepts_authoritative_snapshot_output() {
     let (socket, peer) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(terminal_peer(peer, true, false, None));
+    let task = tokio::spawn(terminal_peer(
+        peer,
+        true,
+        Retirement::Available,
+        false,
+        None,
+    ));
     let actor = EmbeddedAgent::from_test_socket(socket);
     tokio::time::timeout(Duration::from_secs(5), canary(&actor))
         .await
@@ -140,9 +175,19 @@ async fn readiness_accepts_authoritative_snapshot_output() {
 async fn failed_attachment_finishes_the_private_command() {
     let (socket, peer) = UnixStream::pair().unwrap();
     let (cleaned, done) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(terminal_peer(peer, false, true, Some(cleaned)));
+    let task = tokio::spawn(terminal_peer(
+        peer,
+        false,
+        Retirement::Available,
+        true,
+        Some(cleaned),
+    ));
     let actor = EmbeddedAgent::from_test_socket(socket);
-    assert!(canary(&actor).await.is_err());
+    let failure = canary(&actor).await.unwrap_err();
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap()["failed_step"],
+        "readiness"
+    );
     tokio::time::timeout(Duration::from_secs(1), done)
         .await
         .expect("failed canary left its private session open")
@@ -154,7 +199,13 @@ async fn failed_attachment_finishes_the_private_command() {
 async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
     let (socket, peer) = UnixStream::pair().unwrap();
     let (cleaned, done) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(terminal_peer(peer, false, false, Some(cleaned)));
+    let task = tokio::spawn(terminal_peer(
+        peer,
+        false,
+        Retirement::Available,
+        false,
+        Some(cleaned),
+    ));
     let actor = EmbeddedAgent::from_test_socket(socket);
     let (opened, session) = tokio::sync::oneshot::channel();
     let proof_actor = actor.clone();
@@ -170,6 +221,18 @@ async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
     let _ = proof.await;
     finish_canary(&actor, id).await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), done)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn readiness_accepts_primary_exit_without_reattaching_to_a_retired_session() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(terminal_peer(peer, false, Retirement::Retired, false, None));
+    let actor = EmbeddedAgent::from_test_socket(socket);
+    tokio::time::timeout(Duration::from_secs(5), canary(&actor))
         .await
         .unwrap()
         .unwrap();

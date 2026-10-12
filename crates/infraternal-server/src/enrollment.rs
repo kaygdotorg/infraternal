@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 #[path = "remote_authority.rs"]
 pub(crate) mod authority;
+#[path = "bootstrap_retirement.rs"]
+mod bootstrap_retirement;
 pub use authority::HostAuthority;
 
 /// A host's immutable execution mode, bound into its invitation.
@@ -139,21 +141,6 @@ impl EnrollmentStore {
         self.issue_authorized(owner, host, mode, now, None).await
     }
 
-    /// Issue only while the exact authenticated browser session remains live at publication.
-    /// # Errors
-    /// Refuses revoked, pending, expired or switched browser authority and invalid hosts.
-    pub(crate) async fn issue_for_session(
-        &self,
-        owner: &str,
-        host: Uuid,
-        mode: Mode,
-        now: i64,
-        session_hash: &str,
-    ) -> Result<JoinToken, EnrollmentError> {
-        self.issue_authorized(owner, host, mode, now, Some(session_hash))
-            .await
-    }
-
     async fn issue_authorized(
         &self,
         owner: &str,
@@ -161,6 +148,22 @@ impl EnrollmentStore {
         mode: Mode,
         now: i64,
         session_hash: Option<&str>,
+    ) -> Result<JoinToken, EnrollmentError> {
+        let mut connection = self.0.acquire().await?;
+        self.issue_authorized_in(owner, host, mode, now, session_hash, &mut connection)
+            .await
+    }
+
+    /// Issue on the caller's transaction so host metadata and its invitation
+    /// either publish together or roll back together, including cancellation.
+    pub(crate) async fn issue_authorized_in(
+        &self,
+        owner: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+        session_hash: Option<&str>,
+        connection: &mut sqlx::SqliteConnection,
     ) -> Result<JoinToken, EnrollmentError> {
         let expires = now
             .checked_add(900)
@@ -188,7 +191,7 @@ impl EnrollmentStore {
         .bind(mode.as_str())
         .bind(session_hash)
         .bind(session_hash)
-        .execute(&self.0)
+        .execute(connection)
         .await?
         .rows_affected();
         if changed != 1 {

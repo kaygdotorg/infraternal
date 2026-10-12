@@ -1570,6 +1570,7 @@ dependencies = [
  "alacritty_terminal",
  "libghostty-vt",
  "nix",
+ "openssl",
  "vt100",
  "vte",
 ]

@@ -1,0 +1,75 @@
+Running as unit: run-p2045479-i10433045.scope; invocation ID: b3cd73b200664e79841b0579a9a38712
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-wyekc4gd.js, chunk-dpg6mcx9.js, chunk-z6nx6p9v.js, chunk-5wjqz9g6.js, chunk-2ssk5mk5.js, chunk-pebaj9tv.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-wgc79kfn.js, chunk-sv6f9jh9.js, chunk-gax5rk8g.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-8ndf4j9z.js, chunk-dr3c5pcf.js, chunk-h90sa6ay.js, chunk-q6ddvhpv.js, chunk-t0afx66y.js, chunk-5sgspmes.js, chunk-wdgys87n.js, chunk-yabbf838.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-kvm4yqpr.js, chunk-d7mvpwet.js, chunk-9gjfby7t.js, chunk-7pjyz48m.js, chunk-5753zf8s.js, chunk-es9qjkn7.js, chunk-z33nmz4t.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-k6w5jkee.js, chunk-yp67dws4.js, chunk-z2ect1za.js, chunk-ecgmt1ac.js, chunk-1hje8sjn.js, chunk-552g4y7c.js, chunk-axbkkqp1.js, chunk-td170rkw.js, chunk-ekm4n1xb.js, chunk-4233tw15.js, chunk-585vfs9a.js, chunk-jgv3g6r2.js, chunk-3xntmcy8.js, chunk-gdpwxedj.js, chunk-t8syqvw4.js, chunk-hdcnf7a5.js, chunk-y21h86g7.js, chunk-4ybhjcdc.js, chunk-z6yg33q7.js, chunk-ghdqzvs2.js, chunk-s2m84b7s.js, chunk-w9bm32b1.js, chunk-v433vpfj.js, chunk-e3hm0jwj.js, chunk-wbc48k2y.js, chunk-wfjs4kay.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-c17h5g61.js, chunk-z9jrenn8.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-qcehyt0f.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4322
+[WebServer] latency proxy listening on http://localhost:4321; upstream port=4322
+
+Running 27 tests using 1 worker
+
+(node:2048297) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/addhost-wizard.spec.ts:46:1 › the toolbar button and the palette open the wizard (9.7s)
+  ✓   2 test/addhost-wizard.spec.ts:60:1 › network access: detected, shown by name, and the host lands in Console and the sidebar (16.3s)
+  ✓   3 test/addhost-wizard.spec.ts:81:1 › closing the flow window from its own frame ends the wizard (9.2s)
+  ✓   4 test/addhost-wizard.spec.ts:90:1 › the server's own key is the fallback when the network does not sign in (13.3s)
+  ✓   5 test/addhost-wizard.spec.ts:99:1 › a batch shows every host's own progress and opens every host (14.9s)
+  ✓   6 test/addhost-wizard.spec.ts:110:1 › all automatic methods refused: asked to choose, and a password is sent once and never kept (17.7s)
+  ✓   7 test/addhost-wizard.spec.ts:136:1 › a pasted private key signs in as the user's key (15.7s)
+  ✓   8 test/addhost-wizard.spec.ts:149:1 › a saved key (unlocked with the passkey) is offered only when the browser holds one (15.4s)
+  ✓   9 test/addhost-wizard.spec.ts:162:1 › without a saved key the choice does not offer one (13.9s)
+  ✓  10 test/addhost-wizard.spec.ts:170:1 › the server key is shown to copy; adding it and trying again signs in (15.0s)
+  ✓  11 test/addhost-wizard.spec.ts:185:1 › a locked server key is still shown, with the reason (12.1s)
+  ✓  12 test/addhost-wizard.spec.ts:193:1 › no server key to show: the choice is paste or password only (12.2s)
+  ✓  13 test/addhost-wizard.spec.ts:202:1 › an unknown host key shows its fingerprint and is never trusted without a click (16.6s)
+  ✓  14 test/addhost-wizard.spec.ts:219:1 › a host that does not answer: what happened, Retry, and the one-line install from the host (16.7s)
+  ✓  15 test/addhost-wizard.spec.ts:235:1 › a mesh policy block says possible, not certain (12.1s)
+  ✓  16 test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can (23.0s)
+  ✓  17 test/addhost-wizard.spec.ts:268:1 › one refusal without choose_method still offers another way to sign in (12.2s)
+  ✓  18 test/addhost-wizard.spec.ts:275:1 › empty, loading and error states of discovery (16.7s)
+  ✓  19 test/addhost-wizard.spec.ts:300:1 › an SSH config pasted into the field becomes chips (7.1s)
+  ✓  20 test/addhost-wizard.spec.ts:314:1 › closing mid-install asks first, and cancelling ends the run (14.0s)
+  ✓  21 test/addhost-wizard.spec.ts:329:1 › the wizard works on a phone and keeps the footer on screen (9.0s)
+  ✓  22 test/addhost-wizard.spec.ts:353:3 › fresh CA explains passkey confirmation before starting SSH (11.4s)
+  ✓  23 test/addhost-wizard.spec.ts:353:3 › locked CA explains passkey confirmation before starting SSH (11.1s)
+  ✓  24 test/addhost-wizard.spec.ts:371:1 › a canvas flow remains nonmodal (6.2s)
+  ✓  25 test/addhost-wizard.spec.ts:377:1 › Escape in the palette leaves the add-host flow open (7.6s)
+  ✘  26 test/addhost-wizard.spec.ts:391:1 › Tab can leave a canvas flow (798ms)
+(node:2110022) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  27 test/addhost-wizard.spec.ts:400:1 › a typed root login requires consent and cannot pretend to install as a user (831ms)
+
+
+  1) test/addhost-wizard.spec.ts:391:1 › Tab can leave a canvas flow ───────────────────────────────
+
+    Error: apiRequestContext.post: connect ECONNREFUSED ::1:4321
+    Call log:
+      - → POST http://localhost:4321/__mock/bootstrap/reset
+        - user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36
+        - accept: */*
+        - accept-encoding: gzip,deflate,br
+
+        at apiRequestContext.post: connect ECONNREFUSED ::1:4321
+        at open (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/apps/tracer/test/addhost-wizard.spec.ts:20:22)
+        at /home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/apps/tracer/test/addhost-wizard.spec.ts:392:9
+
+    Error Context: test-results/addhost-wizard-Tab-can-leave-a-canvas-flow/error-context.md
+
+  2) test/addhost-wizard.spec.ts:400:1 › a typed root login requires consent and cannot pretend to install as a user 
+
+    Error: apiRequestContext.post: connect ECONNREFUSED ::1:4321
+    Call log:
+      - → POST http://localhost:4321/__mock/bootstrap/reset
+        - user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36
+        - accept: */*
+        - accept-encoding: gzip,deflate,br
+
+        at apiRequestContext.post: connect ECONNREFUSED ::1:4321
+        at open (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/apps/tracer/test/addhost-wizard.spec.ts:20:22)
+        at /home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/apps/tracer/test/addhost-wizard.spec.ts:401:9
+
+    Error Context: test-results/addhost-wizard-a-typed-roo-b5bf2-retend-to-install-as-a-user/error-context.md
+
+  2 failed
+    test/addhost-wizard.spec.ts:391:1 › Tab can leave a canvas flow ────────────────────────────────
+    test/addhost-wizard.spec.ts:400:1 › a typed root login requires consent and cannot pretend to install as a user 
+  25 passed (5.7m)

@@ -246,6 +246,16 @@ fn dispatch_action(
             }
         }
         CliHandler::SessionShim => run_shim_command(matches),
+        CliHandler::KeyMemoryCheck => {
+            #[cfg(feature = "remote")]
+            {
+                run_key_memory_check(json_output)
+            }
+            #[cfg(not(feature = "remote"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::RemoteAgent
         | CliHandler::ServerRestart
         | CliHandler::RemoveHost
@@ -266,6 +276,30 @@ fn missing_action(json_output: bool) -> ExitCode {
         true,
     );
     ExitCode::from(2)
+}
+
+/// The shipping diagnostic refuses partial protection independently of server development policy.
+#[cfg(feature = "remote")]
+fn run_key_memory_check(json_output: bool) -> ExitCode {
+    // D244 requires fully protected pages even for a non-root gate runner.
+    if infraternal_shim::openssl_secure::initialize() == 1 {
+        output::report(
+            json_output,
+            "internal.key-memory-check",
+            "ready",
+            "Key memory initialization=1; locked pages and dump exclusion enabled",
+            "Run this check under an 8 MiB memlock limit.",
+        );
+        ExitCode::SUCCESS
+    } else {
+        output::refuse(
+            json_output,
+            "internal.key-memory-check",
+            "Key memory refused",
+            "Check the compiled provider and memlock limit.",
+            1,
+        )
+    }
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {

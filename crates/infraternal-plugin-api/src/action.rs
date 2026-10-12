@@ -341,6 +341,8 @@ pub enum CliHandler {
     EmbeddedAgent,
     /// Run the internal session shim process.
     SessionShim,
+    /// Check the compiled provider’s locked, dump-excluded key heap.
+    KeyMemoryCheck,
     /// Enroll or reconnect an existing remote node.
     RemoteAgent,
     /// Request a CA-preserving server replacement.

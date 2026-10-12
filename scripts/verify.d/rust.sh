@@ -128,13 +128,36 @@ rust_check_cli_plugin_compile_out() {
     cargo test --locked --package infraternal --bin infraternal --no-default-features
 }
 
+# D244/#154 checks the shipping provider, never a GNU test executable or C probe.
+rust_check_static_key_memory() {
+    local target="$1"
+    local binary="$2"
+    local host="$(uname -m)"
+
+    case "$host:$target" in
+        x86_64:x86_64-unknown-linux-musl|aarch64:aarch64-unknown-linux-musl) ;;
+        *)
+            # Kernel page protection must be checked on the native architecture;
+            # an emulator's successful syscall result is not kernel evidence.
+            printf 'key memory: %s runtime not checked (host %s; native execution required)\n' "$target" "$host"
+            return 0
+            ;;
+    esac
+
+    printf 'key memory: %s; memlock=8388608 bytes\n' "$target"
+    # The hidden diagnostic succeeds only for initialization=1 (locking and
+    # dump exclusion), regardless of the invoking user's development policy.
+    prlimit --memlock=8388608 -- "$binary" __key-memory-check
+}
+
 rust_static_build_check() {
     local target
     local targets=("x86_64-unknown-linux-musl" "aarch64-unknown-linux-musl")
     local target_dir="${CARGO_TARGET_DIR:-target}"
     local x86_binary="${target_dir}/x86_64-unknown-linux-musl/release/infraternal"
+    local failed=0
 
-    for tool in cargo file readelf stat; do
+    for tool in cargo file readelf stat prlimit python3; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             printf 'required static-build tool is missing: %s\n' "$tool" >&2
             return 1
@@ -142,14 +165,18 @@ rust_static_build_check() {
     done
 
     scripts/auth-toolchain || return $?
+    python3 scripts/test-musl-cc.py || return $?
 
     for target in "${targets[@]}"; do
         cargo build --locked --release --package infraternal --target "$target" || return $?
-        rust_check_static_binary "$target" || return $?
+        # Keep every size failure, but still exercise both shipping providers.
+        rust_check_static_binary "$target" || failed=1
+        rust_check_static_key_memory "$target" "${target_dir}/${target}/release/infraternal" || failed=1
     done
 
-    rust_check_cli_stub "$x86_binary" "server" || return $?
-    rust_check_cli_stub "$x86_binary" "agent"
+    rust_check_cli_stub "$x86_binary" "server" || failed=1
+    rust_check_cli_stub "$x86_binary" "agent" || failed=1
+    return "$failed"
 }
 
 rust_verify_fast() {

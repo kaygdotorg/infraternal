@@ -1,0 +1,1 @@
+TEST signer_coverage PASS ssh_keygen_verified=true real_SSHSIG=true tampered_sums_refused=true other_key_refused=true VERSION_hash_covered=true unsigned_pointer_requires_client_validation=true

@@ -1,0 +1,88 @@
+Running as unit: run-p2374588-i10762152.scope; invocation ID: ee8e1fb500034eaf964300c0245f30f8
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling syn v2.0.119
+    Checking crypto-common v0.1.7
+    Checking futures-util v0.3.34
+    Checking getrandom v0.2.17
+    Checking rustls-pki-types v1.15.1
+   Compiling nix v0.30.1
+    Checking uuid v1.27.0
+    Checking digest v0.10.7
+    Checking ring v0.17.14
+    Checking futures-executor v0.3.34
+    Checking sha2 v0.10.9
+    Checking infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-shim)
+    Checking rustls-webpki v0.103.15
+   Compiling tracing-attributes v0.1.31
+   Compiling openssl-macros v0.1.1
+    Checking openssl v0.10.81
+    Checking tracing v0.1.44
+    Checking rustls v0.23.45
+    Checking sqlx-core v0.8.6
+    Checking quinn-udp v0.5.16
+    Checking tokio-openssl v0.6.5
+    Checking quinn-proto v0.11.19
+    Checking sqlx-sqlite v0.8.6
+    Checking quinn v0.11.12
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+    Checking sqlx v0.8.6
+    Checking infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-plugin-api)
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/plugins/remote)
+    Checking infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/plugins/host-facts)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 07s
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling tracing v0.1.44
+   Compiling futures-util v0.3.34
+   Compiling sha2 v0.10.9
+   Compiling crypto-common v0.1.7
+   Compiling getrandom v0.2.17
+   Compiling rustls-pki-types v1.15.1
+   Compiling nix v0.30.1
+   Compiling openssl v0.10.81
+   Compiling uuid v1.27.0
+   Compiling digest v0.10.7
+   Compiling ring v0.17.14
+   Compiling quinn-udp v0.5.16
+   Compiling futures-executor v0.3.34
+   Compiling sqlx-core v0.8.6
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-shim)
+   Compiling tokio-openssl v0.6.5
+   Compiling rustls-webpki v0.103.15
+   Compiling sqlx-sqlite v0.8.6
+   Compiling rustls v0.23.45
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling quinn-proto v0.11.19
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/plugins/host-facts)
+   Compiling quinn v0.11.12
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 41s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-round3/target/debug/deps/infraternal_agent-1270b1fb73c5a6bb)
+
+running 1 test
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... FAILED
+
+failures:
+
+---- daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up stdout ----
+
+thread 'daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up' (2462102) panicked at crates/infraternal-agent/src/daemon_gone_tests.rs:104:56:
+called `Result::unwrap()` on an `Err` value: Error { kind: InvalidInput, message: "path must be shorter than SUN_LEN" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 66 filtered out; finished in 3.13s
+
+error: test failed, to rerun pass `-p infraternal-agent --lib`

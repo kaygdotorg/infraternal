@@ -21,6 +21,10 @@
  * - `needs-key*` / nix-cache: every automatic method refused (auth + choose_method) until a credential is given
  * - `refused*`: one refusal without `choose_method`; the retry signs in
  * - `newkey*`: unknown host key (host-key + fingerprint) until confirmed on the same bootstrap socket
+ * - `stale*`: an earlier setup left leftovers: the attempt pauses on a `check` event carrying
+ *   `failure.kind: "stale_previous_attempt"` and `leftovers` (challenge, mode, findings); `start-fresh` with that challenge
+ *   continues the same attempt to done. Closing the socket cancels the pause (contracts/ssh-bootstrap.md, #169)
+ * - `running*`: `setup_running` once; the retry succeeds
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
  * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
  * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
@@ -39,7 +43,7 @@ const RETAINED_EVENTS = 1024;
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 
 type Step = "check" | "install" | "facts" | "connect" | "done" | "failed";
-type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install";
+type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running";
 const PHASES = [
   { step: "check", message: "Checking the system" },
   { step: "install", message: "Installing the infraternal agent" },
@@ -55,6 +59,7 @@ interface BootstrapEvent {
   message: string;
   elapsed_ms: number;
   log_tail: string[];
+  leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
   failure?: { failed_step?: "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
@@ -73,6 +78,12 @@ interface Target {
   enteredAt: number;
   breadcrumbs: string[];
   timers: Set<ReturnType<typeof setTimeout>>;
+  /** The one-use handle of the leftovers the attempt is paused on (#169); the attempt waits for `start-fresh`. */
+  challenge: string | undefined;
+  /** Continues a paused attempt after `start-fresh`. */
+  resume: (() => void) | undefined;
+  /** Leftovers were removed (or never existed) for this host in this socket. */
+  fresh: boolean;
   /** True after a failed attempt: the next attempt succeeds. */
   fixed: boolean;
   order: number;
@@ -122,6 +133,9 @@ export function resetBootstrapDouble(): void {
   installMode = "ok";
 }
 
+/** A fixed v4-shaped UUID per target, so specs can assert the challenge round trip. */
+const challengeOf = (id: string): string => { const hex = createHash("sha256").update(`challenge:${id}`).digest("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`; };
+
 const fingerprintOf = (name: string): string => `SHA256:${createHash("sha256").update(`host-key:${name}`).digest("base64").replace(/=+$/, "")}`;
 
 /** Scripted outcome of one attempt for a host: undefined succeeds. */
@@ -139,6 +153,7 @@ function failureOf(target: Target): Failure | undefined {
     return { phase: 0, beforeLogin: true, kind: "auth", message: "No sign-in method was accepted.", evidence: "Network access, the server key and a saved key were not accepted.", choose: true };
   }
   if (/^refused/.test(name)) return { phase: 0, beforeLogin: true, kind: "auth", message: "The host refused the server key.", evidence: "The host answered on port 22 and refused the SSH identity." };
+  if (/^running/.test(name)) return { phase: 0, beforeLogin: false, kind: "setup_running", message: "Another setup is still running on this host.", evidence: "A setup holds the lock on this host." };
   if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;
 }
@@ -162,7 +177,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
   const send = (value: unknown): void => { if (!closed && socket.readyState === socket.OPEN) socket.send(JSON.stringify(value)); };
   const refuse = (message: string): void => send({ error: { kind: "unsupported", message, log_tail: [] } });
 
-  function emit(target: Target, step: Step, message: string, failure?: BootstrapEvent["failure"], authentication?: BootstrapEvent["authentication"]): void {
+  function emit(target: Target, step: Step, message: string, failure?: BootstrapEvent["failure"], authentication?: BootstrapEvent["authentication"], leftovers?: BootstrapEvent["leftovers"]): void {
     target.breadcrumbs = [...target.breadcrumbs, message].slice(-8);
     const event: BootstrapEvent = {
       sequence: ++sequence, target: target.id, attempt: target.attempt, step, message,
@@ -170,6 +185,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
     };
     if (failure) event.failure = failure;
     if (authentication) event.authentication = authentication;
+    if (leftovers) event.leftovers = leftovers;
     events.push(event);
     if (events.length > RETAINED_EVENTS) events.shift();
     send(event);
@@ -220,6 +236,14 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
         if (failure?.beforeLogin) { later(target, pace(target, 0) + 400, fail); return; }
         later(target, pace(target, 0) / 2, () => {
           emit(target, "check", "Signed in. Checking the system.", undefined, authOf(target));
+          // Hosts named `stale*`: the check finds leftovers and the attempt pauses on a `check` event until `start-fresh`.
+          if (/^stale/.test(target.name) && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "This host has leftovers from an earlier setup", { kind: "stale_previous_attempt", message: "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.", log_tail: [] }, undefined,
+              { challenge: target.challenge, mode: target.mode, findings: ["An unfinished setup lock", "Files from an interrupted install"] });
+            return;
+          }
           if (failure?.phase === 0) later(target, 300, fail); else later(target, pace(target, 0) / 2, () => walk(1));
         });
         return;
@@ -250,7 +274,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       parsed.push({
         id: entry.id, name: hostNameOf(address as { kind: string; value: string }), credential,
         fixture: fixtureFor({ kind: address.kind, value: address.value }), mode, attempt: 1, state: "queued",
-        enteredAt: Date.now(), breadcrumbs: [], timers: new Set(), fixed: false, order: index,
+        enteredAt: Date.now(), breadcrumbs: [], timers: new Set(), fixed: false, challenge: undefined, resume: undefined, fresh: false, order: index,
       });
     }
     started = true;
@@ -271,6 +295,21 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
     acquire(() => begin(target));
   }
 
+  /** `start-fresh`: valid only for a target paused on leftovers, with that pause's single-use challenge. */
+  function startFresh(command: Record<string, unknown>): void {
+    if (!started) return refuse("Start a host batch first.");
+    const target = typeof command.target === "string" ? targets.get(command.target) : undefined;
+    if (!target) return refuse("That host is not in this batch.");
+    if (!target.challenge || !target.resume || command.challenge !== target.challenge) return refuse("This earlier setup observation is no longer available. Retry the host check.");
+    const resume = target.resume;
+    target.challenge = undefined;
+    target.resume = undefined;
+    target.fresh = true;
+    // The same attempt continues: no new attempt number, then the normal steps.
+    emit(target, "check", "Earlier setup leftovers removed. Continuing the setup steps.");
+    later(target, 250, resume);
+  }
+
   function replay(command: Record<string, unknown>): void {
     if (!started) return refuse("Start a host batch first.");
     const after = command.after;
@@ -289,9 +328,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("not an object");
       command = value as Record<string, unknown>;
     } catch { return send({ error: "invalid bootstrap request" }); }
-    const known = { start: ["action", "targets", "credential", "auth_once"], "confirm-host-key": ["action", "target", "challenge", "fingerprint"], retry: ["action", "target"], replay: ["action", "after"] } as const;
+    const known = { start: ["action", "targets", "credential", "auth_once"], "confirm-host-key": ["action", "target", "challenge", "fingerprint"], retry: ["action", "target"], "start-fresh": ["action", "target", "challenge"], replay: ["action", "after"] } as const;
     const action = command.action;
-    if (action !== "start" && action !== "retry" && action !== "replay" && action !== "confirm-host-key") return send({ error: "invalid bootstrap request" });
+    if (action !== "start" && action !== "retry" && action !== "start-fresh" && action !== "replay" && action !== "confirm-host-key") return send({ error: "invalid bootstrap request" });
     // Unknown fields are rejected, as the contract says.
     if (Object.keys(command).some((key) => !(known[action] as readonly string[]).includes(key))) return send({ error: "invalid bootstrap request" });
     if (action === "confirm-host-key") {
@@ -299,14 +338,14 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       if (!target || target.state !== "failed" || command.challenge !== target.id || command.fingerprint !== fingerprintOf(target.name)) return refuse("Check the host key again.");
       trusted.add(target.name);
       send({ host_key_confirmed: { target: target.id, fingerprint: command.fingerprint } });
-    } else if (action === "start") start(command); else if (action === "retry") retry(command); else replay(command);
+    } else if (action === "start") start(command); else if (action === "retry") retry(command); else if (action === "start-fresh") startFresh(command); else replay(command);
   });
 
   // Disconnect cancels outstanding work; hosts that were running free their slot.
   socket.on("close", () => {
     closed = true;
     for (const target of targets.values()) {
-      const wasRunning = target.state === "active" && target.timers.size > 0;
+      const wasRunning = target.state === "active" && (target.timers.size > 0 || !!target.challenge);
       for (const timer of target.timers) clearTimeout(timer);
       target.timers.clear();
       if (wasRunning) release();

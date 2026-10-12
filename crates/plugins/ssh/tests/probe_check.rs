@@ -29,3 +29,26 @@ fn manager_availability_does_not_request_its_private_environment() {
     );
     assert!(Check::parse(&output.stdout).unwrap().user_systemd);
 }
+
+/// The real Alpine probe is canonical, but unsupported init needs an actionable explanation.
+#[test]
+fn breakit2_no_systemd_names_the_required_manager() {
+    let alpine = b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nother\n1101\nno\nno\nno\nno\n";
+    let refusal = Check::parse(alpine).unwrap_err();
+    assert!(
+        refusal.message.contains("systemd"),
+        "a canonical unsupported-init record must name the required manager: {}",
+        refusal.message
+    );
+}
+
+/// Startup output and a shell that exits before the command must remain refused,
+/// with a useful next step instead of silently accepting banner text.
+#[test]
+fn shell_startup_refusal_names_an_interactive_only_remedy() {
+    for record in [b"".as_slice(), b"public startup greeting\nINFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1101\nno\nyes\nyes\nno\n".as_slice()] {
+        let refused = Check::parse(record).unwrap_err();
+        assert!(refused.message.contains("interactive"));
+        assert!(!refused.message.contains("public startup greeting"));
+    }
+}

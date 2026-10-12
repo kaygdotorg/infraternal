@@ -88,6 +88,25 @@ cleanup retires only this batch's new authority, including after logout, while
 preserving prior enrolled authority. Facts and terminal proof bind the current
 attempt's certificate/generation, never an older connection for the same UUID.
 
+The additive `Backend::invitation_registered` hook publishes the host binding
+to batch cleanup before durable issuance can commit. A backend whose issuance
+is durable overrides the hook and invokes registration before that commit.
+Cancellation then serializes revocation behind any in-flight SQLite writer;
+a pre-commit read of absence is not cleanup proof. The default hook preserves
+non-durable backend compatibility.
+
+Durable provisioning records carry an unfinished-attempt retirement intent in
+that same invitation transaction. Failure begins an exact-host transport fence
+and owned retirement writer synchronously through `Backend::retire_failed`,
+before private-session cleanup or SSH rollback awaits. A caller's cleanup
+acknowledgement deadline cannot discard this obligation. The writer retires the
+host record and consumes its intent together, retrying only transient writer
+contention; storage refusal retains the fence and intent. Startup retires
+unfinished intents before enrollment or transport listeners admit connections.
+Proven installation completion must acknowledge removal of its own intent
+through `Backend::completed` before reporting Done. Prior completed host records
+without an unfinished intent remain outside failed-attempt retirement.
+
 The backend waits for that exact host's authenticated transport and collects
 cheap facts over it, then proves a terminal opens through the existing session
 router before marking done. SSH command exit, TCP reachability or redeemed
@@ -378,8 +397,76 @@ the default server supplies the verified source through the same SSH plugin.
 Failure adds optional `exit_status` from the authenticated command process (a
 signal or unavailable status omits it). Fixed installer codes 71 and 72 retain
 `failed_step` and identify the approved root/rootless directory with ownership
-or lock/rollback guidance. Other failures name the command boundary and next
-check. Arbitrary stdout/stderr remains withheld. One server log line per failed
+or ownership guidance. A competing transaction (72) directs the person back
+to the host check; a live setup (73) offers to wait. Other failures name the
+command boundary and next check. Arbitrary stdout/stderr remains withheld. One server log line per failed
 attempt contains only host UUID (unassigned before issuance), target id, step,
 exit status and static mode; cleanup warnings do not replace the original phase.
 The existing dialog Details disclosure shows the trusted failed-step label.
+
+The optional trusted `failed_step` also admits `readiness` for private terminal
+open, attach, output and cleanup failures. It uses the same server log and
+Details disclosure, without adding a progress stage or exposing remote output.
+
+Readiness retains its primary attachment through the marker and matching
+authenticated status-zero `terminal.exited` notice. That notice proves the
+private command's retirement; success does not open another writer. Ownership
+is cleared synchronously before the subsequent authorization await. An error,
+timeout or cancellation before proof retains the exact session for recovery.
+
+### Verified payload reuse (#169)
+
+An SSH installation may retain one public executable in a private marked
+`infraternal.bootstrap-cache` sibling of its selected installation directory.
+It contains no identity or login material. Its parent, marker, directory and
+payload must satisfy the same execution-uid ownership and no-link checks as
+setup data. Each retry checks the requested executable hash before reusing a
+hard link, then checks the staged payload again before enrollment. Changed
+content is uploaded again; a foreign cache path is refused. Publication starts
+inside the owned transaction. Rollback retains this declared retry cache while
+removing that attempt's installation artifacts; subsequent uploads replace its
+single payload, bounding retained storage to one executable per execution mode.
+The cache creates no background task and grants no host admission authority.
+
+### Start fresh over earlier setup leftovers (#169)
+
+The existing authenticated SSH check also classifies setup ownership, without a
+second SSH command. A live directory-lock holder, installation executable, open
+setup descriptor or session listener returns `setup_running`: “Setup is already
+running on this host. Wait for it to finish, then try again.” New setup commands
+serialize on the private installation parent and hold a bounded 180-second
+transaction lease across command gaps. Commit and rollback retire only the
+lease whose PID birth and inherited descriptor match that transaction.
+
+A private owner marker plus the exact fresh transaction journal may return
+`stale_previous_attempt` on a `check` event, with optional `leftovers` containing
+`challenge`, the approved `mode`, and bounded fixed public `findings`. This is a
+pause in the existing attempt, before issuing an invitation or uploading. The
+same authenticated WebSocket accepts `{ "action": "start-fresh", "target": "…",
+"challenge": "…" }` (registry action `ssh.start-fresh`, permission `ssh.manage`).
+The target and single-use challenge belong to that socket's batch and owner;
+clients never select a path, host identity or previous transaction. Socket loss,
+component disable or the existing attempt deadline cancels the pause without
+removing earlier leftovers.
+
+Confirmation rechecks the owner, transaction, device/inode binding, full root
+and supported staging inventory, and all liveness evidence under the same
+directory lock. Only proven fresh artifacts are retired through the existing
+rollback. Canonical private session sockets with no listener may be removed;
+empty owned directories, marker and journal follow. Unknown files anywhere in
+the setup root or old lock refuse the entire recovery before any removal.
+Upgrade journals, advanced unknown staging layouts and older journals without
+an inode binding are refused with an explicit unsupported/changed-format reason.
+Foreign data remains untouched. A changed observation needs another host check.
+
+Successful recovery continues the same attempt and issues one new invitation.
+Content-free server logs record the previous host UUID, transaction UUID,
+execution mode, fresh ownership journal and started/completed/refused outcome.
+Authenticated command status and setup-step diagnostics remain available; no
+file contents, process arguments, environments or arbitrary remote output enter
+public findings or logs. No existing enrolled identity is adopted by recovery.
+
+Exact screen copy for the later UI pass: title “This host has leftovers from an
+earlier setup”; body “infraternal didn't finish setting up here before. Start
+fresh to remove what it left behind and continue.”; primary “Start fresh”;
+secondary “Back”. Paths belong only in Details.

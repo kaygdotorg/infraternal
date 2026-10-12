@@ -75,9 +75,15 @@
 /* ---- inside a window ---------------------------------------------------------------- */
 /* A session that exited shows its final screen read-only, with one floating pill to run it again. */
 .cl-sx-strip {
-  position: absolute; z-index: 2; left: 50%; bottom: 14px; display: inline-flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 0 4px 0 14px; white-space: nowrap;
-  transform: translateX(-50%); color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking);
+  position: absolute; z-index: 2; left: 0; right: 0; bottom: 14px; margin-inline: auto; width: fit-content; height: fit-content; min-height: var(--pill-h, 38px);
+  display: inline-flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 0 4px 0 14px; white-space: nowrap;
+  color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking);
 }
+/* The strip is placed by auto margins, never by a transform: the shared pill's pressed state sets its own transform, and
+   a centring transform would be replaced by it, so the strip jumped away from the button under the pointer (#185).
+   Only the buttons inside it are pressable; the strip itself neither scales nor changes on hover. */
+.cl-sx-strip.ui-pill:active:not(:disabled) { transform: none; }
+@media (hover: hover) and (pointer: fine) { .cl-sx-strip.ui-pill:hover:not(:disabled) { background: var(--overlay); } }
 .cl-sx-strip-text { color: var(--ui-text-secondary); }
 .cl-sx-strip[data-result="fail"] .cl-sx-strip-text { color: var(--danger); }
 .cl-sx-again {
@@ -91,11 +97,14 @@
 .cl-sx-strip .ui-mark { margin-left: -2px; }
 .ui-window-body:has(.cl-sx-strip) .cl-preview { padding-bottom: 72px; }
 /* On a phone the pill sits at the start edge, clear of the corner the mock badge keeps. */
-@media (pointer: coarse) { .cl-sx-strip { left: 12px; transform: none; } }
+@media (pointer: coarse) { .cl-sx-strip { left: 12px; right: auto; margin-inline: 0; } }
 /* An ended session (#158) has no screen left to read: the empty terminal is hidden (no cursor that invites typing),
    and the pill sits in the middle of the window, on every device. */
-.ui-window-body:has(.cl-sx-strip[data-result="ended"]) .terminal-host { visibility: hidden; }
-.cl-sx-strip[data-result="ended"] { left: 50%; top: 50%; bottom: auto; transform: translate(-50%, -50%); animation: cl-sx-strip-in 200ms var(--ease-out, ease-out); }
+.ui-window-body:has(.cl-sx-strip:is([data-result="ended"], [data-result="refused"])) .terminal-host { visibility: hidden; }
+.cl-sx-strip:is([data-result="ended"], [data-result="refused"]) { inset: 0; margin: auto; animation: cl-sx-strip-in 200ms var(--ease-out, ease-out); }
+/* A refusal explains itself in a sentence or two, so it wraps; the buttons stay on the last line's side. */
+.cl-sx-strip[data-result="refused"] { white-space: normal; width: min(calc(100% - 24px), 420px); padding-block: 6px; border-radius: 22px; }
+.cl-sx-strip[data-result="refused"] .cl-sx-strip-text { flex: 1; min-width: 0; }
 @keyframes cl-sx-strip-in { from { opacity: 0; } }
 @media (hover: hover) and (pointer: fine) { .cl-sx-dismiss:hover { background: var(--hover); color: var(--fg); } }
 

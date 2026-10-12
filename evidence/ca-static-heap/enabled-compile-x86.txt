@@ -1,0 +1,2 @@
+command=['/home/kayg/.cache/codex-scratch/ca-static-heap/target/auth-tools/zig/zig', 'cc', '-target', 'x86_64-linux-musl', '-O2', '-ffunction-sections', '-fdata-sections', '-fPIC', '-I.', '-Iinclude', '-DOPENSSL_BUILDING_OPENSSL', '-DNDEBUG', '-c', 'crypto/mem_sec.c', '-o', '/home/kayg/.cache/codex-scratch/ca-static-heap/target/enabled-mem-sec-x86.o']
+exit=0

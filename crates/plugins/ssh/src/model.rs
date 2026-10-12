@@ -180,6 +180,18 @@ pub enum FailureKind {
     HostKey,
     Unsupported,
     Install,
+    #[serde(rename = "stale_previous_attempt")]
+    StalePreviousAttempt,
+    #[serde(rename = "setup_running")]
+    SetupRunning,
+}
+
+/// Public, bounded findings from a host-local ownership check; paths belong in Details.
+#[derive(Clone, Debug, Serialize)]
+pub struct Leftovers {
+    pub challenge: uuid::Uuid,
+    pub mode: InstallMode,
+    pub findings: Vec<&'static str>,
 }
 
 /// Trusted installation boundary; no request chooses its diagnostic context.
@@ -195,6 +207,7 @@ pub enum InstallStep {
     Install,
     Join,
     Start,
+    Readiness,
 }
 
 /// Architecture and expected public path selected by the server's release bundle.
@@ -276,6 +289,9 @@ impl Failure {
                 InstallStep::Join => {
                     "Joining the host to this server failed. Check the host can reach the server and resolve its address, then try again."
                 }
+                InstallStep::Readiness => {
+                    "Checking terminal readiness failed. Check the infraternal agent service and its terminal session, then try again."
+                }
                 InstallStep::Start => {
                     "Starting the infraternal agent service failed. Check the host service status and its configuration, then try again."
                 }
@@ -283,24 +299,28 @@ impl Failure {
         }
         self
     }
-    /// Classify only our own fixed bootstrap exit codes using the approved path.
+    /// Classify fixed installer exit codes using the approved path. Join also
+    /// executes the uploaded payload, whose status is not an ownership receipt.
     #[must_use]
     pub fn in_mode(mut self, mode: InstallMode) -> Self {
         if self.kind != FailureKind::Install {
             return self;
         }
         match (self.exit_status, mode) {
+            (Some(71..=73), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
                 self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
             }
             (Some(71), InstallMode::Root) => {
                 self.message = "An existing folder /var/lib/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside with administrator access, then try again.";
             }
-            (Some(72), InstallMode::Rootless) => {
-                self.message = "Setup found a lock or unfinished rollback in ~/.local/share/infraternal on this host. Check whether setup is still running. Finish its cleanup, then try again.";
+            (Some(72), _) => {
+                self.message = "Host provisioning found another setup attempt. Retry the host check to continue.";
             }
-            (Some(72), InstallMode::Root) => {
-                self.message = "Setup found a lock or unfinished rollback in /var/lib/infraternal on this host. Check whether setup is still running. Finish its cleanup with administrator access, then try again.";
+            (Some(73), _) => {
+                self.kind = FailureKind::SetupRunning;
+                self.message =
+                    "Setup is already running on this host. Wait for it to finish, then try again.";
             }
             _ => {}
         }
@@ -376,4 +396,6 @@ pub struct Event {
     pub host_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers: Option<Box<Leftovers>>,
 }

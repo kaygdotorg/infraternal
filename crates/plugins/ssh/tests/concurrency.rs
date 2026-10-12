@@ -111,11 +111,10 @@ impl SshSession for ReadOnly {
         Box::pin(async move {
             assert_eq!(
                 script,
-                infraternal_plugin_ssh::probe::CHECK_SCRIPT,
-                "locked/unavailable enrollment must fail before any host mutation"
+                infraternal_plugin_ssh::previous_attempt::check_script(InstallMode::Rootless)
             );
             Ok(CommandOutput {
-                stdout: b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n"
+                stdout: b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n"
                     .to_vec(),
             })
         })

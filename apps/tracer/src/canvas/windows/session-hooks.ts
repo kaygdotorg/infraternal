@@ -23,6 +23,8 @@ export interface SessionUi {
   closeManager(): void;
   /** A window was pointed at another session: its name slides in and its frame lights up. */
   arrived(rec: WinRec): void;
+  /** The host refused a window's new shell: its strip says why. False when no strip claims it (the caller shows a toast). */
+  refused(rec: WinRec, message: string): boolean;
   /** The window whose session is `id` on `host`, in any view. */
   windowFor(host: string, id: string): WinRec | undefined;
   dispose(): void;
@@ -79,6 +81,7 @@ export function createSessionHooks(cx: Ctx): SessionUi {
     },
     closeManager() { part?.closeManager(); },
     arrived(rec) { part?.arrived(rec); },
+    refused(rec, message) { return part?.refused(rec, message) ?? false; },
     windowFor,
     dispose() { off(); part?.dispose(); },
   };

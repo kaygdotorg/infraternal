@@ -1,0 +1,4 @@
+Running as unit: run-p259263-i259563.scope; invocation ID: 2f06973a5f564aa48cdc23b66f37f9b9
+    Blocking waiting for file lock on build directory
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 43.61s

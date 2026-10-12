@@ -1,0 +1,46 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/install-0f36f33fa55ec148)
+
+running 4 tests
+test breakit2_interrupted_lock_creation_allows_cleanup_and_retry ... FAILED
+test breakit2_rollback_preserves_foreign_launcher_new ... FAILED
+test breakit2_rollback_preserves_foreign_unit_new ... FAILED
+test breakit2_stage_refuses_parent_that_cannot_be_rolled_back ... FAILED
+
+failures:
+
+---- breakit2_interrupted_lock_creation_allows_cleanup_and_retry stdout ----
+
+thread 'breakit2_interrupted_lock_creation_allows_cleanup_and_retry' (733313) panicked at crates/plugins/ssh/tests/install.rs:215:5:
+an owned empty lock has no transaction record; rollback cannot recover it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- breakit2_rollback_preserves_foreign_launcher_new stdout ----
+
+thread 'breakit2_rollback_preserves_foreign_launcher_new' (733324) panicked at crates/plugins/ssh/tests/install.rs:158:5:
+assertion `left == right` failed: rollback deleted a file that this attempt never created
+  left: None
+ right: Some("unrelated launcher staging data")
+
+---- breakit2_rollback_preserves_foreign_unit_new stdout ----
+
+thread 'breakit2_rollback_preserves_foreign_unit_new' (733388) panicked at crates/plugins/ssh/tests/install.rs:178:5:
+assertion `left == right` failed: noclobber refused the foreign unit, then rollback deleted it
+  left: None
+ right: Some("unrelated unit staging data")
+
+---- breakit2_stage_refuses_parent_that_cannot_be_rolled_back stdout ----
+
+thread 'breakit2_stage_refuses_parent_that_cannot_be_rolled_back' (733453) panicked at crates/plugins/ssh/tests/install.rs:196:5:
+stage accepted mode 0775, then rollback refused the same parent and left its payload/lock
+
+
+failures:
+    breakit2_interrupted_lock_creation_allows_cleanup_and_retry
+    breakit2_rollback_preserves_foreign_launcher_new
+    breakit2_rollback_preserves_foreign_unit_new
+    breakit2_stage_refuses_parent_that_cannot_be_rolled_back
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test install`

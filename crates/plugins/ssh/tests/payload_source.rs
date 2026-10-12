@@ -33,10 +33,13 @@ impl SshSession for Session {
         Box::pin(async move {
             let call = self.0.fetch_add(1, Ordering::Relaxed);
             if call == 0 {
-                assert_eq!(script, infraternal_plugin_ssh::probe::CHECK_SCRIPT);
+                // Start-fresh folds read-only ownership inspection into the same
+                // sniff command; payload failure must still precede every upload.
+                assert!(script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT));
+                assert!(script.ends_with("\ninspect_previous"));
                 Ok(CommandOutput {
                     stdout:
-                        b"INFRATERNAL_CHECK_V1\nLinux\naarch64\nsystemd\n1002\nno\nyes\nyes\nno\n"
+                        b"INFRATERNAL_CHECK_V1\nLinux\naarch64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n"
                             .to_vec(),
                 })
             } else {

@@ -116,3 +116,6 @@ mod release_build_tests;
 
 #[cfg(feature = "ssh")]
 mod release_payload;
+
+#[cfg(all(test, feature = "remote"))]
+mod ca_update_audit_tests;

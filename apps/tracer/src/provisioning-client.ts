@@ -20,7 +20,7 @@
 import { isCanonicalUuid } from "./identifiers";
 
 export type BootstrapStep = "check" | "install" | "facts" | "connect" | "done" | "failed";
-export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install";
+export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running";
 export type BootstrapMode = "rootless" | "root";
 
 /** Phases a target passes through in order, before `done` (or `failed` at any point). */
@@ -55,12 +55,18 @@ export interface FailureDetail {
   host_key_challenge?: string;
   already_added?: boolean;
   missing_binary?: { architecture: string; path: string };
-  failed_step?: "get-arm64-binary" | "get-x86-64-binary" | "connect" | "upload" | "install" | "join" | "start";
+  failed_step?: "get-arm64-binary" | "get-x86-64-binary" | "connect" | "upload" | "install" | "join" | "start" | "readiness";
   host_key_type?: string;
   host_key_changed?: boolean;
   /** Every automatic sign-in method was refused: the person must choose one (D183). Only on `auth`. */
   choose_method?: boolean;
 }
+
+/**
+ * What an earlier, interrupted setup left on a host (`failure.kind` is `stale_previous_attempt`). `challenge` is the
+ * one-use handle `start-fresh` must echo; `findings` are short public sentences, never paths or raw server text.
+ */
+export interface Leftovers { challenge: string; mode: BootstrapMode; findings: string[] }
 
 export interface BootstrapEvent {
   sequence: number;
@@ -73,6 +79,8 @@ export interface BootstrapEvent {
   /** At most eight trusted breadcrumbs, not a shell log. */
   log_tail: string[];
   failure?: FailureDetail;
+  /** Present with a `stale_previous_attempt` failure. */
+  leftovers?: Leftovers;
   /** Present on the event that reports a successful sign-in. */
   authentication?: AuthenticationInfo;
   /** The server-owned admitted host UUID, present only after successful installation. */
@@ -109,7 +117,7 @@ export interface OneUseAuth { key?: string; passphrase?: string; password?: stri
 
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 const STEPS: readonly string[] = ["check", "install", "facts", "connect", "done", "failed"];
-const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install"];
+const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running"];
 
 /** Turns a host label into a valid request-local id (`[A-Za-z0-9._-]{1,128}`). */
 export function targetIdFor(label: string): string {
@@ -130,7 +138,7 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
-  if (["get-arm64-binary", "get-x86-64-binary", "connect", "upload", "install", "join", "start"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;
+  if (["get-arm64-binary", "get-x86-64-binary", "connect", "upload", "install", "join", "start", "readiness"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;
   if (typeof value.host_key_type === "string") failure.host_key_type = value.host_key_type;
   if (value.host_key_changed === true) failure.host_key_changed = true;
   if (value.already_added === true) failure.already_added = true;
@@ -151,6 +159,11 @@ function parseAuthentication(value: unknown): AuthenticationInfo | undefined {
   return info;
 }
 
+function parseLeftovers(value: unknown): Leftovers | undefined {
+  if (!isRecord(value) || !isCanonicalUuid(value.challenge) || !isStrings(value.findings)) return undefined;
+  return { challenge: value.challenge, mode: value.mode === "root" ? "root" : "rootless", findings: value.findings.slice(0, 16) };
+}
+
 function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined {
   const { sequence, target, attempt, step, message, elapsed_ms: elapsed } = value;
   if (typeof sequence !== "number" || typeof target !== "string" || typeof attempt !== "number" || typeof step !== "string" || !STEPS.includes(step)
@@ -159,6 +172,9 @@ function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined 
   if (value.step === "done" && isCanonicalUuid(value.host_id)) event.host_id = value.host_id;
   const failure = parseFailure(value.failure);
   if (failure) event.failure = failure;
+  const leftovers = parseLeftovers(value.leftovers);
+  // Leftovers without the matching failure kind would offer a cleanup nobody proved; ignore them.
+  if (leftovers && failure?.kind === "stale_previous_attempt") event.leftovers = leftovers;
   const authentication = parseAuthentication(value.authentication);
   if (authentication) event.authentication = authentication;
   return event;
@@ -198,6 +214,12 @@ export class ProvisioningRun {
 
   /** Retries a failed target of this batch under the same address; the server starts the next attempt. */
   retry(target: string): void { this.send({ action: "retry", target }); }
+
+  /**
+   * Removes exactly what the earlier attempt left on a host (the `ssh.start-fresh` action, #169) and continues the same
+   * attempt. `challenge` comes from the failed event's leftovers; the server refuses any other.
+   */
+  startFresh(target: string, challenge: string): void { this.send({ action: "start-fresh", target, challenge }); }
 
   /** Asks for retained events after a sequence. Defaults to what this client has already seen. */
   replay(after: number = this.last): void { this.send({ action: "replay", after }); }
@@ -279,12 +301,17 @@ export interface TargetView {
   /** The server's human text for the latest event. */
   message: string;
   failure: FailureDetail | undefined;
+  /** What an earlier setup left behind, while the running attempt is paused on the person's "Start fresh". */
+  leftovers: Leftovers | undefined;
   elapsedMs: number;
   /** How this attempt signed in, once the server reported it. */
   authentication: AuthenticationInfo | undefined;
 }
 
-export const pendingTarget = (): TargetView => ({ state: "pending", attempt: 0, phase: 0, message: "", failure: undefined, elapsedMs: 0, authentication: undefined });
+/** True while the attempt is paused on earlier-setup leftovers: it waits for the person, nothing is running. */
+export const awaitingFresh = (view: TargetView): boolean => view.state === "running" && !!view.leftovers;
+
+export const pendingTarget = (): TargetView => ({ state: "pending", attempt: 0, phase: 0, message: "", failure: undefined, leftovers: undefined, elapsedMs: 0, authentication: undefined });
 
 /** Folds one event into a target's view; events of an older attempt are ignored. */
 export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
@@ -294,8 +321,11 @@ export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
   // The sign-in method sticks for the attempt, so a later failure still knows it got past authentication.
   const base: TargetView = { ...(fresh ? { ...pendingTarget(), attempt: event.attempt } : view) };
   if (event.authentication) base.authentication = event.authentication;
-  if (event.step === "done") return { ...base, ...(isCanonicalUuid(event.host_id) ? { hostId: event.host_id } : {}), state: "done", phase: PHASES.length, message: event.message, failure: undefined, elapsedMs: event.elapsed_ms };
-  if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, elapsedMs: event.elapsed_ms };
+  if (event.step === "done") return { ...base, ...(isCanonicalUuid(event.host_id) ? { hostId: event.host_id } : {}), state: "done", phase: PHASES.length, message: event.message, failure: undefined, leftovers: undefined, elapsedMs: event.elapsed_ms };
+  if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, leftovers: event.leftovers, elapsedMs: event.elapsed_ms };
+  // Earlier-setup leftovers are a pause inside the open attempt (a `check` event, #169): the attempt stays running and
+  // waits for `startFresh`. The next event of the attempt clears the pause.
+  const paused = event.failure?.kind === "stale_previous_attempt" && !!event.leftovers;
   // Rollback and warnings may emit extra install events; the phase never moves backwards.
-  return { ...base, state: "running", phase: Math.max(base.phase, phase), message: event.message, failure: undefined, elapsedMs: event.elapsed_ms };
+  return { ...base, state: "running", phase: Math.max(base.phase, phase), message: event.message, failure: paused ? event.failure : undefined, leftovers: paused ? event.leftovers : undefined, elapsedMs: event.elapsed_ms };
 }

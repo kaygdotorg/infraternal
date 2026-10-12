@@ -122,6 +122,8 @@ fn cli_plugin() -> PluginDefinition {
     plugin
         .actions
         .push(infraternal_plugin_remote::cli::remove_action());
+    #[cfg(feature = "remote")]
+    plugin.actions.push(key_memory_check_action());
     #[cfg(feature = "ssh")]
     plugin.actions.push(ssh_askpass_action());
     plugin
@@ -222,6 +224,30 @@ fn skill_action() -> ActionDefinition {
     )
     .with_cli_handler(CliHandler::Skill)
     .with_example("skill status", "Print the generated skill for status.")
+}
+
+/// D244 diagnostics use the same hidden-action parsing and compile-out path as the shim.
+#[cfg(feature = "remote")]
+fn key_memory_check_action() -> ActionDefinition {
+    ActionDefinition::new(
+        ["__key-memory-check"],
+        "Check the compiled provider’s key memory without creating or importing keys.",
+        "Use this hidden diagnostic to verify the shipping provider’s page protection.",
+        [
+            "Run under an 8 MiB memlock limit.",
+            "Require initialization=1 for locked pages and dump exclusion.",
+        ],
+        JsonSchema::object([], []),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "cli.internal.key-memory-check",
+            DryRun::Unsupported,
+        ),
+    )
+    .hidden()
+    .with_cli_handler(CliHandler::KeyMemoryCheck)
 }
 
 fn session_shim_action() -> ActionDefinition {
@@ -640,5 +666,25 @@ mod release_tests {
             Some("private-state")
         );
         assert!(selected.matches.get_flag("yes"));
+    }
+}
+
+#[cfg(test)]
+mod key_memory_registry_tests {
+    //! Keeps the shipping diagnostic hidden and removable with the remote capability.
+    use super::*;
+
+    #[test]
+    fn key_memory_diagnostic_follows_remote_feature() {
+        let registry = registry_for(Some("__key-memory-check")).unwrap();
+        let registered = registry.find(&["__key-memory-check"]);
+        #[cfg(feature = "remote")]
+        {
+            let action = registered.unwrap().action;
+            assert!(!action.visible);
+            assert_eq!(action.cli_handler, CliHandler::KeyMemoryCheck);
+        }
+        #[cfg(not(feature = "remote"))]
+        assert!(registered.is_none());
     }
 }

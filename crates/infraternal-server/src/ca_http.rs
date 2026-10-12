@@ -6,10 +6,12 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     routing::post,
 };
+use futures_util::StreamExt;
+use infraternal_shim::locked_bytes::LockedBytes;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{Mutex, Semaphore};
 use zeroize::Zeroizing;
 
 #[derive(Clone)]
@@ -17,6 +19,7 @@ struct Api {
     auth: Auth,
     administration: Arc<CaAdministration>,
     admission: Arc<Semaphore>,
+    starts: Arc<Mutex<HashMap<String, crate::runtime::SourceBucket>>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +47,12 @@ pub fn decode_unlock(input: &[u8]) -> Result<UnlockRequest, crate::ca::CaError> 
 }
 /// Mount only a configured private CA authority; no request can regenerate trust.
 pub fn router(auth: Auth, administration: Arc<CaAdministration>) -> Router {
+    let api = Api {
+        auth,
+        administration,
+        admission: Arc::new(Semaphore::new(8)),
+        starts: Arc::default(),
+    };
     Router::new()
         .route("/remote/ca/status", post(status))
         .route("/remote/ca/administrators/start", post(membership_start))
@@ -53,13 +62,45 @@ pub fn router(auth: Auth, administration: Arc<CaAdministration>) -> Router {
         .route("/remote/ca/unlock/start", post(start))
         .route("/remote/ca/unlock/finish", post(finish))
         .layer(DefaultBodyLimit::max(32768))
+        .layer(axum::middleware::from_fn_with_state(
+            api.clone(),
+            start_budget,
+        ))
         .layer(axum::middleware::from_fn(deadline))
-        .with_state(Api {
-            auth,
-            administration,
-            admission: Arc::new(Semaphore::new(8)),
-        })
+        .with_state(api)
 }
+/// The three start routes share one budget per authenticated principal, across
+/// cookies and ceremony kinds. Finish/status remain available at exhaustion.
+async fn start_budget(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !matches!(
+        incoming.uri().path(),
+        "/remote/ca/unlock/start"
+            | "/remote/ca/bootstrap/start"
+            | "/remote/ca/administrators/start"
+    ) {
+        return next.run(incoming).await;
+    }
+    let (token, now) = match request(&api, incoming.headers()) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
+    let principal = match api.auth.session(token, now).await {
+        Ok(session) => session.user_id,
+        Err(_) => return StatusCode::FORBIDDEN.into_response(),
+    };
+    let mut starts = api.starts.lock().await;
+    if let Err(response) = crate::runtime::admit_temporal_request(&mut starts, principal, now, 30) {
+        return response.into_response();
+    }
+    drop(starts);
+    next.run(incoming).await
+}
+
 async fn deadline(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -246,11 +287,10 @@ async fn finish_request(
     // through reading and proof verification; cancellation or the single
     // request deadline releases it. A stalled sender cannot hold all slots.
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let body = axum::body::to_bytes(body, 32768)
-            .await
-            .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        let intake = locked_intake(body).await?;
         // Parser errors remain static: wrapping material is never reflected.
-        let body = decode_unlock(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let body = decode_unlock(&intake).map_err(|_| StatusCode::BAD_REQUEST)?;
+        drop(intake);
         if bootstrap {
             api.administration
                 .bootstrap_finish(token, &body.ceremony, body.proof, body.scoped_key, now)
@@ -286,4 +326,55 @@ async fn status(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value
         .initialized()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({"locked":locked,"initialized":initialized})))
+}
+
+/// Copy each transport chunk into protected pages immediately after admission.
+/// Transport/kernel chunks remain outside our allocator; never aggregate them
+/// into another ordinary heap buffer containing the scoped wrapping key.
+async fn locked_intake(body: axum::body::Body) -> Result<LockedBytes, StatusCode> {
+    let mut intake = LockedBytes::new(32768).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut stream = body.into_data_stream();
+    let mut length = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        let end = length
+            .checked_add(chunk.len())
+            .filter(|end| *end <= intake.len())
+            .ok_or(StatusCode::PAYLOAD_TOO_LARGE)?;
+        intake[length..end].copy_from_slice(&chunk);
+        length = end;
+    }
+    intake.truncate(length);
+    Ok(intake)
+}
+
+#[cfg(test)]
+mod intake_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn chunked_intake_is_bounded_before_parsing() {
+        let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+            Ok(bytes::Bytes::from(vec![b'x'; 16384])),
+            Ok(bytes::Bytes::from(vec![b'y'; 16384])),
+        ];
+        let intake = locked_intake(axum::body::Body::from_stream(futures_util::stream::iter(
+            chunks,
+        )))
+        .await
+        .unwrap();
+        assert_eq!(intake.len(), 32768);
+        assert_eq!(intake[16383], b'x');
+        assert_eq!(intake[16384], b'y');
+        drop(intake);
+        let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![
+            Ok(bytes::Bytes::from(vec![b'x'; 32768])),
+            Ok(bytes::Bytes::from_static(b"x")),
+        ];
+        let result = locked_intake(axum::body::Body::from_stream(futures_util::stream::iter(
+            chunks,
+        )))
+        .await;
+        assert!(matches!(result, Err(StatusCode::PAYLOAD_TOO_LARGE)));
+    }
 }

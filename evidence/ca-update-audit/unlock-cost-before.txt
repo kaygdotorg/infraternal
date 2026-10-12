@@ -1,0 +1,12 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p4007591-i50097592.scope; invocation ID: d731c7e26b75406185e1c5fdb42395e4
+6.90 14.64 20.30 4/3006 4008860
+
+running 1 test
+test auth::tests::ca_administration_tests::audit_tests::unlock_audit_cost_at_1000_memberships ... ca_unlock memberships=1000 actual_private_copies=1000 measured_registered_principals=1 samples=100 http_excluded=true client_signing_excluded=true copy_setup_excluded=true start_wall_p50_ns=1889291 start_wall_p99_ns=6973088 finish_wall_p50_ns=3556903 finish_wall_p99_ns=8204650 finish_process_cpu_includes_measurement_coordination=true finish_process_cpu_p50_ns=3805686 finish_process_cpu_p99_ns=6921201 rss_before_kib=36832 rss_after_kib=37816 idle_copy_bytes=489813 cores=8 load=8.20 14.31 20.04 7/3199 4009793
+METRIC unlock_audit_formatted_events=0 samples=100 captured_public_log_bytes=0 kernel_journal_io_excluded=true profile=GNU-debug
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 331 filtered out; finished in 25.26s
+
+8.20 14.31 20.04 11/3196 4009794

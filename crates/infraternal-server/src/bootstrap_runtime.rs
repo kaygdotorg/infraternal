@@ -224,6 +224,18 @@ impl Backend for PendingRemoteRuntime {
     fn terminal_canary<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
         not_ready()
     }
+    fn record_start_fresh(
+        &self,
+        target: &Target,
+        host: uuid::Uuid,
+        transaction: uuid::Uuid,
+        outcome: &'static str,
+    ) {
+        tracing::info!(target_id = %target.id, previous_host = %host,
+            previous_transaction = %transaction, mode = ?target.mode, outcome,
+            ownership_journal = "fresh",
+            "host provisioning start fresh");
+    }
     fn record_failure(
         &self,
         target: &Target,
@@ -252,6 +264,7 @@ fn log_bootstrap_failure(
         Some(InstallStep::Install) => "install",
         Some(InstallStep::Join) => "join",
         Some(InstallStep::Start) => "start",
+        Some(InstallStep::Readiness) => "readiness",
         None => match phase {
             Step::Check => "check",
             Step::Facts => "facts",
@@ -363,13 +376,13 @@ mod tests {
     impl SshSession for CheckOnly {
         fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
             Box::pin(async move {
-                assert_eq!(
-                    script, CHECK_SCRIPT,
+                assert!(
+                    script.starts_with(CHECK_SCRIPT),
                     "pending integration must never upload"
                 );
                 Ok(CommandOutput {
                     stdout:
-                        b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n"
+                        b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n"
                             .to_vec(),
                 })
             })
@@ -447,7 +460,7 @@ mod key_authority_tests;
 
 #[cfg(test)]
 mod failure_log_tests {
-    //! Public failure coordinates are logged once without message, log tail or remote output.
+    //! Public setup failure and recovery coordinates are logged without private target details or remote output.
     use super::*;
     use std::{io::Write, sync::Mutex};
 
@@ -507,5 +520,45 @@ mod failure_log_tests {
         }
         assert!(!text.contains("private-message-sentinel"));
         assert!(!text.contains("private-output-sentinel"));
+    }
+    #[test]
+    fn start_fresh_logs_only_the_exact_public_ownership_journal_and_outcome() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Capture(bytes.clone()))
+            .finish();
+        let target = Target {
+            id: "one".into(),
+            address: TargetAddress::Manual("private-address-sentinel".into()),
+            credential: Some("private-selector-sentinel".into()),
+            mode: InstallMode::Rootless,
+            root_consent: false,
+        };
+        let backend = PendingRemoteRuntime {
+            auth: None,
+            key: Arc::new(crate::ssh_key::UnavailableSshKey),
+        };
+        let host = uuid::Uuid::new_v4();
+        let transaction = uuid::Uuid::new_v4();
+        tracing::subscriber::with_default(subscriber, || {
+            backend.record_start_fresh(&target, host, transaction, "started");
+            backend.record_start_fresh(&target, host, transaction, "completed");
+        });
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        for field in [
+            host.to_string(),
+            transaction.to_string(),
+            "target_id=one".into(),
+            "ownership_journal=\"fresh\"".into(),
+            "outcome=\"started\"".into(),
+            "outcome=\"completed\"".into(),
+        ] {
+            assert!(text.contains(&field));
+        }
+        assert!(!text.contains("private-address-sentinel"));
+        assert!(!text.contains("private-selector-sentinel"));
     }
 }

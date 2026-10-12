@@ -1,7 +1,7 @@
 /** Tests bounded SSH target parsing and the progress model used by the add-host flow. */
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, test } from "bun:test";
-import { foldEvent, pendingTarget, type BootstrapEvent, type FailureKind } from "../../provisioning-client";
+import { awaitingFresh, foldEvent, pendingTarget, type BootstrapEvent, type FailureKind } from "../../provisioning-client";
 import { authLabel, failureLine, guideFor, looksLikeSshConfig, matchListed, parseSshConfig, parseTarget, stagesOf } from "./model";
 
 const event = (step: BootstrapEvent["step"], extra: Partial<BootstrapEvent> = {}): BootstrapEvent => ({ sequence: 1, target: "h", attempt: 1, step, message: `${step} message`, elapsed_ms: 1, log_tail: [], ...extra });
@@ -218,4 +218,29 @@ test("an already added host says so and offers opening its existing terminal", (
 test("release payload verification names the architecture step and plain reason", () => {
   const failure = { kind: "install" as const, message: "the binary does not match the signed checksum.", failed_step: "get-arm64-binary" as const, log_tail: [] };
   expect(failureLine(failure)).toBe("Get the arm64 binary: the binary does not match the signed checksum.");
+});
+
+describe("leftovers pause (#169)", () => {
+  const challenge = "3f2b8c1e-9a4d-4e6b-8c7a-1d2e3f4a5b6c";
+  const pause: BootstrapEvent = {
+    sequence: 2, target: "h", attempt: 1, step: "check", message: "leftovers", elapsed_ms: 1, log_tail: [],
+    failure: { kind: "stale_previous_attempt", message: "x", log_tail: [] }, leftovers: { challenge, mode: "rootless", findings: ["An unfinished setup lock"] },
+  };
+  const signedIn: BootstrapEvent = { sequence: 1, target: "h", attempt: 1, step: "check", message: "in", elapsed_ms: 0, log_tail: [], authentication: { method: "server-key" } };
+
+  test("a check event with leftovers pauses the running attempt; the next event clears it", () => {
+    const paused = fold(signedIn, pause);
+    expect(paused.state).toBe("running");
+    expect(awaitingFresh(paused)).toBe(true);
+    expect(paused.leftovers?.challenge).toBe(challenge);
+    expect(stagesOf(paused)[1]?.state).toBe("failed");
+    const resumed = foldEvent(paused, event("check", { sequence: 3, message: "removed" }));
+    expect(awaitingFresh(resumed)).toBe(false);
+    expect(resumed.attempt).toBe(1);
+  });
+
+  test("a pause without leftovers offers nothing to start fresh", () => {
+    const { leftovers: _leftovers, ...bare } = pause;
+    expect(awaitingFresh(fold(signedIn, bare))).toBe(false);
+  });
 });

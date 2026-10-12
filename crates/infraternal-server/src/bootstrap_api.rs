@@ -75,6 +75,10 @@ enum Request {
         #[serde(default)]
         auth_once: Option<OneUseAuth>,
     },
+    StartFresh {
+        target: String,
+        challenge: uuid::Uuid,
+    },
     Replay {
         after: u64,
     },
@@ -295,6 +299,7 @@ async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret)
                         }
                     }
                     Request::Retry { target, auth_once } => batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.retry_with_auth(batch, &owner, &target, auth_once)),
+                    Request::StartFresh {target, challenge} => batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.start_fresh(batch, &owner, &target, challenge)),
                     Request::ConfirmHostKey {target,challenge,fingerprint} => {
                         if let Some(batch)=&batch {
                             let proof=LiveConfirmation {auth:api.auth.clone(),owner:owner.clone(),token:Secret::new(token.as_bytes().to_vec())};

@@ -16,7 +16,10 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
     const message = element.textContent?.trim() ?? "";
     if (message && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
       relaying = true;
-      toast.show({ message, tone: /could not|failed|error|unavailable/i.test(message) ? "error" : "ok", duration: 5000 });
+      // Whatever passes the filter above is bad news (a lost connection, a refused or ended terminal), never a
+      // confirmation, so it never wears the success tick. The old guess by wording missed "The connection to the
+      // server ended."
+      toast.show({ message, tone: "error", duration: 5000 });
     } else if (relaying) {
       relaying = false;
       toast.dismiss();

@@ -1,0 +1,140 @@
+crates/infraternal-server/src/remote_enrollment.rs:63:    /// Refuses altered keys, expired/revoked authority, invalid CSR or unavailable issuer/storage.
+crates/infraternal-server/src/remote_enrollment.rs:89:        // The atomic write rechecks authority and key equality after signing;
+crates/infraternal-server/src/remote_enrollment.rs:105:        pkey::PKey,
+crates/infraternal-server/src/remote_enrollment.rs:110:        let key = PKey::generate_ed25519().unwrap();
+crates/infraternal-server/src/remote_enrollment.rs:112:        builder.set_pubkey(&key).unwrap();
+crates/infraternal-server/src/remote_enrollment.rs:116:        builder.sign(&key, MessageDigest::null()).unwrap();
+crates/infraternal-server/src/remote_enrollment.rs:117:        builder.build().to_der().unwrap()
+crates/infraternal-server/src/ca_copies.rs:12:/// Private encrypted-copy storage; it never owns a plaintext signing key.
+crates/infraternal-server/src/ca_memory.rs:1://! Holds the D168 cold-start lock and process-only update handoff; authentication adapters authorize administrator passkey unlocks, #78.
+crates/infraternal-server/src/ca_memory.rs:9:/// successful passkey ceremony before unwrapping that administrator's envelope.
+crates/infraternal-server/src/ca_memory.rs:13:    /// Supply private material only after current administrator passkey proof.
+crates/infraternal-server/src/ca_memory.rs:27:/// One issuer's public trust survives cold starts independently of its signing key.
+crates/infraternal-server/src/ca_memory.rs:82:            && current.to_der().map_err(|_| CaError)? != published.to_der().map_err(|_| CaError)?
+crates/infraternal-server/src/ca_memory.rs:90:    /// An explicitly configured server can await its first passkey-authorized
+crates/infraternal-server/src/ca_memory.rs:91:    /// provisioning without inventing a trust anchor or touching a private key.
+crates/infraternal-server/src/ca_memory.rs:121:    /// Unlock through a trusted current administrator/passkey policy adapter.
+crates/infraternal-server/src/ca_memory.rs:141:    /// Refuses inconsistent issuer/key material; caller falls back to cold start.
+crates/infraternal-server/src/ca_memory.rs:152:        if material.issuer().to_der().map_err(|_| CaError)?
+crates/infraternal-server/src/ca_memory.rs:153:            != self.issuer()?.to_der().map_err(|_| CaError)?
+crates/infraternal-server/src/ca_memory.rs:158:        // never observe an "unlocked" event without the corresponding key.
+crates/infraternal-server/src/ca_memory.rs:210:            source.issuer().unwrap().to_der().unwrap(),
+crates/infraternal-server/src/ca_memory.rs:211:            issuer.to_der().unwrap()
+crates/infraternal-server/src/ca_memory.rs:243:            replacement.https_certificate().unwrap().to_der().unwrap(),
+crates/infraternal-server/src/ca_memory.rs:244:            source.https_certificate().unwrap().to_der().unwrap()
+crates/infraternal-server/src/ca_memory.rs:247:            replacement.issuer().unwrap().to_der().unwrap(),
+crates/infraternal-server/src/ca_memory.rs:248:            source.issuer().unwrap().to_der().unwrap()
+crates/infraternal-server/src/ca_handoff.rs:8:    pkey::{Id, PKey},
+crates/infraternal-server/src/ca_handoff.rs:12:use zeroize::Zeroizing;
+crates/infraternal-server/src/ca_handoff.rs:24:    // A handoff must not create a plaintext signing seed in a crash dump or
+crates/infraternal-server/src/ca_handoff.rs:41:    let key = material.handoff_key();
+crates/infraternal-server/src/ca_handoff.rs:42:    if key.id() != Id::ED25519 {
+crates/infraternal-server/src/ca_handoff.rs:47:    let raw = Zeroizing::new(key.raw_private_key().map_err(|_| CaError)?);
+crates/infraternal-server/src/ca_handoff.rs:51:    let mut seed = LockedBytes::new(32).map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_handoff.rs:52:    seed.copy_from_slice(&raw);
+crates/infraternal-server/src/ca_handoff.rs:54:    let issuer = material.issuer().to_der().map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_handoff.rs:65:    frame[10..HEADER].copy_from_slice(&seed);
+crates/infraternal-server/src/ca_handoff.rs:82:    let key =
+crates/infraternal-server/src/ca_handoff.rs:83:        PKey::private_key_from_raw_bytes(&frame[10..HEADER], Id::ED25519).map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_handoff.rs:87:    if issuer.to_der().map_err(|_| CaError)? != frame[HEADER..] {
+crates/infraternal-server/src/ca_handoff.rs:90:    let material = CaMaterial::new(key, issuer);
+crates/infraternal-server/src/ca_handoff.rs:174:        // Neither a failed open nor a failed dup may return with the key socket
+crates/infraternal-server/src/ca_bootstrap.rs:15:    pkey::PKey,
+crates/infraternal-server/src/ca_bootstrap.rs:86:/// Load only durable public trust without reading transport or signing keys.
+crates/infraternal-server/src/ca_bootstrap.rs:93:    let key = issuer.public_key().map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_bootstrap.rs:94:    if key.id() != openssl::pkey::Id::ED25519 || !issuer.verify(&key).map_err(|_| CaError)? {
+crates/infraternal-server/src/ca_bootstrap.rs:101:/// Refuses unsafe files, invalid certificates or a mismatched leaf key.
+crates/infraternal-server/src/ca_bootstrap.rs:107:    let key = PKey::private_key_from_pem(
+crates/infraternal-server/src/ca_bootstrap.rs:108:        &private_file(&directory.join("remote.key")).map_err(|_| CaError)?,
+crates/infraternal-server/src/ca_bootstrap.rs:112:        .public_key()
+crates/infraternal-server/src/ca_bootstrap.rs:114:        .public_eq(&key)
+crates/infraternal-server/src/ca_bootstrap.rs:118:    Ok((Identity { certificate, key }, issuer))
+crates/infraternal-server/src/ca_bootstrap.rs:141:    key: &[u8; 32],
+crates/infraternal-server/src/ca_bootstrap.rs:161:            &WrappedCa::seal(&material, member, generation, salt, key)?,
+crates/infraternal-server/src/ca_bootstrap.rs:165:            &material.issuer().to_pem().map_err(|_| CaError)?,
+crates/infraternal-server/src/ca_bootstrap.rs:169:            &identity.certificate.to_pem().map_err(|_| CaError)?,
+crates/infraternal-server/src/ca_bootstrap.rs:171:        let encoded = zeroize::Zeroizing::new(
+crates/infraternal-server/src/ca_bootstrap.rs:173:                .key
+crates/infraternal-server/src/ca_bootstrap.rs:174:                .private_key_to_pem_pkcs8()
+crates/infraternal-server/src/ca_bootstrap.rs:177:        write_new(&stage.join("remote.key"), &encoded)?;
+crates/infraternal-server/src/ca_bootstrap.rs:181:        // The SQLite writer lock serializes every authorized provisioning process.
+crates/infraternal-server/src/ca_bootstrap.rs:200:    let (key, issuer) = generate_issuer(now, end)?;
+crates/infraternal-server/src/ca_bootstrap.rs:202:    // cold-start path building classify it as self-issued despite its leaf key.
+crates/infraternal-server/src/ca_bootstrap.rs:208:    let remote_key = PKey::generate_ed25519().map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_bootstrap.rs:218:    leaf.set_pubkey(&remote_key).map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_bootstrap.rs:256:    leaf.sign(&key, MessageDigest::null())
+crates/infraternal-server/src/ca_bootstrap.rs:259:        CaMaterial::new(key, issuer),
+crates/infraternal-server/src/ca_bootstrap.rs:262:            key: remote_key,
+crates/infraternal-server/src/ca_bootstrap.rs:267:fn generate_issuer(now: i64, end: i64) -> Result<(PKey<openssl::pkey::Private>, X509), CaError> {
+crates/infraternal-server/src/ca_bootstrap.rs:268:    let key = PKey::generate_ed25519().map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_bootstrap.rs:282:    issuer.set_pubkey(&key).map_err(|_| CaError)?;
+crates/infraternal-server/src/ca_bootstrap.rs:303:                .key_cert_sign()
+crates/infraternal-server/src/ca_bootstrap.rs:310:        .sign(&key, MessageDigest::null())
+crates/infraternal-server/src/ca_bootstrap.rs:313:    Ok((key, issuer))
+crates/infraternal-server/src/ca_administration.rs:1://! Authorizes CA unlock through a purpose-bound real passkey ceremony and current explicit administrator generation [168], #78.
+crates/infraternal-server/src/ca_administration.rs:15:use zeroize::Zeroizing;
+crates/infraternal-server/src/ca_administration.rs:80:#[derive(Clone, serde::Deserialize)]
+crates/infraternal-server/src/ca_administration.rs:143:    /// Whether public trust was retained, independently of the private signing key's lock state.
+crates/infraternal-server/src/ca_administration.rs:204:            .login_start(membership.user(), now)
+crates/infraternal-server/src/ca_administration.rs:208:        // This private registry is the purpose binding. Ordinary login endpoints can
+crates/infraternal-server/src/ca_administration.rs:223:    /// Verify a fresh passkey proof, decrypt a private copy and install under the
+crates/infraternal-server/src/ca_administration.rs:224:    /// SQLite writer lock that serializes role, credential and session revocation.
+crates/infraternal-server/src/ca_administration.rs:226:    /// Refuses foreign/expired/replayed ceremonies, bad passkeys or wrong wrapping keys.
+crates/infraternal-server/src/ca_administration.rs:232:        scoped_key: Zeroizing<[u8; 32]>,
+crates/infraternal-server/src/ca_administration.rs:249:            .verify_passkey(id, proof, now)
+crates/infraternal-server/src/ca_administration.rs:269:                .open(&issuer, &member, generation, &scoped_key)
+crates/infraternal-server/src/ca_administration.rs:277:            sqlx::query_scalar::<_, i64>("SELECT 1 FROM passkeys WHERE user_id=? AND id=?")
+crates/infraternal-server/src/ca.rs:1://! Signs host identities from independently validated keys, with CA unlock policy supplied by the owner [133], #78.
+crates/infraternal-server/src/ca.rs:10:    pkey::{Id, PKey, Private},
+crates/infraternal-server/src/ca.rs:25:/// The two issuer candidates proposed on #78; host keys stay Ed25519 in either case.
+crates/infraternal-server/src/ca.rs:28:    /// Consistent with the existing host-key contract.
+crates/infraternal-server/src/ca.rs:34:    fn accepts(self, key: &PKey<Private>) -> bool {
+crates/infraternal-server/src/ca.rs:36:            Self::Ed25519 => key.id() == Id::ED25519,
+crates/infraternal-server/src/ca.rs:38:                key.id() == Id::EC
+crates/infraternal-server/src/ca.rs:39:                    && key.ec_key().is_ok_and(|key| {
+crates/infraternal-server/src/ca.rs:40:                        key.group().curve_name() == Some(openssl::nid::Nid::X9_62_PRIME256V1)
+crates/infraternal-server/src/ca.rs:47:/// Content-free failures; keys and OpenSSL diagnostics never enter logs.
+crates/infraternal-server/src/ca.rs:52:/// Unlocked material supplied in memory; no Debug/serialization or implicit key generation.
+crates/infraternal-server/src/ca.rs:55:    key: PKey<Private>,
+crates/infraternal-server/src/ca.rs:61:    pub fn new(key: PKey<Private>, issuer: X509) -> Self {
+crates/infraternal-server/src/ca.rs:62:        Self { key, issuer }
+crates/infraternal-server/src/ca.rs:65:    /// Borrow the signer only for the private exec channel; never serialize to storage.
+crates/infraternal-server/src/ca.rs:66:    pub(crate) fn handoff_key(&self) -> &PKey<Private> {
+crates/infraternal-server/src/ca.rs:67:        &self.key
+crates/infraternal-server/src/ca.rs:90:    /// Load an unlocked key and corresponding public issuer generation.
+crates/infraternal-server/src/ca.rs:104:/// Signed public host identity and trusted ledger metadata; contains no private key.
+crates/infraternal-server/src/ca.rs:113:    /// Validate material obtained from the configured key source.
+crates/infraternal-server/src/ca.rs:121:        let public = material.issuer.public_key().map_err(|_| CaError)?;
+crates/infraternal-server/src/ca.rs:122:        if !CA_KEY_ALGORITHM.accepts(&material.key)
+crates/infraternal-server/src/ca.rs:123:            || !material.key.public_eq(&public)
+crates/infraternal-server/src/ca.rs:127:                .to_der()
+crates/infraternal-server/src/ca.rs:132:                    .to_der()
+crates/infraternal-server/src/ca.rs:163:        // signing usages on the supplied issuer. A key match alone is insufficient.
+crates/infraternal-server/src/ca.rs:179:        let der = leaf.to_der().map_err(|_| CaError)?;
+crates/infraternal-server/src/ca.rs:180:        let issuer_der = self.0.issuer.to_der().map_err(|_| CaError)?;
+crates/infraternal-server/src/ca.rs:181:        let public_key = csr
+crates/infraternal-server/src/ca.rs:182:            .key()
+crates/infraternal-server/src/ca.rs:183:            .raw_public_key()
+crates/infraternal-server/src/ca.rs:190:            public_key,
+crates/infraternal-server/src/ca.rs:215:        builder.set_pubkey(csr.key())?;
+crates/infraternal-server/src/ca.rs:226:            &self.0.key,
+crates/infraternal-server/src/ca.rs:255:        key: PKey<Private>,
+crates/infraternal-server/src/ca.rs:260:            Ok(CaMaterial::new(self.key.clone(), self.issuer.clone()))
+crates/infraternal-server/src/ca.rs:263:    /// Test-only leaf construction isolates renewal constraints against the same issuer and retained host key.
+crates/infraternal-server/src/ca.rs:266:        key: &PKey<Private>,
+crates/infraternal-server/src/ca.rs:283:        leaf.set_pubkey(key).unwrap();
+crates/infraternal-server/src/ca.rs:312:        leaf.sign(&material.key, MessageDigest::null()).unwrap();
+crates/infraternal-server/src/ca.rs:324:        let key = PKey::generate_ed25519().unwrap();
+crates/infraternal-server/src/ca.rs:335:        cert.set_pubkey(&key).unwrap();
+crates/infraternal-server/src/ca.rs:353:                    .key_cert_sign()
+crates/infraternal-server/src/ca.rs:360:        cert.sign(&key, MessageDigest::null()).unwrap();
+crates/infraternal-server/src/ca.rs:362:            key,
+crates/infraternal-server/src/ca.rs:368:        let key = PKey::generate_ed25519().unwrap();
+crates/infraternal-server/src/ca.rs:372:        req.set_pubkey(&key).unwrap();
+crates/infraternal-server/src/ca.rs:387:        req.sign(&key, MessageDigest::null()).unwrap();
+crates/infraternal-server/src/ca.rs:388:        ValidatedCsr::parse(&req.build().to_der().unwrap()).unwrap()
+crates/infraternal-server/src/ca.rs:407:        assert!(leaf.verify(&source.key).unwrap());
+crates/infraternal-server/src/ca.rs:411:            signed.record.public_key.as_slice(),
+crates/infraternal-server/src/ca.rs:412:            csr.key().raw_public_key().unwrap()
+crates/infraternal-server/src/ca.rs:444:        mismatch.key = PKey::generate_ed25519().unwrap();
+crates/infraternal-server/src/ca.rs:501:        println!(

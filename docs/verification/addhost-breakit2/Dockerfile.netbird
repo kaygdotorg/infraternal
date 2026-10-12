@@ -1,0 +1,17 @@
+# Build a disposable real NetBird SSH counterpart with its upstream module graph; no product dependency (#169).
+FROM golang:1.26.7 AS builder
+WORKDIR /build
+COPY docs/verification/addhost-breakit2/netbird-fixture.go /build/fixture.go
+COPY LICENSE /build/FIXTURE_LICENSE
+RUN go mod download github.com/netbirdio/netbird@67c2041fb5534c19d7b2320617cfc3aaab8e7d3d \
+    && fixture_module_dir="$(go list -m -f '{{.Dir}}' github.com/netbirdio/netbird@67c2041fb5534c19d7b2320617cfc3aaab8e7d3d)" \
+    && cp -a "$fixture_module_dir" /build/upstream \
+    && chmod -R u+w /build/upstream \
+    && mkdir -p /build/upstream/cmd/addhost-breakit2-fixture \
+    && cp /build/fixture.go /build/upstream/cmd/addhost-breakit2-fixture/main.go \
+    && cd /build/upstream \
+    && gofmt -w cmd/addhost-breakit2-fixture/main.go \
+    && go vet ./cmd/addhost-breakit2-fixture \
+    && CGO_ENABLED=0 go build -trimpath -o /out/netbird-ssh-fixture ./cmd/addhost-breakit2-fixture
+FROM scratch
+COPY --from=builder /out/netbird-ssh-fixture /netbird-ssh-fixture

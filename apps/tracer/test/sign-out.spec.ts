@@ -184,7 +184,11 @@ test("a sign-out the server could not complete says so and leaves the person sig
   await page.locator("#palette-input").fill("sign out");
   await page.keyboard.press("Enter");
   await confirm(page).getByRole("button", { name: "Sign out" }).click();
-  await expect(page.locator(".ui-toast:not([hidden])")).toContainText("Could not sign out");
+  const toast = page.locator(".ui-toast:not([hidden])");
+  await expect(toast).toContainText("Could not sign out");
+  // TASTE: the icon matches the news. A failure wears the caution mark, never the success tick.
+  await expect(toast.locator(".ui-toast-glyph")).toBeVisible();
+  await expect(toast.locator(".ui-toast-marker")).toBeHidden();
   await expect(page.locator(".cl-mockup")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Welcome back" })).toHaveCount(0);
 });

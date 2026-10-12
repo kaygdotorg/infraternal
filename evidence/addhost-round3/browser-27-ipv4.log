@@ -1,0 +1,13 @@
+Running as unit: run-p2128343-i10515908.scope; invocation ID: 37706288008d4c1c8c401414a29fffb9
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-rsbz3czs.js, chunk-dpg6mcx9.js, chunk-vhzpqexm.js, chunk-5wjqz9g6.js, chunk-d3bng5mt.js, chunk-jadeqfx7.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-t3gkd291.js, chunk-kspzshrx.js, chunk-gax5rk8g.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-yetrch06.js, chunk-dr3c5pcf.js, chunk-kvabn07w.js, chunk-n959f4sx.js, chunk-t0afx66y.js, chunk-x0246qjy.js, chunk-c8heac1e.js, chunk-mqkaa48w.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-070hhxcw.js, chunk-m31754c1.js, chunk-tq29p01c.js, chunk-q59g5e9d.js, chunk-5753zf8s.js, chunk-46zsm53z.js, chunk-cq631vnb.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-8ffvrvrd.js, chunk-hrg55yx5.js, chunk-7dpjp970.js, chunk-hwc30mbr.js, chunk-1hje8sjn.js, chunk-qwv2npc4.js, chunk-axbkkqp1.js, chunk-sng56w1a.js, chunk-0j7cma7f.js, chunk-wetw6mnr.js, chunk-q81d8q4a.js, chunk-p6qzwef9.js, chunk-bbpnzjfm.js, chunk-gdpwxedj.js, chunk-ew6wwbz6.js, chunk-6rvcrppv.js, chunk-syxeqn0g.js, chunk-x2b01baz.js, chunk-rd6vkvy0.js, chunk-g29vzzpy.js, chunk-6b27gs31.js, chunk-2hbt9afc.js, chunk-4tc4hyfy.js, chunk-9vqas1wk.js, chunk-ws27xbe9.js, chunk-ta0zfcss.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-np2a73xh.js, chunk-87t4wf03.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-4j98t0aw.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4324
+[WebServer] latency proxy listening on http://localhost:4323; upstream port=4324
+
+Running 27 tests using 1 worker
+
+(node:2130541) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/addhost-wizard.spec.ts:46:1 › the toolbar button and the palette open the wizard (11.2s)
+  ✓   2 test/addhost-wizard.spec.ts:60:1 › network access: detected, shown by name, and the host lands in Console and the sidebar (16.3s)
+  ✓   3 test/addhost-wizard.spec.ts:81:1 › closing the flow window from its own frame ends the wizard (10.3s)

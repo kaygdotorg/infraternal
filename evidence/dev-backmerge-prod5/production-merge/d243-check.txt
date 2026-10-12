@@ -1,0 +1,3 @@
+D243 rust_check_static_binary: byte-for-byte identical to dev ee104344.
+x86 maximum: 16404816 bytes; ARM maximum: 13817816 bytes.
+Release profile, DECISIONS.md and docs/PROCESS.md unchanged.

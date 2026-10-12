@@ -47,7 +47,13 @@ fn send(wire: &mut Vec<u8>, stream: u32, frame: &Frame<'_>) {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn a_vanished_session_gets_a_final_close_and_the_channel_stays_up() {
-    let state = std::env::temp_dir().join(format!("infraternal-gone-{}", uuid::Uuid::new_v4()));
+    // Leave room for sessions/<32 hex digits>.sock under a HOME-cache TMPDIR.
+    // A 96-bit random fixture name preserves isolation without spending the
+    // Unix socket path budget on a descriptive directory prefix.
+    let state = std::env::temp_dir().join(format!(
+        "g{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..24]
+    ));
     std::fs::create_dir(&state).unwrap();
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     let state = sessions::state(Some(state)).unwrap();

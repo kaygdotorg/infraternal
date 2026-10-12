@@ -1,4 +1,4 @@
-//! Audited page ownership for short-lived process-transfer buffers; pinning and dump exclusion never affect allocator neighbours [40][217], #154.
+//! Audited page ownership for short-lived private buffers; pinning and dump exclusion never affect allocator neighbours [40][217], #154.
 #![allow(unsafe_code)]
 
 use nix::libc;
@@ -15,12 +15,16 @@ pub struct LockedBytes {
     length: usize,
     mapped: usize,
 }
+// SAFETY: the mapping is exclusively owned and has no thread-affine state.
+// Moving ownership transfers all access; mutation still requires &mut self.
+unsafe impl Send for LockedBytes {}
+
 impl LockedBytes {
-    /// Allocate bounded storage or refuse transfer if either protection fails.
+    /// Allocate bounded storage or refuse private-buffer admission if either protection fails.
     /// # Errors
-    /// Refuses lengths over 4096 and failed page-size, mapping, lock or dump policy.
+    /// Refuses lengths over 32768 and failed page-size, mapping, lock or dump policy.
     pub fn new(length: usize) -> io::Result<Self> {
-        if length > 4096 {
+        if length > 32768 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         // SAFETY: sysconf reads a process-independent scalar, with no pointers.
@@ -111,7 +115,8 @@ mod tests {
 
     #[test]
     fn anonymous_transfer_pages_are_locked_and_excluded_from_core_dumps() {
-        let frame = LockedBytes::new(42).unwrap();
+        let frame = LockedBytes::new(32768).unwrap();
+        assert!(LockedBytes::new(32769).is_err());
         let pointer = frame.as_ptr() as usize;
         let maps = std::fs::read_to_string("/proc/self/smaps").unwrap();
         let mut selected = false;

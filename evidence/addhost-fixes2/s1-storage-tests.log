@@ -1,0 +1,24 @@
+Running as unit: run-p2743125-i6937024.scope; invocation ID: 2f3fe92f6efa46049e086bdca07c9ba3
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/plugins/ssh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 50.54s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/infraternal_server-aaf76c8bf1e2d913)
+
+running 14 tests
+test remote_http::tests::enrollment_api_at_1000_hosts ... ignored, explicit real HTTP-adapter/SQLite signing measurement at 1000 hosts; not transport or whole-daemon evidence
+test runtime::remote_demo_tests::remote_cli_enrollment_and_browser_terminal_two_processes ... ignored, two-process proof requires INFRATERNAL_REMOTE_TEST_BINARY and exclusive port 4701
+test bootstrap_runtime::tests::pending_integration_refuses_enrollment_vault_and_discovery ... ok
+test enrollment::authority::tests::admission_uses_enrolled_uid_and_exact_public_identity_validity ... ok
+test enrollment::authority::tests::revocation_is_owner_bound_and_denies_admission_and_renewal_after_commit ... ok
+test enrollment::authority::tests::renewal_preserves_overlap_and_refuses_changed_key_or_expired_predecessor ... ok
+test enrollment::migration_tests::remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent ... ok
+test remote_enrollment::tests::invalid_invitations_never_load_the_private_signer ... ok
+test remote_enrollment::tests::cold_locked_signer_preserves_admission_and_token_until_authenticated_unlock ... ok
+test remote_enrollment::tests::invalid_csr_does_not_burn_token_and_join_returns_only_committed_authority ... ok
+test remote_http::tests::enrollment_http_is_bound_single_use_and_preserves_token_while_locked ... ok
+test runtime::tests::restart_serves_fresh_setup_token_and_completes_owner_enrollment ... ok
+test auth::tests::concurrent_owner_and_optional_passkey_enrollment_fail_closed ... ok
+test auth::tests::enrollment_prf_input_matches_discoverable_login ... ok
+
+test result: ok. 12 passed; 0 failed; 2 ignored; 0 measured; 315 filtered out; finished in 5.04s
+

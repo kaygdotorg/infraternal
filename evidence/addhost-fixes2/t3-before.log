@@ -1,0 +1,19 @@
+Running as unit: run-p2853087-i7046986.scope; invocation ID: a75fe491893649cf855c9a3225a59abf
+
+running 1 test
+test breakit2_interrupted_lock_creation_allows_cleanup_and_retry ... FAILED
+
+failures:
+
+---- breakit2_interrupted_lock_creation_allows_cleanup_and_retry stdout ----
+
+thread 'breakit2_interrupted_lock_creation_allows_cleanup_and_retry' (2853099) panicked at crates/plugins/ssh/tests/install.rs:217:5:
+an owned empty lock has no transaction record; rollback cannot recover it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    breakit2_interrupted_lock_creation_allows_cleanup_and_retry
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.04s
+

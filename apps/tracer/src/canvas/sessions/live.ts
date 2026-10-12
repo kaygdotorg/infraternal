@@ -96,7 +96,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
-    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void) {}
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string) => boolean) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -165,6 +165,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onSessionGone: (status) => options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status),
         onOpenRefused: (message, sessionList) => {
           if (this.disposed) return true;
+          // A window whose strip asked for this shell says why itself, where the person is looking.
+          if (this.refused?.(message)) return true;
           core.toast.show({ message, tone: "error", ...(sessionList ? { duration: 0 } : {}),
             ...(sessionList && this.showSessions ? { action: { label: "Sessions", onSelect: this.showSessions } } : {}),
           });
@@ -277,7 +279,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
   return {
     bind(model, env): SessionBinding {
-      const b = new Binding(model, env.changed, env.exited, env.showSessions);
+      const b = new Binding(model, env.changed, env.exited, env.showSessions, env.refused);
       bindings.add(b);
       return b;
     },

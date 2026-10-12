@@ -1,4 +1,5 @@
 /** One reusable, accessible status toast with an optional action for product surfaces. */
+import { ICONS } from "./icons";
 import { tick } from "./tick";
 
 export interface ToastAction {
@@ -13,11 +14,11 @@ export interface ToastMessage {
   messageNode?: Node;
   action?: ToastAction;
   duration?: number;
-  /** `error` drops the success tick: the message is a failure, not a confirmation. */
+  /** `error` replaces the success tick with a caution mark (TASTE: a tick only for success): the message is a failure or a lost connection. */
   tone?: "ok" | "error";
   /**
    * Inner SVG markup on the 24 px grid (the shared icons) shown in place of the success tick, for a message that is
-   * waiting or neutral rather than done. Without it the tick shows for "ok" and nothing for "error".
+   * waiting or neutral rather than done. Without it the tick shows for "ok" and the caution mark for "error".
    */
   icon?: string;
   /** Adds a dismiss control: for a message that waits on the person and should not vanish unread. */
@@ -106,9 +107,11 @@ export function mountToast(parent: HTMLElement): ToastController {
       finish();
       closeHandler = value.onClose;
       close.hidden = !value.dismissible;
-      glyph.hidden = !value.icon;
-      host.dataset.icon = value.icon ? "true" : "false";
-      if (value.icon) glyph.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18">${value.icon}</svg>`;
+      // One rule for every caller: a failure never shows the green tick, whatever tone its caller guessed.
+      const icon = value.icon ?? (value.tone === "error" ? ICONS.warning : undefined);
+      glyph.hidden = !icon;
+      host.dataset.icon = icon ? "true" : "false";
+      if (icon) glyph.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18">${icon}</svg>`;
       if (value.messageNode) label.replaceChildren(value.messageNode); else label.textContent = value.message;
       selectAction = value.action?.onSelect;
       action.textContent = value.action?.label ?? "";

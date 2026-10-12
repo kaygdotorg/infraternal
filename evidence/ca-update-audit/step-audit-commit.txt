@@ -1,0 +1,14 @@
+Completed authorized unlock logging: 73965a488a159732e5e2630f9d5eb6ece7b1538b. Real event regression FAIL before (0 events), PASS after (4 outcomes incl cancellation); existing authority unchanged. Final server suite 297 PASS/0 FAIL/35 ignored; remote-disabled check and separate TypeScript fast phase PASS (154 tracer/36 protocol). Static PIE/no PT_INTERP 20,067,504 bytes vs 16,404,816 ceiling; +2,528 bytes vs own before build. No waiver or ceiling change. Evidence: docs/verification/ca-update-audit/README.md; evidence/ca-update-audit/fast-final-rebuilt.txt. Verbatim fast output:
+
+```text
++---------------------------+--------------+
+| Rust gate                 | Result       |
++---------------------------+--------------+
+| fmt                       | PASS         |
+| VT native fmt             | PASS         |
+| clippy                    | PASS         |
+| test                      | PASS         |
+| cargo-deny                | PASS         |
+| static builds             | FAIL (1)     |
++---------------------------+--------------+
+```

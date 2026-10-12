@@ -1,0 +1,33 @@
+Running as unit: run-p127695-i50411385.scope; invocation ID: a5ac35cf00214e4baa39844d05b72613
+   Compiling crossbeam-utils v0.8.23
+   Compiling libsqlite3-sys v0.30.1
+   Compiling either v1.18.0
+   Compiling openssl-sys v0.9.117
+   Compiling getrandom v0.4.3
+   Compiling hyper v1.11.1
+   Compiling regex-automata v0.4.18
+   Compiling nix v0.30.1
+   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/audit-ca-update/baseline/crates/infraternal-server)
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/.cache/codex-scratch/audit-ca-update/baseline/crates/infraternal-protocol)
+   Compiling uuid v1.27.0
+   Compiling crossbeam-queue v0.3.14
+   Compiling openssl v0.10.81
+   Compiling sqlx-core v0.8.6
+   Compiling hyper-util v0.1.21
+   Compiling matchers v0.2.0
+   Compiling axum v0.8.9
+   Compiling tracing-subscriber v0.3.23
+   Compiling sqlx-sqlite v0.8.6
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling tokio-openssl v0.6.5
+   Compiling sqlx-macros-core v0.8.6
+   Compiling axum-server v0.8.0
+   Compiling webauthn-rs-core v0.5.5
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/.cache/codex-scratch/audit-ca-update/baseline/crates/infraternal-plugin-api)
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/audit-ca-update/baseline/crates/infraternal-mesh)
+   Compiling webauthn-rs v0.5.5
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/audit-ca-update/baseline/crates/plugins/mesh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 26s
+  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_server-2e762f2bc8cf85aa)
