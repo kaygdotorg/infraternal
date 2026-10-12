@@ -26,7 +26,7 @@
  */
 import { createSpinner, hostIconMarkup, hostSourceIconMarkup, installFocusRing, mountChipInput, mountStepStatus, PaneStepper, Spring, springCheckbox, createKeyValueList } from "../../../../../packages/ui/src/index";
 import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusController, Tick, ToastController } from "../../../../../packages/ui/src/index";
-import { foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
+import { awaitingFresh, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
 import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../../provisioning-client";
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
@@ -63,6 +63,11 @@ interface Entry {
 
 /** One host of the batch; everything about its progress is `view`, folded from server events. */
 interface Job { entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean }
+
+/** What the person sees for a host: an attempt paused on leftovers reads as needing attention, like a failure. */
+const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : job.view.state;
+/** Still working without the person: not done, not failed, not paused. */
+const working = (job: Job): boolean => { const state = shownState(job); return state === "pending" || state === "running"; };
 
 export function platformOf(name: string | undefined): HostPlatform {
   const os = (name ?? "").toLowerCase();
@@ -594,7 +599,7 @@ export class Wizard {
       // A new host window takes the camera; the wizard stays where the person is looking while it still has work to show.
       if (this.jobs.some((item) => item.view.state === "pending" || item.view.state === "running" || item.view.state === "failed")) this.surface.reveal?.();
     }
-    if (job.view.state === "done" || job.view.state === "failed") this.settle();
+    if (job.view.state === "done" || shownState(job) === "failed") this.settle();
   }
 
   /** A refused command (for example the server's batch limit): shown on the hosts that had not started. */
@@ -617,8 +622,8 @@ export class Wizard {
       if (job.run !== run) continue;
       job.run = undefined;
       if (job.view.state === "pending" || job.view.state === "running") {
-        const message = "The connection to the server ended. Installation stopped; automatic cleanup may still need to finish.";
-        job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] } };
+        const message = "The connection to the server ended before setup finished.";
+        job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] }, leftovers: undefined };
         this.paint(job);
         changed = true;
       }
@@ -645,6 +650,23 @@ export class Wizard {
       run.start([start]);
       this.releaseRun(old);
     } else job.run?.retry(job.target);
+    if (this.page !== "progress") this.go("progress", -1);
+    else { this.paint(job); this.summarise(); }
+    this.setFoot("");
+  }
+
+  /**
+   * Removes what an earlier setup left on this host and continues the same attempt (#169). No confirmation: the
+   * server removes only what infraternal provably created. Without an open run (the connection ended) there is no
+   * attempt to continue, so a fresh run starts and finds the leftovers again with a new handle.
+   */
+  private startFresh(job: Job): void {
+    const leftovers = job.view.leftovers;
+    if (!leftovers || !job.run?.open) { this.retryJob(job); return; }
+    this.fixing = undefined;
+    // Same attempt number, and the sign-in that already succeeded stays on screen while the cleanup runs.
+    job.view = { ...pendingTarget(), attempt: job.view.attempt, authentication: job.view.authentication };
+    job.run.startFresh(job.target, leftovers.challenge);
     if (this.page !== "progress") this.go("progress", -1);
     else { this.paint(job); this.summarise(); }
     this.setFoot("");
@@ -686,9 +708,9 @@ export class Wizard {
 
   private footForProgress(): void {
     if (this.page !== "progress") return;
-    const settled = this.jobs.every((job) => job.view.state === "done" || job.view.state === "failed");
+    const settled = !this.jobs.some(working);
     if (!settled) { this.setFoot(""); return; }
-    const failed = this.jobs.some((job) => job.view.state === "failed");
+    const failed = this.jobs.some((job) => shownState(job) === "failed");
     const done = this.jobs.some((job) => job.view.state === "done");
     this.setFoot(failed
       ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${done ? "finish" : "back"}">${done ? "Close" : "Back"}</button>`
@@ -698,7 +720,7 @@ export class Wizard {
   private paint(job: Job, page: HTMLElement | undefined = this.current): void {
     const row = page?.dataset.page === "progress" ? page.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.target)}"]`) : null;
     if (!row) return;
-    const { state } = job.view;
+    const state = shownState(job);
     const stages = stagesOf(job.view);
     row.dataset.state = state;
     const active = stages.find((stage) => stage.state === "running" || stage.state === "failed");
@@ -711,13 +733,14 @@ export class Wizard {
       this.stageMarks.get(`${job.target}/${stage.id}`)?.set(stage.state);
       row.querySelectorAll<HTMLElement>(".ah-seg > span")[index]!.dataset.state = stage.state;
     });
-    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed";
     // "Fix" opens the page that can mend this failure; plain retries and dead ends have only the retry button.
+    // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
     const fix = state === "failed" ? guideFor(job.entry.label, job.view.failure).fix : "none";
+    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
-    // The button names what it opens.
-    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : "Install from the host";
+    // The button names what it opens or does.
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "start-fresh" ? "Start fresh" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -727,7 +750,7 @@ export class Wizard {
     const summary = page?.querySelector<HTMLElement>(".ah-summary");
     if (!summary) return;
     const done = this.jobs.filter((job) => job.view.state === "done").length;
-    const failed = this.jobs.filter((job) => job.view.state === "failed").length;
+    const failed = this.jobs.filter((job) => shownState(job) === "failed").length;
     const running = this.jobs.length - done - failed;
     summary.textContent = this.jobs.length === 1
       ? (running ? "Working out how to sign in, then installing." : done ? "Ready. The host is in your sidebar." : "This host needs attention.")
@@ -736,9 +759,9 @@ export class Wizard {
 
   /** When nothing is running: a lone failure gets its own page; a clean batch closes itself. */
   private settle(): void {
-    if (this.jobs.some((job) => job.view.state === "pending" || job.view.state === "running")) return;
+    if (this.jobs.some(working)) return;
     this.footForProgress();
-    const failed = this.jobs.filter((job) => job.view.state === "failed");
+    const failed = this.jobs.filter((job) => shownState(job) === "failed");
     if (!failed.length) { this.later(700, () => this.finish()); return; }
     if (this.jobs.length === 1 && this.page === "progress") this.later(500, () => { if (this.page === "progress") this.openFix(failed[0]!); });
   }
@@ -755,19 +778,21 @@ export class Wizard {
   // ── Failure, host key, choose a method, install ────────────────────────────
   private detailsOf(job: Job): string {
     const failure = job.view.failure;
-    const lines = [failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", failure ? `The server said: ${failure.message}` : "", ...(failure?.log_tail ?? [])].filter(Boolean);
+    const lines = [...(job.view.leftovers?.findings ?? []), failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", failure && failure.kind !== "stale_previous_attempt" ? `The server said: ${failure.message}` : "", ...(failure?.log_tail ?? [])].filter(Boolean);
     return lines.join("\n") || job.view.message;
   }
 
   private renderFailure(page: HTMLElement): void {
     const job = this.fixing!;
     const guide: Guide = guideFor(job.entry.label, job.view.failure);
-    page.innerHTML = `${this.hero(ICON.warning, "danger")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
-      <p class="ah-lede">${escapeHtml(guide.happened)}</p>
-      <p class="ah-text">${escapeHtml(guide.next)}</p>
+    // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
+    const icon = guide.fix === "start-fresh" ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
+    page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
+      <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
+      <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}
       <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(this.detailsOf(job))}</pre></details>`;
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${guide.fix === "none" ? "" : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>Retry</span></button>`}`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${guide.fix === "none" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
   }
 
   private renderHostKey(page: HTMLElement): void {
@@ -954,6 +979,7 @@ export class Wizard {
       if (!done.length) return;
       const failed = this.jobs.length - done.length;
       this.deps.toast.show({
+        ...(failed ? { tone: "error" as const } : {}),
         message: failed ? `${done.length} ${done.length === 1 ? "host is" : "hosts are"} ready. ${failed} didn't finish.` : done.length > 1 ? `${done.length} hosts are ready` : `${done[0]!.entry.label} is ready`,
       });
     });
@@ -1033,12 +1059,17 @@ export class Wizard {
     else if (action === "cancel-install") this.dismiss();
     else if (action === "reload") void this.loadDiscovery();
     else if (action === "retry") { if (this.fixing) this.retryJob(this.fixing); }
+    else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing); }
     else if (action === "install") { this.installFrom = this.page === "choose" ? "choose" : "failure"; this.go("install"); }
     else if (action === "back-install") this.go(this.installFrom, -1);
     else if (action === "trust-key") void this.trustKey();
     else if (action === "submit-method") void this.submitMethod();
     else if (action === "retry-job") { const job = jobOf(); if (job) this.retryJob(job); }
-    else if (action === "fix-job") { const job = jobOf(); if (job) this.openFix(job); }
+    else if (action === "fix-job") {
+      const job = jobOf();
+      // Leftovers are cleared right from the row; every other fix opens its own page.
+      if (job) { if (job.view.leftovers) this.startFresh(job); else this.openFix(job); }
+    }
     else if (action === "toggle-job") {
       const row = target.closest<HTMLElement>(".ah-run");
       if (!row) return;

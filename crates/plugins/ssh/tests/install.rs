@@ -8,7 +8,7 @@ use infraternal_plugin_ssh::{
     model::{Failure, InstallMode, Target, TargetAddress},
     transport::{CommandOutput, Input, Operation, Secret, SshSession},
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 use tokio::{io::AsyncWriteExt, process::Command};
 
 struct Local {
@@ -137,11 +137,23 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        // Test-owned leases must retire before their isolated directory disappears.
+        // Never inspect or signal a process outside this fixture's exact journal.
+        let stage = self.base().join(".bootstrap-lock");
+        if stage.is_dir() {
+            let script = format!(
+                "set -eu\nstage={}\n{}\nretire_setup_lease",
+                infraternal_plugin_ssh::transport::shell_quote(stage.to_str().unwrap()),
+                include_str!("../src/setup_lock.sh")
+            );
+            let _ = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .output();
+        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 fn executable(path: &std::path::Path, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, text).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
@@ -213,7 +225,6 @@ async fn breakit2_rollback_preserves_foreign_unit_new() {
 
 #[tokio::test]
 async fn breakit2_stage_refuses_parent_that_cannot_be_rolled_back() {
-    use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     let parent = fixture.root.join(".local/share");
     std::fs::create_dir_all(&parent).unwrap();
@@ -356,7 +367,6 @@ async fn retry_resends_payload_when_cache_content_changes() {
 
 #[tokio::test]
 async fn payload_reuse_never_adopts_a_foreign_cache_directory() {
-    use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     let cache = fixture.base().with_file_name("infraternal.bootstrap-cache");
     std::fs::create_dir_all(&cache).unwrap();
@@ -662,7 +672,6 @@ async fn interrupted_restore_recreates_links_without_deleting_the_original() {
 
 #[tokio::test]
 async fn writable_installation_is_refused_before_upload_or_cleanup() {
-    use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
     transaction.stage(&fixture.binary).await.unwrap();
@@ -913,7 +922,6 @@ async fn pending_fresh_cleanup_refuses_replacement_staging_until_finished() {
 
 #[tokio::test]
 async fn cleanup_receipt_cannot_authorize_a_replaced_unowned_directory() {
-    use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
     transaction.stage(&fixture.binary).await.unwrap();
@@ -984,7 +992,6 @@ async fn malformed_or_exposed_cleanup_receipts_never_remove_the_owned_root() {
 
 #[tokio::test]
 async fn fresh_cleanup_refuses_a_shared_writable_receipt_parent_before_mutation() {
-    use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
     transaction.stage(&fixture.binary).await.unwrap();
@@ -1162,4 +1169,30 @@ async fn enrollment_process_exit_71_is_not_reported_as_directory_refusal() {
             .starts_with("Joining the host to this server failed.")
     );
     assert!(!failure.message.contains("Move it aside"));
+}
+
+#[tokio::test]
+async fn setup_transaction_holds_a_live_lock_between_shell_commands() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let stage = fixture.base().join(".bootstrap-lock");
+    let script = format!(
+        "exec 9< {}; flock -n 9 || exit 73",
+        infraternal_plugin_ssh::transport::shell_quote(stage.to_str().unwrap())
+    );
+    assert_eq!(
+        session
+            .run(&script, Input::Empty)
+            .await
+            .err()
+            .unwrap()
+            .exit_status,
+        Some(73)
+    );
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
 }

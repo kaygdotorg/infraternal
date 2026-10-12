@@ -180,6 +180,18 @@ pub enum FailureKind {
     HostKey,
     Unsupported,
     Install,
+    #[serde(rename = "stale_previous_attempt")]
+    StalePreviousAttempt,
+    #[serde(rename = "setup_running")]
+    SetupRunning,
+}
+
+/// Public, bounded findings from a host-local ownership check; paths belong in Details.
+#[derive(Clone, Debug, Serialize)]
+pub struct Leftovers {
+    pub challenge: uuid::Uuid,
+    pub mode: InstallMode,
+    pub findings: Vec<&'static str>,
 }
 
 /// Trusted installation boundary; no request chooses its diagnostic context.
@@ -290,18 +302,20 @@ impl Failure {
             return self;
         }
         match (self.exit_status, mode) {
-            (Some(71 | 72), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
+            (Some(71..=73), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
                 self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
             }
             (Some(71), InstallMode::Root) => {
                 self.message = "An existing folder /var/lib/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside with administrator access, then try again.";
             }
-            (Some(72), InstallMode::Rootless) => {
-                self.message = "Setup found a lock or unfinished rollback in ~/.local/share/infraternal on this host. Check whether setup is still running. Finish its cleanup, then try again.";
+            (Some(72), _) => {
+                self.message = "Host provisioning found another setup attempt. Retry the host check to continue.";
             }
-            (Some(72), InstallMode::Root) => {
-                self.message = "Setup found a lock or unfinished rollback in /var/lib/infraternal on this host. Check whether setup is still running. Finish its cleanup with administrator access, then try again.";
+            (Some(73), _) => {
+                self.kind = FailureKind::SetupRunning;
+                self.message =
+                    "Setup is already running on this host. Wait for it to finish, then try again.";
             }
             _ => {}
         }
@@ -372,4 +386,6 @@ pub struct Event {
     pub host_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers: Option<Box<Leftovers>>,
 }

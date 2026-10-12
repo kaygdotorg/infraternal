@@ -9,6 +9,7 @@
  *   own text is shown beside it and is never matched on (contracts/ssh-bootstrap.md).
  * - `parseTarget` and `parseSshConfig` read what the person types or pastes into the host field.
  */
+import { awaitingFresh } from "../../provisioning-client";
 import type { AuthenticationInfo, FailureDetail, FailureKind, NetworkProvider, TargetView } from "../../provisioning-client";
 
 export type StageId = "detect" | "connect" | "install" | "enrol" | "session";
@@ -39,6 +40,8 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "host-key": return "This host's key needs your OK";
     case "auth": return "Couldn't sign in to this host";
     case "unsupported": return "This host can't run the infraternal agent yet";
+    case "stale_previous_attempt": return "Leftovers from an earlier setup";
+    case "setup_running": return "Setup is already running on this host";
     case "install": if (failure.already_added) return failure.message; if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`; return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
     default: return "Something went wrong while setting up this host. Try again.";
   }
@@ -77,72 +80,103 @@ export function stagesOf(view: TargetView): StageView[] {
     if (view.state === "done") state = "done";
     else if (view.state !== "pending") {
       if (index < at) state = "done";
-      else if (index === at) state = view.state === "failed" ? "failed" : "running";
+      // A pause on leftovers waits for the person; it is not a spinner.
+      else if (index === at) state = view.state === "failed" || awaitingFresh(view) ? "failed" : "running";
     }
     let detail = "";
     if (stage.id === "detect" && view.authentication && state === "done") detail = `Signed in with ${authLabel(view.authentication)}`;
     // A running stage's text is the server's latest message, which the host's header line already shows;
     // repeating it under the stage name would say everything twice.
-    else if (index === at && view.state === "failed") detail = failureLine(view.failure);
+    else if (index === at && (view.state === "failed" || awaitingFresh(view))) detail = failureLine(view.failure);
     return { id: stage.id, label: stage.label, state, detail };
   });
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "none";
 
-export interface Guide { title: string; happened: string; next: string; fix: FixAction }
+/**
+ * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
+ * running), "danger" for a real failure. The icon follows it (TASTE: the icon matches the news).
+ */
+export interface Guide { title: string; happened: string; next: string; fix: FixAction; tone: "info" | "danger" }
+
+/** What to do after an install failure, by the step that stopped. Without a step nothing more is known. */
+export const STEP_ADVICE: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
+  connect: "The connection to the host dropped. Make sure it is still on, then try again.",
+  upload: "Copying the infraternal agent to the host didn't finish. Try again.",
+  install: "Installing the infraternal agent stopped partway. Try again, or open the details to see where.",
+  join: "The host couldn't join this server. Try again in a moment.",
+  start: "The infraternal agent was installed but didn't start. Try again, or open the details to see why.",
+  readiness: "The host joined, but its terminal wasn't ready yet. Try again in a moment.",
+};
+const GENERIC_ADVICE = "Try again, or open the details to see where it stopped.";
 
 /** Plain-language account of a failed host. `name` is what the person typed or picked. */
 export function guideFor(name: string, failure: FailureDetail | undefined): Guide {
-  if (failure?.already_added) return { title: `${name} is already added`, happened: failure.message, next: "Open its terminal from Console or the command palette.", fix: "none" };
+  if (failure?.already_added) return { title: `${name} is already added`, happened: failure.message, next: "Open its terminal from Console or the command palette.", fix: "none", tone: "info" };
   switch (failure?.kind) {
     case "unreachable": return {
       title: `${name} isn't answering`,
       happened: `We couldn't reach ${name} to sign in.`,
       next: "Check that it is turned on and on the network, then try again. If this server can't reach it, install from the host instead.",
-      fix: "install-command",
+      fix: "install-command", tone: "danger",
     };
     case "mesh-policy": return {
       title: `This server can't connect to ${name}`,
       happened: `${name} is on your network, but this server can't open a connection to it. A network access rule may be blocking it.`,
       next: "Ask whoever manages your network to let this server connect to it, then try again.",
-      fix: "retry",
+      fix: "retry", tone: "danger",
     };
     case "host-key": return {
       title: `${name} needs your OK`,
       happened: `${name} showed a security key this server hasn't seen before.`,
       next: "Compare the fingerprint with the one on the host before you trust it.",
-      fix: failure.fingerprints?.length ? "host-key" : "retry",
+      fix: failure.fingerprints?.length ? "host-key" : "retry", tone: "danger",
     };
     case "auth": return failure.choose_method ? {
       title: `Couldn't sign in to ${name}`,
       happened: "The sign-in methods tried so far didn't get in.",
       next: "Choose another way to sign in, or give this server's key to the host.",
-      fix: "choose-method",
+      fix: "choose-method", tone: "danger",
     } : {
       title: `${name} turned the sign-in down`,
       happened: `${name} answered but wouldn't accept how this server signed in.`,
       next: "Try again, or choose another way to sign in.",
-      fix: "choose-method",
+      fix: "choose-method", tone: "danger",
     };
     case "unsupported": return {
       title: `${name} can't run the infraternal agent yet`,
       happened: "This host is missing something the infraternal agent needs.",
       next: "Use a Linux host (Intel, AMD or ARM) with systemd, then add it again.",
       fix: "none",
+      tone: "danger",
+    };
+    case "stale_previous_attempt": return {
+      title: "This host has leftovers from an earlier setup",
+      happened: "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
+      next: "",
+      fix: "start-fresh",
+      tone: "info",
+    };
+    case "setup_running": return {
+      title: "Setup is already running on this host",
+      happened: "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
+      next: "",
+      fix: "retry",
+      tone: "info",
     };
     case "install": return {
       title: `Setting up ${name} didn't finish`,
       happened: failure.failed_step ? failureLine(failure) : "Setup stopped before this host was ready.",
-      next: "Open the details, restore access to the host if needed, then try again.",
-      fix: "retry",
+      next: failure.missing_binary ? "Add the file on the server, then try again." : failure.failed_step ? STEP_ADVICE[failure.failed_step] : GENERIC_ADVICE,
+      fix: "retry", tone: "danger",
     };
     default: return {
       title: `Something went wrong with ${name}`,
       happened: "Something went wrong while setting up this host.",
       next: "Try again.",
-      fix: "retry",
+      fix: "retry", tone: "danger",
     };
   }
 }

@@ -111,3 +111,17 @@ fn passwordless_sudo_keeps_default_rootless_without_explicit_consent() {
     assert!(target.validate().is_ok());
     assert!(check.authorize_mode(target.mode).is_ok());
 }
+
+#[test]
+fn start_fresh_is_declared_as_an_owned_host_provisioning_action() {
+    let action = infraternal_plugin_ssh::manifest::DESCRIPTOR
+        .actions
+        .iter()
+        .find(|action| action.id == "ssh.start-fresh")
+        .unwrap();
+    assert_eq!(action.summary, "Start fresh on a host");
+    assert!(matches!(
+        action.permission,
+        infraternal_plugin_api::Permission::One("ssh.manage")
+    ));
+}

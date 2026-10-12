@@ -25,6 +25,8 @@ export const ICONS = {
   newRight: '<rect x="3.5" y="4.5" width="8" height="15" rx="2.5"/><path d="M17 9.5v5M14.5 12h5"/>',
   newBelow: '<rect x="4.5" y="3.5" width="15" height="8" rx="2.5"/><path d="M12 16.5v5M9.5 19h5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  // A caution triangle: a failure or a lost connection (the shared toast shows it for its error tone).
+  warning: '<path d="M10.3 4.6 2.9 17.5A2 2 0 0 0 4.6 20.5h14.8a2 2 0 0 0 1.7-3L13.7 4.6a2 2 0 0 0-3.4 0z"/><path d="M12 9.5v4M12 17h.01"/>',
   sidebar: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/>',
   close: '<path d="m7 7 10 10M17 7 7 17"/>',
   expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
