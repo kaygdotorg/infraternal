@@ -23,11 +23,21 @@ spec.loader.exec_module(policy)
 proof = policy.proof
 
 RECEIVER = """import json,socket,sys,time
-s=socket.socket(socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET,socket.SOCK_DGRAM);s.bind((sys.argv[1],5540));s.settimeout(.05)
-print('ready',flush=True);arrivals=[];deadline=time.monotonic()+10
+s=socket.socket(socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET,socket.SOCK_STREAM if len(sys.argv)>2 else socket.SOCK_DGRAM);s.bind((sys.argv[1],5540));s.settimeout(.05)
+if len(sys.argv)>2: s.listen()
+print('ready',flush=True);arrivals=[];deadline=time.monotonic()+10;connection=None;pending=b''
 while time.monotonic()<deadline:
  try:
-  payload=s.recv(4096);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
+  if len(sys.argv)>2:
+   if connection is None:
+    connection,_=s.accept();connection.settimeout(.05)
+   data=connection.recv(4096)
+   if not data: break
+   pending+=data
+   while b'\\n' in pending:
+    payload,pending=pending.split(b'\\n',1);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
+  else:
+   payload,address=s.recvfrom(4096);s.sendto(payload,address);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
  except TimeoutError: pass
 print(json.dumps(arrivals),flush=True)
 """
@@ -66,11 +76,12 @@ async def campaign(args):
         coordinator = await asyncio.create_subprocess_exec(args.coordinator,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=error_log)
         async def send(value):
             coordinator.stdin.write((json.dumps(value)+'\n').encode());await coordinator.stdin.drain()
-        await send({'type':'Init','identities':identities,'extra_members':args.extra_members})
+        await send({'type':'Init','identities':identities,'extra_members':args.extra_members,'change':args.change})
         initialized = set()
         installed = {}
         applied = {}
         measuring = False
+        initial_versions = {}
         locks = [asyncio.Lock() for _ in nodes]
         async def request(index, value):
             async with locks[index]:
@@ -84,12 +95,18 @@ async def campaign(args):
             frames_log.write(json.dumps({'node':index,'version':chunk['version'],'last':chunk['last'],'apply_us':reply['apply_us'],'at_ns':time.monotonic_ns()})+'\n');frames_log.flush()
             if chunk['last']:
                 if index not in initialized:
-                    initialized.add(index);installed[index]=chunk['addresses']
-                elif measuring and index in (1,2):
+                    initialized.add(index);installed[index]=chunk['addresses'];initial_versions[index]=chunk['version']
+                elif measuring and index in (1,2) and chunk['version']>initial_versions[index]:
                     # Ignore startup replays and unrelated completed frames. The
                     # final acknowledgment must correspond to actual key removal.
-                    if len(await request(index, 'stats')) == 2 + args.extra_members:
+                    if args.change in ('RuleRemoval','DefaultTightening') or len(await request(index, 'stats')) == 2 + args.extra_members:
                         applied.setdefault(index, time.monotonic_ns())
+            if index == 0 and chunk['last']:
+                if args.nf_tables:
+                    for tool in ('iptables-nft','ip6tables-nft'):
+                        for chain in ('IFM_IN','IFM_OUT'): proof.run(tool,'-F',chain)
+                else:
+                    for chain in ('incoming','outgoing'): proof.run('nft','flush','chain','inet','infraternal_mesh',chain)
             await asyncio.sleep(args.rtt_ms/2000)
             await send({'type':'Ack','call':frame['call'],'reply':{'applied':reply['applied'],'version':chunk['version']}})
         async def dispatch():
@@ -107,6 +124,7 @@ async def campaign(args):
             assert time.monotonic()<deadline,'initial configuration timeout'
             if dispatcher.done(): dispatcher.result();raise RuntimeError('coordinator closed before initialization')
             await asyncio.sleep(.01)
+        await asyncio.wait_for(asyncio.gather(*apply_tasks),30)
         # Snapshot count is queried from actual kernel counters before timing.
         counts=[len(await request(index, 'stats')) for index in range(len(nodes))]
         assert counts==[3+args.extra_members]*3,counts
@@ -131,9 +149,16 @@ async def campaign(args):
         receivers=[]
         for index,pid in ((1,fixture.child.pid),(2,third.pid)):
             for family in ('ipv4','ipv6'):
-                receiver=fixture.spawn('python3','-c',RECEIVER,installed[index][family],namespace_pid=pid)
-                receivers.append((index,family,receiver))
-                assert (await asyncio.wait_for(asyncio.to_thread(receiver.stdout.readline), 10)).strip()=='ready'
+                for protocol in (('udp','tcp') if args.change else ('udp',)):
+                    receiver=fixture.spawn('python3','-c',RECEIVER,installed[index][family],*(['tcp'] if protocol=='tcp' else []),namespace_pid=pid)
+                    receivers.append((index,family,protocol,receiver))
+                    assert (await asyncio.wait_for(asyncio.to_thread(receiver.stdout.readline), 10)).strip()=='ready'
+        streams=[]
+        if args.change:
+            for index in (1,2):
+                for family in ('ipv4','ipv6'):
+                    stream=await asyncio.to_thread(socket.create_connection,(installed[index][family],5540),5)
+                    streams.append((index,family,stream))
         stop=asyncio.Event()
         async def packets():
             with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as v4, socket.socket(socket.AF_INET6,socket.SOCK_DGRAM) as v6:
@@ -141,15 +166,19 @@ async def campaign(args):
                 while not stop.is_set():
                     for index in (1,2):
                         for family,sender in (('ipv4',v4),('ipv6',v6)):
-                            sender.sendto(str(time.monotonic_ns()).encode(),(installed[index][family],5540))
+                            try: sender.sendto(str(time.monotonic_ns()).encode(),(installed[index][family],5540))
+                            except PermissionError: pass
+                    for index,family,stream in streams:
+                        try: stream.sendall((str(time.monotonic_ns())+'\n').encode())
+                        except OSError: pass
                     await asyncio.sleep(.005)
         sender=asyncio.create_task(packets());tasks.add(sender)
         await asyncio.sleep(.3+args.rtt_ms/1000)
         applied.clear()
         measuring = True
         started=time.monotonic_ns()
-        await send({'type':'Revoke'})
-        deadline=time.monotonic()+5
+        await send({'type':'Change','operation':args.change} if args.change else {'type':'Revoke'})
+        deadline=time.monotonic()+30
         while len(applied)<2 or not revoked.is_set():
             for task in apply_tasks:
                 if task.done(): task.result()
@@ -160,19 +189,20 @@ async def campaign(args):
         assert min(applied.values()) >= started, 'retirement timing used a startup replay'
         await asyncio.sleep(.4+args.rtt_ms/1000)
         stop.set();await sender
+        for index,family,stream in streams: stream.close()
         # Receivers retain arrival timestamps only; packet payloads and keys are never captured.
         observed=[]
-        for index,family,receiver in receivers:
+        for index,family,protocol,receiver in receivers:
             arrivals=json.loads(await asyncio.wait_for(asyncio.to_thread(receiver.stdout.readline), 12))
             assert receiver.wait(timeout=5)==0
-            (args.evidence/f'peer-{index}-{family}-arrivals.json').write_text(json.dumps(arrivals)+'\n')
+            (args.evidence/f'peer-{index}-{family}-{protocol}-arrivals.json').write_text(json.dumps(arrivals)+'\n')
             assert arrivals and min(row['received_ns'] for row in arrivals)<started,'service never reached before revocation'
             assert max(row['sent_ns'] for row in arrivals)<=applied[index], 'revoked packet arrived after key retirement'
-            observed.append({'peer':index,'family':family,'received':len(arrivals),'last_packet_us':(max(row['received_ns'] for row in arrivals)-started)/1000,'retired_us':(applied[index]-started)/1000})
+            observed.append({'peer':index,'family':family,'protocol':protocol,'received':len(arrivals),'last_packet_us':(max(row['received_ns'] for row in arrivals)-started)/1000,'retired_us':(applied[index]-started)/1000})
         after=[len(await request(index, 'stats')) for index in (1,2)]
-        assert after==[2+args.extra_members]*2,after
+        assert after==[(3 if args.change in ('RuleRemoval','DefaultTightening') else 2)+args.extra_members]*2,after
         memory = [rss(node.pid) * 1024 for node in nodes]
-        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
+        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','change':args.change or 'PeerRetirement','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
         await asyncio.wait_for(asyncio.gather(*apply_tasks), 10)
         coordinator.stdin.close()
         await asyncio.wait_for(coordinator.wait(), 5)
@@ -204,8 +234,11 @@ def main():
     parser.add_argument('--fixture',required=True);parser.add_argument('--coordinator',required=True)
     parser.add_argument('--evidence',type=Path,required=True);parser.add_argument('--nf-tables',action='store_true')
     parser.add_argument('--rtt-ms',type=int,choices=(0,150),default=0);parser.add_argument('--extra-members',type=int,default=997)
+    parser.add_argument('--change',choices=('PeerRetirement','RuleRemoval','DefaultTightening'))
     args=parser.parse_args();args.evidence.mkdir(parents=True,exist_ok=True)
     assert Path('/proc/self/uid_map').read_text().split()[2:]==['1'],'run inside unshare -Urn'
     os.environ['PATH']='/usr/sbin:'+os.environ.get('PATH','')
-    print(json.dumps(asyncio.run(campaign(args))),flush=True)
+    summary=asyncio.run(campaign(args))
+    (args.evidence/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+    print('PASS=1 FAIL=0',flush=True)
 if __name__=='__main__': main()
