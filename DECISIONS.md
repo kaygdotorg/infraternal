@@ -2489,3 +2489,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      the page for people with the apps (macOS, iOS, later Windows) and the
      CLI, added when apps ship. Both are served by the infraternal server
      itself, never by a third party.
+259. **Reconnect has two budgets (owner, 2026-10-12, #192):** (1) the
+     session's last screen is back within one frame (16 ms; 8 ms at 120 Hz),
+     drawn from the copy the client already holds, with a subtle sign that it
+     is catching up; (2) the terminal is up to date and typable within one
+     round trip + 50 ms after the network path recovers (about 200 ms
+     India–Germany). Keystrokes typed meanwhile get normal prediction (D130).
+     The goal is that reconnecting feels instant, while the second number keeps
+     the claim honest. Full-screen prediction, a latest-screen view lane and a
+     UDP transport for mesh SSH are decided only after measurement.
