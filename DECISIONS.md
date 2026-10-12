@@ -2434,3 +2434,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Built by us:** boot-request answering, TFTP and HTTP serving in Rust
        inside the plugin; iPXE shipped as separate boot files (licence
        checked per build); measured against dnsmasq before shipping.
+254. **App windows run at the display's refresh rate (owner, 2026-10-12;
+     amends D232):** an app window updates at 60 fps, and at 120 fps on a
+     120 Hz screen, whenever the source changes that fast, and does no work
+     when nothing changes. The target is "super responsive": damage-only
+     updates, zero-copy capture, one encode per source shared by every
+     viewer, frame pacing to the viewer's display, and drop-to-newest for
+     slow viewers; input-to-photon latency is measured end to end at 60 and
+     120 fps. Codec, encoder and capture-engine choices are measured and
+     brought to the owner.
