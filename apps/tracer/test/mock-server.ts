@@ -786,6 +786,10 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
         return;
       }
+      if (connection.welcomed && frame.callId > 0 && frame.actionId === "remote.host.list") {
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"hosts":[],"next":null}') });
+        return;
+      }
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read") {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"os":"Linux"}') });
         return;
@@ -816,6 +820,7 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       return;
     }
     case "Subscribe":
+      if (JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "remote.hosts") return;
       if (frame.subId === 45 && new TextDecoder().decode(frame.filterJson) === '{"topic":"auth.recovery"}') return;
       if (JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "terminal.sessions") {
         connection.sessionInventorySubscriptions.add(frame.subId);

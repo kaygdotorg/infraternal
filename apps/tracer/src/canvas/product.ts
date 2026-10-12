@@ -32,6 +32,7 @@ import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
+import { syncAdmittedHosts } from "./sessions/hosts";
 import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
 import type { DetailsSourceLoader } from "./windows/details-source";
@@ -174,11 +175,17 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   canvasReady();
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
   if (first) canvas.cx.win.setActive(first);
+  const offHosts = syncAdmittedHosts(connection, { replaceHosts(hosts) {
+    const removed = new Set(sessions.replaceHosts(hosts));
+    for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId && removed.has(rec.model.hostId)) canvas.cx.win.close(rec);
+    if (removed.size) canvas.flush();
+  } });
   return {
     canvas, sessions, connection,
     dispose() {
       canvas.flush();
       offRoundTrip();
+      offHosts();
       offSessionInventory();
       authority.dispose();
       offMeshView();
