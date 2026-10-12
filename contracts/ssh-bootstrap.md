@@ -351,3 +351,7 @@ check. Arbitrary stdout/stderr remains withheld. One server log line per failed
 attempt contains only host UUID (unassigned before issuance), target id, step,
 exit status and static mode; cleanup warnings do not replace the original phase.
 The existing dialog Details disclosure shows the trusted failed-step label.
+
+The optional trusted `failed_step` also admits `readiness` for private terminal
+open, attach, output and cleanup failures. It uses the same server log and
+Details disclosure, without adding a progress stage or exposing remote output.
