@@ -1312,3 +1312,208 @@ fn earlier_attempt_classification_preserves_status_boundary_and_authentication()
         );
     }
 }
+
+#[tokio::test]
+async fn start_fresh_resumes_the_same_attempt_after_owner_confirmation() {
+    exercise_start_fresh(false).await;
+}
+
+#[tokio::test]
+async fn turning_off_paused_host_provisioning_preserves_earlier_leftovers() {
+    exercise_start_fresh(true).await;
+}
+
+// Reuse one real-filesystem fixture for completion and component cancellation.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the real shell fixture and same-attempt admission assertions together."
+)]
+async fn exercise_start_fresh(turn_off: bool) {
+    use infraternal_plugin_api::{ComponentPlugin, PluginState};
+    use infraternal_plugin_ssh::{
+        bootstrap::{Authority, Backend, Bootstrap, Resolved},
+        install::BinaryPaths,
+        model::{Destination, MeshEvidence, Step},
+        probe::Check,
+        transport::{Credentials, SshTransport},
+    };
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Ready {
+        host: uuid::Uuid,
+        invitations: AtomicUsize,
+        recoveries: Mutex<Vec<&'static str>>,
+    }
+    impl Backend for Ready {
+        fn resolve<'a>(
+            &'a self,
+            _: &'a Authority,
+            _: &'a Target,
+            _: Option<&'a str>,
+        ) -> Operation<'a, Resolved> {
+            Box::pin(async {
+                Ok(Resolved {
+                    destination: Destination::parse("user@fixture").unwrap(),
+                    credentials: Credentials::Network,
+                    mesh: MeshEvidence::default(),
+                })
+            })
+        }
+        fn invitation<'a>(
+            &'a self,
+            _: &'a Authority,
+            _: &'a Target,
+            _: &'a Check,
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.invitations.fetch_add(1, Ordering::SeqCst);
+                Ok(JoinMaterial {
+                    host: self.host,
+                    url: "https://fixture.invalid/join".into(),
+                    stdin: Secret::new(b"synthetic-capability\n".to_vec()),
+                })
+            })
+        }
+        fn connected_facts<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn terminal_canary<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn record_start_fresh(
+            &self,
+            _: &Target,
+            _: uuid::Uuid,
+            _: uuid::Uuid,
+            outcome: &'static str,
+        ) {
+            self.recoveries.lock().unwrap().push(outcome);
+        }
+        fn failed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    struct Transport {
+        root: PathBuf,
+    }
+    impl SshTransport for Transport {
+        fn open(
+            &self,
+            _: Destination,
+            _: Credentials,
+            _: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            Box::pin(async move {
+                Ok(Arc::new(Local {
+                    root: self.root.clone(),
+                }) as Arc<dyn SshSession>)
+            })
+        }
+    }
+    let fixture = Fixture::new();
+    let old = fixture.transaction();
+    old.stage(&fixture.binary).await.unwrap();
+    // A foreign root entry preserves the original journal through rollback.
+    let foreign = fixture.base().join("keep");
+    std::fs::write(&foreign, "foreign data").unwrap();
+    assert!(old.rollback().await.is_err());
+    std::fs::remove_file(&foreign).unwrap();
+    let backend = Arc::new(Ready {
+        host: fixture.join.host,
+        invitations: AtomicUsize::new(0),
+        recoveries: Mutex::new(Vec::new()),
+    });
+    let runner = Bootstrap::new(
+        Arc::new(Transport {
+            root: fixture.root.clone(),
+        }),
+        backend.clone(),
+        BinaryPaths {
+            x86_64: fixture.binary.clone(),
+            aarch64: fixture.binary.clone(),
+        },
+    );
+    let batch = runner
+        .start("owner".into(), vec![fixture.target.clone()], None)
+        .unwrap();
+    let mut changes = batch.subscribe();
+    let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let (_, events) = batch.events(0);
+            if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
+                assert_eq!(event.attempt, 1);
+                assert!(event.host_id.is_none(), "pause must precede enrollment");
+                return event.leftovers.as_ref().unwrap().challenge;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+    assert!(backend.recoveries.lock().unwrap().is_empty());
+    if turn_off {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            runner.set_enabled(false),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(runner.status().state, PluginState::Off);
+        assert_eq!(runner.status().active_work, 0);
+        assert!(fixture.receipt().exists());
+        assert!(fixture.base().join(".bootstrap-owner").exists());
+        assert!(backend.recoveries.lock().unwrap().is_empty());
+        assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+        assert!(
+            runner
+                .start_fresh(&batch, "owner", "one", challenge)
+                .is_err()
+        );
+        return;
+    }
+    assert!(
+        runner
+            .start_fresh(&batch, "other-owner", "one", challenge)
+            .is_err()
+    );
+    assert!(
+        runner
+            .start_fresh(&batch, "owner", "one", uuid::Uuid::new_v4())
+            .is_err()
+    );
+    runner
+        .start_fresh(&batch, "owner", "one", challenge)
+        .unwrap();
+    assert!(
+        runner
+            .start_fresh(&batch, "owner", "one", challenge)
+            .is_err()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let (_, events) = batch.events(0);
+            if let Some(event) = events
+                .iter()
+                .find(|event| matches!(event.step, Step::Done | Step::Failed))
+            {
+                assert_eq!(event.step, Step::Done, "{}", event.message);
+                assert_eq!(event.attempt, 1);
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(fixture.base().join("bin/current").exists());
+    assert!(!fixture.base().join(".bootstrap-lock").exists());
+    assert_eq!(backend.invitations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *backend.recoveries.lock().unwrap(),
+        vec!["started", "completed"]
+    );
+}

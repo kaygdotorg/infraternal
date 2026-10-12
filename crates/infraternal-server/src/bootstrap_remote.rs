@@ -308,6 +308,16 @@ impl Backend for RemoteBackend {
                 .map_err(|error| error.at(InstallStep::Readiness))
         })
     }
+    fn record_start_fresh(
+        &self,
+        target: &Target,
+        host: Uuid,
+        transaction: Uuid,
+        outcome: &'static str,
+    ) {
+        self.base
+            .record_start_fresh(target, host, transaction, outcome);
+    }
     fn record_failure(
         &self,
         target: &Target,
@@ -607,7 +617,7 @@ mod tests {
     impl SshSession for Sniff {
         fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
             Box::pin(async move {
-                if script != infraternal_plugin_ssh::probe::CHECK_SCRIPT {
+                if !script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) {
                     // Staging failure still requests rollback. Refuse cleanup
                     // safely so the backend must retire its public authority
                     // even when the host cannot be reached.
@@ -617,7 +627,7 @@ mod tests {
                 }
                 Ok(CommandOutput {
                     stdout:
-                        b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n"
+                        b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n"
                             .to_vec(),
                 })
             })
