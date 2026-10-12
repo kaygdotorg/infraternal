@@ -363,6 +363,12 @@ The optional trusted `failed_step` also admits `readiness` for private terminal
 open, attach, output and cleanup failures. It uses the same server log and
 Details disclosure, without adding a progress stage or exposing remote output.
 
+Readiness retains its primary attachment through the marker and matching
+authenticated status-zero `terminal.exited` notice. That notice proves the
+private command's retirement; success does not open another writer. Ownership
+is cleared synchronously before the subsequent authorization await. An error,
+timeout or cancellation before proof retains the exact session for recovery.
+
 ### Verified payload reuse (#169)
 
 An SSH installation may retain one public executable in a private marked
