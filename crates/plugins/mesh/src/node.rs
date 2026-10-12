@@ -381,11 +381,26 @@ impl Node {
             .as_ref()
             .is_some_and(|old| old.version == config.version)
         {
-            // Only a complete identical replay may reuse an accepted version.
-            // Compare after the final chunk so reconnect snapshots remain useful [166].
-            return Err(io::ErrorKind::InvalidData.into());
+            return self.upgrade_legacy_binding(config);
         }
         self.apply(config)?;
+        Ok(true)
+    }
+    fn upgrade_legacy_binding(&mut self, config: Config) -> io::Result<bool> {
+        // The staging fence has already matched a present binding to the enabled
+        // kernel key. Only this previously absent metadata may change at an
+        // accepted revision; compare every prior field after the final chunk.
+        let old = self.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+        if old.local_key.is_some() || config.local_key.is_none() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mut bound = old.clone();
+        bound.local_key = config.local_key;
+        if bound != config {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.save(Some(&config), true)?;
+        self.config = Some(config);
         Ok(true)
     }
     // Keep transition ingress protection available before any address mutation.
