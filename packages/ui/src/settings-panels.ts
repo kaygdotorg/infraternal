@@ -51,7 +51,11 @@ function heading(text: string): HTMLElement {
 
 export interface ChoiceItem { id: string; label: string; hint?: string; swatch?: { bg: string; accent: string } }
 
-/** A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one. */
+/**
+ * A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one.
+ * The name never wraps; when name and hint do not share a line, the hint drops under the name (CSS flex-wrap, see
+ * `.ui-sp-text`), so text never collides at any width (TASTE: "Text never collides").
+ */
 function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void): HTMLElement {
   const block = document.createElement("section");
   block.append(heading(title));
@@ -65,7 +69,7 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
     row.className = "ui-sp-row";
     row.dataset.id = item.id;
     row.setAttribute("role", "radio");
-    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-label"></span><span class="ui-sp-hint"></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
+    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-text"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
     (row.querySelector(".ui-sp-label") as HTMLElement).textContent = item.label;
     (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = item.hint ?? "";
     const sw = row.querySelector<HTMLElement>(".ui-sp-swatch");
