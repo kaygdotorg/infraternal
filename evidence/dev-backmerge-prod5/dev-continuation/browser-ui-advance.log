@@ -1,0 +1,15 @@
+Running as unit: run-p1470386-i18245317.scope; invocation ID: 93a0396dc3244d7cbe1ec18f2b022b09
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-bj168hg2.js, chunk-px28wsnv.js, chunk-gg53rknn.js, chunk-h1gqs6ae.js, chunk-ep5nzq56.js, chunk-mzxm45g7.js, chunk-2npvgzj9.js, chunk-84gsmjrp.js, chunk-1axgnrp1.js, chunk-403gqpdz.js, chunk-7839dkcp.js, chunk-53ka8tp5.js, chunk-6gtm055g.js, chunk-f9rbz7m0.js, chunk-wa2j6rpv.js, chunk-8vy094e1.js, chunk-3fg9yekz.js, chunk-g2gh0ry9.js, chunk-x2ee9rhy.js, chunk-amvz8ph5.js, chunk-jk7e8nfa.js, chunk-na49xj9e.js, main.js, chunk-8n70sfjx.js, chunk-fn4w1xnh.js, chunk-9dhw6tbb.js, chunk-qaz1ez0w.js, chunk-yp9wns0w.js, chunk-qhy37c87.js, chunk-5wnypwr3.js, chunk-8gqdshxw.js, chunk-46ty5gww.js, chunk-fyvmdwkc.js, chunk-fr74cefy.js, chunk-cgj2hv56.js, chunk-47adfskh.js, chunk-78hd2efb.js, chunk-y5t3pc9v.js, chunk-dq4dsytp.js, chunk-jzbvvb6j.js, chunk-sphzych1.js, chunk-axbkkqp1.js, chunk-s0n1pdsb.js, chunk-0s995szy.js, chunk-1vy70qsp.js, chunk-gy4vhykb.js, chunk-tpep6y2j.js, chunk-bdtja7r6.js, chunk-7k7rb1rh.js, chunk-thgzrhqk.js, chunk-emfc7zyy.js, chunk-y9yajbwp.js, chunk-f3cbhqz3.js, chunk-1dzzkwzm.js, chunk-w6fp42zn.js, chunk-5t95rt4z.js, chunk-9zn3cmh0.js, chunk-cw3vy45t.js, chunk-c9kzpyzr.js, chunk-y6xk5fjj.js, chunk-zm3m658m.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-2ypce8gm.js, chunk-k7v8wgx1.js, chunk-smrfvp7n.js, chunk-dzhhabhn.js, chunk-t59tmzgc.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4978
+[WebServer] latency proxy listening on http://localhost:4977; upstream port=4978
+
+Running 3 tests using 1 worker
+
+(node:1473933) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/sessions-canvas.spec.ts:152:1 › closing a window never ends its session: a gentle toast, and Reopen brings it back (8.5s)
+  ✓  2 test/sessions-canvas.spec.ts:169:1 › the close toast teaches once per sign-in, in the first five sign-ins only (35.1s)
+  ✓  3 test/sessions-canvas.spec.ts:201:1 › storage that throws shows no close toast (7.3s)
+
+  3 passed (59.6s)
