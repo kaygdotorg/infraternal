@@ -45,7 +45,7 @@ const measure = (page: Page) => page.evaluate(() => {
   };
 });
 
-for (const { w, h } of SIZES) test(`phone ${w}x${h}: full width is the screen with no neighbour, edge to edge peeks and is narrower`, async ({ browser }) => {
+for (const { w, h } of SIZES) test(`phone ${w}x${h}: full width is the screen with no neighbour, a lone window is full width in both`, async ({ browser }) => {
   test.setTimeout(180_000);
   await mkdir(captures, { recursive: true });
   const context = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
@@ -98,15 +98,27 @@ for (const { w, h } of SIZES) test(`phone ${w}x${h}: full width is the screen wi
     expect(again.width).toBeCloseTo(edge.width, 0);
     expect(again.leftSlice).toBeGreaterThanOrEqual(PEEK - 1.5);
 
-    // A lone window, edge to edge: the same width, centred, nothing peeking.
-    for (const host of ["studio-mac", "nix-cache", "edge-arm"]) {
-      await page.locator("[data-view='console'] .ui-window").filter({ has: page.locator(".ui-window-host", { hasText: host }) }).first()
-        .locator(".ui-window-action[aria-label='Close']").dispatchEvent("click");
-      await page.waitForTimeout(1200);
-    }
+    // A lone window, edge to edge: the full width (as at full width), centred, nothing peeking. Closing the others
+    // grows it through the re-layout transition.
+    const close = (host: string) => page.locator("[data-view='console'] .ui-window").filter({ has: page.locator(".ui-window-host", { hasText: host }) }).first()
+      .locator(".ui-window-action[aria-label='Close']").dispatchEvent("click");
+    for (const host of ["studio-mac", "nix-cache"]) { await close(host); await page.waitForTimeout(1200); }
+    // The last neighbour closes: the remaining window grows to the full width through the re-layout transition, with
+    // in-between widths and no jump.
+    await page.evaluate(() => {
+      const seen: number[] = [];
+      (window as unknown as { __widths: number[] }).__widths = seen;
+      const tick = () => { const w = document.querySelector<HTMLElement>("[data-view='console'] .ui-window"); if (w) seen.push(w.getBoundingClientRect().width); if (seen.length < 120) requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    });
+    await close("edge-arm");
+    await page.waitForTimeout(1500);
+    const widths = await page.evaluate(() => (window as unknown as { __widths: number[] }).__widths);
+    expect(widths.some((x) => x > edge.width + 3 && x < w - 3), `growing to the full width animates: ${widths.filter((_, i) => i % 6 === 0).map(Math.round).join(",")}`).toBe(true);
     const lone = await measure(page);
     expect(lone.count).toBe(1);
-    expect(lone.width).toBeCloseTo(edge.width, 0);
+    expect(lone.width, "a lone window is the full width").toBeCloseTo(lone.vw, 0);
+    expect(lone.width).toBeGreaterThan(edge.width);
     expect(Math.abs(lone.centre)).toBeLessThanOrEqual(1);
     expect(lone.leftSlice + lone.rightSlice).toBe(0);
     fits(lone, "lone edge to edge");

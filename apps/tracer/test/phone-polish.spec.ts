@@ -78,10 +78,11 @@ async function measureShape(page: Page, label: string): Promise<void> {
   // What the window's own shadow adds: the same strips with shadows on and off. Whatever else is there (the toolbar's shadow
   // and fade, the dots) is the same in both, so the difference is the card's shadow alone. A shadow wider than the column's
   // padding was cut flat by the column and showed as a square backing; one that ends inside it adds nothing out here.
+  // A lone window is the full screen width, so there is no canvas beside it to measure (nothing to cut flat either).
   const regions = [
     { name: "below the card", x: Math.max(4, box.left + 4), y: Math.floor(box.bottom + 12), w: Math.max(8, box.right - box.left - 8), h: 2 },
     { name: "beside the card", x: box.right + 4, y: box.bottom - 120, w: 3, h: 100 },
-  ];
+  ].filter((r) => r.x + r.w <= box.width);
   const on = await Promise.all(regions.map((r) => rows(r.x, r.y, r.w, r.h)));
   const off = await page.addStyleTag({ content: ".ui-window { box-shadow: none !important; }" });
   await page.waitForTimeout(100);
@@ -103,7 +104,7 @@ async function cornerCrops(page: Page, name: string): Promise<void> {
 }
 
 for (const { w, h, kb } of SIZES) for (const theme of THEMES) {
-  test(`phone ${w}x${h} ${theme}: one rounded window shape with the keyboard down and up; neighbours peek ${PEEK} px; a lone window keeps the same width`, async ({ browser }) => {
+  test(`phone ${w}x${h} ${theme}: one rounded window shape with the keyboard down and up; neighbours peek ${PEEK} px; a lone window keeps the full width`, async ({ browser }) => {
     test.setTimeout(180_000);
     await mkdir(captures, { recursive: true });
     const { context, page } = await open(browser, w, h, theme);
@@ -156,14 +157,14 @@ for (const { w, h, kb } of SIZES) for (const theme of THEMES) {
       await page.screenshot({ path: `${captures}/phone-${w}x${h}-${theme}-2-windows-first.png` });
       await expectOneRoundedShape(page, "2 windows");
 
-      // A lone window: the same width as in a strip (edge to edge, the default), centred, nothing peeking.
+      // A lone window: the whole canvas width (full width), centred, nothing peeking.
       await closeWindow(page, "nix-cache");
       await closeWindow(page, "edge-arm");
       expect(await columns(page)).toBe(1);
       s = await slices();
       const v = await vp();
       expect(s.left + s.right).toBe(0);
-      expect(Math.abs(s.width - (v.width - 2 * (12 + PEEK))), "lone window width").toBeLessThanOrEqual(1.5);
+      expect(Math.abs(s.width - v.width), "lone window width").toBeLessThanOrEqual(1.5);
       expect(Math.abs(s.centre)).toBeLessThanOrEqual(1);
       await page.screenshot({ path: `${captures}/phone-${w}x${h}-${theme}-1-window.png` });
       await expectOneRoundedShape(page, "1 window, keyboard down");
