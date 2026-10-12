@@ -118,6 +118,16 @@ pub enum PluginError {
     Storage,
 }
 impl PluginRuntime {
+    /// Wake enabled plugins after a durable authority edit, without retaining disabled work.
+    pub async fn authority_changed(&self) {
+        for entry in &self.inner.entries {
+            if entry.enabled.load(Ordering::Acquire)
+                && let Some(operation) = entry.plugin.authority_changed()
+            {
+                operation.await;
+            }
+        }
+    }
     #[cfg(feature = "remote")]
     pub(crate) fn downgrade(&self) -> WeakRuntime {
         WeakRuntime(Arc::downgrade(&self.inner))
