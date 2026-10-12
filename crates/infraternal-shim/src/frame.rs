@@ -13,8 +13,10 @@ pub const SEQUENCED_INPUT: u64 = 1;
 pub const MULTI_WRITER: u64 = 2;
 /// Capability bit 2 selects additive bounded Snapshots with an approximation flag.
 pub const APPROXIMATE_SNAPSHOT: u64 = 4;
-/// Capability bit 3 permits one shared peer for an existing durable writer.
-/// It requires `SEQUENCED_INPUT` and `MULTI_WRITER`; ordinary selection is unchanged.
+/// Capability bit 3 permits a shared peer and bounded sequenced-input deferral.
+/// It requires [`SEQUENCED_INPUT`] and [`MULTI_WRITER`]. Deferral applies
+/// independently of peer selection mode; ordinary writer selection and
+/// replacement remain unchanged.
 pub const SHARED_WRITER: u64 = 8;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
@@ -374,10 +376,27 @@ impl Decoder {
         bytes: &[u8],
         mut consume: impl FnMut(FrameRef<'_>) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.feed_until(bytes, |frame| {
+            consume(frame)?;
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    /// Consume a prefix, retaining the complete current frame when the callback
+    /// returns false. The caller retains the unused suffix and retries, including
+    /// with an empty slice, before reading more bytes. No payload is copied on pause.
+    /// # Errors
+    /// Returns framing or callback errors without accepting a deferred frame.
+    pub fn feed_until(
+        &mut self,
+        bytes: &[u8],
+        mut consume: impl FnMut(FrameRef<'_>) -> io::Result<bool>,
+    ) -> io::Result<usize> {
         // Copy contiguous runs rather than repeatedly parsing the same length
         // for every payload byte. At most one validated frame is retained.
         let mut rest = bytes;
-        while !rest.is_empty() {
+        loop {
             let target = if self.bytes.len() < 4 {
                 4
             } else {
@@ -388,6 +407,16 @@ impl Decoder {
                 }
                 length + 4
             };
+            if self.bytes.len() == target && target > 4 {
+                if !consume(FrameRef::decode(&self.bytes[4..])?)? {
+                    return Ok(bytes.len() - rest.len());
+                }
+                self.bytes.clear();
+                continue;
+            }
+            if rest.is_empty() {
+                return Ok(bytes.len());
+            }
             let count = (target - self.bytes.len()).min(rest.len());
             self.bytes.extend_from_slice(&rest[..count]);
             rest = &rest[count..];
@@ -397,13 +426,8 @@ impl Decoder {
                 if length == 0 || length > MAX_FRAME {
                     return Err(invalid());
                 }
-                if self.bytes.len() == length + 4 {
-                    consume(FrameRef::decode(&self.bytes[4..])?)?;
-                    self.bytes.clear();
-                }
             }
         }
-        Ok(())
     }
 }
 
