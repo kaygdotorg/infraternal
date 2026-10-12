@@ -39,3 +39,19 @@ test("listed host plus port retains its saved user in the serialized destination
   const chip = wizard.resolve("lab:2222", true);
   expect(wizard.addressOf(chip)).toEqual({ kind: "manual", value: "target@lab:2222" });
 });
+
+test("review listed inventory name plus port retains its resolved address", () => {
+  type Entry = { id: string; label: string; user?: string; address: string; port?: number };
+  const known: Entry = { id: "lab", label: "lab", user: "target", address: "203.0.113.7" };
+  const wizard = Object.assign(Object.create(Wizard.prototype) as {
+    resolve(token: string, delimited: boolean): Entry;
+    addressOf(entry: Entry): { kind: string; value: string };
+  }, {
+    typed: [], listed: () => [{ entry: known, added: false }],
+    chipFor: (entry: Entry) => entry,
+  });
+  // Inventory ids need not resolve in DNS. An explicit port changes the port
+  // of the matched inventory destination, preserving its address and user.
+  const chip = wizard.resolve("lab:2222", true);
+  expect(wizard.addressOf(chip)).toEqual({ kind: "manual", value: "target@203.0.113.7:2222" });
+});

@@ -359,7 +359,9 @@ export class Wizard {
     const id = `${user ?? ""}@${target.host}${target.port ? `:${target.port}` : ""}`;
     let entry = this.typed.find((item) => item.id === id);
     if (!entry) {
-      entry = { id, label: target.host, user, address: target.host, port: target.port, os: base?.os ?? "unknown", discovered: base?.discovered };
+      // An inventory name identifies the saved destination; an explicit port
+      // changes that destination's port without turning its name into DNS.
+      entry = { id, label: target.host, user, address: base?.address ?? target.host, port: target.port, os: base?.os ?? "unknown", discovered: base?.discovered };
       this.typed = [entry, ...this.typed];
     }
     return this.chipFor(entry);
