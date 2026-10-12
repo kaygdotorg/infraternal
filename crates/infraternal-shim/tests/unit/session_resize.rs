@@ -65,6 +65,8 @@ fn resize_refusal_session_probe() {
         let mut peer = Peer {
             stream,
             decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
             attached: true,
             caps: APPROXIMATE_SNAPSHOT,
             input_reply: None,
@@ -110,6 +112,7 @@ fn resize_refusal_session_probe() {
                 &mut input,
                 &mut cursors,
                 false,
+                false,
             );
             assert!(
                 result.is_ok(),
@@ -133,6 +136,7 @@ fn resize_refusal_session_probe() {
                     &mut input,
                     &mut cursors,
                     false,
+                    false,
                 )
                 .unwrap();
                 assert!(matches!(peer.input_reply, Some(InputReply::State)));
@@ -152,6 +156,7 @@ fn resize_refusal_session_probe() {
             &mut config,
             &mut input,
             &mut cursors,
+            false,
             false,
         )
         .unwrap();
@@ -195,6 +200,7 @@ fn resize_refusal_session_probe() {
             &mut config,
             &mut input,
             &mut cursors,
+            false,
             false,
         )
         .unwrap();

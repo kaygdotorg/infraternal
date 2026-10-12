@@ -27,6 +27,8 @@ mod budgets {
         let mut peer = Peer {
             stream,
             decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
             attached: true,
             caps: 0,
             input_reply: None,
@@ -60,6 +62,7 @@ mod budgets {
                     &mut config,
                     &mut input,
                     &mut cursors,
+                    false,
                     false,
                 )
                 .unwrap();

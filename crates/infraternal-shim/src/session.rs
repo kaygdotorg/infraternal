@@ -83,6 +83,9 @@ enum InputReply {
 struct Peer {
     stream: UnixStream,
     decoder: Decoder,
+    // One decoder-owned deferred frame plus at most one CHUNK of trailing wire.
+    trailing: Vec<u8>,
+    deferred: Option<u64>,
     attached: bool,
     caps: u64,
     input_reply: Option<InputReply>,
@@ -98,6 +101,33 @@ struct Peer {
     request: Option<Request>,
 }
 impl Peer {
+    /// Capacity cannot hide a malformed range. Shared requests reserve space
+    /// before acceptance; neither geometry nor durable ownership changes here.
+    fn input_waits(
+        &self,
+        sequence: u64,
+        length: usize,
+        accepted: u64,
+        available: usize,
+        reserved: bool,
+    ) -> io::Result<bool> {
+        if self.caps & SHARED_WRITER == 0 && !reserved {
+            return Ok(false);
+        }
+        let end = sequence
+            .checked_add(length as u64)
+            .ok_or_else(invalid_input)?;
+        if sequence > accepted {
+            return Err(invalid_input());
+        }
+        let unseen = usize::try_from(end.saturating_sub(accepted)).map_err(|_| invalid_input())?;
+        if unseen > 0 && reserved && self.caps & SHARED_WRITER == 0 {
+            // Reserved space is unavailable to a fresh legacy request. Keep
+            // capacity refusal, while duplicates and control requests proceed.
+            return Err(invalid_input());
+        }
+        Ok(unseen > 0 && (reserved || unseen > available))
+    }
     /// Capability dependencies are checked before attachment mutates peer state.
     fn attach(&mut self, caps: u64) -> io::Result<()> {
         let caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER);
@@ -289,6 +319,7 @@ pub fn run(mut config: Config) -> io::Result<()> {
     let mut peers: Vec<Peer> = Vec::new();
     let mut exit = None;
     let mut drained = false;
+    let mut next_deferred = 0_u64;
     loop {
         if exit.is_none()
             && let Some(status) = pty.child.try_wait()?
@@ -298,6 +329,44 @@ pub fn run(mut config: Config) -> io::Result<()> {
                     .code()
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
+        }
+        // The oldest deferred request reserves newly freed queue space. Smaller
+        // fresh inputs cannot repeatedly consume it; duplicates need no space.
+        let oldest = peers.iter().filter_map(|p| p.deferred).min();
+        let mut retired = Vec::new();
+        for (index, p) in peers.iter_mut().enumerate() {
+            if p.deferred.is_none() && p.trailing.is_empty() {
+                continue;
+            }
+            let mut trailing = std::mem::take(&mut p.trailing);
+            match consume_peer(
+                &trailing,
+                p,
+                &mut pty,
+                &mut terminal,
+                &ring,
+                &mut config,
+                &mut input,
+                &mut cursors,
+                exit.is_some() && drained,
+                oldest.is_some() && p.deferred != oldest,
+                &mut next_deferred,
+            ) {
+                Ok((true, _)) => return Ok(()),
+                Ok((false, used)) => {
+                    trailing.drain(..used);
+                    p.trailing = trailing;
+                }
+                Err(_) => retired.push(index),
+            }
+        }
+        for index in retired.into_iter().rev() {
+            peers.remove(index);
+        }
+        if peers.iter().filter_map(|p| p.deferred).min() != oldest {
+            // Successful admission (or malformed-peer removal) advances the
+            // reservation before polling; another deferred frame may now fit.
+            continue;
         }
         for p in &mut peers {
             if p.caps & SEQUENCED_INPUT != 0
@@ -384,12 +453,14 @@ pub fn run(mut config: Config) -> io::Result<()> {
             }
             for (index, p) in peers.iter().enumerate() {
                 let mut flags = PollFlags::empty();
-                if input.len() < MAX_FRAME {
+                if p.deferred.is_none() && p.trailing.is_empty() {
                     flags |= PollFlags::POLLIN;
                 }
                 if !p.pending.is_empty() {
                     flags |= PollFlags::POLLOUT;
                 }
+                // Empty flags still observe HUP. A deferred peer is retired on
+                // HUP without reading; live deferred sockets create no wakeups.
                 fds[index + 3] = PollFd::new(p.stream.as_fd(), flags);
             }
             match poll(&mut fds[..peers.len() + 3], None::<u16>) {
@@ -418,6 +489,8 @@ pub fn run(mut config: Config) -> io::Result<()> {
                         let mut next = Peer {
                             stream,
                             decoder: Decoder::default(),
+                            trailing: Vec::new(),
+                            deferred: None,
                             attached: false,
                             caps: 0,
                             input_reply: None,
@@ -511,37 +584,31 @@ pub fn run(mut config: Config) -> io::Result<()> {
             if flags.contains(PollFlags::POLLOUT) && p.flush().is_err() {
                 disconnect = true;
             }
-            if flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
+            if p.deferred.is_some() && flags.contains(PollFlags::POLLHUP) {
+                disconnect = true;
+            }
+            if p.deferred.is_none() && flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
                 let mut bytes = [0; CHUNK];
                 match p.stream.read(&mut bytes) {
                     Ok(0) => disconnect = true,
                     Ok(n) => {
-                        // Temporarily move only decoder ownership so the callback
-                        // can mutate Peer while borrowing its reusable frame bytes.
-                        let mut decoder = std::mem::take(&mut p.decoder);
-                        let mut acknowledged_exit = false;
-                        let result = decoder.feed_with(&bytes[..n], |frame| {
-                            if acknowledged_exit {
-                                return Ok(());
-                            }
-                            acknowledged_exit = handle(
-                                frame,
-                                p,
-                                &mut pty,
-                                &mut terminal,
-                                &ring,
-                                &mut config,
-                                &mut input,
-                                &mut cursors,
-                                exit.is_some() && drained,
-                            )?;
-                            Ok(())
-                        });
-                        p.decoder = decoder;
-                        if result.is_err() {
-                            disconnect = true;
-                        } else if acknowledged_exit {
-                            return Ok(());
+                        let reserved = oldest.is_some();
+                        match consume_peer(
+                            &bytes[..n],
+                            p,
+                            &mut pty,
+                            &mut terminal,
+                            &ring,
+                            &mut config,
+                            &mut input,
+                            &mut cursors,
+                            exit.is_some() && drained,
+                            reserved,
+                            &mut next_deferred,
+                        ) {
+                            Ok((true, _)) => return Ok(()),
+                            Ok((false, used)) => p.trailing.extend_from_slice(&bytes[used..n]),
+                            Err(_) => disconnect = true,
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -574,7 +641,63 @@ pub fn run(mut config: Config) -> io::Result<()> {
         }
     }
 }
+/// Stop exactly at an unaccepted input frame; trailing wire belongs to this peer.
 #[allow(clippy::too_many_arguments)]
+fn consume_peer(
+    bytes: &[u8],
+    p: &mut Peer,
+    pty: &mut Pty,
+    terminal: &mut Terminal,
+    ring: &Ring,
+    config: &mut Config,
+    input: &mut VecDeque<u8>,
+    cursors: &mut Inputs,
+    exited: bool,
+    mut reserved: bool,
+    next_deferred: &mut u64,
+) -> io::Result<(bool, usize)> {
+    let mut decoder = std::mem::take(&mut p.decoder);
+    let mut acknowledged_exit = false;
+    let mut paused = false;
+    let result = decoder.feed_until(bytes, |frame| {
+        if acknowledged_exit {
+            return Ok(true);
+        }
+        match handle(
+            frame, p, pty, terminal, ring, config, input, cursors, exited, reserved,
+        ) {
+            Ok(acknowledged) => {
+                if p.deferred.take().is_some() {
+                    // The completed request releases its ticket. Fresh input in
+                    // the same read must yield to already waiting peers; give it
+                    // a new ticket on the next pause. Duplicates/control are free.
+                    reserved = true;
+                }
+                acknowledged_exit = acknowledged;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                paused = true;
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    });
+    p.decoder = decoder;
+    let used = result?;
+    if paused {
+        if p.deferred.is_none() {
+            p.deferred = Some(*next_deferred);
+            *next_deferred = next_deferred.checked_add(1).ok_or_else(invalid_input)?;
+        }
+        debug_assert!(bytes.len() - used <= CHUNK);
+    } else {
+        p.deferred = None;
+    }
+    Ok((acknowledged_exit, used))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
@@ -585,6 +708,7 @@ fn handle<'a>(
     input: &mut VecDeque<u8>,
     cursors: &mut Inputs,
     exited: bool,
+    reserved: bool,
 ) -> io::Result<bool> {
     let invalid = invalid_request;
     let frame = frame.into();
@@ -607,6 +731,15 @@ fn handle<'a>(
         }
         let writer = p.writer.ok_or_else(invalid)?;
         let accepted = cursors.get(p.writer)?.accepted;
+        if p.input_waits(
+            offset.unwrap_or(accepted),
+            bytes.len(),
+            accepted,
+            MAX_FRAME - input.len(),
+            reserved,
+        )? {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
         if cursors.get(p.writer)?.accepted > accepted {
             // Only newly accepted input changes the active size [74]. Replayed

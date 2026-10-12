@@ -52,6 +52,8 @@ fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss
     let mut peer = Peer {
         stream,
         decoder: Decoder::default(),
+        trailing: Vec::new(),
+        deferred: None,
         attached: true,
         caps: SEQUENCED_INPUT,
         input_reply: None,
