@@ -1,0 +1,8 @@
+<!-- Source and native artifact provenance for the round-5 apply comparison [242], #173. -->
+# Artifact provenance
+
+Baseline source is the merged pre-repair commit `c89fe001`: all 516 crate/manifest files in the private source export match Git exactly. Head source is `94342e78`; production repair commits are `2b02a2d5` and `b6d51a7f`. Both fixtures use the unchanged optimized release profile and all mesh features. Native loader/search paths are adapted only for the authorized VM, with executable-segment SHA256 equality asserted before transfer. Full source and adapted hashes are in the adjacent artifact JSON files.
+
+The four earlier review tests and the two reverse-state test/helper files match their respective reviewer commits byte for byte (six files). The baseline and head bundles use the same private runtime libraries. Build-host compilation duration is not performance evidence. `perf-campaign.sh` runs balanced base/head/head/base cohorts and three coordinator change types with both backends, 10/1,000 installed peers and local/150 ms RTT. Timings run only on the named VM under the shared lock; functional checks run locally. Three live nodes and two receivers are used; additional peers are synthetic public keys installed in the kernel, not independent live workers.
+
+The existing native gate qualification in `gate-profile.toml` changes only three development package optimization levels. Release profiles, assertions and thresholds remain unchanged. `gate-python3.sh` routes only the three-sample gate RTT self-test to the locked authorized VM. Every other Python call stays local.
