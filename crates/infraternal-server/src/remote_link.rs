@@ -636,11 +636,7 @@ async fn greeting<C: Channel>(
         return Ok((prefix, false));
     }
     let admission = admission.ok_or_else(|| io::Error::from(io::ErrorKind::PermissionDenied))?;
-    // Keep wire priming refused until the final runtime admission slice.
-    if prime {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    Ok((admission.hello(channel, receive, false).await?, true))
+    Ok((admission.hello(channel, receive, prime).await?, true))
 }
 
 async fn pump(

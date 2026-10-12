@@ -494,7 +494,7 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
         version: 1,
         caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING
             | infraternal_plugin_api::channel::REMOTE_STANDBY
-            | if link.primed() {
+            | if link.native() {
                 infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
             } else {
                 0
@@ -678,8 +678,7 @@ async fn run_actor(
         #[cfg(feature = "remote")]
         hot.observe(&attachments);
         #[cfg(feature = "remote")]
-        if matches!(connection.as_ref().map(|c| &c.peer), Some(Peer::Remote(link)) if link.native())
-        {
+        if hot.active() {
             writes.enable(&attachments);
         }
         #[cfg(feature = "remote")]
