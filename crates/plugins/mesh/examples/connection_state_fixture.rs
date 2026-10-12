@@ -34,6 +34,50 @@ fn main() -> std::io::Result<()> {
         } else if line == "unobstruct" {
             std::fs::remove_file(&obstruction)?;
             println!("{{\"obstructed\":false}}");
+        } else if line == "commit-narrow" {
+            // Model persisted intent with a cleanup error: rules are restrictive,
+            // but established entries remain for restart to reconcile.
+            let mut config = node
+                .config()
+                .ok_or(std::io::ErrorKind::InvalidInput)?
+                .clone();
+            config.version += 1;
+            for peer in config.peers.values_mut() {
+                peer.inbound = infraternal_plugin_mesh::policy::rules::TrafficPolicy::None;
+            }
+            let fallback = std::env::args().any(|s| s == "--nf-tables");
+            if fallback {
+                infraternal_plugin_mesh::iptables::apply(&config, true)?;
+            } else {
+                let mut child = std::process::Command::new("/usr/sbin/nft")
+                    .args(["-f", "-"])
+                    .stdin(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
+                child
+                    .stdin
+                    .take()
+                    .ok_or(std::io::ErrorKind::BrokenPipe)?
+                    .write_all(
+                        infraternal_plugin_mesh::firewall::render(&config, true).as_bytes(),
+                    )?;
+                assert!(child.wait()?.success());
+            }
+            let (store, _) = infraternal_plugin_mesh::node_state::Store::open(&root)?;
+            store.save(&infraternal_plugin_mesh::node_state::State {
+                enabled: true,
+                config: Some(config),
+                backend: Some(if fallback {
+                    infraternal_plugin_mesh::firewall::Backend::NfTables
+                } else {
+                    infraternal_plugin_mesh::firewall::Backend::Nft
+                }),
+            })?;
+            println!("{{\"committed_without_cleanup\":true}}");
+        } else if line == "restore" {
+            drop(node);
+            node = Node::restore(&root)?;
+            println!("{{\"restored\":true}}");
         } else if line == "quit" {
             node.down()?;
             println!("{{\"off\":true}}");
