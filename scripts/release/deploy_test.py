@@ -6,12 +6,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.machinery
 import importlib.util
 import json
+import io
 import os
 from pathlib import Path
 import socket
 import sqlite3
 import subprocess
 import tempfile
+import tarfile
 import threading
 import unittest
 from unittest.mock import patch
@@ -27,7 +29,8 @@ loader.exec_module(deploy)
 
 class DeploymentTests(unittest.TestCase):
     def setUp(self):
-        scratch = Path.home() / ".cache/codex-scratch/deploy-pipeline/tests"
+        scratch = Path(os.environ.get("INFRATERNAL_RELEASE_TEST_SCRATCH",
+                       str(Path.home() / ".cache/codex-scratch/deploy-pipeline/tests")))
         scratch.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=scratch)
         self.root = Path(self.temp.name)
@@ -65,6 +68,15 @@ class DeploymentTests(unittest.TestCase):
         (directory / "link").symlink_to(directory / "VERSION")
         with self.assertRaises(ValueError):
             deploy.archive(directory)
+
+    def test_streamed_archive_retains_exact_artifacts(self):
+        directory = self.bundle()
+        output = io.BytesIO()
+        self.assertIsNone(deploy.archive(directory, output))
+        output.seek(0)
+        with tarfile.open(fileobj=output) as bundle:
+            self.assertEqual(set(bundle.getnames()), {"VERSION", "SHA256SUMS", "web/index.html"})
+            self.assertEqual(bundle.extractfile("web/index.html").read(), b"new web")
 
     def test_real_online_backup_includes_committed_wal_pages(self):
         data = self.root / "data"
