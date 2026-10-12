@@ -286,6 +286,16 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     flushOutput(connection);
     return sendJson(response, 200, { bytes: bytes.byteLength });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/live-query-output") {
+    const body = await readJson(request);
+    if (typeof body?.text !== "string") return sendJson(response, 400, { error: "query output must be a string" });
+    const bytes = new TextEncoder().encode(body.text);
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_MESSAGE) return sendJson(response, 413, { error: "query output must fit one frame" });
+    session.echoMode = "none";
+    // Use the existing live suffix writer so these bytes follow the captured replay head.
+    appendEchoOutput(session, bytes);
+    return sendJson(response, 200, { bytes: bytes.byteLength, output_sequence: String(session.outputLength) });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/query-snapshot") {
     const body = await readJson(request);
     if (typeof body?.text !== "string") return sendJson(response, 400, { error: "snapshot text must be a string" });

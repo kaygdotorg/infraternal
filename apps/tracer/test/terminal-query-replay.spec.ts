@@ -24,6 +24,7 @@ const QUERY_OUTPUT = [
 ].join("");
 
 type MockState = {
+  attach_count: number;
   accepted_input_bytes: number;
   output_sequence: string;
   snapshot_count: number;
@@ -31,7 +32,7 @@ type MockState = {
   attach_history?: Array<{ last_out_seq: string; output_sequence: string }>;
 };
 
-const scratch = resolve(process.env.HOME ?? ".", ".cache/codex-scratch/terminal-fidelity");
+const scratch = resolve(import.meta.dirname, "../test-results/query-replay");
 const testDoublePort = Number(process.env.TRACER_BACKEND_PORT ?? String(Number(process.env.TRACER_TEST_PORT ?? "4621") + 1));
 const testDoubleOrigin = `http://localhost:${testDoublePort}`;
 const mockUrl = (path: string): string => new URL(path, testDoubleOrigin).toString();
@@ -46,6 +47,8 @@ async function openProduct(page: Page): Promise<void> {
   await page.goto("/?mock=1&theme=ink&bg=none");
   await expect(page.getByText("TEST DOUBLE")).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  // The client flag precedes the delayed AttachTerm; inject queries only after the host observes it.
+  await expect.poll(async () => (await mockState(request)).attach_count, { timeout: 10_000 }).toBeGreaterThan(0);
 }
 
 async function waitForOutputToSettle(page: Page, request: APIRequestContext): Promise<void> {
@@ -124,4 +127,42 @@ test("terminal Snapshot repaint never answers VT queries", async ({ page }) => {
   const restored = await mockState(request);
   expect(restored.snapshot_count).toBe(1);
   expect(restored.accepted_input_bytes).toBe(0);
+});
+
+
+test("a live query queued behind replay answers after the exact paint fence", async ({ page }) => {
+  test.setTimeout(120_000);
+  const request = page.context().request;
+  await openProduct(page);
+  expect((await request.post(mockUrl("/__mock/unicode-case"), { data: { mode: "utf8-split" } })).ok()).toBe(true);
+  await waitForOutputToSettle(page, request);
+  const before = await mockState(request);
+
+  // Keep the real parser and renderer, but hold paint callbacks while both replay frames and live output arrive.
+  await page.addInitScript(() => {
+    const nativeFrame = window.requestAnimationFrame.bind(window);
+    const held: FrameRequestCallback[] = [];
+    let hold = true;
+    window.requestAnimationFrame = (callback) => nativeFrame((at) => {
+      if (hold && window.__tracerTestDouble?.isConnected() === true) held.push(callback);
+      else callback(at);
+    });
+    Object.assign(window, { releaseQueryPaint: () => {
+      hold = false;
+      for (const callback of held.splice(0)) nativeFrame(callback);
+    } });
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect.poll(async () => (await mockState(request)).attach_count, { timeout: 30_000 }).toBeGreaterThan(before.attach_count);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.receivedSequence), { timeout: 30_000 }).toBe(before.output_sequence);
+  expect((await request.post(mockUrl("/__mock/live-query-output"), { data: { text: QUERY_OUTPUT } })).ok()).toBe(true);
+  const live = await mockState(request);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.receivedSequence), { timeout: 30_000 }).toBe(live.output_sequence);
+  await page.evaluate(() => {
+    const release = (window as Window & { releaseQueryPaint?: () => void }).releaseQueryPaint;
+    if (typeof release !== "function") throw new Error("query paint barrier is absent");
+    release();
+  });
+  await waitForOutputToSettle(page, request);
+  await expect.poll(async () => (await mockState(request)).accepted_input_bytes, { timeout: 15_000 }).toBeGreaterThan(before.accepted_input_bytes);
 });
