@@ -26,7 +26,16 @@ fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
 impl Pty {
+    #[cfg(test)]
     pub fn spawn(uid: u32, cols: u16, rows: u16) -> io::Result<Self> {
+        Self::spawn_with_readiness(uid, cols, rows, false)
+    }
+    pub fn spawn_with_readiness(
+        uid: u32,
+        cols: u16,
+        rows: u16,
+        readiness: bool,
+    ) -> io::Result<Self> {
         let user = User::from_uid(Uid::from_raw(uid))
             .map_err(errno)?
             .ok_or_else(|| io::Error::other("target uid has no login account"))?;
@@ -78,7 +87,7 @@ impl Pty {
         };
         let target_uid = user.uid;
         let group = user.gid;
-        let shell = if user.shell.as_os_str().is_empty() {
+        let shell = if readiness || user.shell.as_os_str().is_empty() {
             std::path::PathBuf::from("/bin/sh")
         } else {
             user.shell
@@ -88,8 +97,13 @@ impl Pty {
             "-{}",
             shell.file_name().unwrap_or_default().to_string_lossy()
         );
+        if readiness {
+            // Wait for attachment input without invoking any login rc files.
+            command.args(["-c", "read -r line; printf 'infraternal-ready\\n'"]);
+        } else {
+            command.arg0(login_name);
+        }
         command
-            .arg0(login_name)
             .env_clear()
             .env("HOME", &user.dir)
             .env("USER", &user.name)
@@ -100,6 +114,11 @@ impl Pty {
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave));
+        // Keep only locale values from the host environment; all other inherited
+        // variables stay scrubbed, and an explicit user locale remains authoritative.
+        for (name, value) in crate::session_locale_environment() {
+            command.env(name, value);
+        }
         // Preserve zsh's supported profile location for isolated canaries.
         if let Some(directory) = std::env::var_os("ZDOTDIR") {
             command.env("ZDOTDIR", directory);
@@ -261,6 +280,28 @@ fn reset_child_signals() -> io::Result<()> {
         .map_err(errno)
 }
 
+/// Open a CLOEXEC process lifetime descriptor without signalling or attaching to the process.
+/// The caller must authenticate the PID and recheck its birth identity after registration.
+#[cfg(target_os = "linux")]
+pub(super) fn process_exit_descriptor(pid: u32) -> io::Result<std::os::fd::OwnedFd> {
+    let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if pid == 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: pidfd_open takes only a positive integer PID and zero flags, no
+    // pointers. It returns a new CLOEXEC descriptor, or -1 with errno. Using
+    // the syscall avoids libc-version requirements on distribution-independent
+    // musl binaries. No other code owns the returned descriptor.
+    let result = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0_u32) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = i32::try_from(result).map_err(io::Error::other)?;
+    // SAFETY: a successful pidfd_open returns exactly one owned descriptor;
+    // OwnedFd closes it on every path, including cancelled daemon discovery.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
 #[cfg(test)]
 mod child_signal_tests {
     use super::*;
@@ -360,5 +401,59 @@ mod child_signal_tests {
             (reset[3] - baseline[3]) * 1000.0 / f64::from(count),
             reset[3] - baseline[3]
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod child_locale_tests {
+    use super::*;
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn spawned_login_shell_receives_selected_locale_without_other_host_variables() {
+        let expected = crate::locale::environment();
+        let pty = Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap();
+        let child = ChildGuard(pty.child);
+        let raw = std::fs::read(format!("/proc/{}/environ", child.0.id())).unwrap();
+        let actual = raw
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| {
+                let separator = entry.iter().position(|byte| *byte == b'=')?;
+                Some((&entry[..separator], &entry[separator + 1..]))
+            })
+            .collect::<Vec<_>>();
+        for (name, value) in expected {
+            let name = name.as_os_str().as_encoded_bytes();
+            let value = value.as_os_str().as_encoded_bytes();
+            assert!(
+                actual.iter().any(|(actual_name, actual_value)| {
+                    *actual_name == name && *actual_value == value
+                }),
+                "the login shell must receive the selected locale variable"
+            );
+        }
+        assert!(
+            actual
+                .iter()
+                .any(|(name, value)| *name == b"TERM" && *value == b"xterm-256color")
+        );
+        assert!(actual.iter().all(|(name, _)| {
+            *name == b"HOME"
+                || *name == b"USER"
+                || *name == b"LOGNAME"
+                || *name == b"SHELL"
+                || *name == b"TERM"
+                || *name == b"PATH"
+                || *name == b"ZDOTDIR"
+                || *name == b"LANG"
+                || name.starts_with(b"LC_")
+        }));
     }
 }

@@ -1,0 +1,26 @@
+Running as unit: run-p368263-i4562238.scope; invocation ID: f9954a550bda4d9e98b1060910ad8a91
+[release-prod-3 c4043ec7] Give the session manager a shared fallback anchor (#169)
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+To ssh://10.69.69.52:2222/kayg/infraternal.git
+   6ec4aabd..c4043ec7  HEAD -> release-prod-3
+c4043ec7e37a738096e4516e19d7113d7a1c9646
+[release-prod-3 0e470186] Keep terminal session switching available on touch (#169)
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+To ssh://10.69.69.52:2222/kayg/infraternal.git
+   c4043ec7..0e470186  HEAD -> release-prod-3
+0e470186b4b9c23b5a7be27c266ea1f701d74b66
+[release-prod-3 a716060d] Open the mobile session manager without a header button (#169)
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+To ssh://10.69.69.52:2222/kayg/infraternal.git
+   0e470186..a716060d  HEAD -> release-prod-3
+a716060d61159755412ec5cc12a6fff6a7d70ea7
+[release-prod-3 ffffc4bb] Keep palette session management available on touch (#169)
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+To ssh://10.69.69.52:2222/kayg/infraternal.git
+   a716060d..ffffc4bb  HEAD -> release-prod-3
+ffffc4bbf32f955b4edcd03835276992d2b21e7e
+[release-prod-3 08592ffc] Drive mobile session scenes through the real manager (#169)
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+To ssh://10.69.69.52:2222/kayg/infraternal.git
+   ffffc4bb..08592ffc  HEAD -> release-prod-3
+08592ffc9c1fe72171f6d626195d726b251b935a

@@ -1,0 +1,32 @@
+Running as unit: run-p416335-i4610310.scope; invocation ID: 66fdd7d5d4a243e79bed89a3272c4193
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-0nzg79zm.js, chunk-dpg6mcx9.js, chunk-42p1wg8w.js, chunk-5wjqz9g6.js, chunk-vvhx5ptv.js, chunk-n2tvw204.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-vnyyvgfc.js, chunk-3gg89sgk.js, chunk-aegc6dk4.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-sjyxvqze.js, chunk-dr3c5pcf.js, chunk-p7wn4w40.js, chunk-9w786pra.js, chunk-t0afx66y.js, chunk-c59d7ycw.js, chunk-cbk2qjwk.js, chunk-hvh2mrv1.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-pb81qcp5.js, chunk-75e1yedy.js, chunk-v1q6hxpj.js, chunk-qmq4sk69.js, chunk-5753zf8s.js, chunk-xxpn6gzj.js, chunk-59v6t302.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-j0ypjtgq.js, chunk-xp1hmdch.js, chunk-rbfh9jt1.js, chunk-ysvznpdx.js, chunk-1hje8sjn.js, chunk-qzgfeg8k.js, chunk-axbkkqp1.js, chunk-6rvwqq4k.js, chunk-hrkj46a8.js, chunk-g1qxvky0.js, chunk-xf5g5k2n.js, chunk-y7n12851.js, chunk-hbetxrqg.js, chunk-gdpwxedj.js, chunk-q9sdb27g.js, chunk-6bq797as.js, chunk-qdhay11v.js, chunk-dnwv2ss0.js, chunk-qrnxhkf3.js, chunk-tbycarjt.js, chunk-qdxqbaxw.js, chunk-12w5q343.js, chunk-26yarkxb.js, chunk-aq27k0je.js, chunk-fnedcd4j.js, chunk-b6s2egkg.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-mwr5vh33.js, chunk-9xtgce8r.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-zcdk9jay.js
+[WebServer] latency proxy listening on http://localhost:4935; upstream port=4936
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4936
+
+Running 20 tests using 1 worker
+
+(node:417471) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/sessions-canvas.spec.ts:31:1 › the manager groups sessions by state, orders them by frecency and marks activity (7.8s)
+  ✓   2 test/sessions-canvas.spec.ts:54:1 › a window's actions are one pill as tall as its title pill (13.5s)
+  ✓   3 test/sessions-canvas.spec.ts:75:1 › choosing a session attaches the window to it; the old one keeps running (8.5s)
+  ✓   4 test/sessions-canvas.spec.ts:91:1 › attaching moves only opacity and transform, and leaves nothing animating at rest (8.9s)
+  ✓   5 test/sessions-canvas.spec.ts:118:1 › the popover opens within 200 ms and closes within 130 ms; the keyboard is instant (7.4s)
+  ✓   6 test/sessions-canvas.spec.ts:147:1 › closing a window never ends its session: a gentle toast, and Undo brings it back (8.5s)
+  ✓   7 test/sessions-canvas.spec.ts:163:1 › ending a session names what is running and asks with the compact confirm (8.9s)
+  ✓   8 test/sessions-canvas.spec.ts:182:1 › a rename pins the name and is the window's name (8.0s)
+  ✓   9 test/sessions-canvas.spec.ts:200:1 › the sidebar is the inventory: markers, detached notes and exit codes, in frecency order (11.4s)
+  ✓  10 test/sessions-canvas.spec.ts:220:1 › tapping a detached session opens it in a new window and flies the canvas there (14.3s)
+  ✓  11 test/sessions-canvas.spec.ts:236:1 › an exited session opens its final screen read-only, with Run again and Dismiss (22.5s)
+  ✓  12 test/sessions-canvas.spec.ts:260:1 › both splits open a new shell through the header actions and stack down in the column (11.6s)
+  ✓  13 test/sessions-canvas.spec.ts:281:1 › another device typed last: scaled to fit, a badge says so, typing takes the size over (9.5s)
+  ✓  14 test/sessions-canvas.spec.ts:299:1 › ⌘K lists every session on every host, the actions and the sessions scenes (9.1s)
+  ✓  15 test/sessions-canvas.spec.ts:316:1 › the empty, loading and error states keep the product's rhythm (32.8s)
+  ✓  16 test/sessions-canvas.spec.ts:338:1 › mouse and shortcuts draw no focus ring; Tab does (8.5s)
+  ✓  17 test/sessions-canvas.spec.ts:352:1 › on touch every control is 44 px and a row swipes open 1:1 with the finger (10.8s)
+  ✓  18 test/sessions-canvas.spec.ts:374:1 › scenes run one after another and each starts from the same four windows (21.0s)
+  ✓  19 test/sessions-canvas.spec.ts:390:1 › the manager's code is on demand, fetched at idle so the first open never waits for a download (#128) (6.4s)
+  ✓  20 test/sessions-canvas.spec.ts:408:1 › on a phone the canvas row has a Sessions action that opens the manager of the active window (7.7s)
+
+  20 passed (4.1m)

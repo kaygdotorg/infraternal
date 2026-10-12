@@ -6,8 +6,18 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod ended;
 pub mod frame;
+mod locale;
 mod pty;
 pub mod ring;
+
+/// Resolve locale variables for a scrubbed login shell [#161].
+///
+/// The host locale files and installed locale list are read once per caller
+/// process, so a long-lived session launcher does not repeat discovery per PTY.
+#[must_use]
+pub fn session_locale_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    locale::environment()
+}
 
 /// Restore default child signal policy before exec, without changing the parent.
 /// Attach this before any caller-specific pre-exec setup.
@@ -42,3 +52,13 @@ pub use session::{Config, run, run_with_retention};
 
 #[cfg(feature = "ca-handoff")]
 pub mod locked_bytes;
+
+/// Open the kernel lifetime descriptor for an authenticated Linux shim [D81].
+/// No signals or ptrace permissions are requested. The caller owns registration
+/// and must revalidate process identity to exclude PID reuse during opening.
+/// # Errors
+/// Returns invalid PID, unsupported-kernel, permission or descriptor-limit errors.
+#[cfg(target_os = "linux")]
+pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd> {
+    pty::process_exit_descriptor(pid)
+}

@@ -1,0 +1,201 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p3228412-i7422311.scope; invocation ID: c7d5ea039ffa46a18e94c9a236e2b3d4
+59.87 56.74 49.64 50/1542 3228458
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-g9x5r92e.js, chunk-dpg6mcx9.js, chunk-2whkgamz.js, chunk-5wjqz9g6.js, chunk-9207awxd.js, chunk-gm7d7jd6.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-k550s9qb.js, chunk-7v9909e4.js, chunk-aegc6dk4.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-p1jnewzy.js, chunk-dr3c5pcf.js, chunk-3z6m694z.js, chunk-8nwska95.js, chunk-t0afx66y.js, chunk-5q3en22r.js, chunk-b8h0dnee.js, chunk-6gq27awk.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-4smhkss2.js, chunk-mp3h80k1.js, chunk-vw96ssvk.js, chunk-jzhgd8am.js, chunk-5753zf8s.js, chunk-dd2p3jbr.js, chunk-r50erhgk.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-bqv368nv.js, chunk-cy65qbex.js, chunk-gwttf541.js, chunk-3hjtgcqj.js, chunk-1hje8sjn.js, chunk-sv07tzp6.js, chunk-axbkkqp1.js, chunk-ejhzz31n.js, chunk-56xa3hyc.js, chunk-2mtxfwy3.js, chunk-k9rtv1j1.js, chunk-fmrch13x.js, chunk-mvkcqgam.js, chunk-gdpwxedj.js, chunk-tn08pe2e.js, chunk-w3z6wcpx.js, chunk-rv0kvb32.js, chunk-53wzs4nb.js, chunk-pmf4yk6c.js, chunk-3dbfn2rb.js, chunk-qrmgv2hd.js, chunk-cxwkzk1h.js, chunk-fmcxfpw5.js, chunk-647fqypg.js, chunk-1gkqtars.js, chunk-664q12qg.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-9efxw4bd.js, chunk-gy2vfvd7.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-92j5nenp.js
+[WebServer] latency proxy listening on http://localhost:5264; upstream port=5265
+[WebServer] tracer TEST DOUBLE listening on http://localhost:5265
+
+Running 55 tests using 1 worker
+
+(node:3229232) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/addhost-wizard.spec.ts:46:1 › the toolbar button and the palette open the wizard (11.8s)
+  ✓   2 test/addhost-wizard.spec.ts:60:1 › network access: detected, shown by name, and the host lands in Console and the sidebar (16.7s)
+  ✓   3 test/addhost-wizard.spec.ts:81:1 › closing the flow window from its own frame ends the wizard (11.6s)
+  ✓   4 test/addhost-wizard.spec.ts:90:1 › the server's own key is the fallback when the network does not sign in (15.8s)
+  ✓   5 test/addhost-wizard.spec.ts:99:1 › a batch shows every host's own progress and opens every host (16.2s)
+  ✓   6 test/addhost-wizard.spec.ts:110:1 › all automatic methods refused: asked to choose, and a password is sent once and never kept (18.8s)
+  ✓   7 test/addhost-wizard.spec.ts:136:1 › a pasted private key signs in as the user's key (16.1s)
+  ✓   8 test/addhost-wizard.spec.ts:149:1 › a saved key (unlocked with the passkey) is offered only when the browser holds one (17.0s)
+  ✓   9 test/addhost-wizard.spec.ts:162:1 › without a saved key the choice does not offer one (12.8s)
+  ✓  10 test/addhost-wizard.spec.ts:170:1 › the server key is shown to copy; adding it and trying again signs in (13.9s)
+  ✓  11 test/addhost-wizard.spec.ts:185:1 › a locked server key is still shown, with the reason (13.8s)
+  ✓  12 test/addhost-wizard.spec.ts:193:1 › no server key to show: the choice is paste or password only (13.2s)
+  ✓  13 test/addhost-wizard.spec.ts:202:1 › an unknown host key shows its fingerprint and is never trusted without a click (17.4s)
+  ✓  14 test/addhost-wizard.spec.ts:219:1 › a host that does not answer: what happened, Retry, and the one-line install from the host (18.0s)
+  ✓  15 test/addhost-wizard.spec.ts:235:1 › a mesh policy block says possible, not certain (13.0s)
+  ✓  16 test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can (22.3s)
+  ✓  17 test/addhost-wizard.spec.ts:268:1 › one refusal without choose_method still offers another way to sign in (12.2s)
+  ✓  18 test/addhost-wizard.spec.ts:275:1 › empty, loading and error states of discovery (14.3s)
+  ✓  19 test/addhost-wizard.spec.ts:300:1 › an SSH config pasted into the field becomes chips (7.2s)
+  ✓  20 test/addhost-wizard.spec.ts:314:1 › closing mid-install asks first, and cancelling ends the run (12.4s)
+  ✓  21 test/addhost-wizard.spec.ts:329:1 › the wizard works on a phone and keeps the footer on screen (8.2s)
+  ✓  22 test/addhost-wizard.spec.ts:353:3 › fresh CA explains passkey confirmation before starting SSH (11.3s)
+  ✓  23 test/addhost-wizard.spec.ts:353:3 › locked CA explains passkey confirmation before starting SSH (11.6s)
+  ✓  24 test/addhost-wizard.spec.ts:371:1 › a canvas flow remains nonmodal (7.8s)
+  ✓  25 test/addhost-wizard.spec.ts:377:1 › Escape in the palette leaves the add-host flow open (9.2s)
+  ✓  26 test/addhost-wizard.spec.ts:391:1 › Tab can leave a canvas flow (7.4s)
+  ✓  27 test/addhost-wizard.spec.ts:400:1 › a typed root login requires consent and cannot pretend to install as a user (11.8s)
+  ✓  28 test/dead-session.spec.ts:27:1 › a dead session ends quietly: one attach, an ended state, and a new shell in the same window (18.9s)
+  ✘  29 test/dead-session.spec.ts:82:30 › a retired session carries exit 7 through the same final ended path (12.1s)
+(node:3320716) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  30 test/dead-session.spec.ts:82:30 › a retired session carries exit 0 through the same final ended path (14.3s)
+  ✓  31 test/dead-session.spec.ts:107:1 › a drop between saved status and final Close resumes to the same ended answer (13.8s)
+  ✓  32 test/sessions-canvas.spec.ts:31:1 › the manager groups sessions by state, orders them by frecency and marks activity (7.4s)
+  ✓  33 test/sessions-canvas.spec.ts:54:1 › a window's actions are one pill as tall as its title pill (13.4s)
+  ✓  34 test/sessions-canvas.spec.ts:75:1 › choosing a session attaches the window to it; the old one keeps running (9.1s)
+  ✓  35 test/sessions-canvas.spec.ts:91:1 › attaching moves only opacity and transform, and leaves nothing animating at rest (7.9s)
+  ✓  36 test/sessions-canvas.spec.ts:118:1 › the popover opens within 200 ms and closes within 130 ms; the keyboard is instant (7.9s)
+  ✓  37 test/sessions-canvas.spec.ts:147:1 › closing a window never ends its session: a gentle toast, and Undo brings it back (8.8s)
+  ✓  38 test/sessions-canvas.spec.ts:163:1 › ending a session names what is running and asks with the compact confirm (8.7s)
+  ✓  39 test/sessions-canvas.spec.ts:182:1 › a rename pins the name and is the window's name (7.4s)
+  ✓  40 test/sessions-canvas.spec.ts:200:1 › the sidebar is the inventory: markers, detached notes and exit codes, in frecency order (12.4s)
+  ✓  41 test/sessions-canvas.spec.ts:220:1 › tapping a detached session opens it in a new window and flies the canvas there (15.0s)
+  ✓  42 test/sessions-canvas.spec.ts:236:1 › an exited session opens its final screen read-only, with Run again and Dismiss (26.5s)
+  ✓  43 test/sessions-canvas.spec.ts:260:1 › both splits open a new shell through the header actions and stack down in the column (12.9s)
+  ✓  44 test/sessions-canvas.spec.ts:281:1 › another device typed last: scaled to fit, a badge says so, typing takes the size over (9.9s)
+  ✓  45 test/sessions-canvas.spec.ts:299:1 › ⌘K lists every session on every host, the actions and the sessions scenes (8.1s)
+  ✘  46 test/sessions-canvas.spec.ts:316:1 › the empty, loading and error states keep the product's rhythm (30.0s)
+(node:3363718) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  47 test/sessions-canvas.spec.ts:338:1 › mouse and shortcuts draw no focus ring; Tab does (6.5s)
+  ✓  48 test/sessions-canvas.spec.ts:352:1 › on touch every control is 44 px and a row swipes open 1:1 with the finger (10.1s)
+  ✓  49 test/sessions-canvas.spec.ts:374:1 › scenes run one after another and each starts from the same four windows (21.0s)
+  ✓  50 test/sessions-canvas.spec.ts:390:1 › the manager's code is on demand, fetched at idle so the first open never waits for a download (#128) (7.3s)
+  ✓  51 test/sessions-canvas.spec.ts:408:1 › on a phone the canvas row has a Sessions action that opens the manager of the active window (7.2s)
+theme fixture bytes=605847 metrics={"cols":170,"rows":44,"cellWidth":8,"cellHeight":18,"naturalCellWidth":8,"configuredScrollback":40000000,"cursorX":16,"cursorY":43,"renderCursorX":16,"renderCursorY":43,"renderCursorVisible":true,"themeColorsMs":0,"themeRenderMs":0,"terminalColors":{"background":{"r":246,"g":246,"b":244},"foreground":{"r":29,"g":29,"b":31}},"receivedSequence":"605847","outputSequence":"605847","scrollbackRows":10024,"viewportY":0,"cursorVisible":true,"fontSize":14,"fontFamily":"\"Maple Mono NF\", \"Nerd Symbols\", \"Maple Mono NF Fallback\", ui-monospace, monospace","fontId":"maple-mono-nf","wasmMemoryBytes":35782656}
+theme-switch click-to-full-paint JS ms: n=50 p50=1.000 p99=10.500 max=10.500 long_tasks_gt_50ms=1
+slowest theme samples: [{"sample":3,"click":10.5,"colors":0.10000000149011612,"render":1.6000000014901161},{"sample":24,"click":7.100000001490116,"colors":0,"render":11.799999997019768},{"sample":33,"click":5.600000001490116,"colors":0,"render":12.100000001490116},{"sample":27,"click":4.700000002980232,"colors":0.6000000014901161,"render":21.799999997019768},{"sample":13,"click":3.7999999970197678,"colors":0.09999999403953552,"render":30.5}]
+theme work JS ms: color_setters_p50=0.000 repaint_p50=14.700
+  ✘  52 test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text (18.0s)
+(node:3372413) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  53 test/terminal.spec.ts:5:1 › first run, passkey login, terminal resume, and the latency probe (27.1s)
+(node:3376253) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  54 test/terminal.spec.ts:596:1 › status failure, invalid setup token, and cancelled passkey have distinct guidance (7.0s)
+METRIC name=access_screen_render_upper_bound_setup source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=1760.10 p99_ms=2651.40 budget_ms=1000 result=FAIL
+METRIC name=access_screen_first_contentful_paint_setup source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=1559.80 p99_ms=2451.40 budget_ms=1000 result=REPORT
+  ✘  55 test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget (2.0m)
+
+
+  1) test/dead-session.spec.ts:82:30 › a retired session carries exit 7 through the same final ended path 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 3
+
+      93 |   await expect(page.locator(".capsule-session")).toHaveText("· 0 sessions");
+      94 |   await page.waitForTimeout(2_000);
+    > 95 |   expect((await mockState(request)).attach_count).toBe(before + 1);
+         |                                                   ^
+      96 |   const dir = resolve(import.meta.dirname, "..", "captures", "dead-session");
+      97 |   await mkdir(dir, { recursive: true });
+      98 |   const shot = resolve(dir, `retired-exit-${status}-1440x900-ink.png`);
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/dead-session.spec.ts:95:51
+
+    Error Context: test-results/dead-session-a-retired-ses-6013c-h-the-same-final-ended-path/error-context.md
+
+  2) test/sessions-canvas.spec.ts:316:1 › the empty, loading and error states keep the product's rhythm 
+
+    Test timeout of 30000ms exceeded.
+
+    Error: browserContext.close: Target page, context or browser has been closed
+
+      333 |     await expect(failed.page.locator(".cl-sx-state[data-kind='loading']")).toBeVisible();
+      334 |     await expect(failed.page.locator(".cl-sx-row")).toHaveCount(6, { timeout: 6000 });
+    > 335 |   } finally { await failed.context.close(); }
+          |               ^
+      336 | });
+      337 |
+      338 | test("mouse and shortcuts draw no focus ring; Tab does", async ({ browser }) => {
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/sessions-canvas.spec.ts:335:15
+
+    Error Context: test-results/sessions-canvas-the-empty--a4659-s-keep-the-product-s-rhythm/error-context.md
+
+  3) test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text 
+
+    Error: expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 1
+    + Received  + 3
+
+    - Array []
+    + Array [
+    +   52,
+    + ]
+
+      288 |   });
+      289 |   expect(p99).toBeLessThan(16.67);
+    > 290 |   expect(longTasks.filter((duration) => duration > 50)).toEqual([]);
+          |                                                         ^
+      291 |   expect(await readSocketCounts(page)).toEqual(socketCounts);
+      292 |   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.scrollbackRows ?? 0)).toBe(scrollbackRowsBefore);
+      293 |   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toBe(historyText);
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/terminal-theme.spec.ts:290:57
+
+    Error Context: test-results/terminal-theme-every-curat-3627b--and-its-existing-ANSI-text/error-context.md
+
+  4) test/terminal.spec.ts:5:1 › first run, passkey login, terminal resume, and the latency probe ──
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+    Call Log:
+    - Timeout 5000ms exceeded while waiting on the predicate
+
+      82 |     const started = await page.evaluate(() => performance.now());
+      83 |     await page.getByRole("button", { name: "Continue with passkey" }).click();
+    > 84 |     await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+         |                                                                                                     ^
+      85 |     returningSigninSamples.push(await page.evaluate((start) => performance.now() - start, started));
+      86 |     expect(await page.evaluate(() => document.documentElement.dataset.passkeyGets)).toBe("1");
+      87 |     if (attempt + 1 < signinTrials) {
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/terminal.spec.ts:84:101
+
+    attachment #1: signin-light (image/png) ────────────────────────────────────────────────────────
+    test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/attachments/signin-light-726f576a03566a511cf981fa779a40e8c64deffb.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: signin-dark (image/png) ─────────────────────────────────────────────────────────
+    test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/attachments/signin-dark-2526501a10c7d1971eae0ca0adae985edb160748.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/error-context.md
+
+  5) test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget ───────
+
+    Test timeout of 120000ms exceeded.
+
+    Error: page.goto: Test timeout of 120000ms exceeded.
+    Call log:
+      - navigating to "http://localhost:5264/", waiting until "load"
+
+
+      640 |       const sample = await page.context().newPage();
+      641 |       await sample.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: setupRequired } }));
+    > 642 |       await sample.goto("/");
+          |                    ^
+      643 |       await expect(sample.locator(setupRequired ? "#setup-card" : "#login-passkey")).toBeVisible();
+      644 |       firstPaints.push(await sample.evaluate(() =>
+      645 |         performance.getEntriesByName("first-contentful-paint")[0]?.startTime ?? performance.now()));
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/terminal.spec.ts:642:20
+
+    Error Context: test-results/terminal-access-screens-re-da0df-he-local-first-paint-budget/error-context.md
+
+  Slow test file: test/addhost-wizard.spec.ts (6.0m)
+  Consider running tests from slow files in parallel. See: https://playwright.dev/docs/test-parallel
+  5 failed
+    test/dead-session.spec.ts:82:30 › a retired session carries exit 7 through the same final ended path 
+    test/sessions-canvas.spec.ts:316:1 › the empty, loading and error states keep the product's rhythm 
+    test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text 
+    test/terminal.spec.ts:5:1 › first run, passkey login, terminal resume, and the latency probe ───
+    test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget ────────
+  50 passed (14.2m)
+34.66 33.49 39.37 23/1596 3389944
+BROWSER_EXIT=1

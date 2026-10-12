@@ -1,0 +1,5 @@
+Running as unit: run-p4061852-i4062152.scope; invocation ID: a920b80c64fb4cdf9798f9a09545d3cf
+machine=infraternal-dev cores=12 load=51.14 39.78 38.62
+fmt exit=1
+clippy exit=0
+ssh: Could not resolve hostname cargo: No address associated with hostname

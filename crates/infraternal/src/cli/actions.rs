@@ -259,6 +259,7 @@ fn session_shim_action() -> ActionDefinition {
                     "detach".to_owned(),
                     JsonSchema::boolean("Detach from the parent process."),
                 ),
+                ("readiness".to_owned(), JsonSchema::boolean("Private fixed-command readiness probe; never reads login startup.")),
                 ("exit_retention_ms".to_owned(), JsonSchema::integer("Exited session retention in milliseconds, clamped to the production ceiling.")),
                 (
                     "ring_capacity".to_owned(),

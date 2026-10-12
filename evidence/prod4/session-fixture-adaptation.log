@@ -1,0 +1,16 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p12087-i8399759.scope; invocation ID: 2c50c19274794a6083d76778064b9a3c
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-4/crates/infraternal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.13s
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-4/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.65s
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/agent_sessions-1b9e867e8ad6b82f)
+
+running 3 tests
+test detached_shim_is_discovered_and_replays_from_the_last_observed_offset ... ok
+test latency_fixture_accepts_the_unsolicited_startup_inventory ... ok
+test restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill ... restart_inventory_discovery: live_shims=16 elapsed_ms=6
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.37s
+

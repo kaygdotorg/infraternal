@@ -1,0 +1,138 @@
+    Blocking waiting for file lock on build directory
+   Compiling tokio v1.53.2
+   Compiling digest v0.10.7
+   Compiling crypto-common v0.1.7
+   Compiling nix v0.30.1
+   Compiling sha2 v0.10.9
+   Compiling sha1 v0.10.7
+   Compiling inout v0.1.4
+   Compiling sqlx-core v0.8.6
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/crates/infraternal-shim)
+   Compiling cipher v0.4.4
+   Compiling tungstenite v0.29.0
+   Compiling universal-hash v0.5.1
+   Compiling opaque-debug v0.3.1
+   Compiling polyval v0.6.2
+   Compiling tokio-stream v0.1.19
+   Compiling tokio-util v0.7.19
+   Compiling tokio-openssl v0.6.5
+   Compiling quinn v0.11.12
+   Compiling h2 v0.4.19
+   Compiling sqlx-sqlite v0.8.6
+   Compiling tokio-tungstenite v0.29.0
+   Compiling tower v0.5.3
+   Compiling fs-err v3.3.2
+   Compiling sqlx-macros-core v0.8.6
+   Compiling blake2 v0.10.6
+   Compiling hyper v1.11.1
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/crates/infraternal-server)
+   Compiling tower-http v0.6.11
+   Compiling argon2 v0.5.3
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling ghash v0.5.1
+   Compiling ctr v0.9.2
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/crates/plugins/remote)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/crates/plugins/ssh)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/crates/plugins/mesh)
+   Compiling hyper-util v0.1.21
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/crates/infraternal-agent)
+   Compiling axum-server v0.8.0
+   Compiling axum v0.8.9
+   Compiling aes v0.8.4
+   Compiling hmac v0.12.1
+   Compiling aead v0.5.2
+   Compiling hkdf v0.12.4
+   Compiling aes-gcm v0.10.3
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10m 53s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_server-aaf76c8bf1e2d913)
+
+running 30 tests
+test auth::tests::ca_administration_tests::shipping_cli_tests::bootstrap_cli::fresh_release_bootstrap_join_renew_revoke_cuts_a_live_connection ... ignored, configured release E2E requires INFRATERNAL_REMOTE_TEST_BINARY and exclusive4701/7443
+test bootstrap_api::tests::a_client_request_during_a_pending_confirmation_keeps_the_batch ... ok
+test auth::tests::ca_administration_tests::bootstrap_requires_a_fresh_real_proof_and_publishes_only_wrapped_ca_material ... ok
+test auth::tests::ca_administration_tests::concurrent_bootstrap_ceremonies_retain_one_issuer_and_replay_is_refused ... ok
+test bootstrap_api::tests::admission_stream_is_ordered_and_logout_retires_an_idle_socket ... ok
+test auth::tests::ca_membership_tests::administrator_bootstrap_is_explicit_and_owner_flag_cannot_replace_revoked_role ... ok
+test bootstrap_api::tests::component_off_interrupts_a_stalled_host_key_confirmation_lookup ... ok
+test bootstrap_api::tests::component_off_interrupts_a_stalled_progress_send ... ok
+test bootstrap_api::tests::component_off_retires_idle_sockets_and_refuses_new_admission ... ok
+test bootstrap_api::tests::control_frames_do_not_cancel_bootstrap_or_starve_progress ... ok
+test bootstrap_api::tests::host_key_confirmation_rechecks_the_exact_live_owner_capability ... ok
+test bootstrap_api::tests::logout_interrupts_a_stalled_host_key_confirmation_lookup ... ok
+test bootstrap_api::tests::origin_owner_unlock_and_whole_request_consent_are_required ... ok
+test bootstrap_runtime::failure_log_tests::one_line_contains_only_classified_public_coordinates ... ok
+test bootstrap_api::tests::revocation_interrupts_a_stalled_progress_send ... ok
+test bootstrap_runtime::remote_backend::canary_tests::cancellation_keeps_the_owned_session_available_for_cleanup ... ok
+test bootstrap_runtime::remote_backend::canary_tests::failed_attachment_finishes_the_private_command ... ok
+test bootstrap_runtime::remote_backend::canary_tests::readiness_accepts_authoritative_snapshot_output ... ok
+test bootstrap_runtime::remote_backend::canary_tests::readiness_input_preserves_the_terminal_actor_and_host_connection ... ok
+test bootstrap_runtime::remote_backend::tests::cold_ca_refuses_before_invitation_or_upload ... ok
+test bootstrap_runtime::remote_backend::tests::failed_upload_retires_only_the_new_host ... ok
+test bootstrap_runtime::remote_backend::tests::foreign_or_revoked_authority_never_opens_ssh ... ok
+test bootstrap_runtime::remote_backend::tests::readding_a_live_host_reports_already_added_before_issuing_a_certificate ... ok
+test bootstrap_runtime::remote_backend::tests::unpublished_attempt_drop_releases_only_its_ownership ... ok
+test bootstrap_runtime::tests::pending_integration_refuses_enrollment_vault_and_discovery ... ok
+test ca_bootstrap::tests::generated_remote_leaf_is_verifiable_after_cold_restart ... ok
+test runtime::tests::production_router_exposes_bootstrap_owner_admission ... ok
+test bootstrap_api::tests::settings_public_key_requires_exact_origin_and_live_unlocked_owner ... ok
+test bootstrap_api::tests::split_cookie_fields_preserve_bootstrap_owner_authority ... ok
+test bootstrap_runtime::key_authority_tests::key_export_rechecks_role_session_and_cold_lock ... ok
+
+test result: ok. 29 passed; 0 failed; 1 ignored; 0 measured; 296 filtered out; finished in 17.09s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/catalog_startup-6f6847265ff7752e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/enrollment-d7a537fb95f602f1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_parser-adc9045e815fcafd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_review_plugin-a6b676c2cc7f7af1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_review_policy-b1057b9b606abad6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_review_role_scope-87273c70126f4540)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/plugin_host_review-b3337088ce29c92d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/plugin_settings_review-6d6378dc801df155)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/remote_plugin_contract-65cbf9a731b1745a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

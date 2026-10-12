@@ -25,41 +25,46 @@ def run(binary, state, functional=False, seed=20):
     peaks = []
     stopped = threading.Event()
     try:
-        # Manager detection launches a one-shot child. Exclude its startup
-        # reap from the steady-state canary, while retaining the >1s window
-        # that detects periodic maintenance (no threshold is relaxed).
-        time.sleep(0.25)
-        idle = rss(client.child.pid)
-        idle_agent = assert_process_idle(client.child.pid, 'idle infraternal agent')
-        assert idle < 15 * 1024
-        print(
-            f'idle infraternal agent: {idle_agent.total_slices} scheduled slices over '
-            f'{idle_agent.elapsed_seconds:.3f} s '
-            f'({idle_agent.scheduled_per_minute:.3f}/min); RSS={idle} KiB',
-            flush=True,
-        )
+        # Functional mode is the build-host correctness gate. Resource and
+        # scheduler measurements stay in performance mode on the pinned VM.
+        if not functional:
+            # Manager detection launches a one-shot child. Exclude its startup
+            # reap from the steady-state canary, while retaining the >1s window
+            # that detects periodic maintenance (no threshold is relaxed).
+            time.sleep(0.25)
+            idle = rss(client.child.pid)
+            idle_agent = assert_process_idle(client.child.pid, 'idle infraternal agent')
+            assert idle < 15 * 1024
+            print(
+                f'idle infraternal agent: {idle_agent.total_slices} scheduled slices over '
+                f'{idle_agent.elapsed_seconds:.3f} s '
+                f'({idle_agent.scheduled_per_minute:.3f}/min); RSS={idle} KiB',
+                flush=True,
+            )
         session = client.open()
         client.attach()
         client.until(b'shim-test')
-        shim_pid = session_shim_pid(session)
-        attached_agent = assert_process_idle(
-            client.child.pid, 'idle infraternal agent with attached shim'
-        )
-        idle_shim = assert_process_idle(shim_pid, 'idle session shim')
-        print(
-            f'idle attached infraternal agent: {attached_agent.total_slices} scheduled slices '
-            f'over {attached_agent.elapsed_seconds:.3f} s; '
-            f'idle session shim: {idle_shim.total_slices} over '
-            f'{idle_shim.elapsed_seconds:.3f} s',
-            flush=True,
-        )
+        if not functional:
+            shim_pid = session_shim_pid(session)
+            attached_agent = assert_process_idle(
+                client.child.pid, 'idle infraternal agent with attached shim'
+            )
+            idle_shim = assert_process_idle(shim_pid, 'idle session shim')
+            print(
+                f'idle attached infraternal agent: {attached_agent.total_slices} scheduled slices '
+                f'over {attached_agent.elapsed_seconds:.3f} s; '
+                f'idle session shim: {idle_shim.total_slices} over '
+                f'{idle_shim.elapsed_seconds:.3f} s',
+                flush=True,
+            )
         client.input(b"printf 'OPEN_%s\\n' OK\n")
         client.until(b'OPEN_OK\r\n')
         client.wait_ack()
         client.input(b'exit 7\n')
-        while not client.events:
-            client.process()
-        assert client.events[-1] == dict(type='terminal.exited', session_id=str(session), status=7, final_seq=client.out)
+        terminal_exit = client.wait_event('terminal.exited')
+        assert terminal_exit == dict(
+            type='terminal.exited', session_id=str(session), status=7, final_seq=client.out
+        )
         print('real terminal.open/type/output and terminal.exited status=7: PASS', flush=True)
         client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
         client.open()

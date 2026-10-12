@@ -1,0 +1,1 @@
+Correction to the prior finding: the protocol compiler uses noEmit; it did not regenerate types. The full tracer compiler exposed the existing dev union after its normal frozen install. The TS2739 diagnosis and two-label repair stand; no generated source was changed.

@@ -1,5 +1,7 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
 import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
+import { registerSignOut } from "./sign-out";
+import { lastAccountKey, tabSessionKey } from "./account-storage";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
@@ -57,6 +59,7 @@ declare global {
       } | undefined;
       benchmarkFullRedraw: (iterations: number) => number[] | undefined;
       freezeCursorForTest: () => void;
+      cursorLayerState: () => TerminalClient["cursorLayerState"] | undefined;
       benchmarkOutputAt10MBps: () => Promise<{
         bytes: number;
         elapsedMs: number;
@@ -228,7 +231,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
-    saveBrowserId("tracer.user-id", userId);
+    saveBrowserId(lastAccountKey, userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
@@ -419,7 +422,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
   screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
-  const sessionKey = activeUserId ? `tracer.session.${activeUserId}` : undefined;
+  const sessionKey = activeUserId ? tabSessionKey(activeUserId) : undefined;
   const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
   const hooks = {
     ...probeHooks,
@@ -482,6 +485,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
           return (currentTerminal as unknown as { benchmarkFullRedraw: (count: number) => number[] }).benchmarkFullRedraw(iterations);
         },
         freezeCursorForTest: () => currentTerminal?.freezeCursorForTest(),
+        cursorLayerState: () => currentTerminal?.cursorLayerState,
         benchmarkOutputAt10MBps: () => {
           if (!currentTerminal) return undefined;
           return (currentTerminal as unknown as {
@@ -516,7 +520,7 @@ async function showRecovery(): Promise<void> {
   document.documentElement.removeAttribute("data-ui-font");
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
     activeUserId = userId;
-    saveBrowserId("tracer.user-id", userId);
+    saveBrowserId(lastAccountKey, userId);
     showWelcome(displayName ?? "", instant);
   });
   scheduleBackdrop();
@@ -557,6 +561,35 @@ let canvasPrototype: { dispose(): void } | undefined;
 /** The product canvas: Console on real sessions (a lazy chunk, loaded after sign-in). */
 let productCanvas: { dispose(): void } | undefined;
 
+/**
+ * Lets go of the signed-in app and shows the sign-in screen: the terminals' connections, the canvas (with its inbox
+ * and overlays), the core screen, the frame meter and the test double's handle. Used when the server says the session
+ * is gone and when the person signs out (sign-out.ts). Local preferences stay; sign-out
+ * removes the account's stored data afterwards (sign-out.ts).
+ */
+function endSession(message = ""): void {
+  welcomeEffect?.destroy();
+  welcomeEffect = undefined;
+  window.clearTimeout(welcomeTimer);
+  currentTerminal?.dispose();
+  currentTerminal = undefined;
+  canvasPrototype?.dispose();
+  canvasPrototype = undefined;
+  productCanvas?.dispose();
+  productCanvas = undefined;
+  performanceProbe?.dispose();
+  performanceProbe = undefined;
+  perfHudGeneration++;
+  perfHud?.dispose();
+  perfHud = undefined;
+  coreScreen?.dispose();
+  coreScreen = undefined;
+  delete window.__tracerTestDouble;
+  activeUserId = undefined;
+  renderAuth(false, message);
+}
+registerSignOut(() => endSession(), () => activeUserId);
+
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
   checkingResume = true;
@@ -566,19 +599,7 @@ async function checkForegroundSession(): Promise<void> {
     // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
     if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
     if (!session && previewProto()) { location.reload(); return; }
-    if (!session) {
-      currentTerminal?.dispose();
-      currentTerminal = undefined;
-      productCanvas?.dispose();
-      productCanvas = undefined;
-      performanceProbe?.dispose();
-      performanceProbe = undefined;
-      coreScreen?.dispose();
-      coreScreen = undefined;
-      delete window.__tracerTestDouble;
-      activeUserId = undefined;
-      renderAuth(false, "Your session ended. Sign in again to reconnect.");
-    }
+    if (!session) endSession("Your session ended. Sign in again to reconnect.");
   } catch {
     // The session check is background housekeeping, not something the person asked for. When it
     // cannot complete (the server restarting, the link dropping, a proxy answering with a page)

@@ -16,7 +16,7 @@ try:
     c.send(2, 0x14, struct.pack('<I', 1048576))
     output = {1: bytearray(), 2: bytearray()}
     def receive():
-        s, kind, body = c.read()
+        s, kind, body = c.read_ignoring_replay_complete({1: c.id, 2: c.id})
         if kind == 0x11:
             # Initial 1 MiB per viewer covers these tiny observations. Refunding
             # each prompt fragment can fill the deliberate eight-command queue.

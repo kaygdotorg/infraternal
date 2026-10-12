@@ -39,6 +39,19 @@ fn funded_attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
     }
 }
 
+#[test]
+fn replay_complete_notice_is_accepted_by_embedded_server() {
+    let session_id = "00000000-0000-0000-0000-000000000001";
+    let notice = serde_json::json!({
+        "type": "terminal.replay_complete",
+        "session_id": session_id,
+        "out_seq": "18446744073709551615",
+    });
+    let parsed = serde_json::from_value::<TerminalNotice>(notice)
+        .expect("the embedded server must accept replay completion metadata");
+    assert_eq!(parsed.session_id(), session_id);
+}
+
 #[tokio::test]
 async fn full_output_queue_must_not_block_shared_actor() {
     let (mut link, _peer) = connection();
@@ -284,6 +297,7 @@ async fn real_agent_open_uses_uid_and_character_dimensions() {
     assert!(
         process_command(
             Command::Open {
+                readiness: false,
                 size: TerminalSize {
                     cols: 80,
                     rows: 24,
@@ -338,6 +352,145 @@ async fn real_agent_canonical_uuid_result_is_accepted() {
         .await
     );
     assert_eq!(result.await.unwrap(), Ok([1; 16]));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn agent_link_loss_invalidates_the_last_live_session_snapshot() {
+    let (server, mut agent_peer) = UnixStream::pair().unwrap();
+    let agent = EmbeddedAgent::from_test_socket(server);
+    let mut inventory = agent.session_inventory();
+
+    let mut receive = BytesMut::with_capacity(4096);
+    let mut scratch = [0; 4096];
+    let greeting_seen = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let read = agent_peer.read(&mut scratch).await.unwrap();
+            assert_ne!(read, 0, "actor closed before greeting");
+            receive.extend_from_slice(&scratch[..read]);
+            if let Ok(decoded) = decode_muxed_frame(&receive)
+                && matches!(decoded.frame, Frame::Hello { version: 1, .. })
+            {
+                break true;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(greeting_seen);
+
+    let mut greeting = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "inventory fixture",
+        },
+        &mut greeting,
+    )
+    .unwrap();
+    agent_peer.write_all(&greeting).await.unwrap();
+
+    let session = uuid::Uuid::new_v4();
+    let event = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.sessions.snapshot",
+        "session_ids": [session],
+    }))
+    .unwrap();
+    let mut snapshot = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: &event,
+        },
+        &mut snapshot,
+    )
+    .unwrap();
+    agent_peer.write_all(&snapshot).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), inventory.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &*inventory.borrow(),
+        SessionInventoryState::Available(ids) if ids.as_ref() == [*session.as_bytes()]
+    ));
+
+    // Capability changes have their own watch and must leave the live census intact.
+    let mut changes = agent.changes();
+    let mut plugin_frame = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: br#"{"type":"plugin.event","id":"plugins.disabled"}"#,
+        },
+        &mut plugin_frame,
+    )
+    .unwrap();
+    agent_peer.write_all(&plugin_frame).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), changes.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &*inventory.borrow(),
+        SessionInventoryState::Available(ids) if ids.as_ref() == [*session.as_bytes()]
+    ));
+
+    // Preserve forward compatibility for unrelated control Events: only this
+    // event type is an inventory, and it must not retire the agent link.
+    let future_event = serde_json::to_vec(&serde_json::json!({
+        "type": "future.control.notice",
+    }))
+    .unwrap();
+    let mut future_frame = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: &future_event,
+        },
+        &mut future_frame,
+    )
+    .unwrap();
+    let next_session = uuid::Uuid::new_v4();
+    let next_event = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.sessions.snapshot",
+        "session_ids": [next_session],
+    }))
+    .unwrap();
+    let mut next_frame = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: &next_event,
+        },
+        &mut next_frame,
+    )
+    .unwrap();
+    future_frame.extend_from_slice(&next_frame);
+    agent_peer.write_all(&future_frame).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), inventory.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &*inventory.borrow(),
+        SessionInventoryState::Available(ids) if ids.as_ref() == [*next_session.as_bytes()]
+    ));
+
+    drop(agent_peer);
+    let invalidated = tokio::time::timeout(Duration::from_millis(100), inventory.changed()).await;
+    assert!(
+        invalidated.is_ok(),
+        "agent link loss must invalidate the previously live snapshot"
+    );
+    assert_eq!(*inventory.borrow(), SessionInventoryState::Unavailable);
+    drop(agent);
 }
 
 /// Recovery notices are ordered terminal traffic, so they cannot retire leg B.
@@ -794,4 +947,78 @@ fn server_reload_mask_is_not_inherited_by_embedded_children() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Plugin invalidations must survive the control-event census decoder during integration.
+#[tokio::test]
+async fn plugin_control_notice_preserves_capability_invalidation() {
+    use tokio::io::AsyncWriteExt;
+    for kind in ["plugin.event", "plugins.resync"] {
+        let (mut link, mut peer) = connection();
+        let event = serde_json::to_vec(&serde_json::json!({"type": kind})).unwrap();
+        let mut wire = Vec::new();
+        encode_muxed_frame_into(
+            CONTROL_STREAM,
+            &Frame::Event {
+                sub_id: 0,
+                event_json: &event,
+            },
+            &mut wire,
+        )
+        .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        let incoming = read_incoming(&mut link).await;
+        // A generic future notice may be discarded, but these notices must reach
+        // the capability watch rather than silently retaining stale action grants.
+        assert!(
+            matches!(
+                incoming,
+                Some(Incoming::Event {
+                    stream_id: CONTROL_STREAM,
+                    ..
+                })
+            ),
+            "plugin capability notice was discarded"
+        );
+    }
+}
+
+/// A successful greeting cannot erase earlier short-lived failures; this tests scheduling policy, not host latency.
+#[tokio::test(start_paused = true)]
+async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
+    let (attempts, mut observed) = mpsc::unbounded_channel();
+    let mut connections = std::collections::VecDeque::new();
+    for _ in 0..3 {
+        let (mut link, _peer) = connection();
+        let mut wire = Vec::new();
+        encode_muxed_frame_into(
+            CONTROL_STREAM,
+            &Frame::Close {
+                code: 1006,
+                reason: "fixture link ended",
+            },
+            &mut wire,
+        )
+        .unwrap();
+        link.receive.extend_from_slice(&wire);
+        connections.push_back(link);
+    }
+    let (_commands, receiver) = mpsc::channel(1);
+    let (changes, _notice) = watch::channel(());
+    let (inventory, _snapshot) = watch::channel(SessionInventoryState::Pending);
+    let actor = tokio::spawn(run_actor(
+        Source::Fixture {
+            connections,
+            attempts,
+        },
+        receiver,
+        changes,
+        inventory,
+    ));
+    let first = observed.recv().await.unwrap();
+    let second = observed.recv().await.unwrap();
+    let third = observed.recv().await.unwrap();
+    actor.await.unwrap();
+    assert_eq!(second.duration_since(first), RECONNECT_FLOOR * 2);
+    assert_eq!(third.duration_since(second), RECONNECT_FLOOR * 4);
 }

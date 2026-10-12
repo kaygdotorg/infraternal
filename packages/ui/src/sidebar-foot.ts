@@ -4,8 +4,9 @@
  *   [ avatar  Display name        ]  ( gear )
  *   [         secondary line      ]
  *
- * Both controls are the shared `.ui-pill` and open the Settings overlay (the person's own
- * pill is where an account section will live). They share one height, so their centres sit on
+ * Both controls are the shared `.ui-pill`. The gear opens Settings. The person's own pill opens a small menu (the
+ * shared anchored menu, above the pill) with Settings and Sign out; the product passes the rows in `menu`, and a
+ * foot without them opens Settings from the pill too. They share one height, so their centres sit on
  * one line. The avatar is the name's initial on a soft gradient derived from the theme's accent
  * (a per-name hue offset, so two people differ without leaving the palette). Every control
  * answers a press with the shared 0.97 scale; nothing here is inert.
@@ -19,13 +20,21 @@
  *   const foot = createSidebarFoot({ displayName, secondary, onOpen: () => settings.open("about", "pointer") });
  *   sidebar.append(foot.root);
  */
+import { ICONS } from "./icons";
+import type { AnchoredPopover } from "./anchored-popover";
+
+export interface SidebarFootMenuItem { id: string; label: string; icon: string; run(source: "pointer" | "keyboard"): void }
+
 export interface SidebarFootOptions {
   displayName: string;
   /** A quiet second line under the name (the username or role); omitted in variant b. */
   secondary?: string;
   variant?: "a" | "b";
-  /** Opens Settings. */
+  /** Opens Settings (the gear, and the pill when it has no menu). */
   onOpen(source: "pointer" | "keyboard"): void;
+  /** The rows of the pill's menu; it opens above the pill, inside `stage`. */
+  menu?: SidebarFootMenuItem[];
+  stage?: HTMLElement;
 }
 
 export interface SidebarFoot {
@@ -34,8 +43,6 @@ export interface SidebarFoot {
   readonly settings: HTMLButtonElement;
   dispose(): void;
 }
-
-const GEAR = '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>';
 
 /** The first letter of the name, upper-cased, for the avatar (never empty). */
 const initial = (name: string): string => [...name.trim()][0]?.toUpperCase() ?? "?";
@@ -51,7 +58,9 @@ export function createSidebarFoot(options: SidebarFootOptions): SidebarFoot {
   const user = document.createElement("button");
   user.type = "button";
   user.className = "ui-pill ui-sidebar-user";
-  user.setAttribute("aria-label", `${options.displayName}${options.secondary ? `, ${options.secondary}` : ""}. Open settings`);
+  const hasMenu = Boolean(options.menu?.length && options.stage);
+  user.setAttribute("aria-label", `${options.displayName}${options.secondary ? `, ${options.secondary}` : ""}. ${hasMenu ? "Account menu" : "Open settings"}`);
+  if (hasMenu) { user.setAttribute("aria-haspopup", "menu"); user.setAttribute("aria-expanded", "false"); }
   const avatar = document.createElement("span");
   avatar.className = "ui-sidebar-avatar";
   avatar.setAttribute("aria-hidden", "true");
@@ -76,18 +85,33 @@ export function createSidebarFoot(options: SidebarFootOptions): SidebarFoot {
   settings.className = "ui-pill ui-pill-icon ui-sidebar-settings";
   settings.setAttribute("aria-label", "Settings");
   settings.dataset.tip = "Settings";
-  settings.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">${GEAR}</svg>`;
+  settings.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">${ICONS.gear}</svg>`;
 
   root.append(user, settings);
   const open = (event: MouseEvent): void => options.onOpen(event.detail === 0 ? "keyboard" : "pointer");
-  user.addEventListener("click", open);
+  let menu: AnchoredPopover | undefined;
+  let opening = false;
+  const toggleMenu = (event: MouseEvent): void => {
+    if (menu) { menu.close(event.detail === 0 ? "keyboard" : "pointer"); return; }
+    if (opening) return;
+    opening = true;
+    const source = event.detail === 0 ? "keyboard" : "pointer";
+    // The menu is loaded the first time it is asked for (D188); the first screen does not carry it.
+    void import("./window-menu.on-demand").then((m) => {
+      opening = false;
+      menu = m.openWindowMenu(options.stage!, user, options.menu!.map((item) => ({ id: item.id, label: item.label, icon: item.icon, run: (e) => item.run(e.detail === 0 ? "keyboard" : "pointer") })),
+        source, () => { menu = undefined; }, { label: "Account", side: "above", align: "start", hug: true, maxWidth: 260 });
+    }, () => { opening = false; });
+  };
+  user.addEventListener("click", hasMenu ? toggleMenu : open);
   settings.addEventListener("click", open);
   return {
     root,
     user,
     settings,
     dispose() {
-      user.removeEventListener("click", open);
+      menu?.close("keyboard");
+      user.removeEventListener("click", hasMenu ? toggleMenu : open);
       settings.removeEventListener("click", open);
       root.remove();
     },

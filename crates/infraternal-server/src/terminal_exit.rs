@@ -23,13 +23,13 @@ pub(crate) async fn record(
     session: &[u8; 16],
     cursor: u64,
     event: &[u8],
-) -> Result<(), ()> {
+) -> Result<bool, ()> {
     if event.len() > 1024 {
         return Err(());
     }
     let value: serde_json::Value = serde_json::from_slice(event).map_err(|_| ())?;
     if value["type"] != "terminal.exited" {
-        return Ok(());
+        return Ok(false);
     }
     let exit: Exit = serde_json::from_value(value).map_err(|_| ())?;
     if exit.kind != "terminal.exited"
@@ -41,11 +41,13 @@ pub(crate) async fn record(
     }
     // The write and authority predicate serialize logout/ownership changes.
     // Transport Close never enters this path: disconnect is resumable.
-    let changed = sqlx::query("UPDATE terminal_sessions SET closed_at=COALESCE(closed_at,unixepoch()),exit_status=? WHERE id=? AND user_id=? AND (closed_at IS NULL OR exit_status=?) AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
+    // A census can establish closure before saved status arrives. Fill an unknown
+    // status once; conflicting later notices still cannot overwrite it.
+    let changed = sqlx::query("UPDATE terminal_sessions SET closed_at=COALESCE(closed_at,unixepoch()),exit_status=? WHERE id=? AND user_id=? AND (exit_status IS NULL OR exit_status=?) AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
         .bind(exit.status).bind(session.as_slice()).bind(user).bind(exit.status)
         .bind(crate::auth::hash(token)).bind(user).execute(pool).await.map_err(|_| ())?;
     if changed.rows_affected() != 1 {
         return Err(());
     }
-    Ok(())
+    Ok(true)
 }

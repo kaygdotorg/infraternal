@@ -1,0 +1,20 @@
+Running as unit: run-p740722-i9128319.scope; invocation ID: f08a4aa655f04729b006c123b0d330a5
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-4/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.55s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/infraternal_agent-81ad30b89970ab02)
+
+running 1 test
+test daemon::census_retry_tests::full_control_lane_retries_retirement_census_on_capacity_without_requests ... 
+thread 'daemon::census_retry_tests::full_control_lane_retries_retirement_census_on_capacity_without_requests' (741215) panicked at crates/infraternal-agent/src/daemon_census_retry_tests.rs:127:9:
+census setup never drained; daemon outcome: Ok(Err(Custom { kind: WouldBlock, error: "control reply queue full" }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    daemon::census_retry_tests::full_control_lane_retries_retirement_census_on_capacity_without_requests
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out; finished in 5.00s
+
+error: test failed, to rerun pass `-p infraternal-agent --lib`

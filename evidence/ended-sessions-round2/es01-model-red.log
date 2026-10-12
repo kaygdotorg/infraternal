@@ -1,0 +1,22 @@
+bun test v1.4.2 (744846f84)
+
+src/canvas/sessions/live-inventory.test.ts:
+116 |   // Open Results have priority over census Events in the daemon writer. The
+117 |   // new shell can therefore be known before the pre-open census is consumed.
+118 |   inventory.attach("server", id);
+119 |   inventory.reconcile("server", []);
+120 |   inventory.reconcile("server", [id]);
+121 |   expect(inventory.get("server", id)?.gone).not.toBe(true);
+                                                      ^
+error: expect(received).not.toBe(expected)
+
+Expected: not true
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/apps/tracer/src/canvas/sessions/live-inventory.test.ts:121:49)
+(fail) a census predating a new shell does not permanently retire its confirmed live ID [3.97ms]
+
+ 0 pass
+ 5 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [22.00ms]

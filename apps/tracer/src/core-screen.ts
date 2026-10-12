@@ -9,6 +9,8 @@ import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform"
 import { bindTerminalFont, TERMINAL_FONT_SHORTCUTS } from "./terminal-font-shortcuts";
 import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
+import { askSignOut } from "./sign-out";
+import { ICONS } from "../../../packages/ui/src/icons";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
 import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
 import { toolbarSection } from "../../../packages/ui/src/toolbar-settings";
@@ -293,12 +295,23 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   if (options.canvas && !options.settingsView) settingsSections.unshift(shortcutsPanel);
   const aboutPanel = settingsSections[0]!;
   const settings = options.canvas && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
+  const openSettingsFrom = (source: "pointer" | "keyboard"): void => {
+    if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance", source } }));
+    else settings?.open("about", source);
+  };
+  const askSignOutFrom = (anchor: HTMLElement): void => { askSignOut(anchor, toast); };
   const sidebarFoot = options.canvas
     ? createSidebarFoot({
       displayName: options.displayName?.trim() || "Signed in",
       ...(options.username ? { secondary: options.username } : {}),
       ...(options.footerVariant ? { variant: options.footerVariant } : {}),
-      onOpen: (source) => { if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance", source } })); else settings?.open("about", source); },
+      onOpen: (source) => openSettingsFrom(source),
+      // The person's pill is their account menu (#171): Settings, and the one obvious way out of this device.
+      stage,
+      menu: [
+        { id: "settings", label: "Settings", icon: ICONS.gear, run: (source) => openSettingsFrom(source) },
+        { id: "sign-out", label: "Sign out", icon: ICONS.signOut, run: () => askSignOutFrom(sidebarFoot!.user) },
+      ],
     })
     : undefined;
   if (sidebarFoot) { sidebar.append(sidebarFoot.root); sidebar.dataset.foot = ""; }
@@ -477,6 +490,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { group: "Help", glyph: "i", label: "About infraternal", hint: "version · build · commit", action: "settings:about" },
     ] : []),
     ...(recoveryUiEnabled() && options.onRecovery ? [{ group: "Account", glyph: "◇", label: "Use recovery key", hint: "replace passkey", action: "account:recovery" }] : []),
+    ...(options.canvas ? [{ group: "Account", glyph: "⎋", icon: ICONS.signOut, label: "Sign out", hint: "this device", action: "account:signout" }] : []),
   ];
   // Rows can come from providers (the canvas offers Lock or Unlock by state), so the list and its
   // lookup tables are rebuilt each time the palette opens; typing only filters them.
@@ -777,6 +791,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
       // A control that holds something open (the inbox's expanded line) collapses it first (`data-owns-escape`).
       if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
+      // An open menu or confirmation (the profile pill's menu, a sign-out question) closes first and keeps the sidebar it hangs from.
+      if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true']")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
       // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
       if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
@@ -1384,6 +1400,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (kind === "account" && value === "recovery") {
       setPalette(false, source);
       options.onRecovery?.();
+    } else if (kind === "account" && value === "signout") {
+      setPalette(false, source);
+      // Asked from where the person can see: the profile pill when the sidebar is open, else the top pill.
+      requestAnimationFrame(() => askSignOutFrom(sidebarFoot && !sidebar.hidden ? sidebarFoot.user : get<HTMLElement>("#capsule")));
+      return true;
     } else if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
       writeLocal("tracer.theme", currentThemeId);

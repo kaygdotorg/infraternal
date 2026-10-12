@@ -20,7 +20,7 @@ infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", opt
 infraternal-protocol.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-shim.workspace = true
-nix = { workspace = true, features = ["inotify"] }
+nix = { workspace = true, features = ["inotify", "event"] }
 tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }
 uuid.workspace = true
 serde.workspace = true

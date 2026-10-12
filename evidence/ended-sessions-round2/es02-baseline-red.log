@@ -1,0 +1,18 @@
+Running as unit: run-p3515439-i3515739.scope; invocation ID: 516953d8398b416c9d804469e86280b9
+
+running 1 test
+
+thread 'websocket::session_inventory_tests::reconciliation_before_saved_exit_keeps_the_authoritative_exit_status' (3515697) panicked at crates/infraternal-server/src/session_inventory_tests.rs:103:5:
+assertion `left == right` failed: census closure refused the later saved exit: Err(())
+  left: None
+ right: Some(7)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test websocket::session_inventory_tests::reconciliation_before_saved_exit_keeps_the_authoritative_exit_status ... FAILED
+
+failures:
+
+failures:
+    websocket::session_inventory_tests::reconciliation_before_saved_exit_keeps_the_authoritative_exit_status
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.10s
+

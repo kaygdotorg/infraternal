@@ -22,7 +22,7 @@ try:
     c.send(2, 0x16, c.id.bytes + struct.pack('<QQ', c.out, 0))
     c.send(2, 0x14, struct.pack('<I', 1048576))
     def receive():
-        stream, kind, body = c.read()
+        stream, kind, body = c.read_ignoring_replay_complete({1: c.id, 2: c.id})
         assert stream in acks, (stream, kind)
         if kind == 0x13:
             ack = struct.unpack('<Q', body)[0]

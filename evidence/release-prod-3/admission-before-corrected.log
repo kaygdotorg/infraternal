@@ -1,0 +1,41 @@
+Running as unit: run-p738971-i4932938.scope; invocation ID: b35eb3514fcc43efbe81d336fade2011
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-1rs616h9.js, chunk-dpg6mcx9.js, chunk-1cefch9f.js, chunk-5wjqz9g6.js, chunk-j15xvhfn.js, chunk-3nxh4ggs.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-ahsc928a.js, chunk-grfx8sjv.js, chunk-aegc6dk4.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-t3zw21ev.js, chunk-dr3c5pcf.js, chunk-dy6r3prq.js, chunk-fp7n67ps.js, chunk-t0afx66y.js, chunk-ksz45nsj.js, chunk-6j95b132.js, chunk-b49fn2re.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-aycs61pr.js, chunk-d0mrw5qq.js, chunk-j3w7bqa1.js, chunk-vznbwdga.js, chunk-5753zf8s.js, chunk-zs1074gm.js, chunk-41spawmp.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-cm35m73p.js, chunk-h9rhcfxm.js, chunk-943f4733.js, chunk-ajqpsptr.js, chunk-1hje8sjn.js, chunk-h8pvpfka.js, chunk-axbkkqp1.js, chunk-natz5687.js, chunk-ckjedqb5.js, chunk-ph5kvz6n.js, chunk-4bvzfzd6.js, chunk-8mn4xh3g.js, chunk-qgwf3ta6.js, chunk-gdpwxedj.js, chunk-2np98sjc.js, chunk-w3c0q46e.js, chunk-tg4dk72s.js, chunk-kp85w9sg.js, chunk-x7eg5b73.js, chunk-az2bbtnt.js, chunk-jq086dc5.js, chunk-pe582kkr.js, chunk-zkq46y16.js, chunk-97v65hna.js, chunk-nsa2mxey.js, chunk-ng07d67n.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-67m0m92s.js, chunk-ymebvfaa.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-15qddsz6.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4936
+[WebServer] latency proxy listening on http://localhost:4935; upstream port=4936
+
+Running 1 test using 1 worker
+
+(node:740789) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/clusters.spec.ts:942:1 › a no-access shared window cannot open session management through the palette (11.9s)
+
+
+  1) test/clusters.spec.ts:942:1 › a no-access shared window cannot open session management through the palette 
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: locator('.cl-share')
+    Expected: visible
+    Timeout: 5000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toBeVisible" with timeout 5000ms
+      - waiting for locator('.cl-share')
+
+
+      898 |   await kayg.keyboard.type("share layout");
+      899 |   await kayg.keyboard.press("Enter");
+    > 900 |   await expect(kayg.locator(".cl-share")).toBeVisible();
+          |                                           ^
+      901 |   await expect(kayg.locator('.cl-share-chip[data-view="incident"]')).toHaveAttribute("aria-pressed", "true");
+      902 |   await expect(kayg.locator(".cl-share-send")).toBeDisabled();
+      903 |   await kayg.locator(".cl-share .ui-chip-text").pressSequentially("asha"); // a name that matches becomes a chip as soon as it is unambiguous
+        at sharedPair (/home/kayg/Developer/infraternal/.worktrees/release-prod-3/apps/tracer/test/clusters.spec.ts:900:43)
+        at /home/kayg/Developer/infraternal/.worktrees/release-prod-3/apps/tracer/test/clusters.spec.ts:943:16
+
+    Error Context: test-results/clusters-a-no-access-share-18389-agement-through-the-palette/error-context.md
+
+  1 failed
+    test/clusters.spec.ts:942:1 › a no-access shared window cannot open session management through the palette 

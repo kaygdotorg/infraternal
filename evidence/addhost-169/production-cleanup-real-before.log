@@ -1,0 +1,13 @@
+Running as unit: run-p1193064-i1193364.scope; invocation ID: 60be14c59fc14a338a6ea60164b5c3c3
+READINESS startup=tmux real_pty=true marker=true rc_executed=false elapsed_ms=1180.0
+READINESS startup=zellij real_pty=true marker=true rc_executed=false elapsed_ms=1165.3
+READINESS startup=menu real_pty=true marker=true rc_executed=false elapsed_ms=1145.3
+READINESS startup=bash real_pty=true marker=true rc_executed=false elapsed_ms=1357.9
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/addhost-fixes/scripts/verify-addhost-readiness.py", line 118, in <module>
+    cleanup_cases(args.binary.resolve())
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kayg/Developer/infraternal/.worktrees/addhost-fixes/scripts/verify-addhost-readiness.py", line 101, in cleanup_cases
+    assert not path.exists(), 'private readiness shim still running'
+           ^^^^^^^^^^^^^^^^^
+AssertionError: private readiness shim still running

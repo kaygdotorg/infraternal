@@ -1,0 +1,173 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p3912332-i8106229.scope; invocation ID: 632da4860f2a4e3ebbe2995e8186faff
+80.92 79.99 78.96 123/1966 3912550
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-7tevf83j.js, chunk-dpg6mcx9.js, chunk-gyz0qkq6.js, chunk-5wjqz9g6.js, chunk-rbsk3rxg.js, chunk-xknkg396.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-hegdnnvd.js, chunk-ekkj2ep7.js, chunk-aegc6dk4.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-5xtfdfv2.js, chunk-dr3c5pcf.js, chunk-v9s9bgxa.js, chunk-ccapj91b.js, chunk-t0afx66y.js, chunk-smjht38d.js, chunk-9e5qxt93.js, chunk-zcyp2y9b.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-byygh2bf.js, chunk-cn51skw5.js, chunk-e96akzyx.js, chunk-a2av1v21.js, chunk-5753zf8s.js, chunk-0vreb3f0.js, chunk-c5vc4s27.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-b3hbqqmp.js, chunk-6633rxvm.js, chunk-r58n6r0g.js, chunk-p22vzd34.js, chunk-1hje8sjn.js, chunk-ftyr9e74.js, chunk-axbkkqp1.js, chunk-v959ktac.js, chunk-wh9m84mf.js, chunk-et2snb8j.js, chunk-ka7r51vn.js, chunk-jkqy8yc5.js, chunk-se2jwc6w.js, chunk-gdpwxedj.js, chunk-t6ea7yd8.js, chunk-bjsnganz.js, chunk-br7m11wr.js, chunk-nthnsmdm.js, chunk-a2ax6wrh.js, chunk-z3vqqntv.js, chunk-gew056n2.js, chunk-xmehcwje.js, chunk-awvesg5r.js, chunk-hhnn5veq.js, chunk-n2z6kxd6.js, chunk-g05qrv1m.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-766amc1z.js, chunk-9bw88xa8.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-1s3x7xx8.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:5315
+[WebServer] latency proxy listening on http://localhost:5314; upstream port=5315
+
+Running 6 tests using 1 worker
+
+(node:3913557) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/addhost-wizard.spec.ts:219:1 › a host that does not answer: what happened, Retry, and the one-line install from the host (19.2s)
+  ✘  2 test/sessions-canvas.spec.ts:316:1 › the empty, loading and error states keep the product's rhythm (30.0s)
+(node:3920577) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  3 test/sessions-canvas.spec.ts:390:1 › the manager's code is on demand, fetched at idle so the first open never waits for a download (#128) (11.5s)
+theme fixture bytes=605847 metrics={"cols":170,"rows":44,"cellWidth":8,"cellHeight":18,"naturalCellWidth":8,"configuredScrollback":40000000,"cursorX":16,"cursorY":43,"renderCursorX":16,"renderCursorY":43,"renderCursorVisible":true,"themeColorsMs":0,"themeRenderMs":0,"terminalColors":{"background":{"r":246,"g":246,"b":244},"foreground":{"r":29,"g":29,"b":31}},"receivedSequence":"605847","outputSequence":"605847","scrollbackRows":10024,"viewportY":0,"cursorVisible":true,"fontSize":14,"fontFamily":"\"Maple Mono NF\", \"Nerd Symbols\", \"Maple Mono NF Fallback\", ui-monospace, monospace","fontId":"maple-mono-nf","wasmMemoryBytes":35848192}
+theme-switch click-to-full-paint JS ms: n=50 p50=1.300 p99=11.600 max=11.600 long_tasks_gt_50ms=33
+slowest theme samples: [{"sample":16,"click":11.600000001490116,"colors":0,"render":41.600000001490116},{"sample":24,"click":9.300000004470348,"colors":0,"render":21.200000002980232},{"sample":8,"click":8.5,"colors":0,"render":5.799999997019768},{"sample":28,"click":8.399999998509884,"colors":0,"render":72.59999999403954},{"sample":4,"click":7.800000004470348,"colors":0,"render":22.399999998509884}]
+theme work JS ms: color_setters_p50=0.000 repaint_p50=25.600
+  ✘  4 test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text (32.4s)
+(node:3927157) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  5 test/terminal.spec.ts:5:1 › first run, passkey login, terminal resume, and the latency probe (25.5s)
+(node:3934413) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+METRIC name=access_screen_render_upper_bound_setup source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=2550.20 p99_ms=3436.50 budget_ms=1000 result=FAIL
+METRIC name=access_screen_first_contentful_paint_setup source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=2075.60 p99_ms=2597.40 budget_ms=1000 result=REPORT
+  ✘  6 test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget (2.0m)
+
+
+  1) test/sessions-canvas.spec.ts:316:1 › the empty, loading and error states keep the product's rhythm 
+
+    Test timeout of 30000ms exceeded.
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('[data-view=\'console\'] .ui-window')
+    Expected: 4
+    Received: 0
+
+    Call log:
+      - Expect "toHaveCount" with timeout 20000ms
+      - waiting for locator('[data-view=\'console\'] .ui-window')
+        4 × locator resolved to 0 elements
+          - unexpected value "0"
+
+
+      15 |   const page = await context.newPage();
+      16 |   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none${scene ? `&sessions=${scene}` : ""}`);
+    > 17 |   await expect(page.locator("[data-view='console'] .ui-window")).toHaveCount(4, { timeout: 20_000 });
+         |                                                                  ^
+      18 |   await expect.poll(() => page.evaluate(() => typeof (window as unknown as { __tracerClusters?: { sessions?: unknown } }).__tracerClusters?.sessions)).toBe("function");
+      19 |   await page.waitForTimeout(600);
+      20 |   return { context, page };
+        at open (/home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/sessions-canvas.spec.ts:17:66)
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/sessions-canvas.spec.ts:324:18
+
+    Error Context: test-results/sessions-canvas-the-empty--a4659-s-keep-the-product-s-rhythm/error-context.md
+
+  2) test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text 
+
+    Error: expect(received).toEqual(expected) // deep equality
+
+    - Expected  -  1
+    + Received  + 35
+
+    - Array []
+    + Array [
+    +   70,
+    +   61,
+    +   84,
+    +   118,
+    +   72,
+    +   101,
+    +   94,
+    +   67,
+    +   66,
+    +   67,
+    +   87,
+    +   58,
+    +   67,
+    +   62,
+    +   100,
+    +   52,
+    +   84,
+    +   72,
+    +   90,
+    +   139,
+    +   58,
+    +   51,
+    +   55,
+    +   51,
+    +   99,
+    +   51,
+    +   82,
+    +   59,
+    +   64,
+    +   155,
+    +   108,
+    +   75,
+    +   64,
+    + ]
+
+      288 |   });
+      289 |   expect(p99).toBeLessThan(16.67);
+    > 290 |   expect(longTasks.filter((duration) => duration > 50)).toEqual([]);
+          |                                                         ^
+      291 |   expect(await readSocketCounts(page)).toEqual(socketCounts);
+      292 |   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.scrollbackRows ?? 0)).toBe(scrollbackRowsBefore);
+      293 |   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toBe(historyText);
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/terminal-theme.spec.ts:290:57
+
+    Error Context: test-results/terminal-theme-every-curat-3627b--and-its-existing-ANSI-text/error-context.md
+
+  3) test/terminal.spec.ts:5:1 › first run, passkey login, terminal resume, and the latency probe ──
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+    Call Log:
+    - Timeout 5000ms exceeded while waiting on the predicate
+
+      82 |     const started = await page.evaluate(() => performance.now());
+      83 |     await page.getByRole("button", { name: "Continue with passkey" }).click();
+    > 84 |     await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true)).toBe(true);
+         |                                                                                                     ^
+      85 |     returningSigninSamples.push(await page.evaluate((start) => performance.now() - start, started));
+      86 |     expect(await page.evaluate(() => document.documentElement.dataset.passkeyGets)).toBe("1");
+      87 |     if (attempt + 1 < signinTrials) {
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/terminal.spec.ts:84:101
+
+    attachment #1: signin-light (image/png) ────────────────────────────────────────────────────────
+    test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/attachments/signin-light-726f576a03566a511cf981fa779a40e8c64deffb.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #2: signin-dark (image/png) ─────────────────────────────────────────────────────────
+    test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/attachments/signin-dark-2526501a10c7d1971eae0ca0adae985edb160748.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/error-context.md
+
+  4) test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget ───────
+
+    Test timeout of 120000ms exceeded.
+
+    Error: page.goto: Test timeout of 120000ms exceeded.
+    Call log:
+      - navigating to "http://localhost:5314/", waiting until "load"
+
+
+      640 |       const sample = await page.context().newPage();
+      641 |       await sample.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: setupRequired } }));
+    > 642 |       await sample.goto("/");
+          |                    ^
+      643 |       await expect(sample.locator(setupRequired ? "#setup-card" : "#login-passkey")).toBeVisible();
+      644 |       firstPaints.push(await sample.evaluate(() =>
+      645 |         performance.getEntriesByName("first-contentful-paint")[0]?.startTime ?? performance.now()));
+        at /home/kayg/.cache/codex-scratch/prod4/base/apps/tracer/test/terminal.spec.ts:642:20
+
+    Error Context: test-results/terminal-access-screens-re-da0df-he-local-first-paint-budget/error-context.md
+
+  4 failed
+    test/sessions-canvas.spec.ts:316:1 › the empty, loading and error states keep the product's rhythm 
+    test/terminal-theme.spec.ts:205:1 › every curated theme recolors the initial terminal and its existing ANSI text 
+    test/terminal.spec.ts:5:1 › first run, passkey login, terminal resume, and the latency probe ───
+    test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget ────────
+  2 passed (4.5m)
+126.89 108.79 91.25 103/2059 3958081
+BROWSER_EXIT=1

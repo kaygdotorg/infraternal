@@ -6,6 +6,7 @@ pub mod daemon;
 mod lifecycle;
 pub mod plugin_control;
 pub mod plugins;
+mod process_exits;
 pub mod relay;
 #[cfg(feature = "remote")]
 pub mod remote_client;
@@ -38,3 +39,6 @@ mod transport_diagnostics;
 #[cfg(all(test, feature = "remote"))]
 #[path = "remote_native_tests.rs"]
 mod remote_native_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod process_exits_tests;

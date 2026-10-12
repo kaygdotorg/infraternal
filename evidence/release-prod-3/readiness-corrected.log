@@ -1,0 +1,6 @@
+READINESS startup=tmux real_pty=true marker=true rc_executed=false elapsed_ms=1198.8
+READINESS startup=zellij real_pty=true marker=true rc_executed=false elapsed_ms=1250.5
+READINESS startup=menu real_pty=true marker=true rc_executed=false elapsed_ms=1174.3
+READINESS startup=bash real_pty=true marker=true rc_executed=false elapsed_ms=1286.1
+CLEANUP abandoned=False real_pty=true scope_active=false artifacts=0 elapsed_ms=318.3
+CLEANUP abandoned=True real_pty=true scope_active=false artifacts=0 elapsed_ms=9884.5

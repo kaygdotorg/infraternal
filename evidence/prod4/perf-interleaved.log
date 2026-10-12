@@ -1,0 +1,84 @@
+Running as unit: run-p95179-i95479.scope; invocation ID: d89a390c80144db980a719a87746e741
+Linux infraternal-perf-test 6.12.69+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.69-1 (2026-02-08) x86_64 GNU/Linux
+4
+f5fcda1a36f2270e458a1598a35d444f542a826b6d49fc88f0f876497b25fed1  base
+b8450a258fa701a2149a73747c8f0de4db787cf047611387fcc4fae23e3b02df  head
+RUN revision=base iteration=1
+0.33 0.12 0.03 1/224 95191
+METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=1000 p50_ms=0.24 p99_ms=0.47 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=1000 p50_ms=0.31 p99_ms=0.62 budget_ms=34.00 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=1000 p50_ms=0.25 p99_ms=1.71 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=1000 p50_ms=0.29 p99_ms=1.83 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_other_session source=real-agent-pty n=1000 baseline_p99_ms=0.62 flood_p99_ms=1.83 growth_ms=1.21 budget_ms=16.67 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=1000 p50_ms=1.46 p99_ms=6.58 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=1000 p50_ms=4.80 p99_ms=16.47 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_same_session source=real-agent-pty n=1000 baseline_p99_ms=0.62 flood_p99_ms=16.47 growth_ms=15.85 budget_ms=16.67 result=PASS
+NATIVE_EXIT=0
+0.52 0.16 0.05 1/224 95231
+RUN revision=head iteration=1
+0.52 0.16 0.05 2/224 95232
+METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=1000 p50_ms=0.67 p99_ms=1.61 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=1000 p50_ms=0.80 p99_ms=2.70 budget_ms=34.00 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=1000 p50_ms=0.47 p99_ms=3.89 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=1000 p50_ms=0.60 p99_ms=4.49 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_other_session source=real-agent-pty n=1000 baseline_p99_ms=2.70 flood_p99_ms=4.49 growth_ms=1.79 budget_ms=16.67 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=1000 p50_ms=2.17 p99_ms=8.34 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=1000 p50_ms=7.17 p99_ms=17.13 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_same_session source=real-agent-pty n=1000 baseline_p99_ms=2.70 flood_p99_ms=17.13 growth_ms=14.43 budget_ms=16.67 result=PASS
+NATIVE_EXIT=0
+0.59 0.19 0.06 1/224 95272
+RUN revision=base iteration=2
+0.59 0.19 0.06 1/224 95273
+METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=1000 p50_ms=0.58 p99_ms=2.53 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=1000 p50_ms=0.77 p99_ms=3.31 budget_ms=34.00 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=1000 p50_ms=0.69 p99_ms=6.46 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=1000 p50_ms=1.01 p99_ms=7.77 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_other_session source=real-agent-pty n=1000 baseline_p99_ms=3.31 flood_p99_ms=7.77 growth_ms=4.46 budget_ms=16.67 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=1000 p50_ms=2.50 p99_ms=10.35 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=1000 p50_ms=7.88 p99_ms=18.31 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_same_session source=real-agent-pty n=1000 baseline_p99_ms=3.31 flood_p99_ms=18.31 growth_ms=15.00 budget_ms=16.67 result=PASS
+NATIVE_EXIT=0
+0.73 0.23 0.07 1/224 95313
+RUN revision=head iteration=2
+0.73 0.23 0.07 1/224 95314
+METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=1000 p50_ms=0.43 p99_ms=2.00 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=1000 p50_ms=0.56 p99_ms=3.34 budget_ms=34.00 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=1000 p50_ms=0.54 p99_ms=4.63 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=1000 p50_ms=0.69 p99_ms=5.76 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_other_session source=real-agent-pty n=1000 baseline_p99_ms=3.34 flood_p99_ms=5.76 growth_ms=2.42 budget_ms=16.67 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=1000 p50_ms=2.32 p99_ms=6.94 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=1000 p50_ms=7.59 p99_ms=16.12 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_same_session source=real-agent-pty n=1000 baseline_p99_ms=3.34 flood_p99_ms=16.12 growth_ms=12.78 budget_ms=16.67 result=PASS
+NATIVE_EXIT=0
+0.94 0.29 0.09 1/225 95355
+RUN revision=base iteration=3
+0.94 0.29 0.09 2/225 95356
+METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=1000 p50_ms=0.43 p99_ms=1.74 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=1000 p50_ms=0.57 p99_ms=2.25 budget_ms=34.00 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=1000 p50_ms=0.40 p99_ms=4.64 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=1000 p50_ms=0.51 p99_ms=6.20 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_other_session source=real-agent-pty n=1000 baseline_p99_ms=2.25 flood_p99_ms=6.20 growth_ms=3.96 budget_ms=16.67 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=1000 p50_ms=1.98 p99_ms=13.49 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=1000 p50_ms=6.80 p99_ms=25.36 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_same_session source=real-agent-pty n=1000 baseline_p99_ms=2.25 flood_p99_ms=25.36 growth_ms=23.12 budget_ms=16.67 result=FAIL
+Traceback (most recent call last):
+  File "/root/infraternal-bench/prod4/scripts/verify-latency.py", line 245, in <module>
+    run(args.binary, args.state, args.samples)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/infraternal-bench/prod4/scripts/verify-latency.py", line 226, in run
+    raise AssertionError("latency budget failures: " + ", ".join(failed_metrics))
+AssertionError: latency budget failures: flood_isolation_same_session
+NATIVE_EXIT=1
+1.03 0.33 0.11 2/225 95396
+RUN revision=head iteration=3
+1.03 0.33 0.11 1/225 95397
+METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=1000 p50_ms=0.31 p99_ms=1.39 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=1000 p50_ms=0.39 p99_ms=1.63 budget_ms=34.00 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=1000 p50_ms=0.38 p99_ms=3.65 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=1000 p50_ms=0.48 p99_ms=5.37 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_other_session source=real-agent-pty n=1000 baseline_p99_ms=1.63 flood_p99_ms=5.37 growth_ms=3.74 budget_ms=16.67 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=1000 p50_ms=1.63 p99_ms=4.64 budget_ms=34.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=1000 p50_ms=5.39 p99_ms=10.59 budget_ms=34.00 result=PASS
+METRIC name=flood_isolation_same_session source=real-agent-pty n=1000 baseline_p99_ms=1.63 flood_p99_ms=10.59 growth_ms=8.96 budget_ms=16.67 result=PASS
+NATIVE_EXIT=0
+1.02 0.35 0.11 1/225 95437

@@ -1,0 +1,161 @@
+Running as unit: run-p1158411-i5352374.scope; invocation ID: c56c7910bac0484fae227596722d103f
+PAIR 1 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1695 p99_us=3923 close_200_us=42258 arch=x86_64 cores=12 load=11.68 27.60 31.90 5/1178 1158430
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.32s
+
+PAIR 1 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1495 p99_us=2091 close_200_us=17329 arch=x86_64 cores=12 load=11.68 27.60 31.90 8/1179 1158445
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.28s
+
+PAIR 1 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1235 p99_us=2240 close_200_us=16834 arch=x86_64 cores=12 load=11.68 27.60 31.90 6/1178 1158455
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.25s
+
+PAIR 1 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1726 p99_us=2405 close_200_us=19902 arch=x86_64 cores=12 load=11.68 27.60 31.90 10/1189 1158485
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.30s
+
+PAIR 2 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1726 p99_us=2514 close_200_us=18823 arch=x86_64 cores=12 load=11.68 27.60 31.90 7/1187 1158514
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.30s
+
+PAIR 2 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1925 p99_us=3222 close_200_us=19743 arch=x86_64 cores=12 load=11.68 27.60 31.90 9/1196 1158541
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.33s
+
+PAIR 2 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1699 p99_us=2549 close_200_us=18754 arch=x86_64 cores=12 load=11.68 27.60 31.90 8/1196 1158555
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.30s
+
+PAIR 2 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1632 p99_us=2137 close_200_us=18225 arch=x86_64 cores=12 load=11.68 27.60 31.90 11/1210 1158584
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.29s
+
+PAIR 3 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1557 p99_us=2878 close_200_us=18433 arch=x86_64 cores=12 load=11.68 27.60 31.90 7/1221 1158625
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.29s
+
+PAIR 3 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1782 p99_us=7068 close_200_us=17810 arch=x86_64 cores=12 load=11.68 27.60 31.90 6/1212 1158639
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.34s
+
+PAIR 3 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1503 p99_us=2137 close_200_us=16831 arch=x86_64 cores=12 load=11.68 27.60 31.90 6/1212 1158646
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.26s
+
+PAIR 3 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1439 p99_us=1998 close_200_us=14971 arch=x86_64 cores=12 load=11.68 27.60 31.90 6/1217 1158680
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.25s
+
+PAIR 4 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1920 p99_us=8725 close_200_us=14415 arch=x86_64 cores=12 load=11.63 27.32 31.79 16/1229 1158709
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.36s
+
+PAIR 4 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1592 p99_us=3328 close_200_us=21167 arch=x86_64 cores=12 load=11.63 27.32 31.79 18/1230 1158717
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.32s
+
+PAIR 4 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1732 p99_us=2658 close_200_us=15799 arch=x86_64 cores=12 load=11.63 27.32 31.79 5/1228 1158727
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.28s
+
+PAIR 4 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1689 p99_us=2451 close_200_us=16048 arch=x86_64 cores=12 load=11.63 27.32 31.79 6/1210 1158743
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.28s
+
+PAIR 5 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1540 p99_us=2612 close_200_us=16700 arch=x86_64 cores=12 load=11.63 27.32 31.79 4/1203 1158752
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.28s
+
+PAIR 5 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1595 p99_us=2541 close_200_us=17641 arch=x86_64 cores=12 load=11.63 27.32 31.79 4/1204 1158764
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.29s
+
+PAIR 5 HEAD
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1686 p99_us=2341 close_200_us=18271 arch=x86_64 cores=12 load=11.63 27.32 31.79 5/1201 1158773
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 204 filtered out; finished in 0.29s
+
+PAIR 5 BASELINE
+
+running 1 test
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... inventory_reconciliation: sessions=200 accounts=50 sqlite=memory n=100 p50_us=1439 p99_us=1995 close_200_us=17504 arch=x86_64 cores=12 load=11.63 27.32 31.79 5/1203 1158785
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.28s
+

@@ -25,7 +25,7 @@ export function installSessionScenes(env: { cx: Ctx; inventory: MockInventory; /
   const manager = (host: string): WinRec | undefined => {
     const rec = winOf(host);
     const anchor = rec?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
-    if (!rec || !anchor) return undefined;
+    if (!rec) return undefined;
     cx.win.setActive(rec);
     cx.nav.focusWindow(rec);
     later(() => cx.sessionUi?.toggleManager(rec, anchor, "pointer"), settle);

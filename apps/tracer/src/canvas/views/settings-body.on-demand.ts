@@ -4,14 +4,15 @@
  *
  * The bodies of the Settings view's windows (D179): one panel per section, rendered into its window.
  *
- * The sections that belong to the app itself (appearance, toolbar, shortcuts, about) are rendered here from the
+ * The sections that belong to the app itself (appearance, toolbar, shortcuts, account, about) are rendered here from the
  * shared panels in packages/ui and the core screen. Sections that need account or instance data (devices,
- * account, users, grants, discovery) come from a `SettingsSource`: the product supplies the ones whose server
+ * users, grants, discovery) come from a `SettingsSource`: the product supplies the ones whose server
  * API exists, a mockup supplies test-double panels. A section no source provides is not listed at all.
  */
 import { FONTS } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
-import { renderAppearance, renderHosts, renderWindowSizes, type AppearanceApi, type HostsApi, type StatusActionPref, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import { renderAccount, renderAppearance, renderHosts, renderWindowSizes, type AppearanceApi, type HostsApi, type StatusActionPref, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import { askSignOut } from "../../sign-out";
 import type { AuthorityControl } from "../addhost/authority-unlock";
 import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
 import type { Ctx } from "../context";
@@ -23,6 +24,8 @@ export interface SettingsSource {
   /** Section ids this source renders (besides the four built-in ones). */
   sections: readonly string[];
   render(section: string, pane: HTMLElement, cx: Ctx): (() => void) | void;
+  /** What the account section lists above its sign-out row (a mockup's passkeys); the product has no facts to show yet. */
+  accountFacts?(): Array<{ title: string; rows: Array<{ key: string; value: string }> }>;
 }
 
 /** The host-connection lock as a Settings group: plain words for the state, and the button only for an administrator while it is locked. */
@@ -52,8 +55,8 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
   const windowSizes: WindowSizesApi = {
     groups: [
       { id: "phone", title: "Phones", options: [
-        { id: "full", label: "Full width", hint: "between the margins" },
-        { id: "edge", label: "Edge to edge", hint: "99% of the screen" },
+        { id: "full", label: "Full width", hint: "the whole screen, no neighbours showing" },
+        { id: "edge", label: "Edge to edge", hint: "neighbours peek in at the sides" },
         { id: "comfortable", label: "Comfortable", hint: "with margins" },
       ] },
       { id: "desktop", title: "Desktop", options: [
@@ -86,6 +89,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       case "toolbar": return core.settingsPanels.toolbar.render(pane);
       case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
       case "about": return core.settingsPanels.about.render(pane);
+      case "account": return renderAccount(pane, { groups: cx.adapters.settings.accountFacts?.() ?? [], signOut: (anchor) => { askSignOut(anchor, cx.toast); } });
       default: return cx.adapters.settings.render(section, pane, cx);
     }
   })();

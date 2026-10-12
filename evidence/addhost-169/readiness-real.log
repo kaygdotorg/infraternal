@@ -1,0 +1,5 @@
+Running as unit: run-p279192-i279492.scope; invocation ID: 94bcc259bac64d08ad8c9aef43d99d36
+READINESS startup=tmux real_pty=true marker=true rc_executed=false elapsed_ms=1264.2
+READINESS startup=zellij real_pty=true marker=true rc_executed=false elapsed_ms=1268.3
+READINESS startup=menu real_pty=true marker=true rc_executed=false elapsed_ms=1236.5
+READINESS startup=bash real_pty=true marker=true rc_executed=false elapsed_ms=1237.6

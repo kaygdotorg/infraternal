@@ -14,6 +14,7 @@
  * Storage may be unavailable (private mode, blocked): every method then behaves as an empty store.
  */
 import { parseDocument, type CanvasDocument } from "./document";
+import { canvasKey } from "../../account-storage";
 
 export interface CanvasStore {
   load(): Promise<CanvasDocument | undefined>;
@@ -23,7 +24,7 @@ export interface CanvasStore {
 
 export class LocalCanvasStore implements CanvasStore {
   private readonly key: string;
-  constructor(account: string) { this.key = `infraternal.canvas.${account}`; }
+  constructor(account: string) { this.key = canvasKey(account); }
   async load(): Promise<CanvasDocument | undefined> {
     try {
       const raw = localStorage.getItem(this.key);

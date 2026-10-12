@@ -23,7 +23,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
 
 const CONTROL_STREAM: u32 = 0;
@@ -142,12 +142,24 @@ impl TerminalAttachment {
     }
 }
 
+/// Full inventory availability from the infraternal agent, separate from session liveness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionInventoryState {
+    /// No agent census has arrived during this server run; subscribers must hide cached rows.
+    Pending,
+    /// The agent link dropped; cached rows cannot be offered until a fresh census arrives.
+    Unavailable,
+    /// Authoritative shim identities from one complete agent census.
+    Available(Arc<[[u8; 16]]>),
+}
+
 /// Bounded command sender for the embedded agent actor.
 #[derive(Clone)]
 pub(crate) struct EmbeddedAgent {
     commands: mpsc::Sender<Command>,
     changes: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
+    session_inventory: watch::Sender<SessionInventoryState>,
 }
 
 impl EmbeddedAgent {
@@ -161,6 +173,7 @@ impl EmbeddedAgent {
     pub fn spawn(executable: PathBuf) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable,
@@ -168,11 +181,13 @@ impl EmbeddedAgent {
             },
             receiver,
             changes,
+            session_inventory.clone(),
         ));
         Self {
             commands,
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
+            session_inventory,
         }
     }
 
@@ -182,10 +197,12 @@ impl EmbeddedAgent {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (_changes, notice) = tokio::sync::watch::channel(());
         drop(receiver);
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         Self {
             commands,
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
+            session_inventory,
         }
     }
 
@@ -195,6 +212,7 @@ impl EmbeddedAgent {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (changes, notice) = tokio::sync::watch::channel(());
         let (accepts, incoming) = mpsc::channel(1);
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Remote {
                 incoming,
@@ -203,12 +221,14 @@ impl EmbeddedAgent {
             },
             receiver,
             changes,
+            session_inventory.clone(),
         ));
         (
             Self {
                 commands,
                 changes: notice,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
+                session_inventory,
             },
             accepts,
         )
@@ -242,9 +262,27 @@ impl EmbeddedAgent {
 
     /// Open a terminal on the embedded infraternal agent's host.
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+        self.open_with_readiness(size, false).await
+    }
+
+    /// Open a private fixed-command readiness PTY under the enrolled identity.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+        self.open_with_readiness(size, true).await
+    }
+
+    async fn open_with_readiness(
+        &self,
+        size: TerminalSize,
+        readiness: bool,
+    ) -> Result<[u8; 16], AgentError> {
         let (reply, result) = oneshot::channel();
         self.commands
-            .send(Command::Open { size, reply })
+            .send(Command::Open {
+                size,
+                readiness,
+                reply,
+            })
             .await
             .map_err(|_| AgentError::Unavailable)?;
         result.await.map_err(|_| AgentError::Unavailable)?
@@ -269,6 +307,11 @@ impl EmbeddedAgent {
             .await
             .map_err(|_| AgentError::Unavailable)?;
         result.await.map_err(|_| AgentError::Unavailable)?
+    }
+
+    /// Watch the latest authoritative live-shim set reported by this infraternal agent.
+    pub(crate) fn session_inventory(&self) -> watch::Receiver<SessionInventoryState> {
+        self.session_inventory.subscribe()
     }
 
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
@@ -318,6 +361,7 @@ impl EmbeddedAgent {
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable: PathBuf::new(),
@@ -325,11 +369,13 @@ impl EmbeddedAgent {
             },
             receiver,
             changes,
+            session_inventory.clone(),
         ));
         Self {
             commands,
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
+            session_inventory,
         }
     }
 }
@@ -343,6 +389,7 @@ enum Command {
     },
     Open {
         size: TerminalSize,
+        readiness: bool,
         reply: oneshot::Sender<Result<[u8; 16], AgentError>>,
     },
     Call {
@@ -389,6 +436,12 @@ enum Peer {
 }
 
 enum Source {
+    /// Already-greeted fixture links expose actor retry policy under a paused clock.
+    #[cfg(test)]
+    Fixture {
+        connections: std::collections::VecDeque<AgentConnection>,
+        attempts: mpsc::UnboundedSender<tokio::time::Instant>,
+    },
     Embedded {
         executable: PathBuf,
         initial: Option<UnixStream>,
@@ -404,6 +457,16 @@ enum Source {
 impl Source {
     async fn connect(&mut self) -> Result<AgentConnection, AgentError> {
         match self {
+            #[cfg(test)]
+            Self::Fixture {
+                connections,
+                attempts,
+            } => {
+                attempts
+                    .send(tokio::time::Instant::now())
+                    .map_err(|_| AgentError::Unavailable)?;
+                connections.pop_front().ok_or(AgentError::Unavailable)
+            }
             Self::Embedded {
                 executable,
                 initial,
@@ -480,11 +543,15 @@ impl Source {
             #[cfg(feature = "remote")]
             Self::Remote { incoming, .. } => incoming.recv().await,
             Self::Embedded { .. } => std::future::pending().await,
+            #[cfg(test)]
+            Self::Fixture { .. } => std::future::pending().await,
         }
     }
     fn closed(&self) -> bool {
         match self {
             Self::Embedded { .. } => false,
+            #[cfg(test)]
+            Self::Fixture { connections, .. } => connections.is_empty(),
             #[cfg(feature = "remote")]
             Self::Remote {
                 incoming, pending, ..
@@ -492,6 +559,10 @@ impl Source {
         }
     }
     fn remote(&self) -> bool {
+        #[cfg(test)]
+        if matches!(self, Self::Fixture { .. }) {
+            return false;
+        }
         !matches!(self, Self::Embedded { .. })
     }
 }
@@ -529,6 +600,8 @@ enum Incoming {
         stream_id: u32,
         event_json: Bytes,
     },
+    ControlEvent,
+    SessionInventory(Vec<[u8; 16]>),
     Ack {
         stream_id: u32,
         in_seq_acked: u64,
@@ -593,10 +666,15 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep link loss, capability invalidation and census publication in the same actor lifetime."
+)]
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
     changes: tokio::sync::watch::Sender<()>,
+    session_inventory: watch::Sender<SessionInventoryState>,
 ) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
     let mut routes = HashMap::<u32, u64>::new();
@@ -628,7 +706,6 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
-                backoff = Duration::from_millis(200);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -647,7 +724,10 @@ async fn run_actor(
                 let Some(()) = replacement else { return; };
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
-                if let Some(old) = connection.take() { connection_lost(old,&mut attachments,&mut routes,&mut pending).await; }
+                if let Some(old) = connection.take() {
+                    connection_lost(old, &mut attachments, &mut routes, &mut pending).await;
+                    session_inventory.send_replace(SessionInventoryState::Unavailable);
+                }
             }
             command = commands.recv() => {
                 let Some(command) = command else { return; };
@@ -662,6 +742,7 @@ async fn run_actor(
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
@@ -672,6 +753,7 @@ async fn run_actor(
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
@@ -683,10 +765,16 @@ async fn run_actor(
                     && serde_json::from_slice::<serde_json::Value>(event_json).is_ok_and(|value|value["type"]=="plugin.event" || value["type"]=="plugins.resync") {
                     changes.send_replace(());continue;
                 }
+                if let Incoming::SessionInventory(ids) = incoming {
+                    session_inventory
+                        .send_replace(SessionInventoryState::Available(Arc::from(ids)));
+                    continue;
+                }
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
                     let link = connection.take();
                     if let Some(link) = link {
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
                         first_attempt = false;
                     }
@@ -849,7 +937,11 @@ async fn process_command(
             pending.insert(call_id, PendingCall::Control(reply));
             true
         }
-        Command::Open { size, reply } => {
+        Command::Open {
+            size,
+            readiness,
+            reply,
+        } => {
             #[cfg(feature = "remote")]
             if let Peer::Remote(link) = &connection.peer
                 && link.admit_operation().await.is_err()
@@ -868,11 +960,14 @@ async fn process_command(
             // The trusted enrolled or local host identity never comes from browser JSON.
             // Pixel geometry is sent later through Resize; the daemon opens a
             // PTY using its approved {uid, cols, rows} action schema [9][13].
-            let request = serde_json::json!({
+            let mut request = serde_json::json!({
                 "uid": connection.execution_uid,
                 "cols": size.cols,
                 "rows": size.rows,
             });
+            if readiness {
+                request["readiness"] = serde_json::Value::Bool(true);
+            }
             let Ok(json) = serde_json::to_vec(&request) else {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
@@ -1135,6 +1230,12 @@ enum TerminalNotice {
     },
     #[serde(rename = "terminal.snapshot_unavailable")]
     Unavailable { session_id: String, seq: u64 },
+    #[serde(rename = "terminal.replay_complete")]
+    ReplayComplete {
+        session_id: String,
+        #[serde(deserialize_with = "deserialize_replay_cursor")]
+        out_seq: u64,
+    },
     #[serde(rename = "terminal.exited")]
     Exited {
         session_id: String,
@@ -1161,6 +1262,13 @@ impl TerminalNotice {
                 let _ = seq;
                 session_id
             }
+            Self::ReplayComplete {
+                session_id,
+                out_seq,
+            } => {
+                let _ = out_seq;
+                session_id
+            }
             Self::Exited {
                 session_id,
                 status,
@@ -1172,6 +1280,25 @@ impl TerminalNotice {
             }
         }
     }
+}
+
+/// Replay fences encode their full u64 cursor as canonical decimal JSON text.
+fn deserialize_replay_cursor<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let decimal = String::deserialize(deserializer)?;
+    if decimal.is_empty()
+        || (decimal.len() > 1 && decimal.starts_with('0'))
+        || !decimal.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "invalid replay cursor",
+        ));
+    }
+    decimal
+        .parse::<u64>()
+        .map_err(<D::Error as serde::de::Error>::custom)
 }
 
 // Incoming wire cases share actor-owned sequence accounting and bounded output senders.
@@ -1404,6 +1531,7 @@ async fn process_incoming(
         Incoming::Ping { nonce, sent_us } => {
             write_frame(connection, CONTROL_STREAM, &Frame::Pong { nonce, sent_us }).await
         }
+        Incoming::ControlEvent | Incoming::SessionInventory(_) => true,
         Incoming::Disconnected | Incoming::Hello { .. } => false,
     }
 }
@@ -1428,6 +1556,69 @@ async fn retire_slow_stream(
         },
     )
     .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionInventoryEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    session_ids: Vec<uuid::Uuid>,
+}
+
+/// Accept only the agent's bounded, full live-shim snapshot on the control stream.
+fn decode_session_inventory(event: &[u8]) -> Option<Vec<[u8; 16]>> {
+    let snapshot: SessionInventoryEvent = serde_json::from_slice(event).ok()?;
+    if snapshot.kind != "terminal.sessions.snapshot" {
+        return None;
+    }
+    let ids: Vec<[u8; 16]> = snapshot
+        .session_ids
+        .into_iter()
+        .map(|id| *id.as_bytes())
+        .collect();
+    let unique: std::collections::HashSet<[u8; 16]> = ids.iter().copied().collect();
+    (unique.len() == ids.len()).then_some(ids)
+}
+
+/// Leave other bounded control Events available for protocol extensions.
+fn is_session_inventory_event(event: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(event).is_ok_and(|value| {
+        value.get("type").and_then(serde_json::Value::as_str) == Some("terminal.sessions.snapshot")
+    })
+}
+
+/// Keep inventory Events separate from bounded terminal notices on the data streams.
+fn decode_event(stream_id: u32, sub_id: u32, event_json: &[u8], wire: &Bytes) -> Option<Incoming> {
+    if sub_id != 0 {
+        return None;
+    }
+    if stream_id == CONTROL_STREAM {
+        if is_session_inventory_event(event_json) {
+            return decode_session_inventory(event_json).map(Incoming::SessionInventory);
+        }
+        if event_json.len() > 1024 {
+            return None;
+        }
+        // Capability notices share the control stream with full session censuses.
+        // Retain their bounded payload for the actor's independent capability watch.
+        if serde_json::from_slice::<serde_json::Value>(event_json)
+            .is_ok_and(|value| value["type"] == "plugin.event" || value["type"] == "plugins.resync")
+        {
+            return Some(Incoming::Event {
+                stream_id,
+                event_json: share_payload(wire, event_json)?,
+            });
+        }
+        return Some(Incoming::ControlEvent);
+    }
+    if event_json.len() > 1024 {
+        return None;
+    }
+    Some(Incoming::Event {
+        stream_id,
+        event_json: share_payload(wire, event_json)?,
+    })
 }
 
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
@@ -1460,13 +1651,9 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                         out_seq,
                         bytes: share_payload(&wire, bytes)?,
                     },
-                    Frame::Event {
-                        sub_id: 0,
-                        event_json,
-                    } if event_json.len() <= 1024 => Incoming::Event {
-                        stream_id,
-                        event_json: share_payload(&wire, event_json)?,
-                    },
+                    Frame::Event { sub_id, event_json } => {
+                        decode_event(stream_id, sub_id, event_json, &wire)?
+                    }
                     Frame::Ack { in_seq_acked } => Incoming::Ack {
                         stream_id,
                         in_seq_acked,
@@ -1485,11 +1672,15 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                     &frame,
                     Incoming::Output { .. }
                         | Incoming::Snapshot { .. }
-                        | Incoming::Event { .. }
                         | Incoming::Ack { .. }
                         | Incoming::Close { .. }
                 ) && (stream_id == CONTROL_STREAM || stream_id % 2 != 0)
                 {
+                    return None;
+                }
+                // decode_event admits only capability notices as control-stream
+                // Event payloads; ordinary terminal Events still require an even stream.
+                if matches!(&frame, Incoming::Event {stream_id, ..} if stream_id % 2 != 0) {
                     return None;
                 }
                 return Some(frame);
@@ -1691,3 +1882,7 @@ async fn stop_child(_pid: nix::unistd::Pid) {}
 #[cfg(test)]
 #[path = "embedded_regressions.rs"]
 mod regressions;
+
+#[cfg(test)]
+#[path = "session_exit_latency_tests.rs"]
+mod exit_latency_tests;

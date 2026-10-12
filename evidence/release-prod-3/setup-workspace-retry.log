@@ -1,0 +1,345 @@
+Running as unit: run-p666950-i4860917.scope; invocation ID: 6819a2b9891149c094a3185b94e3ee97
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.24s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal-695a777d772bb491)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
+
+     Running tests/agent_daemon.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/agent_daemon-de8d28f3173c928a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/agent_queues.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/agent_queues-7ed77e0893c3f583)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/agent_review.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/agent_review-32b36c192f733cf1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/agent_sessions-f1bbac7855060be7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/idle_canary.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/idle_canary-1919830791516ee3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/remote_output.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/remote_output-4a8f568510237532)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/session_bounds_review.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/session_bounds_review-a607f03ae598f467)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/session_retention.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/session_retention-51b18a22448c66c2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/shim.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/shim-2c3ca0d2bd6e9d87)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/ssh_askpass-be2387df6f8b7f5c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/vt_credit.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/vt_credit-9ae10e7a767126f9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/vt_reconnect.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/vt_reconnect-71e394f96e9c8a37)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_agent-c125bbd12d7c2678)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 0.00s
+
+     Running tests/transport.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/transport-016f8bdfea5aebb7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_mesh-3f967587718407e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/default_arrow.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/default_arrow-312553ba19630584)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/properties.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/properties-78f35bbe1b57dcd5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/rotation_time.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/rotation_time-a58dd287253d611d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_plugin_api-5c728191785f01c7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/routing_review.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/routing_review-9a16e71abd7f4bdb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_plugin_host_facts-92fb8980e23d63eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_plugin_mesh-65b6dee3ae44f8e9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_plugin_remote-ce4b7bb3a4c213ff)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_plugin_ssh-02a30dda6db1246b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/auth_order.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/auth_order-8370e485a3f0346d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/build_removal.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/build_removal-3134bdbfb0e0f0e3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/concurrency.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/concurrency-3766d6ae92ced0da)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/config_isolation.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/config_isolation-25472931ad04aef4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/credentials.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/credentials-d8c6da88bd261bc7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/diagnostics.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/diagnostics-07d3289d1c3293b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/event_metadata.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/event_metadata-bda517909c0068f9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/foreground.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/foreground-8564c79536bd1ef7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/host_trust.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/host_trust-8b1b0f67365e31ad)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/install-d349145bd9b0eef2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+     Running tests/model.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/model-610654aa19e7b1f4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/probe_check.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/probe_check-61bf65a8dbec3acf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/process.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/process-16290c97198e74ea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/proxy_policy.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/proxy_policy-ca2b62d6c6e39405)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/real_ssh.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/real_ssh-b3256cc9f601cc72)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/single_connection.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/single_connection-da56c522c3d0a816)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/source_completeness.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/source_completeness-55ae727bdca56f9e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/trust_round2.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/trust_round2-2c16a67be95099fe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_protocol-e4eeb92d35d69a68)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_server-4da00085bcd99910)
+
+running 1 test
+test auth::tests::server_setup_terminal_echo_and_resume_preserve_offsets_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 325 filtered out; finished in 1.65s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/catalog_startup-9d56f37d122f8c86)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/enrollment-7407eff966a5f9da)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_parser-9431ee71e664c06e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_review_plugin-a90a6dd2a989c757)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_review_policy-0f6a3397d95362e0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mesh_review_role_scope-d40c0064cd208dc9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/plugin_host_review-a71c7ccd8453f4d9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/plugin_settings_review-afd3f9dce76af585)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/remote_plugin_contract-eaffd940139a77b1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/infraternal_shim-8d88872fb599c816)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.00s
+
+     Running tests/detach.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/detach-af6bf43868555110)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mouse.rs (/home/kayg/.cache/codex-scratch/release-prod-3/target/debug/deps/mouse-3ee544922f442de4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

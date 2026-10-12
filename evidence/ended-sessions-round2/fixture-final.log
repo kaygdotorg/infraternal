@@ -1,0 +1,14 @@
+Running as unit: run-p3555481-i3555781.scope; invocation ID: b34523ca41964428b03c7b6665d6aa4c
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/plugins/remote)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-server)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/plugins/mesh)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 07s
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/agent_sessions-0d1cb38f08ca3355)
+
+running 1 test
+test latency_fixture_accepts_the_unsolicited_startup_inventory ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.32s
+

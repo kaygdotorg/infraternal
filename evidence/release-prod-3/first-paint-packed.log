@@ -1,0 +1,36 @@
+Running as unit: run-p1275785-i5469721.scope; invocation ID: 9fe6bc4035cd428fb92c64f21ba98278
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-q2nxayqq.js, chunk-atqxstac.js, chunk-vz8669mg.js, chunk-dhjhqzv5.js, chunk-2ds56zy7.js, chunk-89ccban2.js, chunk-a895a34j.js, chunk-gtm292qm.js, chunk-gx2t32q0.js, chunk-hqhzap0m.js, chunk-n6gk3kn7.js, chunk-5s6a3m50.js, main.js, chunk-hna59wqc.js, chunk-p3wfa4x0.js, chunk-rqn6pfk3.js, chunk-0n5k7vzr.js, chunk-g10mbfp2.js, chunk-ybs9dq57.js, chunk-wxtwhe1v.js, chunk-yr0r38s4.js, chunk-8t7pe4ht.js, chunk-8wbefd8t.js, chunk-axbkkqp1.js, chunk-jnr3kz9p.js, chunk-xzwvtg96.js, chunk-13dqpdhf.js, chunk-aev3rhcm.js, chunk-z021t1qp.js, chunk-5ckg4yg4.js, chunk-kej893vn.js, chunk-tknnpnpd.js, chunk-8v2ps6hr.js, chunk-atbcw3w4.js, chunk-pk9xsqbf.js, chunk-g45czbcj.js, chunk-yrhbme2t.js, chunk-wkqeh53w.js, chunk-9xd3g65e.js, chunk-28rbcdd5.js, chunk-61xwpgvs.js, chunk-fd1jf97t.js, chunk-nm1z0gca.js, chunk-tcwksehk.js, chunk-vtm2yv15.js, chunk-wrs2q70v.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-cjb0kj4g.js, chunk-f2r0hhqc.js, chunk-9nd0far1.js, chunk-mrjrswdq.js, chunk-m0thw2py.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4936
+[WebServer] latency proxy listening on http://localhost:4935; upstream port=4936
+
+Running 1 test using 1 worker
+
+(node:1277913) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+METRIC name=access_screen_render_upper_bound_setup source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=1072.50 p99_ms=1813.90 budget_ms=1000 result=FAIL
+METRIC name=access_screen_first_contentful_paint_setup source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=870.10 p99_ms=1632.50 budget_ms=1000 result=REPORT
+METRIC name=access_screen_render_upper_bound_signin source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=1294.90 p99_ms=1638.90 budget_ms=1000 result=FAIL
+METRIC name=access_screen_first_contentful_paint_signin source=tracer-production-build n=30 configured_rtt_ms=300 p50_ms=1170.80 p99_ms=1537.80 budget_ms=1000 result=REPORT
+  ✘  1 test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget (1.4m)
+
+
+  1) test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget ───────
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+      667 |     );
+      668 |   }
+    > 669 |   expect(renderBudgetPassed).toBe(true);
+          |                              ^
+      670 | });
+      671 |
+        at /home/kayg/Developer/infraternal/.worktrees/release-prod-3/apps/tracer/test/terminal.spec.ts:669:30
+
+    Error Context: test-results/terminal-access-screens-re-da0df-he-local-first-paint-budget/error-context.md
+
+  1 failed
+    test/terminal.spec.ts:630:1 › access screens render within the local first-paint budget ────────
