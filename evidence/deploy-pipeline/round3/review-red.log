@@ -1,0 +1,54 @@
+bun test v1.4.2 (744846f84)
+
+scripts/release/deploy-review.test.ts:
+REMOTE_ADMISSION unsigned_x86_payload=true refused=false
+51 |   const [exit, stdout, stderr] = await Promise.all([
+52 |     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+53 |   ]);
+54 |   await Bun.write(join(process.env.HOME!, ".cache/codex-scratch/deploy-pipeline-review/artifact-admission.log"), stdout + stderr);
+55 |   console.log(stdout.trim());
+56 |   expect(exit).toBe(0);
+                    ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/scripts/release/deploy-review.test.ts:56:16)
+(fail) remote admission refuses an x86 payload outside the signed manifest [320.31ms]
+{"state": "deployed", "ca_unlocked": true}
+WEB_ONLY_RECORD candidate_binary_recorded=true
+116 |   const [exit, stdout, stderr] = await Promise.all([
+117 |     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+118 |   ]);
+119 |   await Bun.write(join(process.env.HOME!, ".cache/codex-scratch/deploy-pipeline-review/web-only-record.log"), stdout + stderr);
+120 |   console.log(stdout.trim());
+121 |   expect(exit).toBe(0);
+                     ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/scripts/release/deploy-review.test.ts:121:16)
+(fail) web-only deployment does not record the candidate as the running binary [293.62ms]
+ALIAS_RECOVERY restart_requests=1
+169 |   const [exit, stdout, stderr] = await Promise.all([
+170 |     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+171 |   ]);
+172 |   await Bun.write(join(process.env.HOME!, ".cache/codex-scratch/deploy-pipeline-review/alias-recovery.log"), stdout + stderr);
+173 |   console.log(stdout.trim());
+174 |   expect(exit).toBe(0);
+                     ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/scripts/release/deploy-review.test.ts:174:16)
+(fail) alias restoration failure still requests the retained warm rollback [277.14ms]
+
+ 0 pass
+ 3 fail
+ 3 expect() calls
+Ran 3 tests across 1 file. [944.00ms]
