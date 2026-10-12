@@ -45,7 +45,10 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
         feature = "remote",
         all(feature = "mesh", target_os = "linux")
     )),
-    allow(clippy::unnecessary_wraps)
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "Keep the fallible registry API identical when every optional component is compiled out."
+    )
 )]
 pub(crate) fn registry_at(
     mode: ExecutionMode,
