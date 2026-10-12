@@ -44,3 +44,5 @@ The first full fast gate passes fmt, VT native fmt, Clippy and cargo-deny; it fa
 
 The required gate latency self-test is dispatched to the locked perf VM through gate-bin/python3; all other Python invocations and all builds/functional checks remain on the build host. The original build-host self-test failure is preserved but its timing values are not acceptance evidence.
 Raw `.log` files are committed as byte-preserving `.log.gz` archives; raw-log-manifest.json records their uncompressed hashes and sizes.
+
+A subsequent serialized gate exposed a fixture race at `shared_selector`: invalid Attach may retire the peer before a separate selector write. The atomic test fix coalesces those same frames and preserves every refusal/live-writer assertion. The shipping CLI suite passes 18/18 after the fix. `fixture-source-change.json` confirms this integration-test file is the only source difference from the frozen performance artifacts.

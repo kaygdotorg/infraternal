@@ -569,10 +569,15 @@ fn disallowed_signal_only_disconnects_peer() {
 }
 
 /// Raw additive selection keeps this regression runnable against older shims.
-fn shared_selector(peer: &mut UnixStream, writer: u32) {
+fn shared_selector_frame(writer: u32) -> Vec<u8> {
     let mut wire = vec![5, 0, 0, 0, 0x1d];
     wire.extend_from_slice(&writer.to_le_bytes());
-    peer.write_all(&wire).unwrap();
+    wire
+}
+
+/// Send the additive selector on a peer whose Attach was admitted.
+fn shared_selector(peer: &mut UnixStream, writer: u32) {
+    peer.write_all(&shared_selector_frame(writer)).unwrap();
 }
 
 fn writer_peer(session: &Session, writer: u32, shared: bool) -> UnixStream {
@@ -704,8 +709,11 @@ fn shared_writer_refusals_and_full_peer_limit_preserve_the_live_writer() {
     for (caps, writer) in [(8, 7), (9, 7), (10, 7), (3, 7), (11, 0), (11, 99)] {
         let mut refused = session.connect();
         read(&mut refused);
-        send(&mut refused, Frame::Attach(caps));
-        shared_selector(&mut refused, writer);
+        // Invalid Attach may close immediately. Supply both frames together so
+        // the fixture does not require a second write after a valid refusal.
+        let mut coalesced = Frame::Attach(caps).encode().unwrap();
+        coalesced.extend_from_slice(&shared_selector_frame(writer));
+        refused.write_all(&coalesced).unwrap();
         peer_closed(&mut refused);
         assert_eq!(writer_state(&mut active), (0, 0));
     }
