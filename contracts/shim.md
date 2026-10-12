@@ -252,3 +252,31 @@ viewer backpressure. Ordinary peers retain the existing flow-control behavior.
 The authenticated infraternal agent chooses the identity from the existing
 server-assigned native writer binding. This capability grants no browser-selected
 identity, new session authority or guarantee across a shim/host crash.
+
+SHARED_WRITER also negotiates queue deferral for an ordinary native writer
+selected with SelectWriter; it does not change ordinary replacement semantics.
+A valid sequenced frame whose unseen suffix
+cannot fit the shared input queue waits without changing accepted/written
+cursors, geometry or ownership segments. Acceptance remains atomic. Each live
+peer retains at most one complete bounded frame and at most one 16-KiB socket
+read suffix; later frames remain ordered behind the deferred frame. The shim
+stops reading that peer, continues PTY writes and other peer requests, and gives
+the oldest deferred request priority over fresh input requiring queue space.
+Duplicate input requires no space. Overlap is recalculated against the durable
+writer cursor before acceptance.
+
+Dropped deferred peers release their live-peer storage immediately. Only their
+unaccepted data is discarded: accepted bytes remain in the surviving queue,
+and the server retains input until a durable written Ack permits replay to
+advance. Malformed ranges and invalid ordering remain refusals. Peers without
+SHARED_WRITER retain their existing capacity-refusal behavior. The accepted
+queue stays at most 1 MiB; deferred payload belongs to at most 32 live peers,
+never to the 512 retained writer identities. Decoder allocation capacity and
+per-peer read storage are additional to that accepted-byte bound.
+
+Reserved queue space remains unavailable to fresh input from any peer. Ordinary
+ReadFrom, InputStateRequest, Resize and duplicate input continue while another
+peer waits. A legacy peer requesting new input against reserved capacity keeps
+its existing refusal behavior. Completing a deferred request releases its FIFO
+ticket; a trailing request that must wait receives a new ticket behind existing
+waiters.
