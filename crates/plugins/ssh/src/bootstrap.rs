@@ -69,6 +69,25 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, JoinMaterial> {
         self.invitation(authority, target, check)
     }
+    /// Durable backends register their exact host before any commit can execute.
+    /// The caller retains cleanup coordinates if the invitation future is cancelled.
+    /// Existing nondurable adapters retain their post-result registration behavior.
+    fn invitation_registered<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+        register: &'a mut (dyn FnMut(uuid::Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move {
+            let join = self
+                .invitation_with_trust(authority, target, check, lookup)
+                .await?;
+            register(join.host)?;
+            Ok(join)
+        })
+    }
     fn connected_facts<'a>(
         &'a self,
         authority: &'a Authority,
