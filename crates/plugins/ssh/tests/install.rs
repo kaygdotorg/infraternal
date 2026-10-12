@@ -30,6 +30,21 @@ impl SshSession for Local {
             // Map the remote user's home to isolated fixture storage without
             // changing the process's HOME or touching a real user's installation.
             let script = script.replace("$HOME", self.root.to_str().unwrap());
+            // A test-only public marker proves that the real shell has reached
+            // its blocking admission read; yielding alone would not prove overlap.
+            let script = if matches!(&input, Input::Signal(_)) {
+                script.replace(
+                    "read -r approved",
+                    &format!(
+                        ": > {}\nread -r approved",
+                        infraternal_plugin_ssh::transport::shell_quote(
+                            self.root.join("commit-admitted").to_str().unwrap()
+                        )
+                    ),
+                )
+            } else {
+                script
+            };
             let mut child = Command::new("/bin/sh")
                 .args(["-c", &script])
                 .env(
@@ -46,6 +61,10 @@ impl SshSession for Local {
             // A refusal may close stdin before consuming an upload. Inspect the
             // command status first; successful commands still require a full write.
             let written = match input {
+                Input::Signal(release) => match release.await {
+                    Ok(()) => stdin.write_all(b"\n").await,
+                    Err(_) => Err(std::io::ErrorKind::Interrupted.into()),
+                },
                 Input::Empty => Ok(()),
                 Input::Bytes(bytes) => stdin.write_all(bytes).await,
                 Input::File(path) => stdin.write_all(&std::fs::read(path).unwrap()).await,
@@ -254,6 +273,46 @@ fn setup_receipts_require_exact_order_and_preserve_failure_boundaries() {
     }
     assert!(parse_setup(&[b'x'; 257]).is_err());
     assert!(interrupted_setup_step(b"STEP join\nprivate\n").is_none());
+}
+
+#[tokio::test]
+async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
+    for permit in [false, true] {
+        let fixture = Fixture::new();
+        let install = Installation::new(
+            Arc::new(Compound(Local {
+                root: fixture.root.clone(),
+            })),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        install.stage(&fixture.binary).await.unwrap();
+        install.setup(&fixture.join).await.unwrap();
+        let stage = fixture.base().join(".bootstrap-lock");
+        let (release, receiver) = tokio::sync::oneshot::channel();
+        let pending = install.commit_after(receiver);
+        tokio::pin!(pending);
+        tokio::select! {
+            result = &mut pending => panic!("commit preceded proof: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                while !fixture.root.join("commit-admitted").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }) => { result.unwrap(); }
+        }
+        assert!(stage.join("activating").exists());
+        if permit {
+            release.send(()).unwrap();
+            pending.await.unwrap();
+            assert!(!stage.exists());
+        } else {
+            drop(release);
+            assert!(pending.await.is_err());
+            assert!(stage.join("activating").exists());
+            install.rollback().await.unwrap();
+        }
+    }
 }
 
 #[tokio::test]

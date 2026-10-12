@@ -42,6 +42,8 @@ pub enum Credentials {
 
 /// Command input is private stdin; neither binary bytes nor secrets enter argv.
 pub enum Input<'a> {
+    /// Release a fixed commit command only after authenticated terminal proof.
+    Signal(tokio::sync::oneshot::Receiver<()>),
     Empty,
     Bytes(&'a [u8]),
     File(&'a Path),

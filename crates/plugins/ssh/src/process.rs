@@ -107,28 +107,7 @@ async fn execute_inner(
         .take()
         .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
     let operation = async {
-        let write = async {
-            let mut stdin = stdin;
-            match input {
-                Input::Empty => {}
-                Input::Bytes(bytes) => stdin
-                    .write_all(bytes)
-                    .await
-                    .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
-                Input::File(path) => {
-                    let mut file = tokio::fs::File::open(path).await.map_err(|_| {
-                        Failure::install("The matching infraternal binary is unavailable.")
-                    })?;
-                    tokio::io::copy(&mut file, &mut stdin)
-                        .await
-                        .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
-                }
-            }
-            // Broken pipe is expected on pre-command authentication/host-key refusal;
-            // retain the child's bounded diagnostics to classify the real failure.
-            let _ = stdin.shutdown().await;
-            Ok::<(), Failure>(())
-        };
+        let write = write_input(stdin, input);
         let read = async {
             let (stdout, stderr) =
                 tokio::try_join!(bounded(stdout, stdout_limit), bounded(stderr, 8192))?;
@@ -244,4 +223,39 @@ async fn bounded(
         ));
     }
     Ok(bytes)
+}
+
+/// Keep commit release and ordinary input under the same bounded child lifecycle.
+async fn write_input(
+    mut stdin: tokio::process::ChildStdin,
+    input: Input<'_>,
+) -> Result<(), Failure> {
+    match input {
+        Input::Signal(release) => {
+            release.await.map_err(|_| {
+                Failure::install("Host provisioning stopped before terminal proof.")
+            })?;
+            stdin
+                .write_all(b"\n")
+                .await
+                .map_err(|_| Failure::install("The SSH input pipe closed."))?;
+        }
+        Input::Empty => {}
+        Input::Bytes(bytes) => stdin
+            .write_all(bytes)
+            .await
+            .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
+        Input::File(path) => {
+            let mut file = tokio::fs::File::open(path)
+                .await
+                .map_err(|_| Failure::install("The matching infraternal binary is unavailable."))?;
+            tokio::io::copy(&mut file, &mut stdin)
+                .await
+                .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
+        }
+    }
+    // Broken pipe is expected on pre-command authentication/host-key refusal;
+    // retain the child's bounded diagnostics to classify the real failure.
+    let _ = stdin.shutdown().await;
+    Ok::<(), Failure>(())
 }

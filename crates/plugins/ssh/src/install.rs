@@ -345,6 +345,38 @@ rm -rf "$stage"
         Ok(())
     }
 
+    /// Start read-only commit admission while terminal proof is in flight.
+    /// Deletion requires the caller's one-use signal after marker plus status-zero exit.
+    /// # Errors
+    /// Retains rollback artifacts when proof/cancellation closes the signal.
+    pub async fn commit_after(
+        &self,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), Failure> {
+        if !self.session.setup_steps() {
+            release.await.map_err(|_| {
+                Failure::install("Host provisioning stopped before terminal proof.")
+            })?;
+            return self.commit().await;
+        }
+        let script = self.script(
+            r#"stage="$base/.bootstrap-lock"
+[ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
+# No journal or artifact changes occur before the caller proves the terminal.
+read -r approved || exit 1
+[ -z "$approved" ] || exit 1
+[ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
+retire_setup_lease
+rm -rf "$stage"
+"#,
+        );
+        self.session
+            .run(&script, Input::Signal(release))
+            .await
+            .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+        Ok(())
+    }
+
     /// Publish the exact public manual readiness receipt before ordinary commit.
     /// The target requires this nonce and an absent lock before reporting success.
     /// # Errors

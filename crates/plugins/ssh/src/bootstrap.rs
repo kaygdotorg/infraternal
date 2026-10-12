@@ -719,18 +719,26 @@ impl Bootstrap {
             started,
             None,
         );
-        self.backend.connected_facts(&batch.authority, host).await?;
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Connect,
-            "Checking a terminal through the infraternal agent.",
-            started,
-            None,
-        );
-        self.backend.terminal_canary(&batch.authority, host).await?;
-        transaction.commit().await?;
+        let (release, approved) = tokio::sync::oneshot::channel();
+        tokio::try_join!(
+            async {
+                self.backend.connected_facts(&batch.authority, host).await?;
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Connect,
+                    "Checking a terminal through the infraternal agent.",
+                    started,
+                    None,
+                );
+                self.backend.terminal_canary(&batch.authority, host).await?;
+                release.send(()).map_err(|()| {
+                    Failure::install("The host commit command ended before terminal proof.")
+                })
+            },
+            transaction.commit_after(approved),
+        )?;
         // Completion also discharges durable retirement ownership. Reporting
         // Done without that acknowledgement would promise authority that a
         // subsequent startup correctly retires as unfinished provisioning.

@@ -58,7 +58,7 @@ impl SshSession for TimedSession {
                 Input::Empty if script.contains("enable --now") => "start",
                 Input::Empty if script.contains("enable-linger") => "linger",
                 Input::Empty if script.contains("stage/activating") => "install",
-                Input::Empty => "commit",
+                Input::Signal(_) | Input::Empty => "commit",
             };
             if step == "upload" {
                 UPLOAD_STARTED.store(true, Ordering::SeqCst);
