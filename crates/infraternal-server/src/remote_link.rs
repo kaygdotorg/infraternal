@@ -33,6 +33,32 @@ pub(crate) struct RemoteLink {
     renewal: std::sync::atomic::AtomicBool,
     server_paths: bool,
     greeting_sent: bool,
+    priming: Arc<std::sync::Mutex<Option<crate::remote_standby::Priming>>>,
+}
+
+/// Covers cancellation while actor admission is still queued, before preparation owns it.
+pub(crate) struct PrimingAdmission {
+    pub(crate) state: Arc<std::sync::Mutex<Option<crate::remote_standby::Priming>>>,
+    pub(crate) connection: Option<quinn::Connection>,
+    pub(crate) admitted: bool,
+}
+impl Drop for PrimingAdmission {
+    fn drop(&mut self) {
+        if self.admitted {
+            return;
+        }
+        let priming = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if priming.is_some()
+            && let Some(connection) = &self.connection
+        {
+            connection.close(0u32.into(), b"priming admission cancelled");
+        }
+        // The unadmitted queue item retains no identity parking slot after this drop.
+    }
 }
 
 pub(crate) struct QuicLink {
@@ -59,7 +85,8 @@ struct Incoming {
     // Actor select may cancel while channel-identity validation awaits the map.
     // Ownership stays here until delivery or explicit stale-frame retirement.
     pending: Option<Packet>,
-    // Hold one dequeued control frame while the outbound FIFO is full.
+    // A cancelled read may already own control when its outgoing FIFO fills.
+    // Keep that one ordered frame while independent terminal delivery continues.
     held_control: Option<Packet>,
 }
 
@@ -138,10 +165,11 @@ impl RemoteLink {
     }
     pub(crate) async fn tcp_admitted(
         channel: TcpTls,
-        admission: Option<&mut crate::remote_standby::Admission>,
+        mut admission: Option<&mut crate::remote_standby::Admission>,
     ) -> io::Result<Self> {
         let mut receive = Receive::default();
-        let (prefix, greeting_sent) = greeting(&channel, &mut receive, admission).await?;
+        let (prefix, greeting_sent) =
+            greeting(&channel, &mut receive, admission.as_deref_mut()).await?;
         let server_paths = supports_server_paths(&prefix);
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
@@ -155,6 +183,9 @@ impl RemoteLink {
             renewal: std::sync::atomic::AtomicBool::new(false),
             server_paths,
             greeting_sent,
+            priming: Arc::new(std::sync::Mutex::new(
+                admission.and_then(|admission| admission.priming.take()),
+            )),
         })
     }
     #[cfg(test)]
@@ -163,7 +194,7 @@ impl RemoteLink {
     }
     pub(crate) async fn quic_admitted(
         connection: quinn::Connection,
-        admission: Option<&mut crate::remote_standby::Admission>,
+        mut admission: Option<&mut crate::remote_standby::Admission>,
     ) -> io::Result<Self> {
         let (send, receive) = tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
             .await
@@ -171,7 +202,8 @@ impl RemoteLink {
             .map_err(io::Error::other)?;
         let control = Arc::new(NativeChannel::control(send, receive)?);
         let mut receive = Receive::default();
-        let (prefix, greeting_sent) = greeting(control.as_ref(), &mut receive, admission).await?;
+        let (prefix, greeting_sent) =
+            greeting(control.as_ref(), &mut receive, admission.as_deref_mut()).await?;
         let server_paths = supports_server_paths(&prefix);
         let hello = infraternal_protocol::decode_muxed_frame(&prefix).map_err(io::Error::other)?;
         remote_quic::negotiate_binding(&connection, &hello.frame)?;
@@ -211,6 +243,9 @@ impl RemoteLink {
             renewal: std::sync::atomic::AtomicBool::new(false),
             server_paths,
             greeting_sent,
+            priming: Arc::new(std::sync::Mutex::new(
+                admission.and_then(|admission| admission.priming.take()),
+            )),
         })
     }
 
@@ -301,6 +336,7 @@ impl RemoteLink {
         }
     }
 
+    /// Backpressure belongs to the control lane, not healthy terminal streams.
     pub(crate) fn control_read_ready(&self, ready: bool) {
         if let LinkTransport::Quic(link) = &self.transport {
             link.control_reads
@@ -308,10 +344,61 @@ impl RemoteLink {
         }
     }
 
+    /// Owns parking cancellation until the actor accepts its queued preparation.
+    pub(crate) fn priming_admission(&self) -> PrimingAdmission {
+        PrimingAdmission {
+            state: self.priming.clone(),
+            connection: match &self.transport {
+                LinkTransport::Quic(link) => Some(link.connection.clone()),
+                LinkTransport::Tcp { .. } => None,
+            },
+            admitted: false,
+        }
+    }
     pub(crate) fn native(&self) -> bool {
         matches!(self.transport, LinkTransport::Quic(_))
     }
+    pub(crate) fn primed(&self) -> bool {
+        self.priming
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+    pub(crate) fn activation(&self, signal: tokio::sync::oneshot::Sender<()>) -> io::Result<()> {
+        *self
+            .priming
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)?
+            .as_ref()
+            .ok_or(io::ErrorKind::InvalidInput)?
+            .activation
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)? = Some(signal);
+        Ok(())
+    }
+    /// The actor never waits for plugin joins while publishing promotion.
+    pub(crate) async fn promote(&self) -> io::Result<()> {
+        self.admit_operation().await?;
+        let priming = self
+            .priming
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)?
+            .take()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        priming
+            .activation
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)?
+            .take()
+            .ok_or(io::ErrorKind::BrokenPipe)?
+            .send(())
+            .map_err(|()| io::ErrorKind::BrokenPipe)?;
+        // Dropping priming releases the parking slot after actor queue admission.
+        Ok(())
+    }
 
+    /// Owns a bounded flight; an exact Attach may recreate a retired binding.
+    /// Binding stays inside the flight so the actor and sibling readers keep progressing.
     pub(crate) async fn write_encoded_terminal(
         &self,
         stream: u32,
@@ -348,11 +435,25 @@ impl RemoteLink {
         }
     }
 
+    /// Cancellation may happen before binding, so this never creates a stream.
     pub(crate) async fn retire_writer(&self, stream: u32) {
         if let LinkTransport::Quic(link) = &self.transport
             && let Some(channel) = link.streams.lock().await.remove(&stream)
         {
             channel.retire();
+        }
+    }
+
+    /// Promotion joins setup first, then removes bindings no cached-ready writer owns.
+    pub(crate) async fn retain_writers(&self, writers: &[u32]) {
+        if let LinkTransport::Quic(link) = &self.transport {
+            link.streams.lock().await.retain(|stream, channel| {
+                let keep = *stream == 0 || writers.contains(stream);
+                if !keep {
+                    channel.retire();
+                }
+                keep
+            });
         }
     }
 
@@ -429,6 +530,19 @@ impl RemoteLink {
                         )
                         .await?;
                         let channel = Arc::new(NativeChannel::terminal(bound)?);
+                        if self.primed() {
+                            Transmit::default()
+                                .send(
+                                    channel.as_ref(),
+                                    stream,
+                                    &Frame::Call {
+                                        call_id: 0,
+                                        action_id: "transport.prime",
+                                        input_json: b"{}",
+                                    },
+                                )
+                                .await?;
+                        }
                         let mut pumps = link.pumps.lock().await;
                         while pumps.try_join_next().is_some() {}
                         if pumps.len() >= 129 {
@@ -499,10 +613,11 @@ async fn greeting<C: Channel>(
                     call_id: 0,
                     action_id: "transport.standby",
                     input_json,
-                } if crate::remote_standby_request::wants_prime(input_json)
-                    .is_ok_and(|prime| !prime) =>
-                {
-                    return Ok::<Option<Vec<u8>>, io::Error>(None);
+                } => {
+                    return Ok::<Option<(Vec<u8>, bool)>, io::Error>(Some((
+                        Vec::new(),
+                        crate::remote_standby::wants_prime(input_json)?,
+                    )));
                 }
                 _ => return Err(io::ErrorKind::InvalidData.into()),
             }
@@ -512,14 +627,19 @@ async fn greeting<C: Channel>(
             }
             encode_muxed_frame_into(0, &first.frame, &mut prefix).map_err(io::Error::other)?;
         }
-        Ok::<Option<Vec<u8>>, io::Error>(Some(prefix))
+        Ok::<Option<(Vec<u8>, bool)>, io::Error>(Some((prefix, false)))
     })
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-    if let Some(prefix) = prefix {
+    let (prefix, prime) = prefix.ok_or(io::ErrorKind::InvalidData)?;
+    if !prefix.is_empty() {
         return Ok((prefix, false));
     }
     let admission = admission.ok_or_else(|| io::Error::from(io::ErrorKind::PermissionDenied))?;
+    // Keep wire priming refused until the final runtime admission slice.
+    if prime {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     Ok((admission.hello(channel, receive).await?, true))
 }
 

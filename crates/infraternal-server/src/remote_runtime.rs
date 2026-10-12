@@ -189,6 +189,9 @@ impl RemoteHosts {
         link: RemoteLink,
         ip: std::net::IpAddr,
     ) -> io::Result<()> {
+        if link.primed() {
+            return self.admit_primed(authority, link).await;
+        }
         if !authority.permits() {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
@@ -250,6 +253,52 @@ impl RemoteHosts {
         if let Some(runtime) = runtime
             && let Some(host) = hosts.get_mut(&id)
         {
+            Self::attach(&runtime, id, host).await?;
+        }
+        Ok(())
+    }
+
+    /// A primed native link belongs to the existing actor. Its admission waiter
+    /// publishes metadata after activation, outside the actor's plugin turn.
+    async fn admit_primed(&self, authority: AuthorityGuard, link: RemoteLink) -> io::Result<()> {
+        authority.admit_operation().await?;
+        let id = authority.identity.host;
+        let uid = authority.identity.execution_uid;
+        let (actor, expected_generation) = {
+            let hosts = self.0.lock().await;
+            let host = hosts.get(&id).ok_or(io::ErrorKind::PermissionDenied)?;
+            if host.uid != uid || !host.authority.permits() {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            (host.actor.clone(), host.generation)
+        };
+        let server_paths = link.supports_server_paths();
+        let (activated, activation) = tokio::sync::oneshot::channel();
+        link.activation(activated)?;
+        actor
+            .prime(link.authorize(authority.clone()))
+            .await
+            .map_err(|_| io::ErrorKind::WouldBlock)?;
+        tokio::select! {
+            biased;
+            () = authority.cancelled() => return Err(io::ErrorKind::PermissionDenied.into()),
+            signal = activation => signal.map_err(|_| io::ErrorKind::BrokenPipe)?,
+        }
+        authority.admit_operation().await?;
+        let runtime = self.2.lock().await.upgrade();
+        let mut hosts = self.0.lock().await;
+        let host = hosts.get_mut(&id).ok_or(io::ErrorKind::PermissionDenied)?;
+        if host.uid != uid || host.generation != expected_generation {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let generation = Uuid::new_v4();
+        host.generation = generation;
+        host.server_paths = server_paths;
+        host.retirement = self.retirement(id, generation, authority.clone(), actor);
+        host.authority = authority;
+        // A parked underlay is a path replacement, not a new discovery source.
+        // The existing remote registry retains the authoritative observed IP.
+        if let Some(runtime) = runtime {
             Self::attach(&runtime, id, host).await?;
         }
         Ok(())

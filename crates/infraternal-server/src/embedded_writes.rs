@@ -1,7 +1,7 @@
-//! Owns bounded native input flights so QUIC backpressure cannot stop the sibling writers or control dispatch [128,215], #129.
+//! Owns bounded native input flights so QUIC backpressure cannot stop the secondary hedge or sibling writers [128,215], #129.
 use super::{AgentConnection, AttachmentState, Bytes, HashMap, Peer};
 use infraternal_protocol::{Frame, encode_frame_into};
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 use tokio::{sync::mpsc, task::JoinSet};
 
 const FLIGHT: usize = 16 * 1024;
@@ -20,6 +20,8 @@ pub(super) struct State {
     blocked: HashMap<u32, [u8; 16]>,
     credit: HashMap<u32, ([u8; 16], u32)>,
     resize: HashMap<u32, ([u8; 16], [u16; 4])>,
+    // At most two fixed-size cursor/Attach/Credit headers per live writer.
+    prefix: HashMap<u32, ([u8; 16], VecDeque<Bytes>)>,
     tasks: JoinSet<(u32, [u8; 16], Option<u64>, bool)>,
 }
 impl State {
@@ -91,7 +93,67 @@ impl State {
         self.sent.clear();
         self.credit.clear();
         self.resize.clear();
+        self.prefix.clear();
     }
+    /// Orders promotion fences ahead of input without awaiting native flow control.
+    pub(super) fn promote_writer(
+        &mut self,
+        a: &AttachmentState,
+        cached: Option<&(u64, u64, bool)>,
+    ) -> bool {
+        let mut frames = VecDeque::with_capacity(2);
+        let mut encode = |frame: Frame<'_>| {
+            let mut bytes = Vec::with_capacity(128);
+            if encode_frame_into(&frame, &mut bytes).is_err() || bytes.len() > 128 {
+                return false;
+            }
+            frames.push_back(Bytes::from(bytes));
+            true
+        };
+        let credit = if let Some((_, credit, hedged)) = cached {
+            if !hedged {
+                let Ok(json) = serde_json::to_vec(&serde_json::json!({"out_seq": a.last_out_seq}))
+                else {
+                    return false;
+                };
+                if !encode(Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.cursor",
+                    input_json: &json,
+                }) {
+                    return false;
+                }
+            }
+            a.credit.saturating_sub(*credit)
+        } else {
+            if !encode(Frame::AttachTerm {
+                session_id: &a.session_id,
+                last_out_seq: a.last_out_seq,
+                last_in_seq: a.last_in_seq,
+            }) {
+                return false;
+            }
+            a.credit
+        };
+        if credit > 0 {
+            let Ok(bytes) = u32::try_from(credit) else {
+                return false;
+            };
+            if !encode(Frame::Credit { bytes }) {
+                return false;
+            }
+        }
+        if !frames.is_empty() {
+            if self.prefix.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS
+                && !self.prefix.contains_key(&a.stream_id)
+            {
+                return false;
+            }
+            self.prefix.insert(a.stream_id, (a.session_id, frames));
+        }
+        true
+    }
+
     pub(super) fn schedule(
         &mut self,
         connection: &AgentConnection,
@@ -149,6 +211,11 @@ impl State {
                 .values()
                 .any(|a| a.stream_id == *stream && a.session_id == *session)
         });
+        self.prefix.retain(|stream, (session, _)| {
+            attachments
+                .values()
+                .any(|a| a.stream_id == *stream && a.session_id == *session)
+        });
         for a in attachments.values() {
             // The single control owner has its own slot. Count every unjoined
             // terminal task, including detached writers whose route is gone.
@@ -178,6 +245,13 @@ impl State {
         }
     }
     fn encode(&mut self, a: &AttachmentState) -> Option<(Bytes, Option<u64>)> {
+        if let Some((session, frames)) = self.prefix.get_mut(&a.stream_id)
+            && *session == a.session_id
+            && let Some(bytes) = frames.pop_front()
+        {
+            return Some((bytes, None));
+        }
+        self.prefix.remove(&a.stream_id);
         if a.replaying {
             return None;
         }

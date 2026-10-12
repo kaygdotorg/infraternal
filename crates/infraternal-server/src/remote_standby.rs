@@ -52,7 +52,15 @@ pub(crate) struct Admission {
     pub(crate) authority: AuthorityGuard,
     permits: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>,
     slots: Arc<Slots>,
+    pub(crate) priming: Option<Priming>,
 }
+/// Parking and activation ownership used by private actor admission.
+pub(crate) struct Priming {
+    _parking: Parking,
+    pub(crate) activation: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+pub(crate) use crate::remote_standby_request::{activation, wants_prime};
+
 impl Admission {
     pub(crate) fn new(
         authority: AuthorityGuard,
@@ -63,6 +71,7 @@ impl Admission {
             authority,
             permits: Some(permits),
             slots,
+            priming: None,
         }
     }
 
