@@ -2463,3 +2463,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        completes; when all finish the circle turns into a tick, then into the
        machine's OS icon. A failed stage turns its segment into the failure
        state and the pill explains it on tap, in plain words.
+256. **The perf VM's small size is the target, on purpose (owner,
+     2026-10-12):** every performance target is met on the perf VM as it is
+     (4 vCPU, 7 GB). It is deliberately modest so that the code is optimised
+     to fit modest machines, not tuned for people with lots of resources. A
+     result that misses a target is fixed in the code, never by asking for a
+     bigger machine. The owner's own Mac and iPhone are available for
+     real-device checks on request.
