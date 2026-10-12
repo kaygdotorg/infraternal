@@ -2388,3 +2388,58 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        windows and files — whether or not the mesh is involved.
      A mesh `ssh` login passes network access and login access; a terminal
      opened in the app passes roles and login access.
+253. **Boot Machines (network boot, PXE) (owner, 2026-10-12, #156):** a
+     section called **Boot Machines**, off by default.
+     - **What boots:** a versioned list of curated profiles (Debian, Ubuntu,
+       Fedora, Proxmox, SystemRescue, memtest, …), each tested to finish
+       installing. Any other image can be offered with "Try anyway (may
+       stop after the boot menu)". infraternal never hosts Windows; people
+       download it from Microsoft and drop it in.
+     - **Where:** each LAN needs one infraternal node with Boot Machines on.
+       It answers boot requests next to the existing DHCP server (no router
+       change); one node answers per LAN. Images may live anywhere in the
+       mesh; the LAN's boot node caches each after verifying it, with
+       "Prepare for <LAN>" to fetch ahead.
+     - **Reliable:** detects other boot servers, switches that block boot
+       traffic, port clashes and missing DHCP, and says so plainly; **Test
+       this LAN** boots a small VM end to end; a live boot log in plain
+       words; a fallback (router DHCP settings or a USB boot stick) when a
+       network card ignores the answer; a tested firmware list.
+     - **Who may boot:** access rules with **boot**: "the next machine that
+       asks" or a MAC address, one time, for 1 hour by default; "any machine
+       on <LAN>" only as an explicit, time-limited rule.
+     - **Joins by itself:** curated installs add the infraternal agent and a
+       one-time join token; the machine installs, joins the mesh, waits in
+       the Inbox until approved (with a preview of its access), then is a
+       normal machine. Live images join as temporary machines that leave
+       when switched off. Talos and Windows come later.
+     - **Watch it install:** once Linux runs on the installing machine, its
+       screen streams live to an app window on the canvas (framebuffer
+       capture by the in-memory infraternal agent over the D232 transport),
+       with optional control if an install stops to ask something; a
+       terminal is available too. Firmware screens before Linux need a
+       management controller (IPMI/Redfish) or the hypervisor, later.
+     - **Firmware:** UEFI and legacy BIOS first; Secure Boot and Windows
+       later, each measured first. Failures are explained in plain language.
+     - **Integrity:** originals must match the distribution's signed
+       checksums; our changes are built locally from the verified original
+       and every built file's hash is recorded, serving only those exact
+       bytes; dropped-in images are approved by hash once; nothing is served
+       before the whole image is verified.
+     - **Storage (#34):** dropped-in images are data in
+       `/var/lib/infraternal/boot-images` (rootless
+       `~/.local/share/infraternal/boot-images`), kept; downloads and caches
+       in `/var/cache/infraternal/boot` (rootless `~/.cache/infraternal/boot`),
+       evicted oldest first under a configurable limit.
+     - **Built by us:** boot-request answering, TFTP and HTTP serving in Rust
+       inside the plugin; iPXE shipped as separate boot files (licence
+       checked per build); measured against dnsmasq before shipping.
+254. **App windows run at the display's refresh rate (owner, 2026-10-12;
+     amends D232):** an app window updates at 60 fps, and at 120 fps on a
+     120 Hz screen, whenever the source changes that fast, and does no work
+     when nothing changes. The target is "super responsive": damage-only
+     updates, zero-copy capture, one encode per source shared by every
+     viewer, frame pacing to the viewer's display, and drop-to-newest for
+     slow viewers; input-to-photon latency is measured end to end at 60 and
+     120 fps. Codec, encoder and capture-engine choices are measured and
+     brought to the owner.
