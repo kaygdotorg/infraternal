@@ -1,0 +1,10 @@
+[
+  {
+    "name": "nf_tables_authorized_reenrollment_reaches_the_live_node",
+    "exit": 0
+  },
+  {
+    "name": "nft_authorized_reenrollment_reaches_the_live_node",
+    "exit": 0
+  }
+]

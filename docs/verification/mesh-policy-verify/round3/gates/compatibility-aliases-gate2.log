@@ -1,0 +1,33 @@
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/crates/plugins/mesh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.12s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/mpv3-173/target/debug/deps/infraternal_plugin_mesh-e11dab1ae3cc5c66)
+
+running 25 tests
+test firewall::tests::already_removed_owned_table_does_not_block_component_cleanup ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN.
+test firewall::tests::initial_apply_without_adoption_refuses_a_foreign_table ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN.
+test firewall::tests::real_nft_ownership_atomicity_and_scaled_apply ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN.
+test firewall::tests::rule_count_is_independent_of_membership_and_policy_data_is_in_sets ... ok
+test iptables::tests::contiguous_open_members_use_ranges_without_opening_gaps ... ok
+test iptables::tests::real_nf_tables_ownership_partial_family_and_scaled_apply ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN.
+test iptables::tests::replacement_retains_established_rules_and_does_not_duplicate_hooks ... ok
+test netlink::tests::host_prefix_decoder_refuses_ambiguous_or_malformed_ownership ... ok
+test netlink::tests::malformed_lengths_and_padding_are_rejected ... ok
+test netlink::tests::nested_attributes_roundtrip_without_copying_payloads ... ok
+test netlink::tests::public_host_prefixes_decode_both_families_without_claiming_subnets ... ok
+test node::tests::chunked_snapshot_is_atomic_and_applies_1000_kernel_peers ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN; use release for timing.
+test node::tests::explicit_up_recovers_disabled_intent_before_reusing_identity ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN.
+test node::tests::externally_removed_interface_does_not_block_down ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN.
+test node_actions::tests::failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off ... ignored, Run inside a dedicated network namespace with CAP_NET_ADMIN.
+test node_actions::tests::node_actions_refuse_alternate_forms_duplicates_and_unbounded_input ... ok
+test node_actions::tests::node_actions_register_without_kernel_work_and_hide_machine_calls ... ok
+test node_coordination::tests::explicit_off_waits_for_up_and_reconnect_requests_a_snapshot ... ok
+test node_coordination::tests::refused_delta_recovers_immediately_and_closed_channel_retires_worker ... ok
+test node_coordination::tests::removed_binding_can_attach_only_after_authorized_reenrollment ... ok
+test node_state::tests::explicit_off_survives_restart_and_snapshot_contains_only_public_fields ... ok
+test node_state::tests::route_recording_preserves_the_legacy_accepted_state_format ... ok
+test node_state::tests::unsafe_route_journal_and_existing_temporary_files_are_preserved ... ok
+test node_state::tests::unsafe_snapshots_and_preexisting_temporary_files_are_not_followed_or_removed ... ok
+test settings::tests::settings_objects_are_bounded_and_strict_before_storage ... ok
+
+test result: ok. 17 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.42s
+

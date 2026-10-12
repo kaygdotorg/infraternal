@@ -1,0 +1,322 @@
+[
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "firewall::tests::already_removed_owned_table_does_not_block_component_cleanup",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "firewall::tests::initial_apply_without_adoption_refuses_a_foreign_table",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "firewall::tests::real_nft_ownership_atomicity_and_scaled_apply",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "iptables::tests::real_nf_tables_ownership_partial_family_and_scaled_apply",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "node::rotation_tests::nf_tables_restart_fences_retained_replacement_address",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "node::rotation_tests::nft_restart_fences_retained_replacement_address",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "node::tests::chunked_snapshot_is_atomic_and_applies_1000_kernel_peers",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "node::tests::explicit_up_recovers_disabled_intent_before_reusing_identity",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "node::tests::externally_removed_interface_does_not_block_down",
+    "exit": 0
+  },
+  {
+    "suite": "infraternal_plugin_mesh",
+    "case": "node_actions::tests::failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off",
+    "exit": 0
+  },
+  {
+    "suite": "review_firewall_marker",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_firewall_marker",
+    "case": "nf_tables_marker_substring_is_not_chain_ownership",
+    "exit": 0
+  },
+  {
+    "suite": "review_firewall_marker",
+    "case": "nft_marker_substring_is_not_table_ownership",
+    "exit": 0
+  },
+  {
+    "suite": "review_route_inventory",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_route_inventory",
+    "case": "refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes",
+    "exit": 0
+  },
+  {
+    "suite": "review_route_inventory",
+    "case": "restart_preserves_unrecorded_direct_host_routes",
+    "exit": 0
+  },
+  {
+    "suite": "policy_enrollment_binding",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_endpoint_transaction",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_endpoint_transaction",
+    "case": "refused_endpoint_persistence_preserves_kernel_endpoint",
+    "exit": 0
+  },
+  {
+    "suite": "canonical_host_binding",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "kernel",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "kernel",
+    "case": "bulk_retirement_preserves_identity_and_routes_at_1000_peers",
+    "exit": 0
+  },
+  {
+    "suite": "kernel",
+    "case": "created_interface_is_marked_for_restart_adoption",
+    "exit": 0
+  },
+  {
+    "suite": "kernel",
+    "case": "policy_table_route_conflict_is_refused",
+    "exit": 0
+  },
+  {
+    "suite": "kernel",
+    "case": "real_kernel_chunked_peers",
+    "exit": 0
+  },
+  {
+    "suite": "kernel",
+    "case": "real_kernel_ephemeral_identity",
+    "exit": 0
+  },
+  {
+    "suite": "kernel",
+    "case": "retired_host_routes_can_be_replayed",
+    "exit": 0
+  },
+  {
+    "suite": "configuration",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_revoked_host_policy",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "store",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "restart_route_ownership",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "restart_route_ownership",
+    "case": "orphan_route_retirement_preserves_foreign_routes",
+    "exit": 0
+  },
+  {
+    "suite": "policy_snapshot_ordering",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "policy_snapshot_ordering",
+    "case": "nf_tables_equal_version_conflicting_snapshot_is_refused",
+    "exit": 0
+  },
+  {
+    "suite": "policy_snapshot_ordering",
+    "case": "nf_tables_snapshot_cannot_replace_local_node_identity",
+    "exit": 0
+  },
+  {
+    "suite": "policy_snapshot_ordering",
+    "case": "nf_tables_split_snapshot_replay_requires_complete_identical_contents",
+    "exit": 0
+  },
+  {
+    "suite": "policy_snapshot_ordering",
+    "case": "nft_equal_version_conflicting_snapshot_is_refused",
+    "exit": 0
+  },
+  {
+    "suite": "policy_snapshot_ordering",
+    "case": "nft_snapshot_cannot_replace_local_node_identity",
+    "exit": 0
+  },
+  {
+    "suite": "policy_snapshot_ordering",
+    "case": "nft_split_snapshot_replay_requires_complete_identical_contents",
+    "exit": 0
+  },
+  {
+    "suite": "review_local_delivery",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_local_delivery",
+    "case": "nf_tables_node_local_mesh_delivery_remains_available",
+    "exit": 0
+  },
+  {
+    "suite": "review_local_delivery",
+    "case": "nft_node_local_mesh_delivery_remains_available",
+    "exit": 0
+  },
+  {
+    "suite": "authorized_local_binding",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "authorized_local_binding",
+    "case": "nf_tables_local_binding_and_address_recovery",
+    "exit": 0
+  },
+  {
+    "suite": "authorized_local_binding",
+    "case": "nft_local_binding_and_address_recovery",
+    "exit": 0
+  },
+  {
+    "suite": "review_shutdown_restart",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_shutdown_restart",
+    "case": "crash_child",
+    "exit": 0
+  },
+  {
+    "suite": "review_shutdown_restart",
+    "case": "refused_journal_retirement_keeps_stopping_until_explicit_retry",
+    "exit": 0
+  },
+  {
+    "suite": "review_shutdown_restart",
+    "case": "restart_finishes_interrupted_down_at_1000_peers",
+    "exit": 0
+  },
+  {
+    "suite": "review_restart_routes",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_restart_routes",
+    "case": "restart_retires_orphan_peer_host_routes",
+    "exit": 0
+  },
+  {
+    "suite": "review_shutdown_budget",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_shutdown_budget",
+    "case": "shipping_mesh_down_1000_peers_finishes_within_one_second",
+    "exit": 101
+  },
+  {
+    "suite": "review_authorized_reenrollment",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_authorized_reenrollment",
+    "case": "nf_tables_authorized_reenrollment_reaches_the_live_node",
+    "exit": 0
+  },
+  {
+    "suite": "review_authorized_reenrollment",
+    "case": "nft_authorized_reenrollment_reaches_the_live_node",
+    "exit": 0
+  },
+  {
+    "suite": "review_ingress_translation",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_ingress_translation",
+    "case": "nf_tables_translated_underlay_ingress_is_refused",
+    "exit": 0
+  },
+  {
+    "suite": "review_ingress_translation",
+    "case": "nft_translated_underlay_ingress_is_refused",
+    "exit": 0
+  },
+  {
+    "suite": "settings",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "policy_enrollment_identity",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_route_scope",
+    "case": "ordinary",
+    "exit": 0
+  },
+  {
+    "suite": "review_route_scope",
+    "case": "restart_preserves_operator_gateway_host_route",
+    "exit": 0
+  }
+]

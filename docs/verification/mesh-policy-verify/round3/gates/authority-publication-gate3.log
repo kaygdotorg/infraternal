@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.66s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/mpv3-173/target/debug/deps/infraternal_server-2e62c9c74d26d8da)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 347 filtered out; finished in 0.00s
+
