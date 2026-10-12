@@ -2332,3 +2332,22 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      battery cost is measured on an iPhone and on the idle canary before it
      ships. When typing cannot reach the terminal, the cursor stays a steady
      underline (TASTE "A blinking cursor means you can type").
+250. **How changes reach production (owner, 2026-10-12):**
+     - **One line:** `dev` is the only development line. A production
+       deploy is a tag on a `dev` commit that passed its review and gates;
+       `main` is fast-forwarded to whatever production runs, so `main` stays
+       the stable line. The `release-prod-*` branches end once batch 4 and
+       its merge back into `dev` are done. No more ports.
+     - **Deploy each change on its own** as soon as its review passes, not
+       in batches. The owner's own testing in production is the main test;
+       small deploys make each problem easy to find and roll back.
+     - **No CA lock on binary deploys:** deploys use the in-process binary
+       handoff (#154) instead of stop and start, once release pipeline
+       round 4 (signature check, sealed image, recovery) has passed review.
+     - **Builds within the host's capacity:** only as many build-heavy jobs
+       run as the build host can take; release builds get a reserved CPU
+       share and are built for each `dev` head that passes, so a deploy only
+       copies a binary.
+     - **Timing on the perf VM:** every timing, CPU, memory and frame
+       number, native or browser, is measured on the perf VM; build-host
+       timings are not evidence.
