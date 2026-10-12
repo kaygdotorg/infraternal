@@ -41,3 +41,12 @@ installed Python as the original gate. No argument or limit is changed. Set
 `CARGO_TARGET_DIR`, and the short disposable `INFRATERNAL_TEST_STATE_ROOT`.
 The original shared-host setup failures remain retained and qualified as setup
 attempts, not performance evidence.
+
+Use different target directories for baseline and head. An archived baseline can
+overwrite Cargo's un-hashed release binary while the head's fingerprint still
+reports fresh. The initial shared-target head retry is retained as
+`fast-shared-target-before-refresh.log`; its static row checked the baseline
+output and is not final head artifact evidence. The affected four static crates
+were cleaned before the final gate rebuilt them. `static-size-comparison.json`
+includes independent baseline and saved-head hashes. No source-code change or
+size waiver was used to repair this build setup.

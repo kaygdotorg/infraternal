@@ -1,3 +1,5 @@
+129733b3 docs(mesh): retain static size comparison and explicit gate routing (#173)
+8473bd8b docs(mesh): retain exact state proofs and final VM measurements (#173)
 39e70f8b test(mesh): preserve received probes when peer retirement refuses their reply (#173)
 7fff0c54 test(mesh): retain probe arrivals when an updated rule refuses UDP echoes (#173)
 475cc8c0 docs(mesh): define committed access checks in temporary recovery rules (#173)
