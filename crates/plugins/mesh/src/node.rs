@@ -30,6 +30,8 @@ pub struct Node {
     routes: BTreeSet<IpAddr>,
     firewall: Firewall,
     owned: bool,
+    // A committed revision remains restrictive until exact retirement succeeds.
+    connection_cleanup_pending: bool,
     client: Option<Client>,
 }
 impl Default for Node {
@@ -43,6 +45,7 @@ impl Default for Node {
             routes: BTreeSet::new(),
             firewall: Firewall::default(),
             owned: false,
+            connection_cleanup_pending: false,
             client: None,
         }
     }
@@ -256,6 +259,7 @@ impl Node {
         self.client = None;
         self.identity = None;
         self.config = None;
+        self.connection_cleanup_pending = false;
         self.pending = None;
         Ok(())
     }
@@ -268,6 +272,7 @@ impl Node {
     /// # Errors
     /// Refuses stale/out-of-order/wrong-node chunks before changing installed state.
     pub fn chunk(&mut self, chunk: Chunk) -> io::Result<bool> {
+        self.finish_connection_cleanup()?;
         let result = self.stage(chunk);
         if result.is_err() {
             self.pending = None;
@@ -582,7 +587,7 @@ impl Node {
             {
                 Device::retain_recorded_routes(&self.routes, &proposed)?;
             }
-            self.firewall.apply(&config)?;
+            self.firewall.install_pending(&config)?;
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
@@ -632,6 +637,18 @@ impl Node {
             return Err(error);
         }
         self.config = Some(config);
+        self.connection_cleanup_pending = true;
+        self.finish_connection_cleanup()
+    }
+    fn finish_connection_cleanup(&mut self) -> io::Result<()> {
+        if self.connection_cleanup_pending {
+            // Public intent and the final rules have committed. Never roll
+            // back access after irreversible retirement begins. A failed
+            // cleanup is retried before replay can acknowledge this revision.
+            self.firewall
+                .complete(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+            self.connection_cleanup_pending = false;
+        }
         Ok(())
     }
 }
