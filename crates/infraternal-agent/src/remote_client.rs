@@ -208,13 +208,30 @@ async fn quic_connect(
     .map_err(io::Error::other)
 }
 
+fn client_greeting(renewal: bool) -> infraternal_protocol::Frame<'static> {
+    infraternal_protocol::Frame::Hello {
+        version: 1,
+        caps: remote_quic::REMOTE_WRITER_BINDING
+            | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+            | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
+            | if renewal {
+                crate::remote_renewal::LIVE_RENEWAL
+            } else {
+                0
+            },
+        client_info: "infraternal agent",
+    }
+}
+
 /// A proved stream retains its decoder and an optional parked server greeting.
 struct ProvedControl {
     control: NativeChannel,
     receive: Receive,
     greeting: Option<Vec<u8>>,
+    primed: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
@@ -222,41 +239,96 @@ async fn quic_session_on(
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     plugins: crate::plugin_control::Registry,
     proof: Option<ProvedControl>,
-    standby: &tokio::sync::watch::Sender<bool>,
+    standby: &tokio::sync::watch::Sender<u64>,
+    external_native: bool,
 ) -> io::Result<()> {
     let result = async {
-        let ProvedControl { control, receive: mut rx, greeting: cached } = if let Some(proof) = proof { proof } else {
+        let ProvedControl {
+            control,
+            receive: mut rx,
+            greeting: cached,
+            primed,
+        } = if let Some(proof) = proof {
+            proof
+        } else {
             let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
-            ProvedControl { control: NativeChannel::control(send, receive)?, receive: Receive::default(), greeting: None }
+            ProvedControl {
+                control: NativeChannel::control(send, receive)?,
+                receive: Receive::default(),
+                greeting: None,
+                primed: false,
+            }
         };
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
-        let greeting = infraternal_protocol::Frame::Hello { version:1, caps:remote_quic::REMOTE_WRITER_BINDING | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS | if renewal.is_some() { crate::remote_renewal::LIVE_RENEWAL } else { 0 }, client_info:"infraternal agent" };
-        tx.send(&control, 0, &greeting).await?;
+        let greeting = client_greeting(renewal.is_some());
+        if primed {
+            // Priming already sent Hello. Only this negotiated activation may
+            // replace the server's actor and release the parked identity slot.
+            tx.send(
+                &control,
+                0,
+                &infraternal_protocol::Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.activate",
+                    input_json: b"{}",
+                },
+            )
+            .await?;
+        } else {
+            tx.send(&control, 0, &greeting).await?;
+        }
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
-        let prefix = if let Some(cached) = cached { cached } else {
-            let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control)).await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        let prefix = if let Some(cached) = cached {
+            cached
+        } else {
+            let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control))
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
             let mut encoded = Vec::new();
             encode_frame_into(&hello.frame, &mut encoded).map_err(io::Error::other)?;
             encoded
         };
         let hello = infraternal_protocol::decode_frame(&prefix).map_err(io::Error::other)?;
         let binding = remote_quic::negotiate_binding(&connection, &hello.frame)?;
-        standby.send_replace(matches!(hello.frame, infraternal_protocol::Frame::Hello { caps, .. } if caps & infraternal_plugin_api::channel::REMOTE_STANDBY != 0));
-        let allow_priming = matches!(hello.frame, infraternal_protocol::Frame::Hello { caps, .. } if caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0);
-        let control = PrefixedControl { channel:ControlChannel::Quic(control), prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
+        let infraternal_protocol::Frame::Hello { caps, .. } = hello.frame else {
+            return Err(io::ErrorKind::InvalidData.into());
+        };
+        standby.send_replace(caps);
+        let control = PrefixedControl {
+            channel: ControlChannel::Quic(control),
+            prefix: Mutex::new(prefix),
+            sent_greeting: Mutex::new(Some(sent_greeting)),
+            receive: Mutex::new(rx),
+        };
         let dispatch = daemon::run_authenticated_with_plugins(
-            &control, state.clone(), identity.execution_uid, renewal, plugins,
+            &control,
+            state.clone(),
+            identity.execution_uid,
+            renewal,
+            plugins,
         );
-        let native = primed_native::serve(&binding, state, allow_priming);
+        let native = async {
+            if external_native {
+                std::future::pending::<io::Result<()>>().await
+            } else {
+                primed_native::serve(
+                    &binding,
+                    state,
+                    caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0,
+                )
+                .await
+            }
+        };
         tokio::select! {
             result = dispatch => result,
             result = native => result,
             _ = connection.closed() => Err(io::ErrorKind::BrokenPipe.into()),
         }
-    }.await;
+    }
+    .await;
     connection.close(0u32.into(), b"");
     result
 }

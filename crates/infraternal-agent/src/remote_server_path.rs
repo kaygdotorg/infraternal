@@ -24,7 +24,7 @@ struct Link {
     address: SocketAddr,
     kind: ServerLinkKind,
     proof: tokio::sync::Mutex<Option<Proof>>,
-    standby: tokio::sync::watch::Sender<bool>,
+    standby: tokio::sync::watch::Sender<u64>,
 }
 impl Drop for Link {
     fn drop(&mut self) {
@@ -119,7 +119,7 @@ async fn connect(
         address,
         kind,
         proof: tokio::sync::Mutex::new(None),
-        standby: tokio::sync::watch::channel(false).0,
+        standby: tokio::sync::watch::channel(0).0,
     };
     if prove {
         let proof = tokio::time::timeout(PROBE_TIMEOUT, async {
@@ -133,6 +133,7 @@ async fn connect(
                         control,
                         receive,
                         greeting: None,
+                        primed: false,
                     }))
                 }
                 Connected::Tcp(connection) => {
@@ -141,6 +142,7 @@ async fn connect(
                     Ok(Proof::Tcp {
                         receive,
                         greeting: None,
+                        primed: false,
                     })
                 }
             }
@@ -210,6 +212,7 @@ async fn session(
                 registry,
                 proof,
                 &link.standby,
+                false,
             );
             if link.kind == ServerLinkKind::Mesh {
                 // Existing authenticated transport traffic supplies liveness;
@@ -261,7 +264,7 @@ async fn warming(
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
 ) -> io::Result<Link> {
     let mut support = live.standby.subscribe();
-    while !*support.borrow_and_update() {
+    while *support.borrow_and_update() & infraternal_plugin_api::channel::REMOTE_STANDBY == 0 {
         support
             .changed()
             .await
