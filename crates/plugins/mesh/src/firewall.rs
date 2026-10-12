@@ -114,9 +114,10 @@ impl Firewall {
         }
         Ok(())
     }
-    /// Atomically replace the entire node policy. Nothing runs between requests.
+    /// Install final network access rules and retire exactly the state no longer permitted.
     /// # Errors
-    /// Refuses unavailable nft or a failed transaction; an existing table stays unchanged.
+    /// Reports installation or retirement errors. Once installed, the new rules
+    /// remain restrictive on a cleanup error; the caller retries completion.
     pub fn apply(&mut self, config: &Config) -> io::Result<()> {
         self.install_pending(config)?;
         self.complete(config)
