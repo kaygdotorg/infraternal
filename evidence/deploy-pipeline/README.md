@@ -19,10 +19,12 @@ Functional evidence:
   This is a rootless build-host gate, not unlocked-root-CA staging evidence.
 - `merge-clippy-final.log`, `tracer-check.log`: CLI all-target Clippy and tracer
   TypeScript check pass. Formatting and systemd unit validation pass.
-- `scripts-tests.log`: thirteen cases pass, including real SQLite committed-WAL
+- `scripts-tests-latest.log`: fourteen cases pass, including real SQLite committed-WAL
   backup, Unix socket framing, cold-reply refusal, live HTTP redirect refusal,
   exact streaming archive contents and metadata bounds. Controlled restart/web
   rollback cases use explicit doubles; they are not real deployment proof.
+- `builder-lock-red.log`: actual subprocess loses the supervising flock before
+  the fix. Worker subprocesses now inherit the same held descriptor explicitly.
 - `redirect-red.log`: real redirect regression fails before the fix. The fixed
   local HTTP opener refuses redirect/proxy forwarding and closes error bodies.
 - `merge-tests.log`, `merge-tests-serial.log`, `merge-tests-final.log`: failed
@@ -40,6 +42,11 @@ original fixture, deadlines and full-image verification. No crypto engine or
 release profile changed. Complete final-head fast output is recorded on
 #188 and retained separately as `verify-final.log`; no passing full-gate claim
 is made until every required row passes.
+
+The 00344cd0 milestone passes every native Rust row except the pre-existing
+static size ceiling: x86 ELF is 21,882,448 bytes against 16,404,816. No ceiling
+was changed. Final-head verification also includes the child-lock fix; its
+receipt on #188 supersedes earlier milestone/interim output.
 
 Perf VM reachability was confirmed through the named NetBird SSH entry. A later
 nonblocking lock probe returned `LOCK_BUSY`; the attempted functional fixture
