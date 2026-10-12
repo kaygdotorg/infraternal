@@ -179,7 +179,16 @@ Scale load: 0.05/0.04/0.01 before; 0.13/0.05/0.01 after.
 
 ### Reproduction, gates and author review
 
-Use a job-owned CARGO_TARGET_DIR/TMPDIR and a short INFRATERNAL_TEST_STATE_ROOT.
+Keep build targets/worktrees in a job-owned CARGO_TARGET_DIR and use a short
+INFRATERNAL_TEST_STATE_ROOT. For the full native test suite, preserve the small
+fixtures' normal short `/tmp` path: the gone-session fixture appends a UUID and
+session socket name. A long job TMPDIR produced a 157-byte pathname versus
+105 bytes with `/tmp`, exceeding Linux's 108-byte bound including NUL. The
+unchanged exact test then passed in 0.06 s with the short fixture path; no
+assertion/deadline change or #118 waiver. The root CA harness separately uses
+its job-owned TMPDIR for the selected CA tests. No build targets or temporary
+worktrees are placed in `/tmp`.
+
 After changing compiler policy, clean only the affected release provider
 outputs to avoid reusing a disabled archive:
 
