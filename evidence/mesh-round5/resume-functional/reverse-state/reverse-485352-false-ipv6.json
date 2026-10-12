@@ -1,0 +1,68 @@
+{
+  "family": "ipv6",
+  "backend": "nft",
+  "acknowledged": [
+    {
+      "applied": true,
+      "apply_us": 858628
+    },
+    {
+      "applied": true,
+      "apply_us": 120780
+    }
+  ],
+  "before": [
+    {
+      "src": "fd01:203:405::1",
+      "dst": "fd01:203:405::2",
+      "protocol": 6,
+      "sport": 48772,
+      "dport": 5540,
+      "id": "c65dac3b",
+      "zone": "0000"
+    },
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 38613,
+      "dport": 59585,
+      "id": "a8b64959",
+      "zone": "0000"
+    }
+  ],
+  "after": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 38613,
+      "dport": 59585,
+      "id": "a8b64959",
+      "zone": "0000"
+    }
+  ],
+  "recreated": [
+    {
+      "src": "fd01:203:405::2",
+      "dst": "fd01:203:405::1",
+      "protocol": 6,
+      "sport": 5540,
+      "dport": 48772,
+      "id": "6f0701a5",
+      "zone": "0000"
+    },
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 38613,
+      "dport": 59585,
+      "id": "a8b64959",
+      "zone": "0000"
+    }
+  ],
+  "reverse": "reverse-probe",
+  "received": "after",
+  "refused": false
+}
