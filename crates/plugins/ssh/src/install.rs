@@ -693,7 +693,8 @@ pub fn parse_setup(bytes: &[u8]) -> Result<bool, Failure> {
     if !text.ends_with('\n') {
         return Err(invalid_setup());
     }
-    let mut lines = text.lines();
+    // Preserve CR bytes: only the fixed LF receipt is canonical.
+    let mut lines = text.split_terminator('\n');
     for (index, name) in ["join", "install", "start", "linger"]
         .into_iter()
         .enumerate()
@@ -735,7 +736,7 @@ pub fn interrupted_setup_step(bytes: &[u8]) -> Option<InstallStep> {
         return None;
     }
     let mut last = None;
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in text.split_terminator('\n').enumerate() {
         let name = ["join", "install", "start", "linger"].get(index).copied()?;
         if line != format!("STEP {name}") {
             return None;

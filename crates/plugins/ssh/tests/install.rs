@@ -272,6 +272,12 @@ fn setup_receipts_require_exact_order_and_preserve_failure_boundaries() {
         assert!(parse_setup(invalid.as_bytes()).is_err(), "{invalid:?}");
     }
     assert!(parse_setup(&[b'x'; 257]).is_err());
+    let malformed = parse_setup(b"STEP join\r\nFAIL join 71\r\n").unwrap_err();
+    assert!(
+        malformed.exit_status.is_none(),
+        "noncanonical receipt claimed a remote status"
+    );
+    assert!(interrupted_setup_step(b"STEP join\r\n").is_none());
     assert!(interrupted_setup_step(b"STEP join\nprivate\n").is_none());
 }
 
