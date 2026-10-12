@@ -205,9 +205,14 @@ impl Backend for ObservedBackend {
             .await
             .unwrap_or_else(|_| Err(unavailable()));
             println!("DIAG breakit2 canary_output_ok={}", output.is_ok());
-            let cleanup = finish_canary(&actor, session).await;
-            println!("DIAG breakit2 canary_cleanup_ok={}", cleanup.is_ok());
-            output.and(cleanup)
+            if output.is_ok() {
+                self.0.attempts.lock().unwrap().get_mut(&h).unwrap().canary = None;
+                println!("DIAG breakit2 canary_cleanup_ok=true primary_exit=true");
+            } else {
+                let cleanup = finish_canary(&actor, session).await;
+                println!("DIAG breakit2 canary_cleanup_ok={}", cleanup.is_ok());
+            }
+            output
         })
     }
     fn cleanup_sessions<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
@@ -254,6 +259,7 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
             .map_err(|_| unavailable())?;
     }
     let mut received = Vec::new();
+    let mut confirmed = false;
     while let Some(event) = output.recv().await {
         match event {
             // A fast first command may be included in the initial faithful
@@ -264,18 +270,31 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
                 }
                 println!("DIAG breakit2 confirmed_output_bytes={}", bytes.len());
                 received.extend_from_slice(&bytes);
-                if received
+                confirmed = received
                     .windows(marker.len())
-                    .any(|window| window == marker.as_bytes())
-                {
-                    return Ok(());
+                    .any(|window| window == marker.as_bytes());
+            }
+            TerminalOutput::Event { event_json } => {
+                let notice: serde_json::Value =
+                    serde_json::from_slice(&event_json).map_err(|_| unavailable())?;
+                if notice["type"] == "terminal.exited" {
+                    let exited = notice["session_id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .is_some_and(|id| id.as_bytes() == &session);
+                    println!("DIAG breakit2 primary_exit_matches={exited} marker_found={confirmed}");
+                    return if confirmed && exited && notice["status"] == 0 {
+                        Ok(())
+                    } else {
+                        Err(unavailable())
+                    };
                 }
             }
             TerminalOutput::Closed { code, .. } => {
                 println!("DIAG breakit2 output_closed_code={code}");
                 break;
             }
-            _ => {}
+            TerminalOutput::Ack { .. } => {}
         }
     }
     println!("DIAG breakit2 canary_stream_ended=true marker_found=false");
