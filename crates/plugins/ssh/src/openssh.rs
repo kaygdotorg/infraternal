@@ -21,6 +21,8 @@ pub struct OpenSsh {
     pub ssh_keyscan: PathBuf,
     pub ssh_keygen: PathBuf,
     pub askpass_binary: PathBuf,
+    /// Trusted optional binary implementing only the private socket handoff.
+    pub tcp_connector: Option<PathBuf>,
     pub scratch: PathBuf,
     pub command_timeout: Duration,
 }
@@ -76,6 +78,7 @@ impl OpenSsh {
                     credentials,
                     mesh,
                     timeout: self.command_timeout,
+                    tcp_connector: self.tcp_connector.clone(),
                     master: None,
                 };
                 let socket = session.credentials.control_socket()?;
@@ -113,6 +116,7 @@ struct Session {
     credentials: CredentialSession,
     mesh: MeshEvidence,
     timeout: Duration,
+    tcp_connector: Option<PathBuf>,
     master: Option<Master>,
 }
 
@@ -160,6 +164,21 @@ impl Session {
         // Method-specific authentication precedes retained public preferences;
         // OpenSSH singleton command-line options keep their first value.
         self.credentials.configure(&mut command);
+        if let Some(connector) = &self.tcp_connector {
+            let destination = &self.configuration.destination;
+            let dial = format!(
+                "{} __ssh-connect {} {}",
+                shell_quote(&connector.to_string_lossy()),
+                shell_quote(destination.host()),
+                destination.port().unwrap_or(22),
+            );
+            // This local helper receives no credential and passes a socket,
+            // not a proxy stream. Public config was already checked for hops;
+            // all host-key/authentication checks remain in the same SSH child.
+            command
+                .args(["-o", "ProxyUseFdpass=yes", "-o"])
+                .arg(format!("ProxyCommand={dial}"));
+        }
         self.configuration.configure(&mut command);
         // Command-line precedence forces these over config: host keys cannot be accepted or rewritten;
         // forwarding/control sockets from server config must not outlive bootstrap.

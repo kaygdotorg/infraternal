@@ -461,6 +461,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                 ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
                 ssh_keygen: "/usr/bin/ssh-keygen".into(),
                 askpass_binary: binary.clone(),
+                tcp_connector: Some(binary.clone()),
                 scratch: scratch.clone(),
                 command_timeout: Duration::from_secs(30),
             },
