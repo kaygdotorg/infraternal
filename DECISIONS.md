@@ -2282,3 +2282,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      D8):** end-to-end encryption between browser and host is not added now.
      Native apps are mesh nodes and get it over WireGuard. A per-session
      private mode in the browser is measured before it is offered.
+247. **Real logins go through the host's own login path (owner, 2026-10-12,
+     #172; amends D240, keeps D7):** the static binary does not load PAM
+     itself. On systemd hosts, the per-person login (D240) is a long-lived
+     systemd unit with `PAMName=`, and the infraternal agent starts that
+     person's shells inside it. Hosts without systemd fall back to the host's
+     own `su`/`login`. Condition: this is chosen because it is the standard
+     path and expected to be the fastest; it must be measured against the
+     glibc helper option on the perf VM (first terminal, later terminals,
+     opened in advance). If it is clearly slower, the owner decides again.
+     Rejected for now: a glibc helper binary next to the static one, and a
+     dynamic glibc build of the whole binary.
