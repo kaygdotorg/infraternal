@@ -146,6 +146,86 @@ fn executable(path: &std::path::Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+// These break-it regressions state the desired contract and intentionally stay
+// red until the follow-up fix lane. Explicit opt-in keeps the shared fast gate
+// useful while preserving executable evidence of the reported defects (#169).
+#[tokio::test]
+#[ignore = "#169 breakit2: rollback removes an unrelated launcher.new"]
+async fn breakit2_rollback_preserves_foreign_launcher_new() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let foreign = fixture.root.join(".local/bin/infraternal.new");
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    std::fs::write(&foreign, "unrelated launcher staging data").unwrap();
+    assert!(transaction.enroll_and_start(&fixture.join).await.is_err());
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&foreign).ok().as_deref(),
+        Some("unrelated launcher staging data"),
+        "rollback deleted a file that this attempt never created"
+    );
+}
+
+#[tokio::test]
+#[ignore = "#169 breakit2: rollback removes an unrelated unit.new"]
+async fn breakit2_rollback_preserves_foreign_unit_new() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let foreign = fixture
+        .root
+        .join(".config/systemd/user/infraternal-agent.service.new");
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    std::fs::write(&foreign, "unrelated unit staging data").unwrap();
+    assert!(transaction.enroll_and_start(&fixture.join).await.is_err());
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&foreign).ok().as_deref(),
+        Some("unrelated unit staging data"),
+        "noclobber refused the foreign unit, then rollback deleted it"
+    );
+}
+
+#[tokio::test]
+#[ignore = "#169 breakit2: fresh install accepts a parent its rollback refuses"]
+async fn breakit2_stage_refuses_parent_that_cannot_be_rolled_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let parent = fixture.root.join(".local/share");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let transaction = fixture.transaction();
+    let staged = transaction.stage(&fixture.binary).await;
+    let cleanup = transaction.rollback().await;
+    assert!(
+        staged.is_err() || cleanup.is_ok(),
+        "stage accepted mode 0775, then rollback refused the same parent and left its payload/lock"
+    );
+}
+
+#[tokio::test]
+#[ignore = "#169 breakit2: interrupted lock acquisition cannot be rolled back"]
+async fn breakit2_interrupted_lock_creation_allows_cleanup_and_retry() {
+    let fixture = Fixture::new();
+    // A real mkdir succeeds, then the command fails before the transaction and
+    // kind records are written. This models an abrupt stop at that boundary.
+    executable(
+        &fixture.root.join("tools/mkdir"),
+        "#!/bin/sh\n/usr/bin/mkdir \"$@\" || exit $?\ncase \"$*\" in *.bootstrap-lock) exit 42;; esac\n",
+    );
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/mkdir")).unwrap();
+    assert!(
+        transaction.rollback().await.is_ok(),
+        "an owned empty lock has no transaction record; rollback cannot recover it"
+    );
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
 #[tokio::test]
 async fn fresh_runtime_empty_directories_do_not_block_rollback_and_retry() {
     let fixture = Fixture::new();
