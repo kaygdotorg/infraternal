@@ -113,8 +113,12 @@ authorized perf VM through NetBird SSH under `/var/lock/perf-bench.lock`.
 `performance/perf-run.py` records the interleaved native profile commands.
 Always set a unique TRACER_TEST_PORT for browser harnesses.
 
-Final branch-head `scripts/verify fast` output is recorded verbatim on #173 and
-retained in the gate evidence. Static size ceilings remain unchanged. No
+The final code/evidence head `84133448` passed every `scripts/verify fast` row
+except static builds. Its x86_64 static binary is **21740144 bytes** against the
+unchanged **16404816-byte** ceiling; the static-build script stops there, so this
+run makes no ARM static-build claim. The complete output is retained in
+`gates/final-fast-84133448.log`; the summary is recorded verbatim on #173.
+Static size ceilings remain unchanged. No
 deployment or issue closure. Ordinary range changes still require the existing
 overlap barrier; established-flow retention after grant narrowing is unchanged.
 Relay, subnet, exit and login paths are outside this data-plane slice.
