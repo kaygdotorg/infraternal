@@ -121,6 +121,13 @@ impl Installation {
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         self.session.run(&self.script(&format!(r#"
+# Admission and cleanup share the same private-parent rule. Refuse a parent
+# that cannot protect a rollback receipt before creating any installation data.
+parent=$(dirname "$base")
+if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
+[ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+parent_mode=$(stat -c '%a' "$parent")
+[ "$((0$parent_mode & 022))" -eq 0 ] || exit 71
 # A retired fresh transaction still owns final cleanup outside the base.
 # Admit no replacement until its receipt is removed after successful cleanup.
 for receipt in "$base".bootstrap-rollback-*; do

@@ -186,7 +186,6 @@ async fn breakit2_rollback_preserves_foreign_unit_new() {
 }
 
 #[tokio::test]
-#[ignore = "#169 breakit2: fresh install accepts a parent its rollback refuses"]
 async fn breakit2_stage_refuses_parent_that_cannot_be_rolled_back() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();

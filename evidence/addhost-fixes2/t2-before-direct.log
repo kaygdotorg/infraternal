@@ -1,0 +1,19 @@
+Running as unit: run-p2835177-i7029076.scope; invocation ID: cbbd170c7d8f492c8e997646d8490b2a
+
+running 1 test
+test breakit2_stage_refuses_parent_that_cannot_be_rolled_back ... FAILED
+
+failures:
+
+---- breakit2_stage_refuses_parent_that_cannot_be_rolled_back stdout ----
+
+thread 'breakit2_stage_refuses_parent_that_cannot_be_rolled_back' (2835212) panicked at crates/plugins/ssh/tests/install.rs:199:5:
+stage accepted mode 0775, then rollback refused the same parent and left its payload/lock
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    breakit2_stage_refuses_parent_that_cannot_be_rolled_back
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.12s
+
