@@ -3,7 +3,7 @@
 
 mod common;
 use infraternal_plugin_ssh::{
-    auth_order::{AuthProvider, AutoAuth, NetworkProvider},
+    auth_order::{AuthMethod, AuthProvider, AutoAuth, NetworkProvider},
     model::{Destination, FailureKind, InstallMode, MeshEvidence},
     openssh::OpenSsh,
     probe::CHECK_SCRIPT,
@@ -17,10 +17,10 @@ use std::{
     time::Duration,
 };
 
-struct NetworkOnly;
+struct NetworkOnly(Option<NetworkProvider>);
 impl AuthProvider for NetworkOnly {
     fn network(&self) -> Option<NetworkProvider> {
-        Some(NetworkProvider::Netbird)
+        self.0
     }
     fn server_key(&self) -> Operation<'_, Option<Credentials>> {
         Box::pin(async { panic!("network auth must not request keys") })
@@ -84,30 +84,43 @@ async fn network_identity_connect_check_and_changed_key_refusal() {
         infraternal_plugin_ssh::previous_attempt::check_script(InstallMode::Rootless),
         format!("{CHECK_SCRIPT}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'"),
     ];
-    for (index, script) in scripts.iter().enumerate() {
-        let session = automatic
-            .open(
-                destination.clone(),
-                Credentials::Automatic(Arc::new(NetworkOnly)),
-                MeshEvidence::default(),
-            )
-            .await
-            .unwrap();
-        let check = session.run(script, Input::Empty).await.unwrap();
-        assert!(check.stdout.starts_with(b"INFRATERNAL_CHECK_V1\nLinux\n"));
-        if index != 0 {
-            assert!(check.stdout.ends_with(b"INFRATERNAL_SETUP_CLEAR\n"));
+    // Provider metadata is advisory: typed hosts have none, while discovered
+    // hosts preserve either mesh provider without changing SSH negotiation.
+    let mut connections = 0;
+    for provider in [
+        Some(NetworkProvider::Netbird),
+        Some(NetworkProvider::Tailscale),
+        None,
+    ] {
+        for (index, script) in scripts.iter().enumerate() {
+            let session = automatic
+                .open(
+                    destination.clone(),
+                    Credentials::Automatic(Arc::new(NetworkOnly(provider))),
+                    MeshEvidence::default(),
+                )
+                .await
+                .unwrap();
+            let check = session.run(script, Input::Empty).await.unwrap();
+            let authentication = session.authentication().unwrap();
+            assert_eq!(authentication.method, AuthMethod::Network);
+            assert_eq!(authentication.network, provider);
+            assert!(check.stdout.starts_with(b"INFRATERNAL_CHECK_V1\nLinux\n"));
+            if index != 0 {
+                assert!(check.stdout.ends_with(b"INFRATERNAL_SETUP_CLEAR\n"));
+            }
+            let again = session
+                .run("printf 'same-connection\n'", Input::Empty)
+                .await
+                .unwrap();
+            assert_eq!(again.stdout, b"same-connection\n");
+            connections += 1;
+            assert_eq!(
+                std::fs::read_to_string(root.join("connections")).unwrap(),
+                connections.to_string()
+            );
+            drop(session);
         }
-        let again = session
-            .run("printf 'same-connection\n'", Input::Empty)
-            .await
-            .unwrap();
-        assert_eq!(again.stdout, b"same-connection\n");
-        assert_eq!(
-            std::fs::read_to_string(root.join("connections")).unwrap(),
-            (index + 1).to_string()
-        );
-        drop(session);
     }
     // A corrupted public pin must still refuse admission, never be replaced by the transport.
     let pin = root.join("known_hosts");
@@ -127,6 +140,6 @@ async fn network_identity_connect_check_and_changed_key_refusal() {
     assert_eq!(refused.kind, FailureKind::HostKey);
     assert_eq!(std::fs::read(&pin).unwrap(), bytes);
     println!(
-        "FUNCTIONAL check_variants=3 physical_connections=3 later_credentials_requested=0 changed_key_refused=1"
+        "FUNCTIONAL check_variants=3 provider_cases=3 physical_connections=9 later_credentials_requested=0 changed_key_refused=1"
     );
 }
