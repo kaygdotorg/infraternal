@@ -37,7 +37,7 @@ pub struct Peer {
     pub addresses: Addresses,
     pub endpoint: Option<SocketAddr>,
 }
-/// New connection policies. Established authenticated replies pass independently.
+/// Directional network access for initiating tuples and their authenticated replies [242].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerPolicy {

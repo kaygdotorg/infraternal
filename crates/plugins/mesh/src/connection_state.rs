@@ -2,7 +2,10 @@
 //!
 //! Kernel dumps are streamed. Deletion carries the full initiating tuple, zone
 //! and observed state ID, so a concurrent replacement cannot be mistaken for
-//! the observed entry. No namespace-wide removal request is ever constructed.
+//! the observed entry. The selected kernel object owns both original and reply
+//! indexes; removing it retires both directions, regardless of which endpoint
+//! initiated it. Fresh TCP acceptance requires SYN so reverse continuation
+//! cannot recreate that object. No namespace-wide removal request is constructed.
 use crate::{
     dataplane::Config,
     netlink::{self, ConnectionTuple, Socket},

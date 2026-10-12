@@ -58,8 +58,10 @@ removes exactly the connection state no longer permitted, including TCP and UDP
 in both address families. It never flushes unrelated state or resets permitted
 flows. A temporary update fence validates initiating tuples against accepted
 access, or saved intent during recovery, while refusing new initiation; it never
-performs cleanup. Recovery cannot reopen entries refused by committed intent. Exact tuple checks also refuse
-retired state recreated by loose TCP tracking. Coordinator change to the last
+performs cleanup. Recovery cannot reopen entries refused by committed intent. Retirement selects the complete kernel connection object by tuple, ID and zone,
+removing both its original and reply indexes. Fresh TCP acceptance requires an
+initiating SYN: reverse continuation on a retired socket cannot create new
+connection state through still-permitted reverse access. Coordinator change to the last
 node refusing the flow is measured at 10 and 1,000 peers on local and 150 ms
 RTT links [242].
 
@@ -72,8 +74,9 @@ fuzz target cover malformed lengths, padding and kernel error replies.
 An unchanged complete legacy snapshot may gain its previously absent `local_key`
 binding at the accepted revision when it matches the enabled kernel key and
 every prior field is identical. This persists public metadata only. A changed
-identity, policy, address, peer, version or previously present binding cannot
+identity, network access, address, peer, version or previously present binding cannot
 use this compatibility case; normal accepted-version refusal remains in force.
+
 ## Infraternal agent server path [215,227,228]
 
 The coordinator identifies the server in each bounded configuration. Only an
