@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    8073216,
+    8019968,
+    8011776
+  ],
+  "projected_1000_nodes_rss_bytes": 8073216000,
+  "coordinator_three_live_workers_rss_bytes": 27189248,
+  "result": "PASS",
+  "change": "RuleRemoval",
+  "backend": "nft",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "0.50 0.40 0.22 1/15344 252733",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.165,
+    150.153
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    1000,
+    1000
+  ],
+  "revocation_to_last_peer_refusing_us": 280842.637,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 111,
+      "last_packet_us": 223977.92,
+      "retired_us": 280787.895
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186120.101,
+      "retired_us": 280787.895
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 111,
+      "last_packet_us": 224073.262,
+      "retired_us": 280787.895
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 185442.858,
+      "retired_us": 280787.895
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 111,
+      "last_packet_us": 224051.605,
+      "retired_us": 280842.637
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186194.068,
+      "retired_us": 280842.637
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 111,
+      "last_packet_us": 224140.303,
+      "retired_us": 280842.637
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 185483.646,
+      "retired_us": 280842.637
+    }
+  ]
+}

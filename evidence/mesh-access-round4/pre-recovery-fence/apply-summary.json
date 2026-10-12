@@ -1,0 +1,50 @@
+[
+  {
+    "backend": "nft",
+    "peers": 10,
+    "base": {
+      "n": 96,
+      "median_us": 59525.0
+    },
+    "head": {
+      "n": 96,
+      "median_us": 32253.5
+    }
+  },
+  {
+    "backend": "nft",
+    "peers": 1000,
+    "base": {
+      "n": 96,
+      "median_us": 96602.0
+    },
+    "head": {
+      "n": 96,
+      "median_us": 63370.5
+    }
+  },
+  {
+    "backend": "compat",
+    "peers": 10,
+    "base": {
+      "n": 96,
+      "median_us": 411350.5
+    },
+    "head": {
+      "n": 96,
+      "median_us": 200008.0
+    }
+  },
+  {
+    "backend": "compat",
+    "peers": 1000,
+    "base": {
+      "n": 96,
+      "median_us": 402128.5
+    },
+    "head": {
+      "n": 96,
+      "median_us": 205501.0
+    }
+  }
+]

@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    7770112,
+    8212480,
+    8200192
+  ],
+  "projected_1000_nodes_rss_bytes": 8212480000,
+  "coordinator_three_live_workers_rss_bytes": 27152384,
+  "result": "PASS",
+  "change": "PeerRetirement",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 0,
+  "load": "1.80 1.39 1.25 1/11972 410304",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    0.047,
+    0.04
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    999,
+    999
+  ],
+  "revocation_to_last_peer_refusing_us": 460461.703,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 112,
+      "last_packet_us": 298894.662,
+      "retired_us": 460461.703
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 112,
+      "last_packet_us": 298988.817,
+      "retired_us": 460461.703
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 112,
+      "last_packet_us": 298907.896,
+      "retired_us": 460461.703
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 112,
+      "last_packet_us": 299086.53,
+      "retired_us": 460461.703
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 102,
+      "last_packet_us": 243934.84,
+      "retired_us": 405882.536
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 102,
+      "last_packet_us": 243860.828,
+      "retired_us": 405882.536
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 102,
+      "last_packet_us": 243868.11,
+      "retired_us": 405882.536
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 102,
+      "last_packet_us": 243840.372,
+      "retired_us": 405882.536
+    }
+  ]
+}

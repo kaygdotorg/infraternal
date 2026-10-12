@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    6291456,
+    6443008,
+    6402048
+  ],
+  "projected_1000_nodes_rss_bytes": 6443008000,
+  "coordinator_three_live_workers_rss_bytes": 12849152,
+  "result": "PASS",
+  "change": "RuleRemoval",
+  "backend": "nft",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 0,
+  "load": "0.02 0.16 0.12 1/309 235142",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    0.065,
+    0.048
+  ],
+  "installed_peers_before": [
+    10,
+    10,
+    10
+  ],
+  "installed_peers_after": [
+    10,
+    10
+  ],
+  "revocation_to_last_peer_refusing_us": 104596.769,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 61,
+      "last_packet_us": 27876.614,
+      "retired_us": 104596.769
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 61,
+      "last_packet_us": 27818.872,
+      "retired_us": 104596.769
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 61,
+      "last_packet_us": 27754.435,
+      "retired_us": 104596.769
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 61,
+      "last_packet_us": 27997.439,
+      "retired_us": 104596.769
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 61,
+      "last_packet_us": 26788.676,
+      "retired_us": 104426.313
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 61,
+      "last_packet_us": 26798.749,
+      "retired_us": 104426.313
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 61,
+      "last_packet_us": 26821.853,
+      "retired_us": 104426.313
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 61,
+      "last_packet_us": 27865.781,
+      "retired_us": 104426.313
+    }
+  ]
+}

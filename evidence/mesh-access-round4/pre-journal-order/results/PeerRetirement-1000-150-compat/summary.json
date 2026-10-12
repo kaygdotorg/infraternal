@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    7925760,
+    8355840,
+    8376320
+  ],
+  "projected_1000_nodes_rss_bytes": 8376320000,
+  "coordinator_three_live_workers_rss_bytes": 27267072,
+  "result": "PASS",
+  "change": "PeerRetirement",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "1.04 1.62 1.04 1/12259 286425",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.17,
+    150.142
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    999,
+    999
+  ],
+  "revocation_to_last_peer_refusing_us": 540719.54,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 135,
+      "last_packet_us": 358261.533,
+      "retired_us": 540719.54
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 286264.488,
+      "retired_us": 540719.54
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 135,
+      "last_packet_us": 358299.654,
+      "retired_us": 540719.54
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 286365.686,
+      "retired_us": 540719.54
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 132,
+      "last_packet_us": 341585.99,
+      "retired_us": 539252.606
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 280389.777,
+      "retired_us": 539252.606
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 132,
+      "last_packet_us": 341628.041,
+      "retired_us": 539252.606
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 280326.902,
+      "retired_us": 539252.606
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    6221824,
+    6213632,
+    6344704
+  ],
+  "projected_1000_nodes_rss_bytes": 6344704000,
+  "coordinator_three_live_workers_rss_bytes": 12623872,
+  "result": "PASS",
+  "change": "DefaultTightening",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "1.22 1.17 1.17 1/14999 405483",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.124,
+    150.142
+  ],
+  "installed_peers_before": [
+    10,
+    10,
+    10
+  ],
+  "installed_peers_after": [
+    10,
+    10
+  ],
+  "revocation_to_last_peer_refusing_us": 351339.172,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 105,
+      "last_packet_us": 178883.811,
+      "retired_us": 351339.172
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 173700.375,
+      "retired_us": 351339.172
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 115,
+      "last_packet_us": 232193.148,
+      "retired_us": 351339.172
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 173643.648,
+      "retired_us": 351339.172
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 106,
+      "last_packet_us": 184289.96,
+      "retired_us": 247962.537
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 173641.169,
+      "retired_us": 247962.537
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 114,
+      "last_packet_us": 226947.104,
+      "retired_us": 247962.537
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 173774.024,
+      "retired_us": 247962.537
+    }
+  ]
+}
