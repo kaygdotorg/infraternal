@@ -1,0 +1,31 @@
+Running as unit: run-p623093-i4817061.scope; invocation ID: 678ffcae7e834a399bc1455aa3b03144
+   Compiling autocfg v1.5.1
+   Compiling libc v0.2.190
+   Compiling cfg_aliases v0.2.2
+    Checking cfg-if v1.0.5
+    Checking arrayvec v0.7.8
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-shim)
+    Checking bitflags v2.13.2
+    Checking memchr v2.8.3
+   Compiling nix v0.30.1
+   Compiling memoffset v0.9.1
+    Checking vte v0.15.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.42s
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-shim)
+   Compiling cfg-if v1.0.5
+   Compiling arrayvec v0.7.8
+   Compiling memoffset v0.9.1
+   Compiling bitflags v2.13.2
+   Compiling memchr v2.8.3
+   Compiling libc v0.2.190
+   Compiling vte v0.15.0
+   Compiling nix v0.30.1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.58s
+     Running tests/process_exit_descriptor.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round3/helper-target/debug/deps/process_exit_descriptor-e1794865796c8617)
+
+running 2 tests
+test invalid_pid_never_creates_a_descriptor ... ok
+test descriptor_is_cloexec_and_observes_a_real_process_exit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -1,18 +1,19 @@
 /**
- * The product's session inventory, until the host's shim can list its sessions (#100).
+ * The product's session inventory from the server's reconciled live-shim set (#168).
  *
- * The server has no "list sessions" message yet, so this inventory is what this browser knows: every session a
- * window of this account has shown, remembered per account in local storage. A session is open while a window
- * shows it and detached when its window closed (D178: closing never ends a session). It is honest about what it
+ * The server pushes its account-filtered intersection of persisted rows and the infraternal agent's live shim
+ * snapshot. Local storage keeps names and frecency only until that first snapshot; it never establishes liveness.
+ * A session is open while a window of this account shows it and detached when its window closed (D178: closing never ends a session). It is honest about what it
  * cannot do: it cannot end a session, read a session's output or exit code, or know which device typed last, so
  * `can` leaves those verbs out and the manager does not draw them. Renaming works: the name is the window's
  * name, saved in the canvas document, and a rename pins it.
  *
- * The one end it does learn is final: when the server says the host no longer has a session (#158), the session
- * becomes exited and `gone` here, and it is no longer remembered, so a later load never offers it as running.
+ * After a new local session has appeared in a census, a complete host census is final for missing shims: absent rows become exited and `gone`, and are removed from
+ * local storage so a later load never offers them as running. Its bounded exit-status sidecar keeps a saved code
+ * on any matching open window. An unavailable host only hides rows; it does not end them before a fresh census.
  *
- * When #100 lands the host's own inventory replaces this one behind the same interface; the manager, the
- * sidebar and the palette do not change.
+ * The full snapshot is replayed after every socket welcome, so missed changes during a disconnect cannot revive a
+ * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
@@ -21,6 +22,11 @@ interface Stored { host?: string; id: string; name: string; pinned: boolean; fre
 export interface LiveInventory extends SessionInventory {
   /** The server answered that the host no longer has this session (#158): it becomes exited and `gone`. */
   gone(host: string, id: string, status?: number): void;
+  /** Hide cached host rows while the agent cannot provide an authoritative inventory. */
+  unavailable(host: string): void;
+  /** Replace one host's cached rows with its full authoritative live-shim set. */
+  /** Replaces a host's liveness set and reports newly ended IDs to open terminal streams. */
+  reconcile(host: string, ids: readonly string[], ended?: readonly { id: string; status: number }[]): Array<{ id: string; status?: number }>;
   dispose(): void;
 }
 
@@ -29,6 +35,11 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const records = new Map<string, SessionRecord>();
   const listeners = new Set<() => void>();
   const owners = new Map<string, string>();
+  // Only windows opened on this device need status after its sidecar is superseded.
+  const opened = new Set<string>();
+  // A Result can overtake a pre-open census; only a positive census makes absence conclusive.
+  const awaitingCensus = new Set<string>();
+  const verifiedHosts = new Set<string>();
   let top = 0;
   const emit = (): void => { for (const l of listeners) l(); };
   const save = (): void => {
@@ -45,19 +56,20 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const only = (host: string, id: string): boolean => owners.get(id) === host;
   return {
     can,
-    status: (): InventoryStatus => "ready",
+    status: (): InventoryStatus => verifiedHosts.has(options.host) ? "ready" : "loading",
     reload: async () => undefined,
-    hosts: () => [...new Set([options.host, ...owners.values()])],
-    list: (host) => [...records.values()].filter((record) => only(host, record.id)),
+    hosts: () => [...new Set([options.host, ...[...records.values()].filter((record) => !record.gone).map((record) => owners.get(record.id)).filter((host): host is string => Boolean(host))])],
+    list: (host) => host === options.host && !verifiedHosts.has(host) ? [] : [...records.values()].filter((record) => only(host, record.id) && !record.gone),
     get: (host, id) => (only(host, id) ? records.get(id) : undefined),
     attach(host, id, hint) {
       if (owners.has(id) && !only(host, id)) return;
       owners.set(id, host);
+      opened.add(id);
       let s = records.get(id);
       // Selecting a remembered session is not proof that the host can attach it.
       // The final gone state survives another window's selection (#158).
       if (s?.gone) return;
-      if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); }
+      if (!s) { s = blank(id, hint?.name ?? "shell"); records.set(id, s); awaitingCensus.add(id); }
       else if (hint?.name && !s.pinned) s.name = hint.name;
       if (s.state === "open") { if (hint?.name && s.name !== hint.name && !s.pinned) emit(); return; }
       s.state = "open";
@@ -87,7 +99,64 @@ export function createLiveInventory(options: { accountId: string; host: string }
     // A final host answer stays exited even when another window selects the session.
     gone(host, id, status) {
       const s = only(host, id) && records.get(id);
-      if (s) { s.state = "exited"; s.gone = true; if (status !== undefined) s.exit = { code: status }; save(); emit(); }
+      if (s && (!s.gone || (status !== undefined && s.exit?.code !== status))) {
+        awaitingCensus.delete(id);
+        s.state = "exited";
+        s.gone = true;
+        if (status !== undefined) s.exit = { code: status };
+        save();
+        emit();
+      }
+    },
+    unavailable(host) {
+      if (verifiedHosts.delete(host)) emit();
+    },
+    reconcile(host, ids, ended = []) {
+      const live = new Set(ids);
+      const statuses = new Map(ended.map(({ id, status }) => [id, status]));
+      const retired = new Map<string, { id: string; status?: number }>();
+      for (const record of records.values()) {
+        if (only(host, record.id) && record.gone && !opened.has(record.id) && !statuses.has(record.id)) {
+          records.delete(record.id);
+          owners.delete(record.id);
+        }
+      }
+      verifiedHosts.add(host);
+      for (const record of records.values()) {
+        if (only(host, record.id) && !live.has(record.id) && !record.gone && (!awaitingCensus.has(record.id) || statuses.has(record.id))) {
+          awaitingCensus.delete(record.id);
+          record.state = "exited";
+          record.gone = true;
+          const status = statuses.get(record.id);
+          if (status !== undefined) record.exit = { code: status };
+          retired.set(record.id, { id: record.id, ...(status === undefined ? {} : { status }) });
+        }
+      }
+      for (const { id, status } of ended) {
+        if (live.has(id) || (owners.has(id) && !only(host, id))) continue;
+        owners.set(id, host);
+        let record = records.get(id);
+        if (!record) { record = blank(id, "shell"); records.set(id, record); }
+        if (!record.gone || record.exit?.code !== status) {
+          awaitingCensus.delete(record.id);
+          record.state = "exited";
+          record.gone = true;
+          record.exit = { code: status };
+          retired.set(id, { id, status });
+        }
+      }
+      for (const id of live) {
+        if (owners.has(id) && !only(host, id)) continue;
+        awaitingCensus.delete(id);
+        owners.set(id, host);
+        let record = records.get(id);
+        // A final close is monotonic: an older in-flight snapshot cannot revive it.
+        if (record?.gone) continue;
+        if (!record) { record = blank(id, "shell"); records.set(id, record); }
+      }
+      save();
+      emit();
+      return [...retired.values()];
     },
     sizedFor: (): DeviceInfo | undefined => undefined,
     takeOver() { /* every window of this account is this device until #99 */ },

@@ -1,0 +1,19 @@
+Running as unit: run-p3447803-i3448103.scope; invocation ID: a9bf9cd2c9034dc0a10ce049d87ace04
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-cbdk7wx6.js, chunk-9vqcqpm3.js, chunk-b16qdfa7.js, chunk-a76ks9e6.js, chunk-n39y3kzr.js, chunk-cmytcwnf.js, chunk-4mp04kcw.js, chunk-p7nc6pn6.js, chunk-r9aq7cqz.js, chunk-bffptedj.js, chunk-jnb6a2sb.js, chunk-84n9pcex.js, chunk-6gtm055g.js, chunk-221ah2r9.js, chunk-qj97v28s.js, chunk-qs6fw1yq.js, chunk-5qdx1hxa.js, chunk-wyjwa099.js, chunk-t0afx66y.js, chunk-8t6yr2jb.js, chunk-kzhpzqnz.js, chunk-1bkw7ad6.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-nswar1xb.js, chunk-sx6cd48y.js, chunk-94495b3y.js, chunk-y4qckrkj.js, chunk-sf7d019j.js, chunk-5753zf8s.js, chunk-seb82qtq.js, chunk-2w2cafcq.js, chunk-yvy84btg.js, chunk-dh0fwt9m.js, chunk-vgj916ak.js, chunk-x4rqx9m2.js, chunk-pbxha6fq.js, chunk-qq6c54yy.js, chunk-khbam1e8.js, chunk-yfahdqsp.js, chunk-axbkkqp1.js, chunk-zz2zzh6j.js, chunk-pr02h63f.js, chunk-ah1sknkn.js, chunk-z1s5ffr8.js, chunk-0kvbys55.js, chunk-aazerbkh.js, chunk-45vbfqp0.js, chunk-8wwbagx5.js, chunk-qv1rxw1v.js, chunk-1nb5rbda.js, chunk-89xmvse0.js, chunk-f7pk0xm9.js, chunk-6jn2ncn9.js, chunk-98c067hw.js, chunk-c79kj9a1.js, chunk-f69te6h9.js, chunk-91cjha89.js, chunk-p15ay330.js, chunk-gays2csv.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-31eq81ny.js, chunk-k501gkvd.js, chunk-1wxjsjh3.js, chunk-8v02fmre.js, chunk-gf6x8pzd.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4989
+[WebServer] latency proxy listening on http://localhost:4988; upstream port=4989
+
+Running 7 tests using 1 worker
+
+(node:3449894) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/dead-session.spec.ts:27:1 › a dead session disappears and does not retry after the ended state (18.9s)
+  ✓  2 test/dead-session.spec.ts:82:1 › the sidebar waits for the live-shim snapshot and never lists ended cached sessions (16.2s)
+  ✓  3 test/dead-session.spec.ts:117:1 › a pushed ended-session snapshot removes its sidebar row and pill count within one second (9.3s)
+  ✓  4 test/dead-session.spec.ts:130:1 › agent restart hides unverified cached rows and restores the fresh live snapshot (10.7s)
+  ✓  5 test/dead-session.spec.ts:149:30 › a retired session carries exit 7 through the same final ended path (13.9s)
+  ✓  6 test/dead-session.spec.ts:149:30 › a retired session carries exit 0 through the same final ended path (13.1s)
+  ✓  7 test/dead-session.spec.ts:175:1 › a drop between saved status and final Close resumes to the same ended answer (12.5s)
+
+  7 passed (1.7m)

@@ -1,0 +1,13 @@
+Running as unit: run-p3829114-i3829414.scope; invocation ID: 7c26c1ca29bb43c1942438d51f94b07e
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-y4cmw95z.js, chunk-9vqcqpm3.js, chunk-2rm8ygt2.js, chunk-a76ks9e6.js, chunk-m9s3wg8v.js, chunk-46q8870c.js, chunk-4mp04kcw.js, chunk-p7nc6pn6.js, chunk-850trqhg.js, chunk-1h5emy5q.js, chunk-jnb6a2sb.js, chunk-84n9pcex.js, chunk-6gtm055g.js, chunk-221ah2r9.js, chunk-aqyamzwk.js, chunk-qs6fw1yq.js, chunk-11ss2r65.js, chunk-tq05v9am.js, chunk-t0afx66y.js, chunk-brvtxc0g.js, chunk-jtrzvn0t.js, chunk-spt7gsr8.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-nswar1xb.js, chunk-9t9q4w6a.js, chunk-p4fa2wq1.js, chunk-4tqe2d2c.js, chunk-2n5k6dab.js, chunk-5753zf8s.js, chunk-h6ta16t6.js, chunk-cvdmd6rp.js, chunk-yvy84btg.js, chunk-dh0fwt9m.js, chunk-m4jfqgnx.js, chunk-05rswepq.js, chunk-jtk3100m.js, chunk-rmha4gx5.js, chunk-khbam1e8.js, chunk-sqswtbqr.js, chunk-axbkkqp1.js, chunk-zkhgzk26.js, chunk-k49y320t.js, chunk-k0t8rx0a.js, chunk-406h4q6e.js, chunk-njeq8mv7.js, chunk-wbwxd3gc.js, chunk-45vbfqp0.js, chunk-gykn34e3.js, chunk-esxff53m.js, chunk-qge6rp41.js, chunk-tk7a729d.js, chunk-f7pk0xm9.js, chunk-f26hbvrz.js, chunk-vdnhdeqf.js, chunk-z0abp6zs.js, chunk-wmh589yq.js, chunk-q53xwd12.js, chunk-5kjn2ped.js, chunk-gm0htc55.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-dh7fs6xr.js, chunk-nx0h1z4v.js, chunk-1wxjsjh3.js, chunk-dj5p7cjj.js, chunk-mncz956s.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4989
+[WebServer] latency proxy listening on http://localhost:4988; upstream port=4989
+
+Running 1 test using 1 worker
+
+(node:3829660) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/inventory-ordering-review.spec.ts:5:1 › an open result overtaking an earlier census keeps the new shell usable (12.0s)
+
+  1 passed (20.6s)

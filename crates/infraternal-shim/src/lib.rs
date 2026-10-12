@@ -52,3 +52,13 @@ pub use session::{Config, run, run_with_retention};
 
 #[cfg(feature = "ca-handoff")]
 pub mod locked_bytes;
+
+/// Open the kernel lifetime descriptor for an authenticated Linux shim [D81].
+/// No signals or ptrace permissions are requested. The caller owns registration
+/// and must revalidate process identity to exclude PID reuse during opening.
+/// # Errors
+/// Returns invalid PID, unsupported-kernel, permission or descriptor-limit errors.
+#[cfg(target_os = "linux")]
+pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd> {
+    pty::process_exit_descriptor(pid)
+}

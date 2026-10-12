@@ -1,0 +1,2 @@
+20142672
+/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/x86_64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped

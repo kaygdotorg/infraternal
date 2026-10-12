@@ -46,11 +46,15 @@ export interface LiveSessionsOptions {
   onSessionCreated?: (sessionId: string) => void;
   /** The host no longer has a window's session (#158): the inventory marks it ended and the window paints that. */
   onSessionGone?: (host: string, sessionId: string, status?: number) => void;
+  /** Reads saved retirement before an asynchronously loaded stream attaches. */
+  getEndedSession?: (host: string, sessionId: string) => { status?: number } | undefined;
 }
 
 export interface LiveSessions extends SessionService {
   /** The terminal of the active window, for callers outside the canvas. */
   activeClient(): TerminalClient | undefined;
+  /** Applies an authoritative inventory removal to every open window for the session. */
+  markGone(host: string, sessionId: string, status?: number): void;
   /** Registers only an admitted UUID; readable labels never become routing authority. */
   registerHost(host: HostEntry & { address?: string }): void;
   forgetHost(id: string): void;
@@ -85,6 +89,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private visible = true;
     private activeNow = false;
     private painted = false;
+    private retired: { status?: number } | undefined;
     private dropGhost: (() => void) | undefined;
     private ghostTimer = 0;
     /** Marks for the switch timeline (`sw:<n>:<step>`); a few microseconds each, read by the real specs. */
@@ -113,6 +118,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     retarget(model: WindowModel): boolean {
       const client = this.client;
       if (!client || !model.sessionId || this.disposed || model.hostId !== this.model.hostId) return false;
+      this.retired = undefined;
       this.keepScreen();
       this.painted = false;
       this.mark("retarget");
@@ -165,6 +171,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           return true;
         },
         onSessionCreated: (id) => {
+          this.retired = undefined;
           this.model.sessionId = id;
           this.changed();
           options.onSessionCreated?.(id);
@@ -187,6 +194,13 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           ...(this.model.hostId ? { hostId: this.model.hostId } : {}),
           ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
           ...(this.model.sessionId ? { attachSessionId: this.model.sessionId } : {}),
+          getEndedSession: () => {
+            if (this.retired) return this.retired;
+            const id = this.model.sessionId;
+            const ended = id ? options.getEndedSession?.(this.model.host, id) : undefined;
+            if (ended) this.retired = ended;
+            return this.retired;
+          },
           onInputActivity: () => core.onInputActivity(),
           onScroll: (scrolled) => { if (active === this) core.setScrolled(scrolled); },
         });
@@ -198,6 +212,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         if (this.activeNow) core.setActiveTerminal(client);
         if (!this.visible) client.setSuspended(true);
         if (this.wantsFocus) client.focus();
+        if (this.retired) client.markSessionGone(this.retired.status);
         if (first) options.onFirstClient?.(client);
       } catch {
         if (!this.disposed) core.toast.show({ message: "Could not open the terminal. Try again.", tone: "error", duration: 5000 });
@@ -206,6 +221,12 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     focus(): void {
       if (this.client) this.client.focus(); else this.wantsFocus = true;
+    }
+
+    markGone(host: string, sessionId: string, status?: number): void {
+      if (this.model.host !== host || this.model.sessionId !== sessionId) return;
+      this.retired = status === undefined ? {} : { status };
+      this.client?.markSessionGone(status);
     }
 
     setActive(isActive: boolean): void {
@@ -233,6 +254,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     refit(): void { this.client?.refit(); }
 
     openNew(): void {
+      this.retired = undefined;
       this.painted = false;
       this.client?.openNewSession();
     }
@@ -281,6 +303,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }, ...remotes.values()]; },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     activeClient: () => active?.client,
+    markGone(host, sessionId, status) { for (const binding of bindings) binding.markGone(host, sessionId, status); },
     freeze(frozen) { for (const b of bindings) b.setFrozen(frozen); },
     dispose() { for (const b of [...bindings]) b.dispose(); bindings.clear(); },
   };

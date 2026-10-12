@@ -280,6 +280,28 @@ fn reset_child_signals() -> io::Result<()> {
         .map_err(errno)
 }
 
+/// Open a CLOEXEC process lifetime descriptor without signalling or attaching to the process.
+/// The caller must authenticate the PID and recheck its birth identity after registration.
+#[cfg(target_os = "linux")]
+pub(super) fn process_exit_descriptor(pid: u32) -> io::Result<std::os::fd::OwnedFd> {
+    let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if pid == 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: pidfd_open takes only a positive integer PID and zero flags, no
+    // pointers. It returns a new CLOEXEC descriptor, or -1 with errno. Using
+    // the syscall avoids libc-version requirements on distribution-independent
+    // musl binaries. No other code owns the returned descriptor.
+    let result = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0_u32) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = i32::try_from(result).map_err(io::Error::other)?;
+    // SAFETY: a successful pidfd_open returns exactly one owned descriptor;
+    // OwnedFd closes it on every path, including cancelled daemon discovery.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
 #[cfg(test)]
 mod child_signal_tests {
     use super::*;

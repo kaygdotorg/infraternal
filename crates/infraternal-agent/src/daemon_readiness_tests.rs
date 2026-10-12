@@ -274,3 +274,65 @@ async fn uninstall_handoff_runs_only_after_a_successful_real_socket_write() {
         assert_eq!(count.load(Ordering::SeqCst), usize::from(healthy));
     }
 }
+
+#[tokio::test]
+async fn census_and_open_result_share_fifo_order() {
+    let (bulk, bulk_rx) = mpsc::channel(8);
+    let (control, control_rx) = mpsc::channel(8);
+    let mut published = None;
+    assert!(
+        publish_session_snapshot(
+            &control,
+            &crate::lifecycle::Registry::default(),
+            &mut published
+        )
+        .unwrap()
+    );
+    reply(&control, Message::Result(0, 1, true, b"{}".to_vec())).unwrap();
+    let (written, mut frames) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
+    });
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        infraternal_protocol::decode_muxed_frame(&first)
+            .unwrap()
+            .frame,
+        Frame::Event { .. }
+    ));
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        infraternal_protocol::decode_muxed_frame(&second)
+            .unwrap()
+            .frame,
+        Frame::Result {
+            call_id: 1,
+            ok: true,
+            ..
+        }
+    ));
+    drop((bulk, control));
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_saturated_census_queue_cannot_establish_the_open_fence() {
+    let (control, mut receiver) = mpsc::channel(1);
+    reply(&control, Message::Pong(1, 0)).unwrap();
+    let registry = crate::lifecycle::Registry::default();
+    let mut published = None;
+    assert!(!publish_session_snapshot(&control, &registry, &mut published).unwrap());
+    assert!(published.is_none());
+    receiver.recv().await.unwrap();
+    assert!(publish_session_snapshot(&control, &registry, &mut published).unwrap());
+    assert!(matches!(
+        receiver.recv().await.unwrap(),
+        Message::Event(0, _)
+    ));
+}

@@ -244,6 +244,35 @@ async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
         .map_err(|_| io::ErrorKind::BrokenPipe.into())
 }
 
+/// Publishes the authoritative live-shim set without ever parking terminal dispatch on a slow writer.
+/// True establishes the ordered open fence; false leaves the census pending for retry.
+fn publish_session_snapshot(
+    tx: &mpsc::Sender<Message>,
+    registry: &crate::lifecycle::Registry,
+    published: &mut Option<Vec<[u8; 16]>>,
+) -> io::Result<bool> {
+    let session_ids = registry.session_ids();
+    if published.as_ref() == Some(&session_ids) {
+        return Ok(true);
+    }
+    let ids: Vec<String> = session_ids
+        .iter()
+        .map(|id| uuid::Uuid::from_bytes(*id).to_string())
+        .collect();
+    let json = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.sessions.snapshot",
+        "session_ids": ids,
+    }))?;
+    match tx.try_send(Message::Event(0, json)) {
+        Ok(()) => *published = Some(session_ids),
+        Err(mpsc::error::TrySendError::Full(_)) => return Ok(false),
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+    }
+    Ok(true)
+}
+
 /// Run until the trusted server closes its inherited channel.
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
@@ -347,6 +376,9 @@ async fn run_channel(
     let (tx, rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
     let dispatch = async {
+        let mut published_sessions = None;
+        let mut census_pending =
+            !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
         let mut receive = Receive::default();
         if execution_uid.is_some() {
             // The whole greeting has one deadline, including an entirely silent
@@ -367,7 +399,22 @@ async fn run_channel(
         let mut opens: JoinSet<(u32, u32, io::Result<Session>)> = JoinSet::new();
         loop {
             tokio::select! {
-                changed = retirements.changed() => { changed?; registry.refresh(); }
+                changed = retirements.changed() => {
+                    changed?;
+                    registry.refresh();
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                }
+                exited = registry.changed() => {
+                    registry.exited(&exited?);
+                    registry.refresh();
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                }
+                capacity = control.reserve(), if census_pending => {
+                    // A full queue keeps the latest census pending. Capacity is
+                    // the only retry wakeup; idle channels have no scheduled work.
+                    drop(capacity.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?);
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                }
                 result = jobs.join_next(), if !jobs.is_empty() => {
                     let (stream, result) = result.ok_or_else(|| sessions::invalid("missing relay task"))?.map_err(io::Error::other)?;
                     // Close/re-attach may reuse a stream before the old task exits.
@@ -378,6 +425,8 @@ async fn run_channel(
                             reply(&control, Message::Close(stream, "terminal shim disconnected"))?;
                         }
                     }
+                    registry.refresh();
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
                 result = renewals.join_next(), if !renewals.is_empty() => {
                     let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
@@ -390,6 +439,13 @@ async fn run_channel(
                         Ok(session) => {
                             let json = serde_json::to_vec(&serde_json::json!({"session_id": uuid::Uuid::from_bytes(session.id)}))?;
                             registry.insert(&session)?;
+                            // The new-ID census must enter the same FIFO before its Result.
+                            // A full queue cannot publish success without this fence, even
+                            // if the writer drains capacity between these two try_sends.
+                            if !publish_session_snapshot(&control, &registry, &mut published_sessions)? {
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, "census reply queue full"));
+                            }
+                            census_pending = false;
                             reply(&control, Message::Result(stream, call_id, true, json))?;
                         }
                         Err(error) => {
@@ -424,6 +480,7 @@ async fn run_channel(
                         Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             use infraternal_plugin_api::admission::OpenRefusal;
                             registry.refresh();
+                            census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                             let input = if input_json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON { serde_json::from_slice::<Open>(input_json).ok() } else { None };
                             if let Some(input) = input && execution_uid.is_none_or(|uid| input.uid == uid)
                                 && (nix::unistd::Uid::effective().is_root() || input.uid == nix::unistd::Uid::effective().as_raw())
@@ -441,6 +498,7 @@ async fn run_channel(
                         }
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
                             registry.refresh();
+                            census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                             plugins.update_context(registry.context());
                             match plugins.call_with_reply(action_id, input_json) {
                                 Ok(result) => reply(&control, Message::Deferred(0, call_id, result))?,
@@ -474,7 +532,12 @@ async fn run_channel(
                                 Frame::Input {in_seq, bytes} => Command::Input(in_seq, bytes.to_vec()),
                                 Frame::Credit {bytes} => Command::Credit(bytes),
                                 Frame::Resize {cols, rows, px_w, px_h} => Command::Resize(cols, rows, px_w, px_h),
-                                Frame::Close {..} => { streams.remove(&stream); continue; }
+                                Frame::Close {..} => {
+                                    streams.remove(&stream);
+                                    registry.refresh();
+                                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                                    continue;
+                                }
                                 _ => return Err(sessions::invalid("unexpected leg-B request")),
                             };
                             // Never await a session's capacity in shared dispatch.
@@ -1061,3 +1124,7 @@ mod gone_tests;
 #[cfg(test)]
 #[path = "stream_memory_tests.rs"]
 mod stream_memory_tests;
+
+#[cfg(test)]
+#[path = "daemon_census_retry_tests.rs"]
+mod census_retry_tests;

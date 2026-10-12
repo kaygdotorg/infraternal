@@ -14,6 +14,7 @@
 import { onDemand } from "../on-demand";
 import { hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
 import { ConnectionPool, MuxConnection } from "../connection";
+import { isCanonicalUuid } from "../identifiers";
 import type { CoreScreen } from "../core-screen";
 import type { TerminalClient, TerminalHooks } from "../terminal";
 import { createAddHost } from "./addhost";
@@ -84,6 +85,28 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
     onSessionGone: inventory.gone,
+    getEndedSession: (host, id) => {
+      const session = inventory.get(host, id);
+      return session?.gone ? (session.exit ? { status: session.exit.code } : {}) : undefined;
+    },
+  });
+  const offSessionInventory = connection.subscribe({ topic: "terminal.sessions" }, (event) => {
+    if (event.type === "terminal.sessions.unavailable") {
+      inventory.unavailable(options.host.name);
+    } else if (event.type === "terminal.sessions.snapshot" && Array.isArray(event.session_ids)) {
+      const ids = event.session_ids.filter(isCanonicalUuid);
+      const ended = Array.isArray(event.ended_sessions) ? event.ended_sessions.flatMap((value) => {
+        if (!value || typeof value !== "object") return [];
+        const row = value as { session_id?: unknown; status?: unknown };
+        return isCanonicalUuid(row.session_id) && Number.isSafeInteger(row.status)
+          && Number(row.status) >= -2147483648 && Number(row.status) <= 2147483647
+          ? [{ id: row.session_id, status: Number(row.status) }]
+          : [];
+      }) : [];
+      for (const row of inventory.reconcile(options.host.name, ids, ended)) {
+        sessions.markGone(options.host.name, row.id, row.status);
+      }
+    }
   });
   const store = new LocalCanvasStore(options.accountId);
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
@@ -155,6 +178,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     dispose() {
       canvas.flush();
       offRoundTrip();
+      offSessionInventory();
       authority.dispose();
       offMeshView();
       addHost.dispose();

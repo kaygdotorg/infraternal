@@ -2,9 +2,9 @@
  * A window whose session the host no longer has (#158), on the product canvas against the test double.
  *
  * The production incident: the host lost a session, and its window kept a green dot over a blank body while the
- * attach was repeated about twice a second. Here the double's "host" loses the session and drops the link; the page
- * must ask once, take the server's final answer (Close 4404), show the ended state, never attach again, and open a
- * new shell in the same window with one action.
+ * attach was repeated about twice a second. Here the double pushes an inventory without the lost session and drops
+ * the link; the page removes the row, settles the existing window, never retries it after the ended state, and
+ * opens a new shell with one action.
  */
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -24,7 +24,7 @@ async function openProduct(page: Page): Promise<void> {
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
 }
 
-test("a dead session ends quietly: one attach, an ended state, and a new shell in the same window", async ({ page }, testInfo) => {
+test("a dead session disappears and does not retry after the ended state", async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   const request = page.context().request;
   await openProduct(page);
@@ -34,7 +34,7 @@ test("a dead session ends quietly: one attach, an ended state, and a new shell i
   await expect.poll(async () => (await mockState(request)).attach_count).toBeGreaterThanOrEqual(1);
   const before = (await mockState(request)).attach_count;
 
-  // The host loses the session and the link drops: the page reconnects and asks once.
+  // The pushed inventory removes the row immediately, independent of the terminal connection.
   const dead = ((await (await retry(() => request.post("/__mock/end-session"))).json()) as { session_id: string }).session_id;
   await expect(win.locator(".cl-sx-strip")).toBeVisible({ timeout: 10_000 });
   await expect(win.locator(".cl-sx-strip-text")).toHaveText("Session ended");
@@ -45,9 +45,9 @@ test("a dead session ends quietly: one attach, an ended state, and a new shell i
   // The top pill counts sessions: an ended one is not one.
   await expect(page.locator(".capsule-session")).toHaveText("· 0 sessions");
   const ended = (await mockState(request)).attach_count;
-  expect(ended, "exactly one attach after the session ended").toBe(before + 1);
+  expect(ended, "the authoritative inventory prevents a stale attach").toBe(before);
 
-  // No retry: not over time, and not after another link drop.
+  // The snapshot makes the terminal final too; neither time nor another link drop can revive it.
   await page.waitForTimeout(2_000);
   await retry(() => request.post("/__mock/drop-sockets"));
   await page.waitForTimeout(3_000);
@@ -79,11 +79,79 @@ test("a dead session ends quietly: one attach, an ended state, and a new shell i
   await expect.poll(async () => (await mockState(request)).echoed_text).toContain("echo alive");
 });
 
+test("the sidebar waits for the live-shim snapshot and never lists ended cached sessions", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
+  const request = page.context().request;
+  await openProduct(page);
+  const { session_ids: endedIds } = await (await retry(() => request.post("/__mock/seed-ended-sessions", { data: { count: 40 } }))).json() as { session_ids: string[] };
+  const identity = await page.evaluate(async () => {
+    const response = await fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    return await response.json() as { user_id: string; hostname: string };
+  });
+  await page.evaluate(({ userId, host, ids }) => {
+    const rows = ids.map((id, index) => ({ host, id, name: "shell", pinned: false, frecency: ids.length - index }));
+    localStorage.setItem(`tracer.sessions.${userId}`, JSON.stringify(rows));
+  }, { userId: identity.user_id, host: identity.hostname, ids: endedIds });
+  await page.reload();
+  await expect(page.locator(".ui-window").first()).toHaveAttribute("data-status", "live", { timeout: 30_000 });
+  await expect(page.locator(".capsule-session")).toHaveText("· 1 session");
+  await page.locator("#sidebar-toggle").click();
+  const rows = page.locator(`#tree .bm-sec[data-id="view:console"] .bm-leaf[data-id^="s:"]`);
+  await expect(rows).toHaveCount(1);
+  const listed = await rows.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.id ?? ""));
+  expect(listed[0]).toContain((await mockState(request)).session_id);
+  for (const id of endedIds) await expect(page.locator(`#tree .bm-leaf[data-id$='/${id}']`)).toHaveCount(0);
+  for (const id of listed) {
+    await page.locator(`#tree .bm-leaf[data-id='${id}']`).click();
+    await expect(page.locator(".ui-window").first()).toHaveAttribute("data-status", "live");
+  }
+
+  // The reviewed capture is the production bundle at the desktop target viewport.
+  const dir = resolve(import.meta.dirname, "..", "captures", "ended-sessions");
+  await mkdir(dir, { recursive: true });
+  const shot = resolve(dir, "sidebar-after-1440x900.png");
+  await page.screenshot({ path: shot, animations: "disabled" });
+  await testInfo.attach("sidebar-after-1440x900", { path: shot, contentType: "image/png" });
+});
+
+test("a pushed ended-session snapshot removes its sidebar row and pill count within one second", async ({ page }) => {
+  test.setTimeout(90_000);
+  const request = page.context().request;
+  await openProduct(page);
+  await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "true", { timeout: 30_000 });
+  await page.locator("#sidebar-toggle").click();
+  const rows = page.locator(`#tree .bm-sec[data-id="view:console"] .bm-leaf[data-id^="s:"]`);
+  await expect(rows).toHaveCount(1);
+  expect((await retry(() => request.post("/__mock/remove-session-from-inventory"))).ok()).toBe(true);
+  await expect(rows).toHaveCount(0, { timeout: 1_000 });
+  await expect(page.locator(".capsule-session")).toHaveText("· 0 sessions");
+});
+
+test("agent restart hides unverified cached rows and restores the fresh live snapshot", async ({ page }) => {
+  test.setTimeout(90_000);
+  const request = page.context().request;
+  await openProduct(page);
+  await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "true", { timeout: 30_000 });
+  await page.locator("#sidebar-toggle").click();
+  const rows = page.locator(`#tree .bm-sec[data-id="view:console"] .bm-leaf[data-id^="s:"]`);
+  await expect(rows).toHaveCount(1);
+
+  expect((await retry(() => request.post("/__mock/agent-offline"))).ok()).toBe(true);
+  await expect(rows).toHaveCount(0, { timeout: 1_000 });
+  await expect(page.locator(".capsule-session")).toHaveText("· 0 sessions");
+
+  expect((await retry(() => request.post("/__mock/agent-online"))).ok()).toBe(true);
+  await expect(rows).toHaveCount(1, { timeout: 1_000 });
+  await rows.first().click();
+  await expect(page.locator(".ui-window").first()).toHaveAttribute("data-status", "live");
+});
+
 for (const status of [7, 0]) test(`a retired session carries exit ${status} through the same final ended path`, async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   const request = page.context().request;
   await openProduct(page);
   const win = page.locator(".ui-window").first();
+  await expect.poll(async () => (await mockState(request)).attach_count).toBeGreaterThanOrEqual(1);
   const before = (await mockState(request)).attach_count;
   const response = await retry(() => request.post("/__mock/retire-session", { data: { status } }));
   const dead = (await response.json() as { session_id: string }).session_id;
@@ -92,7 +160,7 @@ for (const status of [7, 0]) test(`a retired session carries exit ${status} thro
   await expect(win.locator(".terminal-host")).toBeHidden();
   await expect(page.locator(".capsule-session")).toHaveText("· 0 sessions");
   await page.waitForTimeout(2_000);
-  expect((await mockState(request)).attach_count).toBe(before + 1);
+  expect((await mockState(request)).attach_count).toBe(before);
   const dir = resolve(import.meta.dirname, "..", "captures", "dead-session");
   await mkdir(dir, { recursive: true });
   const shot = resolve(dir, `retired-exit-${status}-1440x900-ink.png`);
@@ -109,6 +177,7 @@ test("a drop between saved status and final Close resumes to the same ended answ
   const request = page.context().request;
   await openProduct(page);
   const win = page.locator(".ui-window").first();
+  await expect.poll(async () => (await mockState(request)).attach_count).toBeGreaterThanOrEqual(1);
   const before = (await mockState(request)).attach_count;
   await retry(() => request.post("/__mock/retire-session-drop-close", { data: { status: 7 } }));
   await expect(win.locator(".cl-sx-strip-text")).toHaveText("Session ended · Exit 7", { timeout: 20_000 });

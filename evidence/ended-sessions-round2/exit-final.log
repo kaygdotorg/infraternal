@@ -1,0 +1,10 @@
+Running as unit: run-p3577599-i3577899.scope; invocation ID: 810b1eff76b14faea50dd5985f2c6e19
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/infraternal_server-f3b5ce2272ed86ee)
+
+running 2 tests
+test auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session ... ok
+test auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 202 filtered out; finished in 1.84s
+
