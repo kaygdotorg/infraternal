@@ -88,6 +88,13 @@ cleanup retires only this batch's new authority, including after logout, while
 preserving prior enrolled authority. Facts and terminal proof bind the current
 attempt's certificate/generation, never an older connection for the same UUID.
 
+The additive `Backend::invitation_registered` hook publishes the host binding
+to batch cleanup before durable issuance can commit. A backend whose issuance
+is durable overrides the hook and invokes registration before that commit.
+Cancellation then serializes revocation behind any in-flight SQLite writer;
+a pre-commit read of absence is not cleanup proof. The default hook preserves
+non-durable backend compatibility.
+
 The backend waits for that exact host's authenticated transport and collects
 cheap facts over it, then proves a terminal opens through the existing session
 router before marking done. SSH command exit, TCP reachability or redeemed
