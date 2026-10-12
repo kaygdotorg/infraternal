@@ -280,23 +280,32 @@ def apply(config):
                     changed_aliases.append(alias)
             return {"state": "deployed", "sha": config["sha"], "backup": str(saved), "ca_unlocked": True}
         except BaseException:
+            restoration_failed = False
             for alias in reversed(changed_aliases):
-                if alias.name == "infraternal":
-                    swap_link(alias, previous)
-                elif alias.name in old_payloads:
-                    swap_link(alias, old_payloads[alias.name])
-                else:
-                    alias.unlink()
+                try:
+                    if alias.name == "infraternal":
+                        swap_link(alias, previous)
+                    elif alias.name in old_payloads:
+                        swap_link(alias, old_payloads[alias.name])
+                    else:
+                        alias.unlink()
+                except (OSError, ValueError):
+                    restoration_failed = True
             if replaced_web:
-                shutil.rmtree(web)
-                previous_web.rename(web)
+                try:
+                    shutil.rmtree(web)
+                    previous_web.rename(web)
+                except (OSError, ValueError):
+                    restoration_failed = True
+            # Allocation failures restoring aliases/web must not skip process
+            # recovery: its signed image already exists in the retained backup.
             if requested:
                 before_rollback = endpoint(data)
                 restart(data, previous)
                 wait_for_success(config, before_rollback, previous)
             # Never overwrite a running SQLite database. Restoring a database is
             # a separate cold recovery operation; automatic rollback keeps its data.
-            if not healthy(config):
+            if restoration_failed or not healthy(config):
                 raise ValueError("rollback requires operator recovery") from None
             raise ValueError("deployment refused; previous release healthy and CA unlocked") from None
 
