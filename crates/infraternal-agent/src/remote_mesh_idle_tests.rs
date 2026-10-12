@@ -2,6 +2,29 @@
 use super::*;
 use crate::remote_client::dial_runtime::DialRuntime;
 
+/// Bounds diagnostic storage while retaining the authenticated arrival spread.
+#[derive(Default)]
+struct SampledGaps {
+    count: u64,
+    total_us: u128,
+    squared_us: u128,
+    maximum_us: u128,
+    histogram_25ms: [u64; 32],
+}
+impl SampledGaps {
+    fn observe(&mut self, gap: Duration) {
+        let micros = gap.as_micros();
+        self.count += 1;
+        self.total_us += micros;
+        self.squared_us += micros * micros;
+        self.maximum_us = self.maximum_us.max(micros);
+        self.histogram_25ms[usize::try_from(gap.as_millis() / 25).unwrap_or(31).min(31)] += 1;
+    }
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({"count":self.count,"total_us":self.total_us,"squared_us":self.squared_us,"maximum_us":self.maximum_us,"histogram_25ms":self.histogram_25ms})
+    }
+}
+
 fn usage() -> (u64, u64) {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     let fields: Vec<_> = stat
@@ -116,14 +139,40 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
     for connection in connections.iter().filter(|_| guarded) {
         let connection = connection.clone();
         watchers.spawn(async move {
-            let deadline = Duration::from_secs(2)
-                + connection
-                    .rtt()
-                    .min(Duration::from_secs(5))
-                    .saturating_mul(3);
-            remote_quic::PeerFreshness::new(&connection)
-                .interrupted(&connection, deadline)
-                .await
+            let started = tokio::time::Instant::now();
+            let initial_ping = connection.stats().frame_tx.ping;
+            let mut guard = remote_quic::PeerFreshness::new(&connection);
+            let mut watched = std::pin::pin!(guard.interrupted_adaptive(&connection));
+            let mut last_poll = tokio::time::Instant::now();
+            let mut max_poll_gap = Duration::ZERO;
+            let mut sampled_peer = remote_quic::PeerFreshness::new(&connection);
+            let mut last_arrival = last_poll;
+            let mut sampled_gaps = SampledGaps::default();
+            // Observe the real guard rather than replacing it with diagnostic
+            // polling: a delayed executor wake must remain distinguishable
+            // from a peer that never returned an authenticated packet.
+            let result = std::future::poll_fn(|context| {
+                let now = tokio::time::Instant::now();
+                max_poll_gap = max_poll_gap.max(now.duration_since(last_poll));
+                last_poll = now;
+                // A separate production observer adds one diagnostic stats
+                // snapshot per poll. These are sampled authenticated gaps,
+                // not packet timestamps or unauthenticated UDP arrivals.
+                if sampled_peer.observe_change(&connection) {
+                    sampled_gaps.observe(now.duration_since(last_arrival));
+                    last_arrival = now;
+                }
+                std::future::Future::poll(watched.as_mut(), context)
+            })
+            .await;
+            (
+                result,
+                connection.stats(),
+                max_poll_gap,
+                started.elapsed(),
+                initial_ping,
+                sampled_gaps,
+            )
         });
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -143,8 +192,14 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
         .map(remote_quic::PeerFreshness::new)
         .collect();
     let mut max_silence = Duration::ZERO;
+    let mut previous_observation = tokio::time::Instant::now();
+    let mut max_observation_gap = Duration::ZERO;
     for _ in 0..samples {
         tokio::time::sleep(Duration::from_millis(50)).await;
+        let observed = tokio::time::Instant::now();
+        max_observation_gap =
+            max_observation_gap.max(observed.duration_since(previous_observation));
+        previous_observation = observed;
         for (connection, guard) in connections.iter().zip(&mut freshness) {
             max_silence = max_silence.max(guard.silence(connection));
         }
@@ -154,10 +209,28 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
         .iter()
         .map(|connection| connection.stats().udp_tx.datagrams)
         .sum::<u64>();
-    assert!(
-        watchers.try_join_next().is_none(),
-        "healthy authenticated watchers must stay live at scale"
-    );
+    // Preserve every completed guard result before the healthy assertion. A
+    // false interruption must retain evidence rather than erase its scale run.
+    let (mut false_interruptions, mut timeout_interruptions, mut closed_interruptions) = (0, 0, 0);
+    let (mut other_interruptions, mut watcher_join_errors, mut unexpected_completions) = (0, 0, 0);
+    let mut timeout_paths = Vec::new();
+    while let Some(result) = watchers.try_join_next() {
+        false_interruptions += 1;
+        match result {
+            Ok((Err(error), stats, poll_gap, lifetime, initial_ping, gaps))
+                if error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                timeout_interruptions += 1;
+                timeout_paths.push(serde_json::json!({"rtt_us":stats.path.rtt.as_micros(),"min_rtt_us":stats.path.min_rtt.as_micros(),"lost_packets":stats.path.lost_packets,"guard_max_poll_gap_us":poll_gap.as_micros(),"guard_lifetime_us":lifetime.as_micros(),"tx_ping_initial":initial_ping,"tx_ping":stats.frame_tx.ping,"rx_ping":stats.frame_rx.ping,"rx_acks":stats.frame_rx.acks,"sampled_authenticated_gaps":gaps.json()}));
+            }
+            Ok((Err(error), _, _, _, _, _)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                closed_interruptions += 1;
+            }
+            Ok((Err(_), _, _, _, _, _)) => other_interruptions += 1,
+            Ok((Ok(()), _, _, _, _, _)) => unexpected_completions += 1,
+            Err(_) => watcher_join_errors += 1,
+        }
+    }
     let after_wire_bytes = connections
         .iter()
         .map(|connection| connection.stats().udp_tx.bytes)
@@ -166,11 +239,30 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
         .iter()
         .filter(|connection| connection.close_reason().is_none())
         .count();
-    assert_eq!(alive, 1000, "idle transport must stay live at scale");
     let elapsed_us = start.elapsed().as_micros();
-    let report = serde_json::json!({"machine":"infraternal-dev","profile":"transport_only","connections":1000,"freshness_watcher_tasks":if guarded { 1000 } else { 0 },"freshness_state_bytes":std::mem::size_of::<remote_quic::PeerFreshness>(),"timer_udp_payload_bytes":after_wire_bytes-before_wire_bytes,"client_endpoints":1000,"join_concurrency":join_concurrency,"live":alive,"window_us":elapsed_us,"max_authenticated_silence_us":max_silence.as_micros(),"cpu_ticks":after_ticks-before_ticks,"clock_ticks_per_second":clock_ticks,"setup_cpu_ticks":before_ticks-baseline_ticks,"resident_delta_bytes":resident_pages.saturating_sub(baseline_pages)*page_size,"timer_datagrams":after_packets-before_packets,"keepalive_ms":keepalive_ms,"idle_ms":idle_ms,"load_before":load_before.trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim()});
+    let mut report = serde_json::json!({"machine":"infraternal-dev","profile":"transport_only","connections":1000,"freshness_watcher_tasks":if guarded { 1000 } else { 0 },"freshness_state_bytes":std::mem::size_of::<remote_quic::PeerFreshness>(),"timer_udp_payload_bytes":after_wire_bytes-before_wire_bytes,"client_endpoints":1000,"join_concurrency":join_concurrency,"live":alive,"window_us":elapsed_us,"max_authenticated_silence_us":max_silence.as_micros(),"cpu_ticks":after_ticks-before_ticks,"clock_ticks_per_second":clock_ticks,"setup_cpu_ticks":before_ticks-baseline_ticks,"resident_delta_bytes":resident_pages.saturating_sub(baseline_pages)*page_size,"timer_datagrams":after_packets-before_packets,"keepalive_ms":keepalive_ms,"idle_ms":idle_ms,"load_before":load_before.trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim()});
+    let healthy = false_interruptions == 0 && alive == 1000;
+    report["freshness_profile"] = if guarded {
+        "adaptive_current_rtt_plus_200ms"
+    } else {
+        "unguarded"
+    }
+    .into();
+    report["freshness_observation_interval_ms"] = serde_json::json!(if guarded { 50 } else { 0 });
+    report["false_interruptions"] = serde_json::json!(false_interruptions);
+    report["max_bulk_observation_gap_us"] = serde_json::json!(max_observation_gap.as_micros());
+    report["timeout_paths"] = serde_json::json!(timeout_paths);
+    report["diagnostic_extra_authenticated_snapshot_per_guard_poll"] = true.into();
+    report["freshness_watcher_tasks_remaining"] = serde_json::json!(watchers.len());
+    report["timeout_interruptions"] = serde_json::json!(timeout_interruptions);
+    report["closed_interruptions"] = serde_json::json!(closed_interruptions);
+    report["other_interruptions"] = serde_json::json!(other_interruptions);
+    report["watcher_join_errors"] = serde_json::json!(watcher_join_errors);
+    report["unexpected_watcher_completions"] = serde_json::json!(unexpected_completions);
+    report["result"] = if healthy { "PASS" } else { "FAIL" }.into();
     let scratch = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(".cache/codex-scratch/mesh-agent-transport");
+        .join(".cache/codex-scratch/mesh-agent-transport-round2");
+    std::fs::create_dir_all(&scratch).unwrap();
     std::fs::write(
         scratch.join(format!(
             "mesh-idle-guarded-{guarded}-1000-{keepalive_ms}-{idle_ms}.json"
@@ -179,10 +271,16 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
     )
     .unwrap();
     println!(
-        "METRIC mesh_idle connections=1000 live={alive} cpu_ticks={} packets={} window_us={elapsed_us} result=PASS",
+        "METRIC mesh_idle connections=1000 live={alive} false_interruptions={false_interruptions} cpu_ticks={} packets={} window_us={elapsed_us} result={}",
         after_ticks - before_ticks,
-        after_packets - before_packets
+        after_packets - before_packets,
+        if healthy { "PASS" } else { "FAIL" }
     );
+    assert_eq!(
+        false_interruptions, 0,
+        "healthy authenticated watchers must stay live at scale"
+    );
+    assert_eq!(alive, 1000, "idle transport must stay live at scale");
     watchers.abort_all();
     while watchers.join_next().await.is_some() {}
     for client in clients {

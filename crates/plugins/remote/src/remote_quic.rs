@@ -222,6 +222,16 @@ impl PeerFreshness {
         }
         self.observed.elapsed()
     }
+    /// Observe an authenticated signature change for sampled test diagnostics.
+    /// This uses the production observation, avoiding a timing threshold or a
+    /// second implementation of the post-decryption frame selection.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn observe_change(&mut self, connection: &quinn::Connection) -> bool {
+        let previous = self.frames;
+        let _ = self.silence(connection);
+        self.frames != previous
+    }
     /// Watch an established path without application traffic or ledger work.
     /// The future owns no detached task; cancellation stops every observation.
     /// # Errors
