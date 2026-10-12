@@ -77,3 +77,5 @@ Raw logs retain failed and successful attempts. Invalid port/setup attempts are 
 - `start-comment.txt`
 - `static-images.json`
 - `ts-fast.log`
+
+Additional final-gate fixture evidence: `fast-doc-head-before-census-fix.log`, `census-before-isolated.log`, `census-setup-diagnostic.log`, `census-race-green.log`, `census-race-full-and-repeat.log`.

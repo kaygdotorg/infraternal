@@ -31,6 +31,16 @@ renderer regression and fixture setup barrier. No wire format, engine, timer or
 UI primitive changed. The split adds a paint boundary only for a region spanning
 replay and live bytes; ordinary live writes retain the existing path.
 
+The documentation-head replay also exposed a real fixture setup race in the
+census saturation oracle. Its diagnostic shows `WouldBlock/control reply queue
+full`: Hello plus eight Pings can enqueue nine replies before the writer consumes
+the initial census. `18fa1002` splits greeting delivery and fences census-write
+readiness before releasing Pings. All eight Pongs, deadlines, no-request retirement
+and capacity retry assertions remain. Default 42/0 and remote 66/0 suites plus five
+focused repetitions (20–50 ms) pass; production behavior is unchanged. This is
+not classified as a host-load waiver. `census-setup-diagnostic.log` and
+`census-race-full-and-repeat.log` retain the cause and corrected proof.
+
 ## Native typing comparison
 
 The same real-PTY fixture ran on `infraternal-perf-test`, Debian kernel 6.12.69,
