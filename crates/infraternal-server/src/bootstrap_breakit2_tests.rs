@@ -42,6 +42,7 @@ impl SshSession for TimedSession {
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let step = match &input {
+                Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => "upload",
                 Input::File(_) => "upload",
                 Input::Bytes(_) => "join",
                 Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => {
@@ -71,6 +72,8 @@ impl SshSession for TimedSession {
             }
             let file_bytes = if let Input::File(path) = &input {
                 path.metadata().ok().map(|metadata| metadata.len())
+            } else if let Input::Bytes(bytes) = &input {
+                (step == "upload").then(|| u64::try_from(bytes.len()).unwrap())
             } else {
                 None
             };
@@ -480,6 +483,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             aarch64: binary,
         },
     );
+    let prepared = Instant::now();
+    runner.prepare_payloads().await;
+    println!("METRIC payload_prepare startup_ms={:.3}", prepared.elapsed().as_secs_f64() * 1000.0);
     let batch = runner
         .start_authenticated(
             "owner".into(),

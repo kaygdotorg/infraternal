@@ -158,6 +158,53 @@ fn executable(path: &std::path::Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+struct CorruptUpload(Local);
+impl SshSession for CorruptUpload {
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        let input = if script.contains("gzip -dc >") || script.contains("zstd -dc >") {
+            Input::Bytes(b"invalid compressed stream")
+        } else {
+            input
+        };
+        self.0.run(script, input)
+    }
+}
+
+#[tokio::test]
+async fn compressed_stage_roundtrips_and_rejects_corruption_before_execution() {
+    for corrupt in [false, true] {
+        let fixture = Fixture::new();
+        // The fixture remains executable shell text and exceeds the raw fallback threshold.
+        let mut payload = std::fs::read(&fixture.binary).unwrap();
+        payload.extend_from_slice(b"\n# ");
+        payload.extend(std::iter::repeat_n(b'x', 70_000));
+        payload.push(b'\n');
+        std::fs::write(&fixture.binary, &payload).unwrap();
+        let local = Local {
+            root: fixture.root.clone(),
+        };
+        let session: Arc<dyn SshSession> = if corrupt {
+            Arc::new(CorruptUpload(local))
+        } else {
+            Arc::new(local)
+        };
+        let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+        let result = install.stage(&fixture.binary).await;
+        if corrupt {
+            assert!(result.is_err());
+            assert!(!fixture.base().join(".bootstrap-lock/state").exists());
+        } else {
+            result.unwrap();
+            assert_eq!(
+                std::fs::read(fixture.base().join(".bootstrap-lock/payload")).unwrap(),
+                payload
+            );
+        }
+        install.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+    }
+}
+
 #[tokio::test]
 async fn review_interrupted_transaction_receipt_allows_owned_cleanup() {
     let fixture = Fixture::new();

@@ -16,6 +16,7 @@ pub mod master;
 pub mod model;
 pub mod openssh;
 mod payload;
+mod payload_encoding;
 pub mod previous_attempt;
 pub mod probe;
 pub mod process;
@@ -24,3 +25,7 @@ mod prompt_image;
 pub mod socket_connector;
 pub mod transport;
 pub mod trust;
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_common;

@@ -12,7 +12,7 @@ static CACHE: PayloadCache = PayloadCache {
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Identity {
+pub(super) struct Identity {
     device: u64,
     inode: u64,
     size: u64,
@@ -20,7 +20,7 @@ struct Identity {
     changed: (i64, i64),
 }
 impl Identity {
-    fn of(metadata: &std::fs::Metadata) -> Self {
+    pub(super) fn of(metadata: &std::fs::Metadata) -> Self {
         Self {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -89,13 +89,9 @@ fn unreadable() -> Failure {
 }
 
 #[cfg(test)]
-#[path = "../tests/common/mod.rs"]
-mod test_common;
-
-#[cfg(test)]
 mod tests {
-    use super::test_common as common;
     use super::*;
+    use crate::test_common as common;
 
     struct Fixture(std::path::PathBuf);
     impl Fixture {

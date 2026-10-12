@@ -137,6 +137,27 @@ pub struct Bootstrap {
 }
 
 impl Bootstrap {
+    /// Prepare only configured public payloads before accepting host setup.
+    /// Missing files/tools retain the existing actionable per-host refusal/raw path.
+    pub async fn prepare_payloads(&self) {
+        let Ok(_activity) = self.activity() else {
+            return;
+        };
+        for architecture in [
+            crate::probe::Architecture::X86_64,
+            crate::probe::Architecture::Aarch64,
+        ] {
+            let path = self.binaries.get(architecture);
+            if crate::payload::digest(path).await.is_ok() {
+                for codec in [
+                    crate::payload_encoding::Codec::Zstd,
+                    crate::payload_encoding::Codec::Gzip,
+                ] {
+                    let _ = crate::payload_encoding::encoded(path, codec).await;
+                }
+            }
+        }
+    }
     /// Construct an adapter with no network side effects or idle timers.
     #[must_use]
     pub fn new(

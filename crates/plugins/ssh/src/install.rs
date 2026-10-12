@@ -133,7 +133,7 @@ impl Installation {
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         let query = format!(
-            "{PAYLOAD_CACHE}\nvalidate_cache\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then printf 'reuse\\n'; fi",
+            "{PAYLOAD_CACHE}\nvalidate_cache\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then printf 'reuse\\n'; elif command -v zstd >/dev/null 2>&1; then printf 'zstd\\n'; elif command -v gzip >/dev/null 2>&1; then printf 'gzip\\n'; fi",
             shell_quote(&digest)
         );
         let cached = self
@@ -141,16 +141,31 @@ impl Installation {
             .run(&self.script(&query), Input::Empty)
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
-        let reuse = match cached.stdout.as_slice() {
-            b"reuse\n" => true,
-            b"" => false,
+        let (reuse, codec) = match cached.stdout.as_slice() {
+            b"reuse\n" => (true, None),
+            b"" => (false, None),
+            b"zstd\n" => (false, Some(crate::payload_encoding::Codec::Zstd)),
+            b"gzip\n" => (false, Some(crate::payload_encoding::Codec::Gzip)),
             _ => {
                 return Err(Failure::install("The payload reuse response was invalid.")
                     .at(InstallStep::Upload));
             }
         };
+        let packed = if let Some(codec) = codec {
+            crate::payload_encoding::encoded(binary, codec)
+                .await
+                .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?
+        } else {
+            None
+        };
         let transfer = if reuse {
             "ln \"$cache/payload\" \"$stage/payload\""
+        } else if packed.is_some() {
+            match codec {
+                Some(crate::payload_encoding::Codec::Zstd) => "zstd -dc > \"$stage/payload\"",
+                Some(crate::payload_encoding::Codec::Gzip) => "gzip -dc > \"$stage/payload\"",
+                None => return Err(Failure::install("The payload encoding is unavailable.")),
+            }
         } else {
             "cat > \"$stage/payload\""
         };
@@ -161,6 +176,8 @@ impl Installation {
         );
         let input = if reuse {
             Input::Empty
+        } else if let Some(bytes) = &packed {
+            Input::Bytes(bytes)
         } else {
             Input::File(binary)
         };
