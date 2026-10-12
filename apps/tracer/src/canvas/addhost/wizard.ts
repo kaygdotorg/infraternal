@@ -26,7 +26,7 @@
  */
 import { createSpinner, hostIconMarkup, hostSourceIconMarkup, installFocusRing, mountChipInput, mountStepStatus, PaneStepper, Spring, springCheckbox, createKeyValueList } from "../../../../../packages/ui/src/index";
 import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusController, Tick, ToastController } from "../../../../../packages/ui/src/index";
-import { foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
+import { awaitingFresh, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
 import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../../provisioning-client";
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
@@ -63,6 +63,11 @@ interface Entry {
 
 /** One host of the batch; everything about its progress is `view`, folded from server events. */
 interface Job { entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean }
+
+/** What the person sees for a host: an attempt paused on leftovers reads as needing attention, like a failure. */
+const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : job.view.state;
+/** Still working without the person: not done, not failed, not paused. */
+const working = (job: Job): boolean => { const state = shownState(job); return state === "pending" || state === "running"; };
 
 export function platformOf(name: string | undefined): HostPlatform {
   const os = (name ?? "").toLowerCase();
@@ -594,7 +599,7 @@ export class Wizard {
       // A new host window takes the camera; the wizard stays where the person is looking while it still has work to show.
       if (this.jobs.some((item) => item.view.state === "pending" || item.view.state === "running" || item.view.state === "failed")) this.surface.reveal?.();
     }
-    if (job.view.state === "done" || job.view.state === "failed") this.settle();
+    if (job.view.state === "done" || shownState(job) === "failed") this.settle();
   }
 
   /** A refused command (for example the server's batch limit): shown on the hosts that had not started. */
@@ -618,7 +623,7 @@ export class Wizard {
       job.run = undefined;
       if (job.view.state === "pending" || job.view.state === "running") {
         const message = "The connection to the server ended before setup finished.";
-        job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] } };
+        job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] }, leftovers: undefined };
         this.paint(job);
         changed = true;
       }
@@ -703,9 +708,9 @@ export class Wizard {
 
   private footForProgress(): void {
     if (this.page !== "progress") return;
-    const settled = this.jobs.every((job) => job.view.state === "done" || job.view.state === "failed");
+    const settled = !this.jobs.some(working);
     if (!settled) { this.setFoot(""); return; }
-    const failed = this.jobs.some((job) => job.view.state === "failed");
+    const failed = this.jobs.some((job) => shownState(job) === "failed");
     const done = this.jobs.some((job) => job.view.state === "done");
     this.setFoot(failed
       ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${done ? "finish" : "back"}">${done ? "Close" : "Back"}</button>`
@@ -715,7 +720,7 @@ export class Wizard {
   private paint(job: Job, page: HTMLElement | undefined = this.current): void {
     const row = page?.dataset.page === "progress" ? page.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.target)}"]`) : null;
     if (!row) return;
-    const { state } = job.view;
+    const state = shownState(job);
     const stages = stagesOf(job.view);
     row.dataset.state = state;
     const active = stages.find((stage) => stage.state === "running" || stage.state === "failed");
@@ -745,7 +750,7 @@ export class Wizard {
     const summary = page?.querySelector<HTMLElement>(".ah-summary");
     if (!summary) return;
     const done = this.jobs.filter((job) => job.view.state === "done").length;
-    const failed = this.jobs.filter((job) => job.view.state === "failed").length;
+    const failed = this.jobs.filter((job) => shownState(job) === "failed").length;
     const running = this.jobs.length - done - failed;
     summary.textContent = this.jobs.length === 1
       ? (running ? "Working out how to sign in, then installing." : done ? "Ready. The host is in your sidebar." : "This host needs attention.")
@@ -754,9 +759,9 @@ export class Wizard {
 
   /** When nothing is running: a lone failure gets its own page; a clean batch closes itself. */
   private settle(): void {
-    if (this.jobs.some((job) => job.view.state === "pending" || job.view.state === "running")) return;
+    if (this.jobs.some(working)) return;
     this.footForProgress();
-    const failed = this.jobs.filter((job) => job.view.state === "failed");
+    const failed = this.jobs.filter((job) => shownState(job) === "failed");
     if (!failed.length) { this.later(700, () => this.finish()); return; }
     if (this.jobs.length === 1 && this.page === "progress") this.later(500, () => { if (this.page === "progress") this.openFix(failed[0]!); });
   }
@@ -773,7 +778,7 @@ export class Wizard {
   // ── Failure, host key, choose a method, install ────────────────────────────
   private detailsOf(job: Job): string {
     const failure = job.view.failure;
-    const lines = [...(job.view.leftovers?.findings ?? []), failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", failure ? `The server said: ${failure.message}` : "", ...(failure?.log_tail ?? [])].filter(Boolean);
+    const lines = [...(job.view.leftovers?.findings ?? []), failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", failure && failure.kind !== "stale_previous_attempt" ? `The server said: ${failure.message}` : "", ...(failure?.log_tail ?? [])].filter(Boolean);
     return lines.join("\n") || job.view.message;
   }
 

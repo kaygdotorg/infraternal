@@ -301,12 +301,15 @@ export interface TargetView {
   /** The server's human text for the latest event. */
   message: string;
   failure: FailureDetail | undefined;
-  /** What an earlier setup left behind, while the host waits on the person's "Start fresh". */
+  /** What an earlier setup left behind, while the running attempt is paused on the person's "Start fresh". */
   leftovers: Leftovers | undefined;
   elapsedMs: number;
   /** How this attempt signed in, once the server reported it. */
   authentication: AuthenticationInfo | undefined;
 }
+
+/** True while the attempt is paused on earlier-setup leftovers: it waits for the person, nothing is running. */
+export const awaitingFresh = (view: TargetView): boolean => view.state === "running" && !!view.leftovers;
 
 export const pendingTarget = (): TargetView => ({ state: "pending", attempt: 0, phase: 0, message: "", failure: undefined, leftovers: undefined, elapsedMs: 0, authentication: undefined });
 
@@ -320,6 +323,9 @@ export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
   if (event.authentication) base.authentication = event.authentication;
   if (event.step === "done") return { ...base, ...(isCanonicalUuid(event.host_id) ? { hostId: event.host_id } : {}), state: "done", phase: PHASES.length, message: event.message, failure: undefined, leftovers: undefined, elapsedMs: event.elapsed_ms };
   if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, leftovers: event.leftovers, elapsedMs: event.elapsed_ms };
+  // Earlier-setup leftovers are a pause inside the open attempt (a `check` event, #169): the attempt stays running and
+  // waits for `startFresh`. The next event of the attempt clears the pause.
+  const paused = event.failure?.kind === "stale_previous_attempt" && !!event.leftovers;
   // Rollback and warnings may emit extra install events; the phase never moves backwards.
-  return { ...base, state: "running", phase: Math.max(base.phase, phase), message: event.message, failure: undefined, leftovers: undefined, elapsedMs: event.elapsed_ms };
+  return { ...base, state: "running", phase: Math.max(base.phase, phase), message: event.message, failure: paused ? event.failure : undefined, leftovers: paused ? event.leftovers : undefined, elapsedMs: event.elapsed_ms };
 }
