@@ -81,6 +81,8 @@ The first combined fixed diagnostic used the long state-root override described 
 
 The first full gate with `CARGO_TARGET_DIR` under the required job scratch path reached `agent_review::initial_attach_requires_explicit_credit_before_replay`, whose helper failed before its assertions with `FileNotFoundError: target/ac<PID>` because the worktree had no `target/` directory. `scripts/verify-agent-attach-credit.py` now uses the shared `fixture_state('ac')` helper for a private state path. With the worktree `target/` still absent, the exact integration test passed in the weighted systemd scope in 2.95 seconds. This was an unrelated verification-script path assumption surfaced by keeping build output outside the worktree.
 
+A later full gate exposed the same build-directory assumption in `agent_sessions::detached_shim_is_discovered_and_replays_from_the_last_observed_offset`: it used `../../target/ar<PID>`, whose parent was absent with the external target directory. The exact test reproduced `ENOENT` in 0.01 seconds, then passed in 0.04 seconds after commit `e1bf4208` moved its private state to the user cache and added a `<108`-byte socket-path check. `cargo fmt --all --check` and `cargo clippy --locked -p infraternal --all-targets` also passed after that change.
+
 ## Author review
 
 - Production restart code and its strict executable/ownership checks are unchanged.
