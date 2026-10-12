@@ -62,3 +62,9 @@ The public `ServerPath` coordinate type separates a future Mesh destination
 from the enrolled fallback. TLS authority remains in the existing remote
 identity, and plugin delivery uses the transport-independent `NodeChannel`
 capability. D215 can select a destination without changing enrolled identity.
+
+An unchanged complete legacy snapshot may gain its previously absent `local_key`
+binding at the accepted revision when it matches the enabled kernel key and
+every prior field is identical. This persists public metadata only. A changed
+identity, policy, address, peer, version or previously present binding cannot
+use this compatibility case; normal accepted-version refusal remains in force.
