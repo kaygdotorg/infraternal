@@ -17,7 +17,7 @@
  *   and font (`core.registerTerminal`).
  * - The first window uses the screen's own terminal host element, so the page still has one `#terminal-host`.
  */
-import { isCanonicalUuid } from "../../identifiers";
+import { isCanonicalUuid, randomUuid } from "../../identifiers";
 import type { CoreScreen } from "../../core-screen";
 import type { ConnectionPool, MuxConnection } from "../../connection";
 import type { TerminalClient, TerminalHooks } from "../../terminal";
@@ -328,7 +328,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       const remote = explicit ? remotes.get(explicit) : !embeddedTarget && matches.length === 1 && hostName !== host.name ? matches[0] : undefined;
       const local = !explicit && (embeddedTarget || hostName === host.name && matches.length === 0);
       return {
-        id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? (local ? host.name : hostName),
+        id: `t-${randomUuid()}`, kind: "terminal", host: remote?.name ?? (local ? host.name : hostName),
         ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local ? { ...(host.user ? { user: host.user } : {}), ...(host.os ? { os: host.os } : {}) } : { noAccess: true }),
         ...(opts?.from ? { splitOf: opts.from.id } : {}),
         ...(opts?.session ? { sessionId: opts.session } : {}),

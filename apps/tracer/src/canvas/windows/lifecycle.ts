@@ -15,6 +15,7 @@
  *
  * Every layout change measures, changes, then plays (layout/flip.ts); the terminal refits once at the new size.
  */
+import { randomUuid } from "../../identifiers";
 import { Spring } from "../../../../../packages/ui/src/spring";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
@@ -489,7 +490,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (!c || c.view.layout !== "tiled") return undefined;
     const columns = [...c.colsEl.querySelectorAll<HTMLElement>(":scope > .cl-col")];
     const at = state.activeWin ? columns.indexOf(state.activeWin.card.root.parentElement as HTMLElement) : -1;
-    const model: WindowModel = { id: `f-${crypto.randomUUID()}`, kind: "flow", host: title };
+    const model: WindowModel = { id: `f-${randomUuid()}`, kind: "flow", host: title };
     const rec = addColumn(c, model, at < 0 ? columns.length : at + 1, state.metrics.colW);
     setActive(cx, rec);
     if (state.currentView !== c.view.id) cx.nav.flyView(c.view.id);

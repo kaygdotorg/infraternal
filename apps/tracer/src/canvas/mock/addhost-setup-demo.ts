@@ -15,6 +15,7 @@
  * (including a host the person picks themselves). The autopilot only exists so the demo URL runs by itself: it presses
  * the same controls a person would (open the wizard, pick the Ubuntu host `o2`, press Continue).
  */
+import { randomUuid } from "../../identifiers";
 import type { ProvisioningRun, ProvisioningHandlers, BootstrapEvent, StartTarget } from "../../provisioning-client";
 import type { ProvisioningService } from "../addhost/service";
 import { SETUP_STAGES, type SetupEvent, type SetupStageId } from "../addhost/setup-stages";
@@ -107,7 +108,7 @@ export function createSetupDemo(failStage: SetupStageId | undefined, slow = 1): 
     }
     start(targets: StartTarget[]): void {
       for (const target of targets) {
-        this.targets.set(target.id, { attempt: 0, hostId: crypto.randomUUID() });
+        this.targets.set(target.id, { attempt: 0, hostId: randomUuid() });
         const at = (ms: number, fn: () => void): void => later(ms, () => { if (!this.ended) fn(); });
         at(150 * slow, () => this.send(target.id, "check", "Checking SSH and host support."));
         at(450 * slow, () => this.send(target.id, "check", "Signed in.", { authentication: { method: "network", network: "netbird" } }));
