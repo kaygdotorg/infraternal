@@ -54,7 +54,7 @@ impl Check {
             "INFRATERNAL_CHECK_V1",
             "Linux",
             arch,
-            "systemd",
+            init,
             uid,
             sudo,
             user_systemd,
@@ -74,14 +74,21 @@ impl Check {
         if parsed_uid.to_string() != *uid {
             return Err(invalid());
         }
-        Ok(Self {
+        let check = Self {
             architecture,
             uid: parsed_uid,
             sudo: flag(sudo)?,
             user_systemd: flag(user_systemd)?,
             linger: flag(linger)?,
             existing: flag(existing)?,
-        })
+        };
+        match *init {
+            "systemd" => Ok(check),
+            "other" => Err(Failure::unsupported(
+                "Host provisioning requires systemd on this target. Use a supported systemd host or add this host for SSH access without installation.",
+            )),
+            _ => Err(invalid()),
+        }
     }
 
     /// Enforce execution identity after the sniff; sudo availability never grants consent.
