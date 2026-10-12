@@ -17,6 +17,8 @@ impl SshSession for TimedSession {
                 Input::File(_) => "upload",
                 Input::Bytes(_) => "join",
                 Input::Empty if script == infraternal_plugin_ssh::probe::CHECK_SCRIPT => "check",
+                Input::Empty if script.contains("ln \"$cache/payload\" \"$stage/payload\"") => "reuse_payload",
+                Input::Empty if script.contains("validate_cache") => "payload_lookup",
                 Input::Empty if script.contains("validate_receipt") => "rollback",
                 Input::Empty if script.contains("enable --now") => "start",
                 Input::Empty if script.contains("enable-linger") => "linger",
@@ -35,8 +37,15 @@ impl SshSession for TimedSession {
                     "The fixture refused its first install boundary.",
                 ));
             }
+            let file_bytes = if let Input::File(path) = &input {
+                path.metadata().ok().map(|metadata| metadata.len())
+            } else { None };
             let started = Instant::now();
             let result = self.inner.run(script, input).await;
+            if let Some(bytes) = file_bytes {
+                println!("METRIC breakit2 file_input_bytes={bytes} accepted={}", result.is_ok());
+            }
+
             println!(
                 "METRIC breakit2 step={step} elapsed_ms={:.3} ok={}",
                 started.elapsed().as_secs_f64() * 1000.0,
