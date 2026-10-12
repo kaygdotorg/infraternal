@@ -18,8 +18,10 @@ from the fixed base. Browser instrumentation records the first glyph draw and
 public action IDs, never terminal text, cookies or setup capabilities.
 `sign-in.json` retains the samples. Its p99 field is the sample maximum with only
 12 trials, not a statistically established tail percentile. Inventory precedes
-that first draw in zero candidate trials. An eight-millisecond median difference
-in the initial run is variation, not proof of zero latency cost; the ordering
+that first draw in zero candidate trials. The repeated run with the final native server has equal 1,367.8 ms medians,
+with sample maxima of 2,430.6 ms baseline and 1,586.4 ms candidate. Load before
+is 2.22/1.76/1.14 and after 1.21/1.55/1.12. These samples are not proof of zero
+latency cost; the ordering
 check proves inventory requests are outside the initial terminal frame path.
 
 All timings come from the named perf VM (4 vCPU, 7 GB), under
