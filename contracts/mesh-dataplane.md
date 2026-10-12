@@ -13,8 +13,12 @@ logged, passed in argv, or sent to the coordinator.
 Configuration contains stable node identity, version, local IPv4/ULA host
 addresses, public peer keys, discovered UDP endpoints, /32 and /128 allowed
 IPs and directional network access rules. Snapshots and diffs are staged
-until the final chunk, with contiguous version checking. A missing or failed
-chunk leaves the applied view unchanged. Reconnecting requests a snapshot.
+until the final chunk, with contiguous version checking. A missing or invalid
+staged chunk leaves the applied view unchanged. Application failures before
+public intent commits restore the old rules and preserve connection state.
+Once final rules and public intent commit, exact retirement is irreversible:
+cleanup failures retain the new restrictive rules and retry forward before
+acknowledgment, including on replay or restart. They never restore old access. Reconnecting requests a snapshot.
 Control chunks fit the existing 8 KiB action-body resource bound.
 
 Full coordinator snapshots may include `local_key`, the public key bound to
