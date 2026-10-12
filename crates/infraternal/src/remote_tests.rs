@@ -6,8 +6,14 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        let root = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/remote-agents/identity-tests")
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
+            .map_or_else(
+                || {
+                    PathBuf::from(std::env::var_os("HOME").unwrap())
+                        .join(".cache/codex-scratch/remote-agents/identity-tests")
+                },
+                PathBuf::from,
+            )
             .join(uuid::Uuid::new_v4().to_string());
         std::fs::DirBuilder::new()
             .recursive(true)
