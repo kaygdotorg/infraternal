@@ -2,7 +2,7 @@
  * The session UI on the canvas (`?mock=1&proto=clusters`, scenes via `&sessions=N`; D121, D127, D178, D183): the
  * manager (grouping, order, marks, attach, rename, end), the sidebar inventory, close with Undo, exited sessions,
  * splits through the droplet, the "Sized for" badge, ⌘K, the empty, loading and error states, and what TASTE asks
- * to be measured (motion durations, no rings from the mouse, 44 px on touch, the actions in one pill).
+ * to be measured (motion durations, no rings from the mouse, 44 px on touch, desktop actions in one pill and touch Close).
  */
 import { expect, test, type Browser, type BrowserContext, type Page } from "playwright/test";
 
@@ -61,11 +61,11 @@ test("a window's actions are one pill as tall as its title pill", async ({ brows
         const actions = root.querySelector(".ui-window-actions")!;
         const box = actions.getBoundingClientRect();
         const style = getComputedStyle(actions);
-        return { pillH: Math.round(pill.height), actionsH: Math.round(box.height), border: style.borderTopWidth, radius: style.borderTopLeftRadius, labels: [...actions.querySelectorAll("button")].map((b) => b.getAttribute("aria-label")), buttonH: Math.min(...[...actions.querySelectorAll("button")].map((b) => Math.round(b.getBoundingClientRect().height))), inside: box.right <= root.getBoundingClientRect().right, titleClipped: pill.right <= box.left };
+        return { pillH: Math.round(pill.height), actionsH: Math.round(box.height), border: style.borderTopWidth, radius: style.borderTopLeftRadius, labels: [...actions.querySelectorAll("button")].filter((b) => b.getBoundingClientRect().height > 0).map((b) => b.getAttribute("aria-label")), buttonH: Math.min(...[...actions.querySelectorAll("button")].map((b) => Math.round(b.getBoundingClientRect().height))), inside: box.right <= root.getBoundingClientRect().right, titleClipped: pill.right <= box.left };
       });
       expect(geometry.actionsH).toBe(geometry.pillH);
       expect(geometry.border).toBe("1px");
-      expect(geometry.labels).toEqual(["Split right", "Split down", "Sessions", "Close"]);
+      expect(geometry.labels).toEqual(viewport.touch ? ["Close"] : ["Split right", "Split down", "Sessions", "Close"]);
       expect(geometry.inside).toBe(true);
       expect(geometry.titleClipped).toBe(true);
     } finally { await context.close(); }
@@ -257,7 +257,7 @@ test("an exited session opens its final screen read-only, with Run again and Dis
   } finally { await context.close(); }
 });
 
-test("both splits open a new shell with no prompt, through the droplet, and down stacks it in the column", async ({ browser }) => {
+test("both splits open a new shell through the header actions and stack down in the column", async ({ browser }) => {
   const { context, page } = await open(browser, DESKTOP);
   try {
     const win = windowOf(page, "build-01");
@@ -267,7 +267,9 @@ test("both splits open a new shell with no prompt, through the droplet, and down
     const created = page.locator(".ui-window[data-window-id*='-s1']");
     await expect(created.locator(".ui-window-session")).toHaveText("shell");
     await page.waitForTimeout(1500);
-    await created.locator("[data-action='split-down']").click();
+    // A split narrows its header, so its shared overflow menu carries the actions.
+    await created.getByRole("button", { name: "More window actions" }).click();
+    await page.locator(".ui-window-menu-item[data-action='split-down']").click();
     await expect(consoleWindows(page)).toHaveCount(6);
     await page.waitForTimeout(1500);
     const columns = await page.locator("[data-view='console'] .cl-col").evaluateAll((cols) => cols.map((c) => c.querySelectorAll(":scope > .ui-window").length));
@@ -403,7 +405,7 @@ test("the manager's code is on demand, fetched at idle so the first open never w
   await context.close();
 });
 
-test("on a phone the canvas row has a Sessions action that opens the manager of the active window", async ({ browser }) => {
+test("on a phone the canvas row has a Sessions action that opens the manager of the active window", async ({ browser }, testInfo) => {
   const { context, page } = await open(browser, PHONE);
   try {
     const item = page.locator("#keyrow-canvas button[aria-label='Sessions']");
@@ -413,5 +415,8 @@ test("on a phone the canvas row has a Sessions action that opens the manager of 
     await item.tap();
     await expect(page.locator(".cl-sx-pop")).toBeVisible({ timeout: 8000 });
     await expect(page.locator(".cl-sx-title")).toHaveText("build-01");
+    const capture = "../../evidence/release-prod-3/mobile-manager.png";
+    await page.screenshot({ path: capture });
+    await testInfo.attach("mobile session manager", { path: capture, contentType: "image/png" });
   } finally { await context.close(); }
 });
