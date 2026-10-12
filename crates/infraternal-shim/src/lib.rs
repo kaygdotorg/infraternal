@@ -62,3 +62,5 @@ pub mod locked_bytes;
 pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd> {
     pty::process_exit_descriptor(pid)
 }
+#[cfg(feature = "ca-handoff")]
+pub mod openssl_secure;

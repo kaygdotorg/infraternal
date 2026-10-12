@@ -4,10 +4,7 @@ use crate::ca::{CaError, CaKeySource, CaMaterial};
 use crate::ca_memory::MemoryCaSource;
 use infraternal_shim::locked_bytes::LockedBytes;
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
-use openssl::{
-    pkey::{Id, PKey},
-    x509::X509,
-};
+use openssl::{pkey::Id, x509::X509};
 use std::{io::Write, os::unix::net::UnixStream};
 use zeroize::Zeroizing;
 
@@ -79,8 +76,7 @@ pub fn parse(frame: &[u8]) -> Result<CaMaterial, CaError> {
     if length == 0 || length > MAX_ISSUER || frame.len() != HEADER + length {
         return Err(CaError);
     }
-    let key =
-        PKey::private_key_from_raw_bytes(&frame[10..HEADER], Id::ED25519).map_err(|_| CaError)?;
+    let key = CaMaterial::key_from_seed(&frame[10..HEADER])?;
     let issuer = X509::from_der(&frame[HEADER..]).map_err(|_| CaError)?;
     // Require exact DER consumption; the certificate decoder may accept a
     // valid prefix followed by extra bytes. Never extend the frame implicitly.

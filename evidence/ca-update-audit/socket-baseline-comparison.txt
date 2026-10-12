@@ -1,0 +1,19 @@
+Running as unit: run-p159436-i50443123.scope; invocation ID: 38f73e4925d441bea6a06a9312d4a352
+checkout=dev-ded3abd6 machine=infraternal-dev cpus=8 load_before=24.64 28.41 29.30 29/3186 159501
+
+running 1 test
+test auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity ... mesh_sockets=8 pool_connections=8 control_ms=1 pong_while_mesh_pending=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 2.02s
+
+checkout=dev-ded3abd6 exit=0 elapsed_s=2.031 load_after=25.55 28.53 29.33 15/3197 159753
+checkout=audit-ca-update machine=infraternal-dev cpus=8 load_before=25.55 28.53 29.33 15/3197 159753
+
+running 1 test
+test auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity ... mesh_sockets=8 pool_connections=8 control_ms=2 pong_while_mesh_pending=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 331 filtered out; finished in 1.90s
+
+checkout=audit-ca-update exit=0 elapsed_s=2.004 load_after=25.55 28.53 29.33 16/3176 159853

@@ -1,0 +1,135 @@
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-shim)
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/remote)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/ssh)
+   Compiling webauthn-rs-core v0.5.5
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-agent)
+   Compiling webauthn-rs v0.5.5
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 36s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/infraternal_server-cb652bc3787ed128)
+
+running 66 tests
+test auth::tests::ca_administration_tests::actual_ca_unlock_cost_at_1000_administrator_records ... ignored, release real authority diagnostic at1000 memberships/copies; no concurrent own build/browser
+test auth::tests::ca_administration_tests::actual_passkey_unlocks_cold_ca_once_and_leaves_no_extra_browser_session ... ok
+test auth::tests::ca_administration_tests::administrator_with_stale_tap_must_make_a_new_verified_proof_to_unlock ... ok
+test auth::tests::ca_administration_tests::audit_tests::private_copy_persistence_contains_only_ciphertext_and_public_metadata ... ok
+test auth::tests::ca_administration_tests::audit_tests::unlock_audit_cost_at_1000_memberships ... ignored, real 100-unlock/1000-membership audit formatting diagnostic; no own builds or browsers
+test auth::tests::ca_administration_tests::audit_tests::unlock_audit_records_principal_time_outcome_without_material ... ok
+test auth::tests::ca_administration_tests::bootstrap_requires_a_fresh_real_proof_and_publishes_only_wrapped_ca_material ... ok
+test auth::tests::ca_administration_tests::changed_generation_expired_session_or_removed_credential_cannot_unlock ... ok
+test auth::tests::ca_administration_tests::concurrent_bootstrap_ceremonies_retain_one_issuer_and_replay_is_refused ... ok
+test auth::tests::ca_administration_tests::foreign_browser_cannot_consume_the_original_ca_unlock_ceremony ... ok
+test auth::tests::ca_administration_tests::http_tests::audit_tests::ca_start_budget_is_shared_by_routes_and_cookies_but_not_status_or_finish ... ok
+test auth::tests::ca_administration_tests::http_tests::audit_tests::sequential_unlock_starts_require_a_temporal_budget ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_body_admission_at_1000_requests ... ignored, 1000-request body admission diagnostic; run alone without builds
+test auth::tests::ca_administration_tests::http_tests::ca_finish_body_deadline_returns_its_admission_slot ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_exact_origin_and_live_cookie_are_required ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_parser_is_bounded_and_errors_do_not_reflect_wrapping_material ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_real_passkey_unlock_returns_only_lock_status_without_a_session_cookie ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_http_refuses_origin_and_cookie_before_decoding_wrapping_material ... ok
+test auth::tests::ca_administration_tests::http_tests::ca_status_distinguishes_initial_setup_from_locked_retained_trust ... ok
+test auth::tests::ca_administration_tests::http_tests::first_machine_certificate_setup_starts_a_fresh_passkey_ceremony ... ok
+test auth::tests::ca_administration_tests::http_tests::independent_review_ca_body_reads_share_the_eight_request_admission_limit ... ok
+test auth::tests::ca_administration_tests::http_tests::independent_review_ca_headers_are_refused_before_reading_an_unfinished_body ... ok
+test auth::tests::ca_administration_tests::new_administrator_device_rewraps_pending_copy_and_role_generation_never_resurrects_it ... ok
+test auth::tests::ca_administration_tests::ordinary_login_ceremony_has_no_ca_unlock_purpose ... ok
+test auth::tests::ca_administration_tests::pending_administrator_cannot_replace_the_last_retained_wrapped_copy ... ok
+test auth::tests::ca_administration_tests::published_issuer_without_memory_projection_is_recovered_as_locked_trust ... ok
+test auth::tests::ca_administration_tests::revoked_membership_or_original_session_cannot_finish_an_existing_ca_ceremony ... ok
+test auth::tests::ca_administration_tests::role_changes_require_fresh_purpose_bound_proofs_and_recheck_owner_permission ... ok
+test auth::tests::ca_administration_tests::role_grant_is_pending_and_revoke_removes_old_copy_without_restoring_old_authority ... ok
+test auth::tests::ca_administration_tests::shipping_cli_tests::bootstrap_cli::fresh_release_bootstrap_join_renew_revoke_cuts_a_live_connection ... ignored, configured release E2E requires INFRATERNAL_REMOTE_TEST_BINARY and exclusive4701/7443
+test auth::tests::ca_administration_tests::shipping_cli_tests::configured_release_cli_cold_lock_real_passkey_unlock_and_cold_restart ... ignored, configured release CLI proof needs INFRATERNAL_REMOTE_TEST_BINARY and exclusive4701/7443
+test auth::tests::ca_administration_tests::wrong_wrapping_key_or_missing_user_verification_leaves_ca_locked ... ok
+test auth::tests::ca_membership_tests::administrator_bootstrap_is_explicit_and_owner_flag_cannot_replace_revoked_role ... ok
+test auth::tests::ca_membership_tests::administrator_copy_refuses_deleted_passkey_or_session ... ok
+test auth::tests::ca_membership_tests::administrator_copy_refuses_pending_expired_stale_or_future_session ... ok
+test auth::tests::ca_membership_tests::administrator_guard_cost_at_1000_memberships ... ignored, optimized administrator guard diagnostic at1000 memberships; no own build/browser overlap
+test bootstrap_runtime::remote_backend::tests::cold_ca_refuses_before_invitation_or_upload ... ok
+test ca_bootstrap::tests::generated_remote_leaf_is_verifiable_after_cold_restart ... ok
+test ca_copies::tests::copy_store_cost_at_1000_administrators ... ignored, release-only private CA-copy disk diagnostic; no own build/browser overlap
+test ca_copies::tests::encrypted_copy_is_private_durable_and_bound_to_member_generation ... ok
+test ca_copies::tests::removal_is_member_generation_scoped_and_idempotent ... ok
+test ca_copies::tests::unsafe_copy_directory_or_file_is_refused_without_following_symlinks ... ok
+test ca_handoff::shipping_tests::shipping_child ... ok
+test ca_handoff::shipping_tests::shipping_restart_reload_rollback_and_cold_start ... ignored, explicit shipping-binary integration/benchmark; set INFRATERNAL_TEST_BINARY
+test ca_handoff::tests::exec_child ... ok
+test ca_handoff::tests::failed_null_open_or_duplication_closes_private_stdin ... ok
+test ca_handoff::tests::parser_property_corpus_is_bounded_and_never_accepts_trailing_bytes ... ok
+test ca_handoff::tests::real_exec_failures_and_killed_receiver_never_unlock_a_cold_successor ... ok
+test ca_handoff::tests::real_exec_retains_unlock_but_another_process_cannot_import_the_channel ... ok
+test ca_handoff::tests::serialized_seed_frame_is_locked_and_excluded_from_core_dumps ... ok
+test ca_handoff::tests::socketpair_preserves_unlock_and_cold_start_still_locks ... ok
+test ca_handoff::tests::truncated_wrong_generation_and_wrong_version_leave_successor_locked ... ok
+test ca_handoff_binary::tests::marker_is_an_exact_versioned_note_not_a_byte_substring ... ok
+test ca_http::intake_tests::chunked_intake_is_bounded_before_parsing ... ok
+test ca_memory::tests::accepted_unlock_notifies_and_memory_handoff_preserves_signing_without_a_timer ... ok
+test ca_memory::tests::cold_start_retains_public_trust_and_denied_unlock_leaves_signing_locked ... ok
+test ca_memory::tests::unavailable_secure_heap_refuses_root_and_warns_for_nonroot ... ok
+test ca_update_audit_tests::every_ciphertext_byte_and_tag_mutation_refuses_without_material_in_errors ... ok
+test ca_update_audit_tests::handoff_descriptor_is_close_on_exec_and_prepare_failure_preserves_source ... ok
+test ca_update_audit_tests::handoff_memory_protection_failure_keeps_the_existing_signer ... ok
+test ca_update_audit_tests::no_timer_locks_signing_and_wrong_issuer_cannot_replace_the_unlocked_source ... ok
+test ca_update_audit_tests::secure_heap_capacity_at_10000_live_keys ... ignored, isolated secure heap sizing at 10000 live keys; run with no own builds/browser overlap
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... ok
+test remote_startup::tests::normal_cold_start_uses_public_trust_without_loading_or_generating_ca_key ... ok
+test runtime::remote_demo_tests::shipping_route::independent_review_configured_server_mounts_ca_unlock_routes ... ok
+test runtime::temporal_admission_tests::ca_budget_cost_at_capacity ... ignored, isolated debug admission diagnostic at 4096 principals; run without own build overlap
+
+test result: ok. 56 passed; 0 failed; 10 ignored; 0 measured; 272 filtered out; finished in 143.70s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/catalog_startup-8aec2036dd7023e3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/enrollment-194cbb575c927380)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_parser-cc32c3dd0d7db4d7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_plugin-261d926d4b67de60)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_policy-4de11c7c2826df16)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/mesh_review_role_scope-7374e348a9f36549)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_host_review-3c7f288efa2b2365)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/plugin_settings_review-3520ddf72fab907d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/audit-ca-update/target/debug/deps/remote_plugin_contract-1fc9827242ed95a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

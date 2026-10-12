@@ -24,9 +24,9 @@ async fn unlock_fixture() -> UnlockFixture {
     let auth = fixture().await;
     let material = crate::ca::tests::test_material();
     let source = Arc::new(MemoryCaSource::cold_start(material.issuer().clone()));
-    let root = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(".cache/codex-scratch/remote-agents/ca-administration-tests")
-        .join(Uuid::new_v4().to_string());
+    // Follow the runner's TMPDIR so static/root proofs own their entire fixture
+    // tree rather than writing into another job's scratch directory (#154).
+    let root = std::env::temp_dir().join(format!("ca-administration-{}", Uuid::new_v4()));
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -900,3 +900,6 @@ async fn pending_administrator_cannot_replace_the_last_retained_wrapped_copy() {
             .is_ok()
     );
 }
+
+#[path = "ca_unlock_audit_tests.rs"]
+mod audit_tests;

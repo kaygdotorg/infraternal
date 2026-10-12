@@ -1,0 +1,14 @@
+{"action":"server.serve","message":"Preparing the configured server","next":"Check the configured listener and retained public trust.","state":"starting"}
+{"action":"server.serve","message":"OpenSSL secure heap could not be locked and excluded from dumps; check the server memlock limit","next":"Check configuration and retained public server trust.","state":"refused"}
+zero-limit root server: refused (exit 1)
+uid=0 memlock_bytes=8388608 cores=4
+machine=infraternal-perf-test kernel=6.12.69+deb13-amd64
+load_before=0.01 0.06 0.06 3/225 95500
+{"mode": "baseline", "measurement": "process_key_memory_check", "n": 31, "p50_ms": 2.684211, "max_ms": 4.653123}
+{"mode": "candidate", "measurement": "process_key_memory_check", "n": 31, "p50_ms": 2.562976, "max_ms": 3.609166}
+{"mode": "baseline", "bytes": 20090384, "sha256": "81d6d22651a07c5d2f8c40630a29c37df57ca6aeae89c39e3e2eac54a10bef1d"}
+{"mode": "baseline", "measurement": "server_refusal", "n": 21, "p50_ms": 3.815133, "max_ms": 6.059259}
+{"mode": "candidate", "bytes": 20098960, "sha256": "4e72a992762e69c51372ce6cee0aad9dbe10d097f0651ec91e22ba1557c2bb69"}
+{"mode": "candidate", "server_health": 200, "vm_lck_kib": 1024, "locked_dump_excluded_kib": 1024, "servers": 1}
+{"mode": "candidate", "measurement": "server_health_ready", "n": 21, "p50_ms": 57.142904, "max_ms": 153.0044}
+load_after=0.01 0.06 0.06 3/227 95856

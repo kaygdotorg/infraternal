@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/scripts/test-musl-cc.py", line 28, in <module>
+    assert result.stdout.splitlines() == ['cc', '-target', zig_target, *retained], target
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: x86_64-unknown-linux-musl

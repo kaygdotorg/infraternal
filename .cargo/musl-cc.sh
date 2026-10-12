@@ -15,6 +15,11 @@ export ZIG_GLOBAL_CACHE_DIR="$target_root/auth-tools/cache"
 args=()
 for arg in "$@"; do
     case "$arg" in
+        # openssl-src adds this historical musl workaround. Our pinned Zig
+        # sysroot supports the provider's locked, dump-excluded key heap;
+        # D244/#154 requires it in the shipping static binaries. Remove only
+        # this exact argument, leaving OpenSSL sources and all other flags intact.
+        -DOPENSSL_NO_SECURE_MEMORY) ;;
         --target="$TARGET") ;;
         --target=*) printf 'unexpected C target override
 ' >&2; exit 1 ;;

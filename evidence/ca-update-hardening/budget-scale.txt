@@ -1,0 +1,8 @@
+Running as unit: run-p310499-i310799.scope; invocation ID: cb629602ab444efda077bb2ec0858946
+
+running 1 test
+test runtime::temporal_admission_tests::ca_budget_cost_at_capacity ... METRIC ca_budget_principals=4096 requests=1000 wall_p50_ns=109965 wall_p99_ns=360132 max_starts_per_minute=122880 cores=12 load=36.16 38.56 32.77 29/1789 310517
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 337 filtered out; finished in 0.37s
+

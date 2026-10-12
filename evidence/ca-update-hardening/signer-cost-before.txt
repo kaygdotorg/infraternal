@@ -1,0 +1,5 @@
+Running as unit: run-p270024-i270324.scope; invocation ID: d5948108193e4714a7d4e03cd1a1f6b8
+machine=infraternal-dev mode=before samples=30 artifact_bytes=1024 load_before=36.98 38.61 31.36 31/1489 270048
+METRIC signer_artifacts=12 wall_p50_ms=5.971 wall_p99_ms=72.334 published_bytes=2092
+METRIC signer_artifacts=1002 wall_p50_ms=154.055 wall_p99_ms=353.751 published_bytes=121612
+load_after=36.98 38.58 31.39 34/1473 271668
