@@ -222,6 +222,33 @@ async fn breakit2_interrupted_lock_creation_allows_cleanup_and_retry() {
     retry.rollback().await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "#169 review: receipt recovery must retire its acquisition journal"]
+async fn interrupted_acquisition_cleanup_receipt_can_resume() {
+    let fixture = Fixture::new();
+    executable(
+        &fixture.root.join("tools/mkdir"),
+        "#!/bin/sh\n/usr/bin/mkdir \"$@\" || exit $?\ncase \"$*\" in *.bootstrap-lock) exit 42;; esac\n",
+    );
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/mkdir")).unwrap();
+    executable(
+        &fixture.root.join("tools/rm"),
+        "#!/bin/sh\ncase \"$*\" in *.bootstrap-acquiring) exit 42;; esac\nexec /usr/bin/rm \"$@\"\n",
+    );
+    assert!(transaction.rollback().await.is_err());
+    assert!(fixture.receipt().exists());
+    assert!(fixture.base().join(".bootstrap-acquiring").exists());
+    assert!(!fixture.base().join(".bootstrap-lock").exists());
+    std::fs::remove_file(fixture.root.join("tools/rm")).unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
 /// Counts actual file input crossing the session boundary while commands execute locally.
 struct TransferCount {
     local: Local,
