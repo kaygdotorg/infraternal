@@ -125,7 +125,94 @@ interval with the raw results. Run all timing work on the perf VM. The build
 host's unit-test durations and mandatory gate diagnostics are not performance
 evidence.
 
-This job's acceptance is pending the signed A/B artifacts. Its functional suite
-exercises real WAL backup and Unix framing plus controlled rollback, web-only
-failure, status ordering, capacity admission and pruning. These checks do not
-substitute for the real staging deployment.
+Owner D1 on #188 authorizes `staging-trust`, a **non-default** Cargo feature.
+It requires `INFRATERNAL_STAGING_PUBLIC_KEY` to name a fresh public key at build
+time. Production builds ignore that variable. No private key or permanent test
+public key is committed. The normal static gate scans the final ELF before its
+size check and refuses the staging authority marker, including stripped images.
+
+Run `scripts/release/staging-proof` from this worktree on the build host. It
+creates an ephemeral Ed25519 key under the job scratch directory, builds the
+static staging image, signs A/B/C with the real v1 identity-bearing manifest
+and SSHSIG format, and deletes the private key before transport. A and B execute
+the same compiled program; B has an inert ELF trailer and a different signed
+version/hash, so live-image confirmation cannot mistake A for B. C is a signed,
+deliberately unusable ELF. The ARM file is a signed placeholder in this x86-only
+fixture; it is never executed or a production release artifact.
+
+The script waits up to 1800 seconds for the shared perf-VM lock. Extraction,
+the test and teardown all hold it. Every run gets its own directory, ephemeral
+loopback ports, CA, data and transient systemd unit. A private `/run` mount
+keeps shims out of the VM's global runtime directory. Setup reuses the real
+software passkey fixture and encrypted CA copies; only one unlock ceremony is
+performed. The administrator session remains in memory and private pipes.
+The native test executable's existing runtime libraries travel beside it and
+are deleted with the run; nothing is installed on the VM.
+
+At 50 users, 10000 retained node records and 128 real PTYs, the fixture performs
+12 alternating handoffs, confirms all surviving shim PIDs, checks unlocked CA
+and exact executable hashes, then leaves B serving. It tests C refusal with
+unchanged restart endpoint before shutdown and exercises the actual deploy
+transaction's verified warm rollback. It checks the retained database's
+integrity and row counts and verifies the retained rollback signature. All128
+sessions must accept new input and return the expected output afterward.
+
+Listener sampling uses nominal 1 ms intervals and records actual maximum sample
+spacing. Each gap is a conservative bracket from the last successful connect
+before refusal to the first success afterward; no observed refusal is reported
+as zero at that resolution. p50/p99 use nearest rank over 12 brackets; p99 is
+the maximum sample. This is listener availability, not end-to-end terminal
+reconnect time. Raw VM output and machine/load context are retained in
+`evidence/deploy-pipeline/staging-proof.txt`. The unit, its process group, data,
+CA, executables and runtime libraries are removed before releasing the lock.
+
+Functional packaging tests are `python3 scripts/release/staging_artifacts_test.py`.
+The ordinary deployment suite covers WAL backup, framing, rollback, web-only
+failure, capacity and pruning; those tests do not replace perf-VM acceptance.
+
+
+# Production cut-over: orchestrator procedure, not executed by this job
+
+1. Integrate reviewed changes onto `dev` and resolve every blocking gate,
+   including the existing static-size ceiling. Run `scripts/verify fast` on
+   the exact production candidate, require a production-trust PASS for both
+   static architectures, and require break-it review with no P0/P1. A staging
+   image or a size-failing gate receipt cannot be used for production.
+2. Install the user builder unit on the build host only as an explicit
+   orchestrator operation. Set the real repository path and the fixed starting
+   dev ancestor, then run `systemctl --user daemon-reload` and
+   `systemctl --user enable --now infraternal-release-builder.service`.
+   Check its exact-head GATE/SOURCE receipts and both actual static payloads.
+   This job has not installed that service.
+3. Publish only the reviewed, gated dev candidate through the production
+   release procedure in `docs/operations/release.md`. Place the returned public
+   `MANIFEST` and `MANIFEST.sig` beside the **same bytes** in its local build
+   cache. Production signing remains external. Never carry the staging feature,
+   marker, test key or fixture artifacts into that cache.
+4. Before the first administrative cut-over, confirm the production service
+   has the reviewed round4 restart protocol, runs as root, has an unlocked CA,
+   and has signed matching metadata for its current image. Confirm its data,
+   binary/payload and web paths match the deploy entry point. If these
+   prerequisites are absent, prepare a separate reviewed migration; stop/start
+   cannot demonstrate D217 continuity.
+5. Pipe the existing authorized administrator session from an in-memory caller
+   into `scripts/release/deploy <full-dev-sha> --review-clear`. The orchestrator
+   runs that command; this job does not. It performs the online backup and
+   verified handoff, verifies live hash/health/unlocked CA, then atomically
+   pushes the annotated production tag and fast-forwarded main. Keep its safe
+   receipt, backup location and deployed SHA as the production record.
+6. Check production health, unlocked CA, version, retained sessions and the
+   production tag. On `deployed-unrecorded`, reconcile the existing running SHA
+   and concurrent main update before recording refs; do not force-push. On a
+   failed deploy, confirm the retained signed previous image serves with its
+   CA unlocked. A dead/locked successor requires explicit cold recovery and a
+   passkey unlock; never overwrite a live database.
+7. D251 makes production follow edge. The existing declaration-backed setting
+   is `infraternal server --data /var/lib/infraternal channel edge --yes`;
+   confirm the selection with `infraternal server --data /var/lib/infraternal
+   channel --json`. Only reviewed, gated builds may be published to that
+   channel. Channel selection/download alone does **not** implement D251's
+   quiet-window automatic application: enable that behavior only when its
+   separate reviewed implementation is integrated. Thereafter administrative
+   deploy is for initial cut-over or recovery; routine updates use the same
+   verified CA-preserving handoff.
