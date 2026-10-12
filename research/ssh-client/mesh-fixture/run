@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run the secret-free, loopback SSH regression with job-owned build and state roots (#195).
+set -euo pipefail
+repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
+scratch="${INFRATERNAL_TEST_STATE_ROOT:-$HOME/.cache/codex-scratch/n195}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$scratch/target}"
+export INFRATERNAL_TEST_STATE_ROOT="$scratch"
+export GOCACHE="$scratch/go-cache" GOMODCACHE="$scratch/go-mod"
+mkdir -p "$scratch"
+cd "$repo/research/ssh-client/mesh-fixture"
+"${GO:-go}" build -mod=readonly -o "$scratch/mesh-fixture" .
+export INFRATERNAL_MESH_FIXTURE="$scratch/mesh-fixture"
+cd "$repo"
+cargo test --locked -p infraternal-plugin-ssh --test mesh_ssh -- --ignored --nocapture
