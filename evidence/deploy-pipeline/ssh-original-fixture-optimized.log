@@ -1,0 +1,12 @@
+Running as unit: run-p1622716-i14203988.scope; invocation ID: e6c9fd56a0f040a9a4e0a90487ad6ed9
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.14s
+     Running tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/deploy-pipeline/target/debug/deps/ssh_askpass-9ebf1f9a1e110a7b)
+
+running 3 tests
+test encrypted_key_without_passphrase_never_prompts_on_a_controlling_terminal ... ignored, run under the disposable controlling-terminal harness
+test real_cli_askpass_refuses_unregistered_parent_and_cleans_helper ... ok
+test real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 6.17s
+

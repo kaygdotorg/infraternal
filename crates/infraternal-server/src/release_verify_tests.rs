@@ -6,6 +6,33 @@ use std::{
     process::Command,
 };
 
+#[test]
+fn compiled_authorities_keep_production_and_isolate_staging() {
+    let production = include_str!("../../../release/allowed_signers");
+    assert!(TRUST.starts_with(production));
+    assert_eq!(
+        TRUST.contains("infraternal-staging-trust-v1"),
+        cfg!(feature = "staging-trust")
+    );
+}
+
+#[test]
+fn per_run_signature_obeys_the_compiled_feature_boundary() {
+    let Some(directory) = std::env::var_os("INFRATERNAL_STAGING_SIGNED_FIXTURE") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let file = File::open(directory.join("payload")).unwrap();
+    let sums = std::fs::read(directory.join("SHA256SUMS")).unwrap();
+    let signature = std::fs::read(directory.join("SHA256SUMS.sig")).unwrap();
+    let result = verify_release_file(&file, "payload", &sums, &signature);
+    if cfg!(feature = "staging-trust") {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(ReleaseError::Untrusted));
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     sums: Vec<u8>,

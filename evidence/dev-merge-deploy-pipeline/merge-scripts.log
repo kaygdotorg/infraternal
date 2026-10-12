@@ -1,0 +1,55 @@
+Running as unit: run-p1910995-i18685867.scope; invocation ID: b91d71a8d433458cbd40e3796d7cf869
+.....Release build failed for aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; gate log retained
+.Build deferred: host capacity limit reached
+.........
+----------------------------------------------------------------------
+Ran 15 tests in 1.228s
+
+OK
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.135s
+
+OK
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+OK
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 4.837s
+
+OK
+bun test v1.4.2 (744846f84)
+
+scripts/release/worker.test.ts:
+(pass) signs stable and writes its channel pointer [14.32ms]
+(pass) signs edge and writes its channel pointer [8.04ms]
+(pass) refuses versions outside stable and UTC edge forms before bucket work [0.94ms]
+
+scripts/release/review.test.ts:
+PUBLICATION_ADMISSION same_host=true build_directories=2 list_requests=1 uploads=4 replaced_objects=0
+(pass) publication with two build directories admits only one writer [345.73ms]
+STORAGE_PREFLIGHT duplicate_result=true existing_objects=1 exit=1 stdout_bytes=0 stderr_bytes=46
+(pass) storage preflight refuses ambiguous existing-object results [39.37ms]
+
+scripts/release/deploy-review.test.ts:
+REMOTE_ADMISSION unsigned_x86_payload=true refused=true
+(pass) remote admission refuses an x86 payload outside the signed manifest [343.23ms]
+{"state": "deployed", "ca_unlocked": true}
+WEB_ONLY_RECORD candidate_binary_recorded=false
+(pass) web-only deployment does not record the candidate as the running binary [337.60ms]
+ALIAS_RECOVERY restart_requests=2
+(pass) alias restoration failure still requests the retained warm rollback [371.57ms]
+
+ 8 pass
+ 0 fail
+ 24 expect() calls
+Ran 8 tests across 3 files. [1.50s]
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/scripts/release/channel_cli_test.py", line 14, in <module>
+    BINARY = Path(os.environ['INFRATERNAL_BIN'])
+                  ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "<frozen os>", line 709, in __getitem__
+KeyError: 'INFRATERNAL_BIN'

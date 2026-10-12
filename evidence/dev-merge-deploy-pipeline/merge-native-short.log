@@ -1,0 +1,676 @@
+Running as unit: run-p2195262-i18970131.scope; invocation ID: 3fa1c13ca1824336b53285506306e343
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/infraternal-443d0763057d26a9)
+
+running 28 tests
+test cli::command_tree::backmerge_tests::restart_inherits_private_state_before_or_after_the_command ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... ok
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test restart::tests::path_review::late_recovery_from_path_invocation_keeps_install_target ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... ok
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... ok
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... ok
+test restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode ... ok
+test restart_binary::audit_tests::symlink_parent_escape_and_writable_candidates_are_refused ... ok
+test restart_binary::audit_tests::unsigned_or_tampered_replacement_is_refused_before_exec ... ok
+test restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running ... ok
+test restart_binary::audit_tests::verification_twenty_megabytes ... ignored, optimized weighted 20 MiB signature and admission measurement
+test restart_image::tests::probe_never_inherits_the_control_descriptor ... ok
+test restart_image::tests::snapshot_refuses_every_mutation_and_preserves_source_offset ... ok
+
+test result: ok. 27 passed; 0 failed; 1 ignored; 0 measured; 48 filtered out; finished in 32.98s
+
+     Running tests/agent_daemon.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/agent_daemon-c3165d6fa37adc39)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/agent_queues.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/agent_queues-ca0780b77cd9ea3c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/agent_review.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/agent_review-4ae809d41e21b566)
+
+running 2 tests
+test retained_unwritten_input_survives_interleaved_ack_restart ... ok
+test two_writers_keep_independent_ack_and_exact_input_after_restart ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 6.66s
+
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/agent_sessions-9073d0b687b22895)
+
+running 1 test
+test restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.72s
+
+     Running tests/idle_canary.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/idle_canary-233e58ce97b60b7c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/key_memory.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/key_memory-4c3061ac1c1966f2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/remote_output.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/remote_output-5e11d7bfd83a5937)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/session_bounds_review.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/session_bounds_review-40e2fba40371536b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/session_exit_events.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/session_exit_events-9c36163c3c55c880)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/session_retention.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/session_retention-8e3b7fb02a777b24)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/setup_output.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/setup_output-ff1b320136bd46c7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/shim.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/shim-6f17fdaf5cf14048)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/ssh_askpass-ecdf60643ac78acb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/vt_credit.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/vt_credit-356edb34ae1c286a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/vt_reconnect.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/vt_reconnect-fb258bff50ffd816)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+   Compiling crypto-common v0.1.7
+   Compiling tokio v1.53.2
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling sqlx-core v0.8.6
+   Compiling getrandom v0.4.3
+   Compiling sqlx-sqlite v0.8.6
+   Compiling tokio-stream v0.1.19
+   Compiling sqlx-macros-core v0.8.6
+   Compiling uuid v1.27.0
+   Compiling sqlx-macros v0.8.6
+   Compiling nix v0.30.1
+   Compiling tokio-util v0.7.19
+   Compiling h2 v0.4.19
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-plugin-api)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-shim)
+   Compiling hyper v1.11.1
+   Compiling sha1 v0.10.7
+   Compiling inout v0.1.4
+   Compiling cipher v0.4.4
+   Compiling tungstenite v0.29.0
+   Compiling hyper-util v0.1.21
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling universal-hash v0.5.1
+   Compiling opaque-debug v0.3.1
+   Compiling webauthn-rs-core v0.5.5
+   Compiling polyval v0.6.2
+   Compiling tokio-tungstenite v0.29.0
+   Compiling fs-err v3.3.2
+   Compiling tokio-openssl v0.6.5
+   Compiling tower v0.5.3
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-mesh)
+   Compiling blake2 v0.10.6
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-server)
+   Compiling tower-http v0.6.11
+   Compiling axum v0.8.9
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/plugins/ssh)
+   Compiling argon2 v0.5.3
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/plugins/mesh)
+   Compiling webauthn-rs v0.5.5
+   Compiling axum-server v0.8.0
+   Compiling ghash v0.5.1
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-agent)
+   Compiling aes v0.8.4
+   Compiling ctr v0.9.2
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/plugins/release)
+   Compiling hmac v0.12.1
+   Compiling aead v0.5.2
+   Compiling aes-gcm v0.10.3
+   Compiling hkdf v0.12.4
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 11s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/infraternal_server-0524e703d268085e)
+
+running 29 tests
+test auth::tests::socket_tests::expired_handshake_releases_user_permits ... ok
+test embedded::regressions::path_tests::full_ack_releases_retention_and_duplicate_input_is_not_replayed ... ok
+test release_build_tests::release_build_marker_is_explicit ... ok
+test release_http::tests::bounded_body_status_and_existing_destination_are_refused ... ok
+test release_http::tests::https_cannot_silently_accept_a_plaintext_bucket ... ok
+test release_http::tests::unsupported_scheme_credentials_query_and_fragment_never_connect ... ok
+test release_latest::tests::bench_bounded_metadata_verification ... ignored, local weighted-scope verification latency benchmark
+test release_latest::tests::bench_latest_fifty_callers ... ignored, local weighted-scope 50-caller real-engine RSS measurement
+test release_latest::tests::edge_pointer_is_verified_in_its_own_channel ... ok
+test release_latest::tests::pointer_authenticates_signed_version_and_refuses_replays_tampering_and_duplicates ... ok
+test release_latest::tests::stable_empty_reports_opt_in_without_edge_request ... ok
+test release_manifest::tests::noncanonical_or_cross_channel_identity_is_refused ... ok
+test release_manifest::tests::signed_identity_and_exact_bytes_are_required ... ok
+test release_payload::tests::a_missing_payload_never_enables_development_fallback ... ok
+test release_payload::tests::a_valid_older_release_replayed_under_the_requested_version_is_refused ... ok
+test release_payload::tests::cache_symlinks_and_shared_files_are_refused ... ok
+test release_payload::tests::cross_architecture_cold_and_warm_cache_measurements ... ignored, run release-profile measurements in a weighted scope
+test release_payload::tests::edge_add_host_keeps_exact_server_version_and_verified_cache ... ok
+test release_payload::tests::eight_concurrent_add_hosts_share_one_verified_download ... ok
+test release_payload::tests::missing_wrong_version_tampered_network_and_development_only_fallback ... ok
+test release_payload::tests::partial_download_restart_child ... ignored, subprocess helper for release-cache restart verification
+test release_payload::tests::resolver_startup_removes_only_owned_inactive_private_staging ... ok
+test release_payload::tests::restarted_resolution_reclaims_partial_downloads_after_process_stop ... ok
+test release_payload::tests::signed_download_cache_hit_offline_and_tampered_cache ... ok
+test release_verify::tests::compiled_authorities_keep_production_and_isolate_staging ... ok
+test release_verify::tests::openssh_signatures_preserve_descriptor_and_reject_every_byte_mutation ... ok
+test release_verify::tests::per_run_signature_obeys_the_compiled_feature_boundary ... ok
+test release_verify::tests::trust_namespace_hash_trailing_data_and_manifest_ambiguity_are_refused ... ok
+test release_verify::tests::verification_twenty_megabytes_fifty_runs ... ignored, run release-profile measurements in a weighted scope
+
+test result: ok. 24 passed; 0 failed; 5 ignored; 0 measured; 232 filtered out; finished in 5.76s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/catalog_startup-0d9fbda4170f6fce)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/enrollment-da6fac60b07f3bc7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_parser-a74dc7ee400e6578)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_review_plugin-2554022590645129)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_review_policy-62dc0d9089e19cbe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_review_role_scope-cb995c94363dc12e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/plugin_host_review-cd5fd2a2766486c6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/plugin_settings_review-19cd42f889535c04)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/remote_plugin_contract-4170807866be2a94)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 11s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/infraternal_server-0524e703d268085e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 261 filtered out; finished in 0.00s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/catalog_startup-0d9fbda4170f6fce)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/enrollment-da6fac60b07f3bc7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_parser-a74dc7ee400e6578)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_review_plugin-2554022590645129)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_review_policy-62dc0d9089e19cbe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/mesh_review_role_scope-cb995c94363dc12e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/plugin_host_review-cd5fd2a2766486c6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/plugin_settings_review-19cd42f889535c04)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/remote_plugin_contract-4170807866be2a94)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+   Compiling displaydoc v0.2.7
+   Compiling smallvec v1.16.2
+   Compiling serde_core v1.0.229
+   Compiling tinystr v0.8.4
+   Compiling icu_locale_core v2.3.0
+   Compiling zerotrie v0.2.5
+   Compiling icu_provider v2.3.1
+   Compiling icu_collections v2.3.0
+   Compiling futures-sink v0.3.34
+   Compiling serde v1.0.229
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling syn v2.0.119
+   Compiling idna_adapter v1.2.2
+   Compiling slab v0.4.12
+   Compiling tracing-core v0.1.36
+   Compiling futures-util v0.3.34
+   Compiling tracing-attributes v0.1.31
+   Compiling idna v1.1.0
+   Compiling log v0.4.34
+   Compiling num-traits v0.2.19
+   Compiling url v2.5.8
+   Compiling tracing v0.1.44
+   Compiling either v1.18.0
+   Compiling parking_lot_core v0.9.12
+   Compiling base64 v0.22.1
+   Compiling parking_lot v0.12.5
+   Compiling serde_urlencoded v0.7.1
+   Compiling flume v0.11.1
+   Compiling futures-intrusive v0.5.0
+   Compiling atoi v2.0.0
+   Compiling sha2 v0.10.9
+   Compiling futures-executor v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling crypto-common v0.1.7
+   Compiling serde_json v1.0.151
+   Compiling digest v0.10.7
+   Compiling sqlx-core v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling nix v0.30.1
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-plugin-api)
+   Compiling uuid v1.27.0
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/plugins/release)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.17s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/infraternal_plugin_release-44b7bf20fca3ad2a)
+
+running 8 tests
+test latest::tests::cancellation_joins_verification ... ok
+test latest::tests::startup_reclaims_only_owned_inactive_private_metadata ... ok
+test service::tests::api_setting_requires_owner_and_current_fresh_session ... ok
+test service::tests::authority_is_rechecked_after_the_setting_write_before_commit ... ok
+test service::tests::channel_reads_at_fifty_concurrent_callers ... ignored, run alone under CPUWeight=10000; measures SQLite action overhead, not terminal or full authenticated socket latency
+test service::tests::default_stable_refuses_silent_edge_and_persists_explicit_opt_in ... ok
+test service::tests::disabled_feature_starts_no_lookup_and_rejects_settings ... ok
+test service::tests::object_input_rejects_duplicates_unknown_fields_and_alternate_representations ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running tests/review_pool.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/review_pool-9f991b4ccdda4456)
+
+running 1 test
+test pending_channel_writers_preserve_authority_read_capacity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.60s
+
+     Running tests/review_restart.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/review_restart-db35bba1676f2b84)
+
+running 4 tests
+test lookup_creates_private_staging_under_owner_restrictive_umask ... ok
+test partial_metadata_restart_child ... ignored, subprocess helper for metadata restart verification
+test restarted_latest_reclaims_metadata_after_process_stop ... ok
+test restricted_umask_lookup_child ... ignored, subprocess helper for restricted-umask lookup verification
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+   Doc-tests infraternal_plugin_release
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling serde_core v1.0.229
+   Compiling memchr v2.8.3
+   Compiling serde v1.0.229
+   Compiling percent-encoding v2.3.2
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-plugin-api)
+   Compiling vte v0.15.0
+   Compiling form_urlencoded v1.2.2
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling serde_json v1.0.151
+   Compiling uuid v1.27.0
+   Compiling url v2.5.8
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal-shim)
+   Compiling futures-core v0.3.34
+   Compiling zeroize v1.9.0
+   Compiling futures-util v0.3.34
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.91s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/infraternal_plugin_ssh-968b7ebe7e05b20f)
+
+running 14 tests
+test auth_once::tests::caller_cannot_choose_or_extend_the_expiry_clock ... ok
+test auth_once::tests::each_method_consumes_once_and_expiry_erases_both_methods ... ok
+test auth_once::tests::invalid_material_is_refused_before_any_helper_or_scheduling ... ok
+test cli::tests::ssh_actions_are_complete_and_marked_unavailable ... ok
+test config::tests::configured_private_sources_are_excluded_and_public_trust_is_retained ... ok
+test config::tests::flattened_quoted_public_filenames_are_refused_when_existing_trust_would_be_lost ... ok
+test config::tests::malformed_public_policy_is_refused_before_it_can_change_command_arguments ... ok
+test config::tests::trust_lookup_uses_every_explicit_alias_verbatim ... ok
+test config::tests::unresolved_or_relative_public_paths_cannot_admit_first_contact ... ok
+test manifest::tests::node_provisioning_declares_an_existing_server_and_only_node_components ... ok
+test prompt::tests::helper_reply_requires_the_registered_parent_and_is_served_once ... ok
+test prompt::tests::reply_fixture ... ignored, private subprocess for the one-reply peer oracle
+test prompt_image::tests::helper_identity_refuses_in_place_and_path_replacement ... ok
+test transport::secret_tests::secret_input_has_a_fixed_bound_and_accepts_only_strings ... ok
+
+test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/auth_order.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/auth_order-c359a4d14967dc3d)
+
+running 6 tests
+test authentication_never_replays_a_mutating_first_command_or_reuses_a_failed_scope ... ok
+test cancelling_authentication_consumes_the_attempt_without_requesting_secrets ... ok
+test later_command_auth_errors_never_restart_the_selected_method_sequence ... ok
+test only_exhausted_auth_returns_typed_choose_method ... ok
+test successful_authentication_is_reported_and_later_secrets_are_never_requested ... ok
+test trust_network_and_remote_command_failures_stop_without_loading_local_secrets ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/build_removal.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/build_removal-a75be5690ec7cbbe)
+
+running 1 test
+test build_without_default_plugins_excludes_ssh_dependency ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/concurrency.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/concurrency-a8ba3b6ad309ccd8)
+
+running 7 tests
+test a_thousand_admitted_targets_keep_eight_active_backend_calls ... ignored, explicit CPUWeight10000 scale measurement with a controlled unavailable backend
+test an_interrupted_disable_keeps_admission_closed_until_its_adapter_retires ... ok
+test authenticated_batches_retain_an_opaque_session_for_trusted_issuance ... ok
+test component_off_retires_a_real_native_helper ... ok
+test concurrency_is_eight_across_batches_and_all_ten_hosts_fail_independently ... ok
+test entire_batch_validates_before_start_and_duplicates_are_refused ... ok
+test turning_off_drains_queued_work_and_reenable_never_resumes_old_batches ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/config_isolation.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/config_isolation-a2f5f0c34d4d03f8)
+
+running 2 tests
+test configured_identity_paths_are_not_inherited_by_the_command_child ... ok
+test synthetic_master_socket_is_private_at_creation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/credentials.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/credentials-b2d0a7e31dfaf6fe)
+
+running 4 tests
+test credential_helper_refuses_host_trust_and_permission_prompts ... ok
+test kernel_running_helper_is_materialized_in_its_private_scope ... ok
+test password_helpers_prepare_a_fresh_private_root_and_remove_only_their_directory ... ok
+test password_socket_refuses_an_unrelated_same_user_process ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+     Running tests/diagnostics.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/diagnostics-a9639a353de31b62)
+
+running 8 tests
+test bootstrap_status_mapping_covers_each_step_and_approved_mode ... ok
+test dynamic_public_trust_is_retained_without_becoming_file_only_admission ... ok
+test effective_configuration_never_scans_a_proxy_or_invalid_endpoint ... ok
+test every_failed_step_names_the_step_and_a_next_action ... ok
+test failed_join_retains_only_the_allowlisted_host_dns_error ... ok
+test mesh_policy_requires_both_discovery_facts_and_a_transport_refusal ... ok
+test remote_command_text_is_not_ssh_authority_and_never_enters_logs ... ok
+test status_mapping_preserves_authentication_and_missing_payload_classification ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/event_metadata.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/event_metadata-448a385ae9d6e982)
+
+running 1 test
+test unsupported_host_reports_method_and_retry_never_replays_it_as_current ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/foreground.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/foreground-6f2e360972485ce2)
+
+running 1 test
+test configured_backgrounding_is_overridden_for_owned_bootstrap_commands ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/host_trust.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/host_trust-525a10df53241405)
+
+running 2 tests
+test configured_known_hosts_command_revocation_cannot_offer_first_contact ... ignored, run through research/ssh-client/measure.py with its synthetic public host key
+test first_contact_needs_fresh_authority_and_never_replaces_existing_trust ... ignored, run through research/ssh-client/measure.py --negative-trust-oracle with its memory-held synthetic key
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/install-f311547e4f78a9c7)
+
+running 48 tests
+test acknowledged_linger_noop_does_not_own_later_external_enable ... ok
+test active_service_stop_failure_never_replaces_live_artifacts ... ok
+test active_transaction_is_live_between_ssh_setup_commands ... ok
+test breakit2_interrupted_lock_creation_allows_cleanup_and_retry ... ok
+test breakit2_rollback_preserves_foreign_launcher_new ... ok
+test breakit2_rollback_preserves_foreign_unit_new ... ok
+test breakit2_stage_refuses_parent_that_cannot_be_rolled_back ... ok
+test cleanup_receipt_cannot_authorize_a_replaced_unowned_directory ... ok
+test command_failure_names_upload_join_install_and_start_separately ... ok
+test denied_linger_request_does_not_undo_a_later_external_enable ... ok
+test earlier_attempt_classification_preserves_status_boundary_and_authentication ... ok
+test earlier_attempt_records_reject_suffixes_truncation_and_unbounded_counts ... ok
+test enrollment_process_exit_71_is_not_reported_as_directory_refusal ... ok
+test failed_upgrade_preserves_previous_binary_state_and_unit ... ok
+test foreign_data_refusal_retains_exit_status_and_actionable_directory ... ok
+test foreign_files_and_another_attempt_lock_are_never_removed ... ok
+test fresh_cleanup_refuses_a_shared_writable_receipt_parent_before_mutation ... ok
+test fresh_cleanup_resumes_after_base_removal_and_retires_its_receipt ... ok
+test fresh_cleanup_resumes_after_owner_marker_removal_with_a_fresh_session ... ok
+test fresh_failure_removes_owned_artifacts_and_success_can_rejoin ... ok
+test fresh_receipt_is_removed_before_transaction_rollback ... ok
+test fresh_rollback_resumes_after_transaction_directory_removal ... ok
+test fresh_runtime_empty_directories_do_not_block_rollback_and_retry ... ok
+test fresh_runtime_symlink_never_removes_foreign_empty_directories ... ok
+test fresh_runtime_unexpected_data_keeps_ownership_and_cleanup_receipt ... ok
+test full_stage_frees_payload_before_allocating_a_cleanup_receipt ... ok
+test interrupted_acquisition_cleanup_receipt_can_resume ... ok
+test interrupted_linger_reply_retains_intent_for_cleanup ... ok
+test interrupted_restore_recreates_links_without_deleting_the_original ... ok
+test interrupted_rollback_never_deletes_already_restored_state_on_retry ... ok
+test interrupted_upgrade_after_acknowledged_stop_restarts_the_previous_service ... ok
+test linger_policy_denial_is_a_warning_and_owned_changes_are_reversible ... ok
+test linked_owner_marker_is_refused_before_retiring_the_transaction ... ok
+test malformed_or_exposed_cleanup_receipts_never_remove_the_owned_root ... ok
+test payload_reuse_never_adopts_a_foreign_cache_directory ... ok
+test pending_fresh_cleanup_refuses_replacement_staging_until_finished ... ok
+test refused_previous_service_stop_only_removes_staging ... ok
+test rejoin_preserves_existing_host_identity_in_the_private_staging_state ... ok
+test retry_cleanup_uses_fresh_session_and_preserves_privilege_consent ... ok
+test retry_resends_payload_when_cache_content_changes ... ok
+test retry_reuses_verified_payload_after_owned_rollback ... ok
+test review_interrupted_transaction_receipt_allows_owned_cleanup ... ok
+test rollback_stop_refusal_retains_artifacts_for_later_cleanup ... ok
+test setup_transaction_holds_a_live_lock_between_shell_commands ... ok
+test stale_previous_attempt_socket_can_be_retired_without_manual_cleanup ... ok
+test start_fresh_resumes_the_same_attempt_after_owner_confirmation ... ok
+test turning_off_paused_host_provisioning_preserves_earlier_leftovers ... ok
+test writable_installation_is_refused_before_upload_or_cleanup ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.77s
+
+     Running tests/model.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/model-5a5df724a8179265)
+
+running 6 tests
+test addresses_never_become_options_or_shell_syntax ... ok
+test check_is_exact_bounded_and_rejects_every_truncation ... ok
+test consent_and_credential_references_are_the_only_request_authority ... ok
+test passwordless_sudo_keeps_default_rootless_without_explicit_consent ... ok
+test root_consent_is_required_before_ssh_and_uid_zero_cannot_be_rootless ... ok
+test start_fresh_is_declared_as_an_owned_host_provisioning_action ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/payload_source.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/payload_source-0797943f7a45e488)
+
+running 2 tests
+test stalled_download_retains_the_named_step_before_the_attempt_deadline ... ok
+test verification_failure_names_step_and_stops_before_upload ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/probe_check.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/probe_check-5ed9349fcc514c46)
+
+running 3 tests
+test breakit2_no_systemd_names_the_required_manager ... ok
+test manager_availability_does_not_request_its_private_environment ... ok
+test shell_startup_refusal_names_an_interactive_only_remedy ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/process.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/process-c6373a223bd5dcc0)
+
+running 5 tests
+test cancellation_retires_the_helper_descendant_too ... ok
+test completed_helper_retires_descendants_with_closed_pipes ... ok
+test group_identity_is_retained_until_inherited_pipes_finish ... ok
+test oversized_remote_output_is_bounded_and_active_timeout_is_enforced ... ok
+test reviewer_ssh_helper_does_not_inherit_server_reload_mask ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/proxy_policy.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/proxy_policy-55ade067683c6f1e)
+
+running 1 test
+test unchecked_proxy_hops_are_refused_before_credential_helpers_or_network ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/real_ssh.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/real_ssh-b1d4fddf0304e4fb)
+
+running 1 test
+test actual_ssh_authentication_check_and_strict_host_key_rejection ... ignored, run through research/ssh-client/measure.py with the synthetic rootless sshd fixture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/single_connection.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/single_connection-6681bf0e6aab868a)
+
+running 1 test
+test one_physical_connection_erases_helpers_and_refuses_reconnect ... ignored, run through the rootless real-sshd fixture, selecting this test only
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/source_completeness.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/source_completeness-82ed2bc0e643ea15)
+
+running 1 test
+test declared_public_modules_have_committed_sources ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/trust_round2.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/trust_round2-df5db127b0f21d08)
+
+running 2 tests
+test long_data_directory_does_not_bound_the_ssh_helper_socket ... ignored, scripts/test-ssh-host-trust.py supplies the real multi-key target
+test multi_key_target_trusts_once_and_reconnects_without_a_loop ... ignored, scripts/test-ssh-host-trust.py supplies a real multi-key sshd and memory-held credentials
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests infraternal_plugin_ssh
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

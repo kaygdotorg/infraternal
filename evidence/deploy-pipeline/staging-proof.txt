@@ -1,0 +1,29 @@
+STAGING machine=infraternal-perf-test
+STAGING kernel=6.12.69+deb13-amd64
+STAGING load_before=0.21 0.64 0.84
+
+running 1 test
+test auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::signed_deploy_preserves_passkey_ca_and_live_sessions ... STAGING fixture=retained-ca unit=infraternal-deploy-aa6b1c0f827547d4b44a0de8e4a7f7cc port=10219
+STAGING cold_locked=true real_passkey_unlock=true unit=infraternal-deploy-aa6b1c0f827547d4b44a0de8e4a7f7cc port=10219
+STAGING real_pty_sessions_created=128
+STAGING handoff=1 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160026Z-b02c2a6cd9c643ff89936fb89ba10290-B","ca_unlocked":true,"handoff_transaction_ms":986.031343,"listener_gap_bracket_ms":204.673606,"probe_max_interval_ms":101.624954,"refused_samples":2,"sha":"B","state":"deployed"}
+STAGING handoff=2 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160027Z-bfd43cd0ae804370b046e4a89e305853-A","ca_unlocked":true,"handoff_transaction_ms":664.43512,"listener_gap_bracket_ms":18.488884,"probe_max_interval_ms":2.608534,"refused_samples":14,"sha":"A","state":"deployed"}
+STAGING handoff=3 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160028Z-6dea5d878b4343efb5be552104e9da3b-B","ca_unlocked":true,"handoff_transaction_ms":734.043639,"listener_gap_bracket_ms":24.996173,"probe_max_interval_ms":3.043014,"refused_samples":17,"sha":"B","state":"deployed"}
+STAGING handoff=4 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160029Z-52864aa43b45452e948e2eb8c9bc210f-A","ca_unlocked":true,"handoff_transaction_ms":715.952195,"listener_gap_bracket_ms":27.106042,"probe_max_interval_ms":2.770182,"refused_samples":21,"sha":"A","state":"deployed"}
+STAGING handoff=5 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160029Z-822e43c445954a72909fe9da80aa6e43-B","ca_unlocked":true,"handoff_transaction_ms":845.052593,"listener_gap_bracket_ms":102.786697,"probe_max_interval_ms":101.362454,"refused_samples":1,"sha":"B","state":"deployed"}
+STAGING handoff=6 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160030Z-605f784b1aca46d0be231e03fd63cbf8-A","ca_unlocked":true,"handoff_transaction_ms":784.885897,"listener_gap_bracket_ms":20.638197,"probe_max_interval_ms":3.118367,"refused_samples":15,"sha":"A","state":"deployed"}
+STAGING handoff=7 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160031Z-5bc6961acba74f58b0262b207fb0152b-B","ca_unlocked":true,"handoff_transaction_ms":771.427622,"listener_gap_bracket_ms":18.183829,"probe_max_interval_ms":4.022846,"refused_samples":14,"sha":"B","state":"deployed"}
+STAGING handoff=8 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160032Z-5b08545bf56d4fc9a0f1be1ebbcbedc3-A","ca_unlocked":true,"handoff_transaction_ms":671.914865,"listener_gap_bracket_ms":19.367799,"probe_max_interval_ms":2.959163,"refused_samples":14,"sha":"A","state":"deployed"}
+STAGING handoff=9 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160033Z-7c1ed8047c05476a894fe29374eb5071-B","ca_unlocked":true,"handoff_transaction_ms":793.452643,"listener_gap_bracket_ms":24.431536,"probe_max_interval_ms":4.044578,"refused_samples":19,"sha":"B","state":"deployed"}
+STAGING handoff=10 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160034Z-82a0cc969fde4a7cb1cab3bf1c464dac-A","ca_unlocked":true,"handoff_transaction_ms":765.528034,"listener_gap_bracket_ms":27.313254,"probe_max_interval_ms":5.366411,"refused_samples":20,"sha":"A","state":"deployed"}
+STAGING handoff=11 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160035Z-a418f57b85b546f3a15411ae295ecab8-B","ca_unlocked":true,"handoff_transaction_ms":792.81236,"listener_gap_bracket_ms":27.412566,"probe_max_interval_ms":7.169676,"refused_samples":20,"sha":"B","state":"deployed"}
+STAGING handoff=12 {"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160035Z-fcba67c8f8024f4d8a5a49eaa3519fd4-A","ca_unlocked":true,"handoff_transaction_ms":743.860098,"listener_gap_bracket_ms":24.247803,"probe_max_interval_ms":3.061053,"refused_samples":16,"sha":"A","state":"deployed"}
+STAGING operation=refuse {"ca_unlocked":true,"refused_before_shutdown":true}
+STAGING operation=bad-deploy {"automatic_rollback":true,"backup":"/root/infraternal-bench/deploy/rc616d9c6/backups/20261012T160037Z-20c17b5b83cf4529ad3d332e3ee5beec-C","backup_integrity":true,"backup_nodes":10000,"backup_users":50,"ca_unlocked":true}
+METRIC name=signed_deploy_handoff n=12 listener_gap_bracket_p50_ms=24.432 listener_gap_bracket_p99_ms=204.674 probe_max_interval_ms=101.625 users=50 nodes=10000 real_pty_sessions=128 surviving_shim_pids=128 resumed_input_output=128 unlock_ceremonies=1 ca_unlocked=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 372 filtered out; finished in 18.64s
+
+STAGING load_after=0.44 0.67 0.84
+STAGING teardown_directory_absent=true

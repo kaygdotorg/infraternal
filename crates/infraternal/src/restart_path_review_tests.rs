@@ -1,4 +1,4 @@
-//! Verifies that sealed recovery retains the installed executable when initial invocation uses PATH [217], #157.
+//! Verifies that sealed recovery retains the installed executable when initial invocation uses PATH [217], #157/#188.
 use std::{
     ffi::CString,
     os::unix::{ffi::OsStrExt, fs::DirBuilderExt, process::CommandExt},
@@ -48,14 +48,28 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
         .mode(0o700)
         .create(&state)
         .unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut child = Command::new(std::env::current_exe().unwrap())
         .arg0("infraternal")
         .args(["--exact", NAME, "--nocapture"])
         .current_dir(&state)
         .env("REVIEW_RECOVERY_PATH_STATE", &state)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    // A refused or stalled child must not keep this functional review open.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            std::fs::remove_dir_all(&state).unwrap();
+            panic!("path recovery child did not complete");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
     std::fs::remove_dir_all(state).unwrap();
     assert!(
         output.status.success(),

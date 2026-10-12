@@ -1,0 +1,16 @@
+STAGING machine=infraternal-perf-test
+STAGING kernel=6.12.69+deb13-amd64
+STAGING load_before=0.10 0.41 0.96
+
+running 1 test
+test auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::signed_deploy_preserves_passkey_ca_and_live_sessions ... STAGING fixture=retained-ca unit=infraternal-deploy-f426ed5b7edc41ea915909f666868e0e port=18559
+STAGING cold_locked=true real_passkey_unlock=true unit=infraternal-deploy-f426ed5b7edc41ea915909f666868e0e port=18559
+FAILED
+
+failures:
+
+failures:
+    auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::signed_deploy_preserves_passkey_ca_and_live_sessions
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 372 filtered out; finished in 5.19s
+

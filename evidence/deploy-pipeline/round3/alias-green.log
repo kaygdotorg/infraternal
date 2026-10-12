@@ -1,0 +1,11 @@
+bun test v1.4.2 (744846f84)
+
+scripts/release/deploy-review.test.ts:
+ALIAS_RECOVERY restart_requests=2
+(pass) alias restoration failure still requests the retained warm rollback [377.14ms]
+
+ 1 pass
+ 2 filtered out
+ 0 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [396.00ms]

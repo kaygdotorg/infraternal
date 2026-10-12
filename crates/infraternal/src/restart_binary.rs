@@ -23,6 +23,8 @@ impl Opened {
     pub(crate) fn running() -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
             let file = File::open("/proc/self/exe")?;
             let invoked = std::env::args_os()
                 .next()
@@ -34,7 +36,22 @@ impl Opened {
             let path = if invoked.is_absolute() {
                 invoked
             } else {
-                std::env::current_exe()?
+                let resolved = std::env::current_exe()?;
+                if file.metadata()?.nlink() == 0 {
+                    // Atomic installation unlinks the running inode. Its kernel
+                    // label is not a pathname: retain the live install target
+                    // for the next reload after sealed recovery [217,250], #188.
+                    // Check the inode first so a literal filename ending in this
+                    // suffix stays intact; preserve non-UTF-8 pathname bytes too.
+                    let path = resolved
+                        .as_os_str()
+                        .as_bytes()
+                        .strip_suffix(b" (deleted)")
+                        .ok_or(io::ErrorKind::NotFound)?;
+                    PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()))
+                } else {
+                    resolved
+                }
             };
             let image =
                 crate::restart_image::Image::copy_limit(&file, Path::new("/"), 512 * 1024 * 1024)?;

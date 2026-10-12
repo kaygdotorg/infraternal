@@ -1,0 +1,2 @@
+production trust: FAIL (missing image or staging authority)
+expected_staging_rejection_exit=1

@@ -1,5 +1,9 @@
 //! Tests private control endpoints and replacement-path trust before any key is exported [217], #154.
 
+#[cfg(target_os = "linux")]
+#[path = "restart_deleted_path_review_tests.rs"]
+mod deleted_path_review;
+
 use super::*;
 use crate::restart_binary::fixture::Signed;
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
@@ -270,10 +274,18 @@ fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
     let opened = signed.open().unwrap();
     assert!(infraternal_server::ca_handoff_binary::capable(&opened.file).unwrap());
     assert!(!opened.warm);
-    let original = opened.file.metadata().unwrap().ino();
+    let original = std::fs::metadata(&binary).unwrap().ino();
+    let sealed = opened.file.metadata().unwrap().ino();
+    assert_ne!(original, sealed);
     std::fs::rename(&binary, directory.0.join("retained")).unwrap();
     std::fs::copy("/usr/bin/bash", &binary).unwrap();
-    assert_eq!(opened.file.metadata().unwrap().ino(), original);
+    assert_eq!(opened.file.metadata().unwrap().ino(), sealed);
+    assert_eq!(
+        std::fs::metadata(directory.0.join("retained"))
+            .unwrap()
+            .ino(),
+        original
+    );
     assert_ne!(std::fs::metadata(&binary).unwrap().ino(), original);
     assert!(Replacement::new(opened, None).unwrap().input.is_none());
 }

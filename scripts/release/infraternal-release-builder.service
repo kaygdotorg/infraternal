@@ -1,0 +1,19 @@
+# Serial gated-dev release builder with two reserved CPUs and load backoff [250].
+[Unit]
+Description=Build gated infraternal dev releases
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Developer/infraternal
+ExecStart=/usr/bin/env python3 scripts/release/dev_builder.py --repo %h/Developer/infraternal --start-sha c0d01d2285b92ea8e452f10a3a0d8b479fa1bff8
+Environment=PATH=%h/.nix-profile/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+CPUWeight=10000
+CPUQuota=200%
+UMask=0077
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
