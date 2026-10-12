@@ -141,3 +141,14 @@ in `verify-staging-final.log`.
 Production cut-over still requires that gate and an independent break-it review
 with no P0/P1. D251 quiet-window automatic application is a separate integration
 prerequisite; the existing channel setting alone does not implement it.
+
+# Round-three review fixes and reproof
+
+The exact four independent review regressions and the R1/P1 plus R2–R4/P2
+repairs are recorded in [round-three evidence](round3/README.md). The fresh
+[locked staging rerun](round3/staging-proof.txt) after the recovery-path fix
+passes 12 handoffs, 128 preserved shim PIDs/resumed sessions, single-unlock CA
+custody, C refusal, verified warm rollback, backup and teardown. Its listener
+brackets are p50/p99 18.576/102.768 ms with 101.438 ms worst probe spacing.
+The earlier acceptance table and raw receipt above remain the original run.
+Final branch-head gate output is recorded verbatim on #188.
