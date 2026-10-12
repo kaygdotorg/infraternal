@@ -1,0 +1,13 @@
+Merge reviewed mesh data-plane repairs into D215 transport (#129)
+
+Transport head 515d3712 inherited translated-ingress, endpoint persistence and
+orphan-route defects. Merge reviewed feec1988 with --no-ff so its transactional
+kernel/persistence fixes and ownership regressions remain traceable together.
+Reject reimplementing or selectively copying those repairs into transport:
+that would lose reviewed recovery invariants and their regression history.
+
+Production files merge automatically. Eight new Config/Chunk fixture literals
+need server: None for this branch's additive D215 server-path field; retain all
+original assertions and inventories. D128, D198, D215, D216.
+
+Refs: #129

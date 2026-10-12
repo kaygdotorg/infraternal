@@ -1,0 +1,12 @@
+--- /home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/remote/src/remote_quic.rs
++++ /home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/src/remote_quic_ack_candidate.rs
+@@ -87,6 +87,9 @@
+     idle: std::time::Duration,
+ ) -> std::sync::Arc<quinn::TransportConfig> {
+     let mut config = quinn::TransportConfig::default();
++    let mut ack = quinn::AckFrequencyConfig::default();
++    ack.max_ack_delay(Some(std::time::Duration::from_millis(1)));
++    config.ack_frequency_config(Some(ack));
+     config.congestion_controller_factory(std::sync::Arc::new(
+         quinn::congestion::BbrConfig::default(),
+     ));

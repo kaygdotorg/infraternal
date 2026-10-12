@@ -1,0 +1,17 @@
+test(shim): enforce deferred input validation and FIFO re-ticketing
+
+A paused valid input must retain its cursor transaction while malformed gaps
+and overflow remain refusals. After the held frame is accepted, fresh input
+in its trailing socket bytes must queue behind an older deferred peer.
+Exercise both rules through the real shim peer/PTY state.
+
+Rejected assertions only on final bytes: they miss capacity-dependent cursor
+and ticket ordering errors. The FIFO regression failed with no renewed ticket
+instead of ticket2 before the module fix.
+
+D62/D128/D215. Fresh exact current artifact verified 78 tests; fmt and strict
+all-target Clippy pass. Full unit result: 66 passed, 0 failed, 12 ignored
+(110.95s). Immutable artifact/source/inventory seals and exact logs archived
+under evidence/mesh-agent-transport-round2/shim-session-*.
+
+Refs: #129

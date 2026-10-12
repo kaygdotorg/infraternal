@@ -1,0 +1,14 @@
+Declare negotiated support for parked enrolled fallback transports (#129)
+
+Expose one additive channel capability for servers that can park an
+already ledger-admitted enrolled fallback without replacing the live host.
+Clients can keep the fallback authenticated while mesh is active and reuse
+its greeting on activation. Legacy peers remain on their existing path.
+
+An unconditional standby request was rejected because an older server
+cannot distinguish it from an invalid pre-greeting action. No transport
+engine or mandatory greeting field changes (D128, D198, D215).
+
+Validation: cargo fmt --all; plugin-api all-target clippy with -D warnings;
+plugin-api library tests: 10 passed, 0 failed.
+Refs: #129

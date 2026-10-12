@@ -1,0 +1,22 @@
+{
+  "qualification": "Corrected hexREADY fixture reproduces real queue refusal against immutable old actual production shim runner; test protocol consumer library does not execute PTY implementation",
+  "runner_sha256": "7991631c5e7d007bde5ea7eb904c39c68124c427af8d29657449454cafe8fe68",
+  "runner_source": "parked-shared-final-provenance.json source_sha256/session.rs",
+  "test_sha256": "79044af3fbb4f2075cd352cf8b9617f31026a4a0160e854a59e35715bbcb5484",
+  "result": "0 passed;1failed;UnexpectedEof at shared writer State;0.55s",
+  "snapshots": {
+    "frame": [
+      "crates/infraternal-shim/src/frame.rs",
+      "crates/infraternal-shim/tests/unit/frame.rs"
+    ],
+    "session": [
+      "crates/infraternal-shim/src/session.rs",
+      "crates/infraternal-shim/tests/unit/sequenced_input.rs",
+      "crates/infraternal-shim/tests/unit/session_budgets.rs",
+      "crates/infraternal-shim/tests/unit/session_resize.rs"
+    ],
+    "integration": [
+      "crates/infraternal/tests/shim.rs"
+    ]
+  }
+}

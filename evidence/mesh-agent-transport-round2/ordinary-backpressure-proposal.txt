@@ -1,0 +1,5 @@
+D215 #129 additive negotiation clarification before the ordinary native writer repair.
+
+The SHARED_WRITER capability negotiates bounded queue deferral independently of selection mode. A supporting ordinary native writer should select this advertised capability while still using SelectWriter, so its input also waits for the surviving global queue instead of disconnecting. It does not use SelectSharedWriter or change ordinary replacement semantics. Old shims that do not advertise the capability retain their existing negotiated mask and capacity behavior.
+
+Reason: the server16KiB durableAck window alone cannot bound the surviving1MiB queue across512 retained writer identities. Current connect_writer requests only bits0/1/2, so ordinary native paths could still receive a capacity refusal after detached writers left accepted bytes queued. Added a realUnix handshake fail-first regression for masks3/15 and unchanged ordinary selector; implementation will follow its observed red.

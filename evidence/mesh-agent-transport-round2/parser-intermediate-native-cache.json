@@ -1,0 +1,8 @@
+{
+  "source_cache": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/vt-tools/native-21ecc4916239931c11b1ccaf163d5758eb976d2556594177a3bb00da4dbe72e3",
+  "gate_cache": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/vt-tools/native-e676671fbf38be0417f85f4af9d1086e12c2396818d20b5f7d5a7ac940e66995",
+  "abi": "x86_64-linux-gnu",
+  "optimization": "ReleaseSafe",
+  "source_recipe_identical": true,
+  "archive_sha256": "453460971ef97246191ea57cec99727b7edb75913174dab8ff3678a5da7199b4"
+}

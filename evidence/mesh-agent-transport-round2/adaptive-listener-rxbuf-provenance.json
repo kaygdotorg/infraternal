@@ -1,0 +1,45 @@
+{
+  "base": "cf64f1d2",
+  "candidate": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-listener-rxbuf",
+  "change": "central listener SO_RCVBUF request212992 B only; default100ms/defaultACK/pinnedguard unchanged",
+  "baseline_import_sha256": {
+    "crates/plugins/remote/src/remote_quic.rs": "665584ffdd052384a2530fea5f57d872a049d9bfd01b2f354f5cf6edd6f20e6e",
+    "crates/plugins/remote/src/remote_tls.rs": "5ac6f37dd5b0def3fcb05a27dab806c291d97c591df39a6d4b5840f81ebc328c",
+    "crates/infraternal-agent/src/remote_dial_runtime.rs": "da792cc70ba69a66961d353f5c42c92dfbabdf152069408aab52cabac5f68ded",
+    "crates/infraternal-agent/src/remote_mesh_idle_tests.rs": "4bad7780c05c08768f1a4395e848414bfaa47c08a65a6cc311c9f4f41dc4108e"
+  },
+  "registry_artifacts": 216,
+  "lock_registry_version_source_checksum_mismatches": 0,
+  "memory_ceiling_incremental_bytes_one_listener": 212992,
+  "expected_nodes_one_listener": 1000,
+  "no_kernel_or_node_socket_changes": true,
+  "target": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness-target",
+  "profile": "GNU release opt3/fullLTO/1CGU/strip/unwind",
+  "benchmark": "Authorized serial default/candidate completed; both FAIL acceptance unchanged",
+  "executable": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness-listener-rxbuf",
+  "executable_sha256": "ff9f252ecb2df4e13393342751405a29f38debde1fb8dd69f822e46cd1b7eea9",
+  "executable_bytes": 7935648,
+  "build_result": "PASS --offline --locked release --lib --no-run, 1m44s; one unused remote_tls import warning",
+  "configuration_result": {
+    "passed": 1,
+    "failed": 0,
+    "before_effective_bytes": 212992,
+    "effective_bytes": 425984,
+    "incremental_bytes": 212992,
+    "local_address": "127.0.0.1:14047",
+    "inode": "socket:[13281471]",
+    "connections": 0
+  },
+  "build_command": "rustup run 1.99.0 cargo test --offline --locked --release --lib --no-run --target-dir /home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness-target",
+  "configuration_command": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness-listener-rxbuf central_listener_receive_buffer_configuration_is_bounded --nocapture",
+  "candidate_sha256": {
+    "Cargo.toml": "6a795d57de8e239d3928f71d1cefb4d2a01322c4e919298485a8b115ab664eff",
+    "Cargo.lock": "97f266a87860cc6d0fa5468d65208d04d2eca5775045ba17e37e98282b66c68c",
+    "src/lib.rs": "a6675a2bfe257d42d40b21c371da95b60a209b5f80fb2af12068485bfd1034ff",
+    "listener-only-fixture.patch": "c86e5c8e8f0e4b61168d0e135db81a49da72c92a5d91d70a431a530a8d12e148",
+    "frozen-workspace/crates/infraternal-agent/src/remote_mesh_idle_tests.rs": "f629ce03b74ebcf35b2548d2c1c54b242e5efaf6d6134ac9b7d2643efd005eef"
+  },
+  "cohort_comparison": "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-comparison.json",
+  "observer_script_final_sha256": "4895e170120c4322cecdd0f0feb592be7b88044a063982146251d7583dc32bde",
+  "observer_role_prefix_fix_after_measurement": true
+}

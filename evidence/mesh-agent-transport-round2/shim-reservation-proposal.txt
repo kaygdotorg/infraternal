@@ -1,0 +1,5 @@
+D215 #129 additive shared-input reservation clarification before the follow-up repair.
+
+A deferred shared Input must not globally disable reading ordinary peers: ReadFrom, InputStateRequest, Resize and duplicate input continue to parse and progress. Space reserved for the oldest deferred request is unavailable to fresh input from any peer. A peer without SHARED_WRITER that requests new input while that space is reserved receives its existing capacity refusal without cursor/geometry mutation; it does not gain deferred-input semantics. When one deferred frame succeeds and a later frame on the same socket defers, the later request receives a new queue ticket so it cannot overtake an already waiting peer.
+
+Independent review found that the draft POLLIN guard currently blocks ordinary controls and can deadlock an output-blocked PTY before queued input drains. A corrected real-PTY fail-first regression is being executed against the immutable draft runner. Two-peer ordering coverage will verify renewed tickets. No frozen frame layout or foundational library change. Final module gates and real-terminal performance remain pending.

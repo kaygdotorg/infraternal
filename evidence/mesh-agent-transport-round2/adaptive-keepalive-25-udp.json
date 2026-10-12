@@ -1,0 +1,1230 @@
+{
+  "role": "one-second readonly sampler of owned cohort UDP sockets; overhead included in host load",
+  "observer_cpu_seconds": 1.634176014,
+  "observer_wall_seconds": 85.85882019996643,
+  "samples": [
+    {
+      "elapsed_s": 0.004302978515625,
+      "owned_socket_count": 0,
+      "total_drops": 0,
+      "total_rx_queue_bytes": 0,
+      "max_socket_rx_queue_bytes": 0,
+      "sockets_with_drops": []
+    },
+    {
+      "elapsed_s": 1.0140833854675293,
+      "owned_socket_count": 305,
+      "total_drops": 133,
+      "total_rx_queue_bytes": 1280,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 1280,
+          "drops": 133
+        }
+      ]
+    },
+    {
+      "elapsed_s": 2.054767370223999,
+      "owned_socket_count": 521,
+      "total_drops": 629,
+      "total_rx_queue_bytes": 279552,
+      "max_socket_rx_queue_bytes": 200192,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 200192,
+          "drops": 629
+        }
+      ]
+    },
+    {
+      "elapsed_s": 3.0984621047973633,
+      "owned_socket_count": 548,
+      "total_drops": 3477,
+      "total_rx_queue_bytes": 45824,
+      "max_socket_rx_queue_bytes": 19712,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 19712,
+          "drops": 3477
+        }
+      ]
+    },
+    {
+      "elapsed_s": 4.131808757781982,
+      "owned_socket_count": 585,
+      "total_drops": 7838,
+      "total_rx_queue_bytes": 166144,
+      "max_socket_rx_queue_bytes": 101632,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 101632,
+          "drops": 7838
+        }
+      ]
+    },
+    {
+      "elapsed_s": 5.14949893951416,
+      "owned_socket_count": 678,
+      "total_drops": 10070,
+      "total_rx_queue_bytes": 0,
+      "max_socket_rx_queue_bytes": 0,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 10070
+        }
+      ]
+    },
+    {
+      "elapsed_s": 6.179711818695068,
+      "owned_socket_count": 687,
+      "total_drops": 17312,
+      "total_rx_queue_bytes": 184320,
+      "max_socket_rx_queue_bytes": 112640,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 112640,
+          "drops": 17312
+        }
+      ]
+    },
+    {
+      "elapsed_s": 7.2105278968811035,
+      "owned_socket_count": 695,
+      "total_drops": 24151,
+      "total_rx_queue_bytes": 236800,
+      "max_socket_rx_queue_bytes": 185600,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 185600,
+          "drops": 24151
+        }
+      ]
+    },
+    {
+      "elapsed_s": 8.243942260742188,
+      "owned_socket_count": 773,
+      "total_drops": 30999,
+      "total_rx_queue_bytes": 248320,
+      "max_socket_rx_queue_bytes": 3840,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 3840,
+          "drops": 30999
+        }
+      ]
+    },
+    {
+      "elapsed_s": 9.37234902381897,
+      "owned_socket_count": 797,
+      "total_drops": 41045,
+      "total_rx_queue_bytes": 140032,
+      "max_socket_rx_queue_bytes": 107520,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 107520,
+          "drops": 41045
+        }
+      ]
+    },
+    {
+      "elapsed_s": 10.407173156738281,
+      "owned_socket_count": 813,
+      "total_drops": 49787,
+      "total_rx_queue_bytes": 201472,
+      "max_socket_rx_queue_bytes": 166912,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 166912,
+          "drops": 49787
+        }
+      ]
+    },
+    {
+      "elapsed_s": 11.45132827758789,
+      "owned_socket_count": 823,
+      "total_drops": 58927,
+      "total_rx_queue_bytes": 6400,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 58927
+        }
+      ]
+    },
+    {
+      "elapsed_s": 12.476989030838013,
+      "owned_socket_count": 862,
+      "total_drops": 67286,
+      "total_rx_queue_bytes": 200960,
+      "max_socket_rx_queue_bytes": 161280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 161280,
+          "drops": 67286
+        }
+      ]
+    },
+    {
+      "elapsed_s": 13.506015300750732,
+      "owned_socket_count": 924,
+      "total_drops": 73140,
+      "total_rx_queue_bytes": 145920,
+      "max_socket_rx_queue_bytes": 79360,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 79360,
+          "drops": 73140
+        }
+      ]
+    },
+    {
+      "elapsed_s": 14.56600546836853,
+      "owned_socket_count": 940,
+      "total_drops": 83326,
+      "total_rx_queue_bytes": 144640,
+      "max_socket_rx_queue_bytes": 47360,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 47360,
+          "drops": 83326
+        }
+      ]
+    },
+    {
+      "elapsed_s": 15.590830087661743,
+      "owned_socket_count": 958,
+      "total_drops": 94758,
+      "total_rx_queue_bytes": 40960,
+      "max_socket_rx_queue_bytes": 26880,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 26880,
+          "drops": 94758
+        }
+      ]
+    },
+    {
+      "elapsed_s": 16.612187147140503,
+      "owned_socket_count": 993,
+      "total_drops": 105181,
+      "total_rx_queue_bytes": 151552,
+      "max_socket_rx_queue_bytes": 124672,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 124672,
+          "drops": 105181
+        }
+      ]
+    },
+    {
+      "elapsed_s": 17.641990661621094,
+      "owned_socket_count": 1001,
+      "total_drops": 115078,
+      "total_rx_queue_bytes": 25600,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 1280,
+          "drops": 115078
+        }
+      ]
+    },
+    {
+      "elapsed_s": 18.748612642288208,
+      "owned_socket_count": 1001,
+      "total_drops": 128827,
+      "total_rx_queue_bytes": 142080,
+      "max_socket_rx_queue_bytes": 115200,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 115200,
+          "drops": 128827
+        }
+      ]
+    },
+    {
+      "elapsed_s": 19.769947290420532,
+      "owned_socket_count": 1001,
+      "total_drops": 138751,
+      "total_rx_queue_bytes": 281600,
+      "max_socket_rx_queue_bytes": 189440,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 189440,
+          "drops": 138751
+        }
+      ]
+    },
+    {
+      "elapsed_s": 20.79009699821472,
+      "owned_socket_count": 1001,
+      "total_drops": 156152,
+      "total_rx_queue_bytes": 186880,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 156152
+        }
+      ]
+    },
+    {
+      "elapsed_s": 21.816558837890625,
+      "owned_socket_count": 1001,
+      "total_drops": 175881,
+      "total_rx_queue_bytes": 244992,
+      "max_socket_rx_queue_bytes": 199680,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 199680,
+          "drops": 175881
+        }
+      ]
+    },
+    {
+      "elapsed_s": 22.84783101081848,
+      "owned_socket_count": 1001,
+      "total_drops": 186589,
+      "total_rx_queue_bytes": 193280,
+      "max_socket_rx_queue_bytes": 161280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 161280,
+          "drops": 186589
+        }
+      ]
+    },
+    {
+      "elapsed_s": 23.869194269180298,
+      "owned_socket_count": 1001,
+      "total_drops": 194468,
+      "total_rx_queue_bytes": 189440,
+      "max_socket_rx_queue_bytes": 183040,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 183040,
+          "drops": 194468
+        }
+      ]
+    },
+    {
+      "elapsed_s": 24.932990789413452,
+      "owned_socket_count": 1001,
+      "total_drops": 204011,
+      "total_rx_queue_bytes": 269824,
+      "max_socket_rx_queue_bytes": 205824,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 205824,
+          "drops": 204011
+        }
+      ]
+    },
+    {
+      "elapsed_s": 26.013027906417847,
+      "owned_socket_count": 1001,
+      "total_drops": 213529,
+      "total_rx_queue_bytes": 66560,
+      "max_socket_rx_queue_bytes": 48640,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 48640,
+          "drops": 213529
+        }
+      ]
+    },
+    {
+      "elapsed_s": 27.0572292804718,
+      "owned_socket_count": 1001,
+      "total_drops": 221151,
+      "total_rx_queue_bytes": 248320,
+      "max_socket_rx_queue_bytes": 116480,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 116480,
+          "drops": 221151
+        }
+      ]
+    },
+    {
+      "elapsed_s": 28.102622747421265,
+      "owned_socket_count": 1001,
+      "total_drops": 231978,
+      "total_rx_queue_bytes": 209920,
+      "max_socket_rx_queue_bytes": 170240,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 170240,
+          "drops": 231978
+        }
+      ]
+    },
+    {
+      "elapsed_s": 29.15118408203125,
+      "owned_socket_count": 1001,
+      "total_drops": 241586,
+      "total_rx_queue_bytes": 32000,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 241586
+        }
+      ]
+    },
+    {
+      "elapsed_s": 30.2130868434906,
+      "owned_socket_count": 1001,
+      "total_drops": 250734,
+      "total_rx_queue_bytes": 163840,
+      "max_socket_rx_queue_bytes": 110080,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 110080,
+          "drops": 250734
+        }
+      ]
+    },
+    {
+      "elapsed_s": 31.264355897903442,
+      "owned_socket_count": 1001,
+      "total_drops": 259885,
+      "total_rx_queue_bytes": 216320,
+      "max_socket_rx_queue_bytes": 172800,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 172800,
+          "drops": 259885
+        }
+      ]
+    },
+    {
+      "elapsed_s": 32.33623790740967,
+      "owned_socket_count": 1000,
+      "total_drops": 269121,
+      "total_rx_queue_bytes": 254720,
+      "max_socket_rx_queue_bytes": 190720,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 190720,
+          "drops": 269121
+        }
+      ]
+    },
+    {
+      "elapsed_s": 33.403565406799316,
+      "owned_socket_count": 1001,
+      "total_drops": 279866,
+      "total_rx_queue_bytes": 98560,
+      "max_socket_rx_queue_bytes": 35840,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 35840,
+          "drops": 279866
+        }
+      ]
+    },
+    {
+      "elapsed_s": 34.43098759651184,
+      "owned_socket_count": 1001,
+      "total_drops": 295113,
+      "total_rx_queue_bytes": 206080,
+      "max_socket_rx_queue_bytes": 165120,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 165120,
+          "drops": 295113
+        }
+      ]
+    },
+    {
+      "elapsed_s": 35.45608329772949,
+      "owned_socket_count": 1001,
+      "total_drops": 310444,
+      "total_rx_queue_bytes": 60160,
+      "max_socket_rx_queue_bytes": 16640,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 16640,
+          "drops": 310444
+        }
+      ]
+    },
+    {
+      "elapsed_s": 36.48819828033447,
+      "owned_socket_count": 1001,
+      "total_drops": 320978,
+      "total_rx_queue_bytes": 143360,
+      "max_socket_rx_queue_bytes": 136960,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 136960,
+          "drops": 320978
+        }
+      ]
+    },
+    {
+      "elapsed_s": 37.54544186592102,
+      "owned_socket_count": 1001,
+      "total_drops": 331507,
+      "total_rx_queue_bytes": 483840,
+      "max_socket_rx_queue_bytes": 185600,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 185600,
+          "drops": 331507
+        }
+      ]
+    },
+    {
+      "elapsed_s": 38.605700969696045,
+      "owned_socket_count": 1002,
+      "total_drops": 350688,
+      "total_rx_queue_bytes": 312320,
+      "max_socket_rx_queue_bytes": 172800,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 172800,
+          "drops": 350688
+        }
+      ]
+    },
+    {
+      "elapsed_s": 39.68661403656006,
+      "owned_socket_count": 1001,
+      "total_drops": 368281,
+      "total_rx_queue_bytes": 51200,
+      "max_socket_rx_queue_bytes": 21760,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 21760,
+          "drops": 368281
+        }
+      ]
+    },
+    {
+      "elapsed_s": 40.7227783203125,
+      "owned_socket_count": 1001,
+      "total_drops": 383433,
+      "total_rx_queue_bytes": 198400,
+      "max_socket_rx_queue_bytes": 161280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 161280,
+          "drops": 383433
+        }
+      ]
+    },
+    {
+      "elapsed_s": 41.79157781600952,
+      "owned_socket_count": 1001,
+      "total_drops": 402494,
+      "total_rx_queue_bytes": 202240,
+      "max_socket_rx_queue_bytes": 167680,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 167680,
+          "drops": 402494
+        }
+      ]
+    },
+    {
+      "elapsed_s": 42.82239294052124,
+      "owned_socket_count": 1001,
+      "total_drops": 421973,
+      "total_rx_queue_bytes": 281600,
+      "max_socket_rx_queue_bytes": 193280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 193280,
+          "drops": 421973
+        }
+      ]
+    },
+    {
+      "elapsed_s": 43.92236542701721,
+      "owned_socket_count": 1001,
+      "total_drops": 440525,
+      "total_rx_queue_bytes": 209920,
+      "max_socket_rx_queue_bytes": 170240,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 170240,
+          "drops": 440525
+        }
+      ]
+    },
+    {
+      "elapsed_s": 45.037163972854614,
+      "owned_socket_count": 1001,
+      "total_drops": 451895,
+      "total_rx_queue_bytes": 231680,
+      "max_socket_rx_queue_bytes": 195840,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 195840,
+          "drops": 451895
+        }
+      ]
+    },
+    {
+      "elapsed_s": 46.08081364631653,
+      "owned_socket_count": 1001,
+      "total_drops": 469401,
+      "total_rx_queue_bytes": 115200,
+      "max_socket_rx_queue_bytes": 35840,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 35840,
+          "drops": 469401
+        }
+      ]
+    },
+    {
+      "elapsed_s": 47.1309232711792,
+      "owned_socket_count": 1001,
+      "total_drops": 488988,
+      "total_rx_queue_bytes": 217600,
+      "max_socket_rx_queue_bytes": 190720,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 190720,
+          "drops": 488988
+        }
+      ]
+    },
+    {
+      "elapsed_s": 48.27250051498413,
+      "owned_socket_count": 1001,
+      "total_drops": 506033,
+      "total_rx_queue_bytes": 243200,
+      "max_socket_rx_queue_bytes": 177920,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 177920,
+          "drops": 506033
+        }
+      ]
+    },
+    {
+      "elapsed_s": 49.38774490356445,
+      "owned_socket_count": 1001,
+      "total_drops": 526011,
+      "total_rx_queue_bytes": 204800,
+      "max_socket_rx_queue_bytes": 167680,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 167680,
+          "drops": 526011
+        }
+      ]
+    },
+    {
+      "elapsed_s": 50.40880513191223,
+      "owned_socket_count": 1001,
+      "total_drops": 542903,
+      "total_rx_queue_bytes": 217600,
+      "max_socket_rx_queue_bytes": 213760,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 213760,
+          "drops": 542903
+        }
+      ]
+    },
+    {
+      "elapsed_s": 51.45101475715637,
+      "owned_socket_count": 1001,
+      "total_drops": 558162,
+      "total_rx_queue_bytes": 232960,
+      "max_socket_rx_queue_bytes": 151040,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 151040,
+          "drops": 558162
+        }
+      ]
+    },
+    {
+      "elapsed_s": 52.48753523826599,
+      "owned_socket_count": 1001,
+      "total_drops": 569583,
+      "total_rx_queue_bytes": 115200,
+      "max_socket_rx_queue_bytes": 32000,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 32000,
+          "drops": 569583
+        }
+      ]
+    },
+    {
+      "elapsed_s": 53.527196645736694,
+      "owned_socket_count": 1001,
+      "total_drops": 586723,
+      "total_rx_queue_bytes": 23040,
+      "max_socket_rx_queue_bytes": 12800,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 12800,
+          "drops": 586723
+        }
+      ]
+    },
+    {
+      "elapsed_s": 54.57670307159424,
+      "owned_socket_count": 1001,
+      "total_drops": 593937,
+      "total_rx_queue_bytes": 202240,
+      "max_socket_rx_queue_bytes": 104960,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 960,
+          "rx_queue_bytes": 104960,
+          "drops": 593937
+        }
+      ]
+    },
+    {
+      "elapsed_s": 55.61432981491089,
+      "owned_socket_count": 1001,
+      "total_drops": 604831,
+      "total_rx_queue_bytes": 181760,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 604831
+        }
+      ]
+    },
+    {
+      "elapsed_s": 56.66520571708679,
+      "owned_socket_count": 1001,
+      "total_drops": 624421,
+      "total_rx_queue_bytes": 204800,
+      "max_socket_rx_queue_bytes": 195840,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 195840,
+          "drops": 624421
+        }
+      ]
+    },
+    {
+      "elapsed_s": 57.70422101020813,
+      "owned_socket_count": 1001,
+      "total_drops": 639328,
+      "total_rx_queue_bytes": 215040,
+      "max_socket_rx_queue_bytes": 172800,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 172800,
+          "drops": 639328
+        }
+      ]
+    },
+    {
+      "elapsed_s": 58.75695538520813,
+      "owned_socket_count": 1001,
+      "total_drops": 650576,
+      "total_rx_queue_bytes": 216320,
+      "max_socket_rx_queue_bytes": 116480,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 116480,
+          "drops": 650576
+        }
+      ]
+    },
+    {
+      "elapsed_s": 59.79671001434326,
+      "owned_socket_count": 1002,
+      "total_drops": 658997,
+      "total_rx_queue_bytes": 110080,
+      "max_socket_rx_queue_bytes": 47360,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 47360,
+          "drops": 658997
+        }
+      ]
+    },
+    {
+      "elapsed_s": 60.83019018173218,
+      "owned_socket_count": 1001,
+      "total_drops": 666024,
+      "total_rx_queue_bytes": 231680,
+      "max_socket_rx_queue_bytes": 112640,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 112640,
+          "drops": 666024
+        }
+      ]
+    },
+    {
+      "elapsed_s": 61.85669231414795,
+      "owned_socket_count": 1001,
+      "total_drops": 674904,
+      "total_rx_queue_bytes": 120320,
+      "max_socket_rx_queue_bytes": 97280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 97280,
+          "drops": 674904
+        }
+      ]
+    },
+    {
+      "elapsed_s": 62.88038635253906,
+      "owned_socket_count": 1001,
+      "total_drops": 692249,
+      "total_rx_queue_bytes": 276480,
+      "max_socket_rx_queue_bytes": 198400,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 198400,
+          "drops": 692249
+        }
+      ]
+    },
+    {
+      "elapsed_s": 63.98854637145996,
+      "owned_socket_count": 1001,
+      "total_drops": 709184,
+      "total_rx_queue_bytes": 28160,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 709184
+        }
+      ]
+    },
+    {
+      "elapsed_s": 65.02666807174683,
+      "owned_socket_count": 1001,
+      "total_drops": 719053,
+      "total_rx_queue_bytes": 163840,
+      "max_socket_rx_queue_bytes": 94720,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 94720,
+          "drops": 719053
+        }
+      ]
+    },
+    {
+      "elapsed_s": 66.06226396560669,
+      "owned_socket_count": 1001,
+      "total_drops": 729354,
+      "total_rx_queue_bytes": 238080,
+      "max_socket_rx_queue_bytes": 135680,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 135680,
+          "drops": 729354
+        }
+      ]
+    },
+    {
+      "elapsed_s": 67.0892117023468,
+      "owned_socket_count": 1001,
+      "total_drops": 744745,
+      "total_rx_queue_bytes": 211200,
+      "max_socket_rx_queue_bytes": 185600,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 185600,
+          "drops": 744745
+        }
+      ]
+    },
+    {
+      "elapsed_s": 68.13367867469788,
+      "owned_socket_count": 1001,
+      "total_drops": 755388,
+      "total_rx_queue_bytes": 170240,
+      "max_socket_rx_queue_bytes": 103680,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 103680,
+          "drops": 755388
+        }
+      ]
+    },
+    {
+      "elapsed_s": 69.16876554489136,
+      "owned_socket_count": 1001,
+      "total_drops": 765208,
+      "total_rx_queue_bytes": 224000,
+      "max_socket_rx_queue_bytes": 167680,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 167680,
+          "drops": 765208
+        }
+      ]
+    },
+    {
+      "elapsed_s": 70.20951461791992,
+      "owned_socket_count": 1001,
+      "total_drops": 775500,
+      "total_rx_queue_bytes": 6400,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 775500
+        }
+      ]
+    },
+    {
+      "elapsed_s": 71.25519061088562,
+      "owned_socket_count": 1001,
+      "total_drops": 788197,
+      "total_rx_queue_bytes": 198400,
+      "max_socket_rx_queue_bytes": 122880,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 122880,
+          "drops": 788197
+        }
+      ]
+    },
+    {
+      "elapsed_s": 72.2855110168457,
+      "owned_socket_count": 1000,
+      "total_drops": 799291,
+      "total_rx_queue_bytes": 38400,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 799291
+        }
+      ]
+    },
+    {
+      "elapsed_s": 73.33038854598999,
+      "owned_socket_count": 1001,
+      "total_drops": 809200,
+      "total_rx_queue_bytes": 248320,
+      "max_socket_rx_queue_bytes": 172800,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 172800,
+          "drops": 809200
+        }
+      ]
+    },
+    {
+      "elapsed_s": 74.38327813148499,
+      "owned_socket_count": 1001,
+      "total_drops": 817137,
+      "total_rx_queue_bytes": 284160,
+      "max_socket_rx_queue_bytes": 180480,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 180480,
+          "drops": 817137
+        }
+      ]
+    },
+    {
+      "elapsed_s": 75.44539284706116,
+      "owned_socket_count": 1001,
+      "total_drops": 826787,
+      "total_rx_queue_bytes": 431360,
+      "max_socket_rx_queue_bytes": 172800,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 172800,
+          "drops": 826787
+        }
+      ]
+    },
+    {
+      "elapsed_s": 76.57740569114685,
+      "owned_socket_count": 1001,
+      "total_drops": 848951,
+      "total_rx_queue_bytes": 239360,
+      "max_socket_rx_queue_bytes": 212480,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 212480,
+          "drops": 848951
+        }
+      ]
+    },
+    {
+      "elapsed_s": 77.63541173934937,
+      "owned_socket_count": 1001,
+      "total_drops": 864984,
+      "total_rx_queue_bytes": 12800,
+      "max_socket_rx_queue_bytes": 1280,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 1280,
+          "drops": 864984
+        }
+      ]
+    },
+    {
+      "elapsed_s": 78.65468549728394,
+      "owned_socket_count": 1001,
+      "total_drops": 874972,
+      "total_rx_queue_bytes": 303360,
+      "max_socket_rx_queue_bytes": 185600,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 185600,
+          "drops": 874972
+        }
+      ]
+    },
+    {
+      "elapsed_s": 79.68251490592957,
+      "owned_socket_count": 1001,
+      "total_drops": 882897,
+      "total_rx_queue_bytes": 222720,
+      "max_socket_rx_queue_bytes": 147200,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 147200,
+          "drops": 882897
+        }
+      ]
+    },
+    {
+      "elapsed_s": 80.72216248512268,
+      "owned_socket_count": 1001,
+      "total_drops": 891037,
+      "total_rx_queue_bytes": 273920,
+      "max_socket_rx_queue_bytes": 174080,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 174080,
+          "drops": 891037
+        }
+      ]
+    },
+    {
+      "elapsed_s": 81.7448570728302,
+      "owned_socket_count": 1001,
+      "total_drops": 901362,
+      "total_rx_queue_bytes": 261120,
+      "max_socket_rx_queue_bytes": 203520,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 203520,
+          "drops": 901362
+        }
+      ]
+    },
+    {
+      "elapsed_s": 82.78763508796692,
+      "owned_socket_count": 1001,
+      "total_drops": 914355,
+      "total_rx_queue_bytes": 171520,
+      "max_socket_rx_queue_bytes": 170240,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 170240,
+          "drops": 914355
+        }
+      ]
+    },
+    {
+      "elapsed_s": 83.84500908851624,
+      "owned_socket_count": 1001,
+      "total_drops": 923585,
+      "total_rx_queue_bytes": 168960,
+      "max_socket_rx_queue_bytes": 152320,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 152320,
+          "drops": 923585
+        }
+      ]
+    },
+    {
+      "elapsed_s": 84.85638117790222,
+      "owned_socket_count": 535,
+      "total_drops": 934460,
+      "total_rx_queue_bytes": 360960,
+      "max_socket_rx_queue_bytes": 2560,
+      "sockets_with_drops": [
+        {
+          "inode": "9152672",
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "drops": 934460
+        }
+      ]
+    }
+  ]
+}

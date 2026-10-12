@@ -1,0 +1,1050 @@
+{
+  "role": "Historical WIP artifacts recovered byte-for-byte; build-host timings are not final perf VM acceptance",
+  "wip": "73aba820649b43a2ad976b3dbd62c257ec19a7b0",
+  "files": {
+    "evidence/mesh-agent-transport-round2/adaptive-ack-candidate-provenance.json": {
+      "bytes": 1818,
+      "sha256": "60ce0e40291683c15d0af819ef9b6314a789c360ff7e87d70ceebfb84cad6a4b"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-ack-candidate.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-ack-candidate.json": {
+      "bytes": 826136,
+      "sha256": "d40e0503208221339496fd287331453a8deeb4dbbbc6edd36020399b07388c71"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-ack-candidate.patch": {
+      "bytes": 669,
+      "sha256": "c0e877e2dec7d19410b8e9a74a4b188af56c3c25bd918799aa05a12bc1f9e2bb"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-commit.txt": {
+      "bytes": 968,
+      "sha256": "90c6ef6625bd9e84141526dfa3b242e0176e30711a9efbceca88139329675706"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-current-review-provenance.json": {
+      "bytes": 1203,
+      "sha256": "da838f64806a42d5fa3bad2beeebf69aff35f454aec68ed324c0078dbc0b8eb3"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-current-review.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-diagnostic-debug-1-provenance.json": {
+      "bytes": 609,
+      "sha256": "032217bfe6c22e1b3d2840492f1793ef807feba67317131232cfe4932ca21510"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-diagnostic-debug-1.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-diagnostics-commit.txt": {
+      "bytes": 934,
+      "sha256": "504412412c5a770f64d64bb7346e868c0d73f720a25234e754b5b8c9c709ec83"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-diagnostics-step.txt": {
+      "bytes": 689,
+      "sha256": "c904987271909b2754ca046e4b7187685857dbbf7dba8dbc89feea3cb93df247"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-frame-current-provenance.json": {
+      "bytes": 1469,
+      "sha256": "59b8f9bc377804811dff6e3a1f3429fc36db846ce9b05e2785b372fb4cf1ed2a"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-frame-current.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-frame-current.json": {
+      "bytes": 627,
+      "sha256": "5d86769bcd6c6ae0b4b46e6b4bded6fe8db101890827ce9c2c6a75855da85b6d"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-baseline-provenance.json": {
+      "bytes": 2072,
+      "sha256": "472757968e37d94d1cbe50729233874e09c218f9d69af5d2eb45d91e7271f4f5"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-baseline.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-baseline.json": {
+      "bytes": 45780,
+      "sha256": "a7df0ccf44f2d1ceeb98b3cb2920740c174b3d45f985964a598197b4d6032149"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-gap-baseline-paired.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-gap-baseline-paired.json": {
+      "bytes": 701360,
+      "sha256": "357d55f669fa147b263cfc81c9c4cd8aee133ab3da161ff3c0b74a4be6c27709"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-gap-baseline-provenance.json": {
+      "bytes": 2247,
+      "sha256": "32a42feb75bf85eb2733e8e99f08ad36628cc05ff8f2e029947f16211a08c723"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-gap-baseline.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-gap-baseline.json": {
+      "bytes": 320882,
+      "sha256": "b628d6008393b89da6a75e88a3e7f9b6a7275ee621c42c80b7b90b6ce10ff4c1"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned-highload-provenance.json": {
+      "bytes": 3991,
+      "sha256": "239ca5f12f4ac8f96713801af166749814d318cbc84ca4dfbc5b7d52b7609324"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned-highload.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned-highload.json": {
+      "bytes": 222348,
+      "sha256": "607e2f50e96d38d28881db5a46874b33f7fcacc11504582d1b92654195e4d23b"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned-provenance.json": {
+      "bytes": 2373,
+      "sha256": "43813121f51e5b06a90f997823ab9af1651ffaf90f78ebd30c8e25411499627f"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned-repeat.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned-repeat.json": {
+      "bytes": 1092,
+      "sha256": "cd1d35e190e0eaabf420f7adfeaee66b183b5b601a07b8b665ab2817d8046ece"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-harness-pinned.json": {
+      "bytes": 1090,
+      "sha256": "f943a81d53454891fdcd1820bdf266a02a6ab6d2bdf7d3138c2905b39d454c9a"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-keepalive-25-provenance.json": {
+      "bytes": 2736,
+      "sha256": "4fa99c1575d5b3053be973917196c4a9c34fb1db805264d15069243d2dd61e4b"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-keepalive-25-udp.json": {
+      "bytes": 30694,
+      "sha256": "cf86598aec8c53c537e249ca8f1a140ce53eeaad9842e9063fd40dc0de101cad"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-keepalive-25.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-candidate-udp.json": {
+      "bytes": 15495,
+      "sha256": "84c7f41cb95b97e1fb37431915744369617ea719ab6e025c927d951e6985a4aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-candidate.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-candidate.json": {
+      "bytes": 526944,
+      "sha256": "242e04e6c32c3ab4698056b9eb20d7135fc8f969924c51e9b75316e0fb360386"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-comparison.json": {
+      "bytes": 2217,
+      "sha256": "8f8d03792dd36b54f99bc87f26c263c32bb53449787f19529f4ce29ae21460c5"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-default-udp.json": {
+      "bytes": 10575,
+      "sha256": "c9e42ba6fde6754316d3136aa525f1cf432397027602148280b94c1b395501ec"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-default.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-default.json": {
+      "bytes": 866642,
+      "sha256": "4ff0dcfc94ca50ec06554d58bf2e9d5b2df418aaf61180e45bd932435a5cbaa5"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-finding.md": {
+      "bytes": 2879,
+      "sha256": "d43a8b638f40443775ff9f93fa775ce2218b72c99ecaa6043e694a3eedd481f5"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-provenance.json": {
+      "bytes": 3029,
+      "sha256": "461424717e86ef15242e7bf4142474116a339a21a0e5168c56252523a11dc02a"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-plugin-clippy.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-plugin-fmt.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-plugin-tests.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-standby-fuzz-provenance.json": {
+      "bytes": 1677,
+      "sha256": "3d258bb32c15525f2a16ceeb7f21c62269d24984f6a8a8a15e66b296e5dc07ca"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-standby-fuzz.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-step.txt": {
+      "bytes": 532,
+      "sha256": "29c1560d4b157e1250867d6b192ad3f727a0b7ef4d082363eab99f13eca3f337"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-watchdog-commit.txt": {
+      "bytes": 1132,
+      "sha256": "1b4988a3fc4893c6727dc3acce5c4f66129668654962a47d6a830762441f1ce5"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-watchdog-evidence.md": {
+      "bytes": 9384,
+      "sha256": "3572b60285971487ccb4febd9a58be96ac505df87e79b4e6a7e39e5405d7e0e6"
+    },
+    "evidence/mesh-agent-transport-round2/adaptive-watchdog-step-root.txt": {
+      "bytes": 612,
+      "sha256": "595a67c135e68d2222b1840823f0ab647a53e5d59b04c904bfc3cf0900a74d7a"
+    },
+    "evidence/mesh-agent-transport-round2/additive-contract-record.txt": {
+      "bytes": 684,
+      "sha256": "bdfb83c8c9ba30ff33ab27c13022033b68963ac6ba8be2661d5e8ba32c0dc944"
+    },
+    "evidence/mesh-agent-transport-round2/admission-commit.txt": {
+      "bytes": 867,
+      "sha256": "281cabbab402105b264199578cec04651246f4b7df946401ffaf2a79848ffb4e"
+    },
+    "evidence/mesh-agent-transport-round2/admission-step.txt": {
+      "bytes": 777,
+      "sha256": "3396576482f21f8f17bcef37c4e9aa881e92ef3c97734715f4496a83a2b1b792"
+    },
+    "evidence/mesh-agent-transport-round2/auth-baseline-findings.txt": {
+      "bytes": 3117,
+      "sha256": "638874d31c6215e1a93a9d6cb428b0fdab20164c3f7322712d3d318dc1a9fdb7"
+    },
+    "evidence/mesh-agent-transport-round2/bloat-515d3712.json": {
+      "bytes": 3107506,
+      "sha256": "5f854baff44bcf8bb60bb2c0267bd4d9a14adc36cd52f260c59c85dcc10a48c5"
+    },
+    "evidence/mesh-agent-transport-round2/bloat-a5f744fb.json": {
+      "bytes": 3088088,
+      "sha256": "4f4c1a39615c6c0c31807890012fa35c7e34243c49cbd1ef7f6f2c9f292ea9fd"
+    },
+    "evidence/mesh-agent-transport-round2/bloat-docs-commit.txt": {
+      "bytes": 1201,
+      "sha256": "a4814183fbd211ddee8ac39557bc65b7b16cce03fd120497a22b88908624a56b"
+    },
+    "evidence/mesh-agent-transport-round2/bloat-docs-step.txt": {
+      "bytes": 753,
+      "sha256": "1fb12cc33c7521e362aaae5a403ed3a4cb9357fd1cc5e6106d4a36a9c35217c4"
+    },
+    "evidence/mesh-agent-transport-round2/bloat-finding.txt": {
+      "bytes": 1546,
+      "sha256": "5a772fa8e13905d48ddf89c73e1c7b7b2f08facc977c90e53ee6fd51c853e815"
+    },
+    "evidence/mesh-agent-transport-round2/bloat-start.txt": {
+      "bytes": 643,
+      "sha256": "bc86ea79151ff8a74ddef2db789ba31e8e92fbb618d400c8a999471224bdf412"
+    },
+    "evidence/mesh-agent-transport-round2/control-fixture-limit-finding.txt": {
+      "bytes": 1075,
+      "sha256": "52c3a7a98ab8df2e0458e4cd92059c3f6164eb758d8adfc37cc9b28c2677f4d7"
+    },
+    "evidence/mesh-agent-transport-round2/current-agent-full-provenance.json": {
+      "bytes": 1110,
+      "sha256": "601fad9ac3ffcf8b0b0fc11e13689f3141f83ccd5df5061db152a6980935d261"
+    },
+    "evidence/mesh-agent-transport-round2/cursor-parser-commit.txt": {
+      "bytes": 782,
+      "sha256": "3f610ff6336c31a9f25d44fc82aa246eda2039fa1e7b71eedf49dbf65aae162f"
+    },
+    "evidence/mesh-agent-transport-round2/cursor-parser-step.txt": {
+      "bytes": 726,
+      "sha256": "d537d3bf5d6accc0f2f3de40f01326bdf13930f1f0373afe9235be4cea413f0f"
+    },
+    "evidence/mesh-agent-transport-round2/final-kernel-review-pending-provenance.json": {
+      "bytes": 6973,
+      "sha256": "a54e7fceacbff08c8777d10e924ebd7af94f7ab66161a711da53001a52f86722"
+    },
+    "evidence/mesh-agent-transport-round2/final-measurement-matrix.md": {
+      "bytes": 5542,
+      "sha256": "34d5d9ee211c63d37bfe0709ea87fc3ae971d96351b0d474edefd5b9e7572275"
+    },
+    "evidence/mesh-agent-transport-round2/issue-history-prose.txt": {
+      "bytes": 2063987,
+      "sha256": "0336e46b60fcf44509c4dd15756e8ceae9a5660e9ebf019a99142460b5334508"
+    },
+    "evidence/mesh-agent-transport-round2/issue-history.txt": {
+      "bytes": 2288235,
+      "sha256": "3822a65a16e41377cd122dcc0ea13aeadd5758989e72e261b029b30b6a5cf5dd"
+    },
+    "evidence/mesh-agent-transport-round2/latest-issue-comments.txt": {
+      "bytes": 2369035,
+      "sha256": "45b56196fe5618c89b130e8ca49c953d9df59ab010896dc97ea0cf2feb481b43"
+    },
+    "evidence/mesh-agent-transport-round2/merge-build-retry.jsonl": {
+      "bytes": 163405,
+      "sha256": "706c2c550d6b26ad7809d3b8318b100f8a370d0d14930cb26bb3aa4a8789374a"
+    },
+    "evidence/mesh-agent-transport-round2/merge-build.jsonl": {
+      "bytes": 154618,
+      "sha256": "0cd3cbcca99227b6a34595f58b9587115f46230e65106b486800233f6c75f5f9"
+    },
+    "evidence/mesh-agent-transport-round2/merge-commit.txt": {
+      "bytes": 686,
+      "sha256": "bc1897f0467fb1610655d0f9e4aa928e538d7a0749533d729d4ca3978ff70b70"
+    },
+    "evidence/mesh-agent-transport-round2/merge-finding.txt": {
+      "bytes": 509,
+      "sha256": "658b28f25ba1010d6281da7d94fe96e8e88193421e5b576b476aea7d76d1d0c6"
+    },
+    "evidence/mesh-agent-transport-round2/merge-step.txt": {
+      "bytes": 885,
+      "sha256": "5060bac221f241fc043442db21d1a8cea9ddd0dac0f9f77b1adcd556dec5e563"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-disabled-reason-commit.txt": {
+      "bytes": 893,
+      "sha256": "04081bdcfecf4258376716bf643e06ab057233d0fc0955bd55813a37e955d24c"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-disabled-reason-step.txt": {
+      "bytes": 538,
+      "sha256": "89b0acf176c02e758378528f9a7a1309a8aad241ec39f1b976c9f668764ddfa1"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-idle-guarded-false-1000-100-60000.json": {
+      "bytes": 938,
+      "sha256": "4ae97a1161e45f23fd5ed821aec9765d43342a2c331853d7a51ca1da1b771fe1"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-idle-guarded-false-1000-15000-30000.json": {
+      "bytes": 936,
+      "sha256": "29376ced50213baad458cfd8326f2b11bc7098eea896c97a5a0cc0c4de829242"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-idle-guarded-true-1000-100-60000.json": {
+      "bytes": 969,
+      "sha256": "b97f47880aef140404615e704845b0cc384050ff3ec6460357dd39c9e1ecbbac"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-path-regressions-commit.txt": {
+      "bytes": 910,
+      "sha256": "de3ba2603cc574649443062689908ab816ede6256fef179b9067c7a1fa5e9d21"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-path-regressions-step.txt": {
+      "bytes": 562,
+      "sha256": "0c8ac0eca7039fa61e5dd0d5e4104a8332a6be3a082849f6774d58fb1c3b0ac7"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-probe-commit.txt": {
+      "bytes": 903,
+      "sha256": "d0d68f9475121fce8081c0f5b7da2ba70de2b84568dc036d62aa425ab9fed68f"
+    },
+    "evidence/mesh-agent-transport-round2/mesh-probe-step.txt": {
+      "bytes": 687,
+      "sha256": "b34186aed28c10a37a95e8cee3efbc17603c6299a243be09b6a0ff74b623ada1"
+    },
+    "evidence/mesh-agent-transport-round2/native-activation-commit.txt": {
+      "bytes": 1049,
+      "sha256": "7e76a22f5361bfc81bd64ab06dd3eff15f8c15a1a1d1fc4ed1490d80c6cbd34f"
+    },
+    "evidence/mesh-agent-transport-round2/native-activation-step.txt": {
+      "bytes": 565,
+      "sha256": "992e2f4ed9aa398f3c4daaf2f0165180bc3cad1ba646de723b78327b6a7c9b85"
+    },
+    "evidence/mesh-agent-transport-round2/native-adapter-working.diff": {
+      "bytes": 19157,
+      "sha256": "95dbb951a69f1188f885af40a177ef4f987af15193408c4e9ba8b866fd907fe2"
+    },
+    "evidence/mesh-agent-transport-round2/native-review-findings.txt": {
+      "bytes": 921,
+      "sha256": "24a4f253c19d0121990f26926f0031cfc1f9dc8b22de617ba4c4eaf333da6ed4"
+    },
+    "evidence/mesh-agent-transport-round2/native-supervisor-commit.txt": {
+      "bytes": 1014,
+      "sha256": "dc1f2aa121e0a4691eb1889ed5c0baec427e1eedb1558e7a7019cff66e48f10a"
+    },
+    "evidence/mesh-agent-transport-round2/native-supervisor-step.txt": {
+      "bytes": 514,
+      "sha256": "2314c9b0f01a62d0c8d6537fda2119c600753a9e0661bf021679dac0e7795ea3"
+    },
+    "evidence/mesh-agent-transport-round2/new-review-findings.txt": {
+      "bytes": 1605,
+      "sha256": "a4167def33b0542a9ac57b6f61869200be617d642478b5932ca4d41590264cbc"
+    },
+    "evidence/mesh-agent-transport-round2/normal-fuzz-checkpoint-prepared.json": {
+      "bytes": 1902,
+      "sha256": "9279d1526ab1fa3ab9753652ae41efd4e4b849a93a41839966c7456dfea35cd3"
+    },
+    "evidence/mesh-agent-transport-round2/ordinary-backpressure-proposal.txt": {
+      "bytes": 987,
+      "sha256": "4b6698ca42ec45c675c199ca865b912b0b668555b69cd03f4cb3ed176a992cd9"
+    },
+    "evidence/mesh-agent-transport-round2/ordinary-native-finish-step.txt": {
+      "bytes": 753,
+      "sha256": "06230620e70897ef8dae004823a45464b62de89abe87298ef5700169df2b61c0"
+    },
+    "evidence/mesh-agent-transport-round2/ordinary-native-module-commit.txt": {
+      "bytes": 942,
+      "sha256": "f0e1d7926d67ee1b82dc461d6a65a72e8aec51796b8b3cb0b4981742b64dfdf4"
+    },
+    "evidence/mesh-agent-transport-round2/ordinary-native-test-commit.txt": {
+      "bytes": 741,
+      "sha256": "79b5065cbc96bf3518da8ec0308845592e326ff7234b6930e1f6eaf3c639e419"
+    },
+    "evidence/mesh-agent-transport-round2/ordinary-writer-and-churn-step.txt": {
+      "bytes": 1474,
+      "sha256": "b55a6db1bc20dc061c2a659e941d6150d93921202311ff922dd10bb2485cbcef"
+    },
+    "evidence/mesh-agent-transport-round2/parent-history-prose.txt": {
+      "bytes": 5307,
+      "sha256": "d66fb31f897e8ab6abbbf6a7ee59d3eab44a1d1e4b49c23f8860b500a5eddbbf"
+    },
+    "evidence/mesh-agent-transport-round2/parent-history.txt": {
+      "bytes": 5322,
+      "sha256": "697a7cc6a854eff484e8b90fc6eb334df5d99aa604c5758a7cb7765001c7f333"
+    },
+    "evidence/mesh-agent-transport-round2/parked-shared-final-provenance.json": {
+      "bytes": 1946,
+      "sha256": "158f3c43023af5c9e972bc6b39093cc9aa2fc684941807a696d418527ffe15b5"
+    },
+    "evidence/mesh-agent-transport-round2/parked-shared-green-provenance.json": {
+      "bytes": 1131,
+      "sha256": "1fb12feed6409fa5753c350085669bfe5df8f833fb3446c70db6523151fdc2e8"
+    },
+    "evidence/mesh-agent-transport-round2/parked-shim-drain-commit.txt": {
+      "bytes": 1248,
+      "sha256": "906326b80d5fe70ff35bf58fb436dbb1990db82e83107609222fa1c254128bf4"
+    },
+    "evidence/mesh-agent-transport-round2/parser-intermediate-native-cache.json": {
+      "bytes": 524,
+      "sha256": "89654fbf84ad9b03e5f60a80a4769f3ce30bc2573cac5149437f742550eacea2"
+    },
+    "evidence/mesh-agent-transport-round2/parser-intermediate-provenance.json": {
+      "bytes": 961,
+      "sha256": "22eaba6328d89ee7daa1e3935e87452ef22aa2af4904080f2dccddb52d3f7e9f"
+    },
+    "evidence/mesh-agent-transport-round2/primary-ack-window-red-provenance.json": {
+      "bytes": 705,
+      "sha256": "08022cd71f96a30d82d1292e7d914550d3af19eb77ff901fa1bc699ac0ba428e"
+    },
+    "evidence/mesh-agent-transport-round2/primary-ack-window-step.txt": {
+      "bytes": 1164,
+      "sha256": "d4bb3f6ab013d8ffa82c6b845055147da3df3230948d16138a6d8cb7e183f86e"
+    },
+    "evidence/mesh-agent-transport-round2/primed-api-commit.txt": {
+      "bytes": 738,
+      "sha256": "fcd097c707b85b4704e62cf504eaa21b9453c777d2a2062a57097c4a666dd9bd"
+    },
+    "evidence/mesh-agent-transport-round2/primed-api-step.txt": {
+      "bytes": 466,
+      "sha256": "3fec2645823261b6ae64df79ef492e8084e5221022f17802c19834447422320d"
+    },
+    "evidence/mesh-agent-transport-round2/primed-cancellation-finding.txt": {
+      "bytes": 666,
+      "sha256": "94aa3f1f7e177d78ceb9e1f3380e1961211098fb7496ce3203e87fe482e49253"
+    },
+    "evidence/mesh-agent-transport-round2/primed-relay-commit.txt": {
+      "bytes": 1164,
+      "sha256": "79454b790a1826cf4a9d05be9199ce849c05c1aa7a6ac96925df580adeeecdd4"
+    },
+    "evidence/mesh-agent-transport-round2/primed-relay-step.txt": {
+      "bytes": 835,
+      "sha256": "82c6a18409737009c63e271f1bb0b46c6db83c09875ba58d879f58cc626a25fd"
+    },
+    "evidence/mesh-agent-transport-round2/primed-relay-tests-commit.txt": {
+      "bytes": 1081,
+      "sha256": "727ffe72a645a0435a8be46f1f02b4e10f60d6f1add6185b51750bf13c7aef58"
+    },
+    "evidence/mesh-agent-transport-round2/primed-relay-tests-step.txt": {
+      "bytes": 582,
+      "sha256": "901c8f00bf7172a8668ff7f31d52e74c2b772ac52ce50876de04c8bb60f16d77"
+    },
+    "evidence/mesh-agent-transport-round2/primed-stream-intent-proposal.txt": {
+      "bytes": 990,
+      "sha256": "bf42d05ea827677fef14dc826f8f3698705b6ed1d7e31f92a81bf44b6d10ad24"
+    },
+    "evidence/mesh-agent-transport-round2/primed-warm-owner-commit.txt": {
+      "bytes": 1178,
+      "sha256": "dac79a7e235185af1ce7e06d0df23de30fd2ae2237780c74e7617a1ad6c786ab"
+    },
+    "evidence/mesh-agent-transport-round2/primed-warm-owner-step.txt": {
+      "bytes": 540,
+      "sha256": "fbc18ec8c540f25dd1e2977b0a730e8acbe68d1bc32356147b84a87737cb7d63"
+    },
+    "evidence/mesh-agent-transport-round2/promotion-and-churn-finding.txt": {
+      "bytes": 1425,
+      "sha256": "a4ffe644e4661115658fb99fae1020b7921180d550494be8104c0337ae6d6d0f"
+    },
+    "evidence/mesh-agent-transport-round2/recovery-focused-finding.txt": {
+      "bytes": 1410,
+      "sha256": "3d56431bfa7ad455ce175464a18eaef0ed1f200286d87229e43c67ee8cbf1b20"
+    },
+    "evidence/mesh-agent-transport-round2/remote-cursor-fuzz-load-before.txt": {
+      "bytes": 33,
+      "sha256": "bcf227074d26a025b4ac50f4d14fc0d4610dd091c817151f75673e4e60ccf807"
+    },
+    "evidence/mesh-agent-transport-round2/retention-finding.txt": {
+      "bytes": 681,
+      "sha256": "225f766bce1c93a5a742dc3ca23988ab4d0b9c97ac84f5bc31405026e5fc6317"
+    },
+    "evidence/mesh-agent-transport-round2/retention-fix-commit.txt": {
+      "bytes": 967,
+      "sha256": "f02d4b5d96e893688087d5ef84b19bf6eccbb91c1f77398062f7a9eaf6f0df66"
+    },
+    "evidence/mesh-agent-transport-round2/retention-regressions-commit.txt": {
+      "bytes": 751,
+      "sha256": "bdd0efc9419f566cc29301777570719343b88ed86da3786326b79b194a0a081a"
+    },
+    "evidence/mesh-agent-transport-round2/retention-step.txt": {
+      "bytes": 646,
+      "sha256": "86a298b41d9c39dd9da4418ed836dc319e12725e96025dddfcbba3976b4fd13b"
+    },
+    "evidence/mesh-agent-transport-round2/retention-test-step.txt": {
+      "bytes": 689,
+      "sha256": "95e8bb17a85321bc47b36a7fc531e02a223df37528a72e755b0da4064f9c1cc8"
+    },
+    "evidence/mesh-agent-transport-round2/retention-tests-commit.txt": {
+      "bytes": 521,
+      "sha256": "98c22b0a04d3f810f4573ca98c33ae7e4424c837e474243c0ad1c0e4fbe46f12"
+    },
+    "evidence/mesh-agent-transport-round2/review-fixes-step.txt": {
+      "bytes": 1047,
+      "sha256": "5c157e69724186884a4893d78a03bd51148932cbaa690ed196a8a6913c88f4e2"
+    },
+    "evidence/mesh-agent-transport-round2/server-atomic-outline.md": {
+      "bytes": 4392,
+      "sha256": "7b2be3885085cd0ad61f86136e8bcb30ddec931c3729eb9f203c0ebe027a8c09"
+    },
+    "evidence/mesh-agent-transport-round2/server-churn-current-focused-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-confirmed-findings.txt": {
+      "bytes": 2058,
+      "sha256": "745167b8bf10b713337bc93dcf56601b32a478692cad30f3a87ec6fbf1d3c9e5"
+    },
+    "evidence/mesh-agent-transport-round2/server-control-pause-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-control-queue-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-detached-binding-churn-counts.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-detached-binding-churn-final-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-churn-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-control-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-full-lib.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-owner-clippy.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-owner-fmt.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-owner-green-provenance.json": {
+      "bytes": 42513,
+      "sha256": "d11912e9232e32839c0a7b59240df166fb5829f0d7566dbcbc66d13eb376b03f"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-owner-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-priming-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-final-writes-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-native-control-queue-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-native-control-valid-red-provenance.json": {
+      "bytes": 42412,
+      "sha256": "f748d1f5ab28aada30ff6f6dff1e23fa4d51d6730da11e9e73b0fb8e69a2b7a6"
+    },
+    "evidence/mesh-agent-transport-round2/server-native-control-valid-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-owned-attach-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-owned-attach-red-provenance.json": {
+      "bytes": 41243,
+      "sha256": "0b5866422043245566f8dc7e75b46e013ad7007ab45be8124f57c43512e3b91e"
+    },
+    "evidence/mesh-agent-transport-round2/server-owned-attach-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-owned-current-focused-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-owned-write-final-prebuilt-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-prebuilt-detached-binding-churn.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-prebuilt-owned-writes.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-prebuilt-promotion-header.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-prebuilt-shadow-state.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-priming-draft-review.md": {
+      "bytes": 2144,
+      "sha256": "f3422397eb5466e22c50a7699c2bcbc9f1fedbaac2f8784725f5376fb9377e45"
+    },
+    "evidence/mesh-agent-transport-round2/server-priming-plan.md": {
+      "bytes": 2808,
+      "sha256": "a875041767a100be08bf587bdb071c71fd772c4e04d5f0383c6ae6fc7d1028da"
+    },
+    "evidence/mesh-agent-transport-round2/server-priming-progress.txt": {
+      "bytes": 2424,
+      "sha256": "b40e24b7cfdcd2650f3657beb36548d1c22eb214dc1785a8efa2e9fd007bc3a9"
+    },
+    "evidence/mesh-agent-transport-round2/server-priming-start.txt": {
+      "bytes": 1212,
+      "sha256": "a627f83f37feb0f98960c299bf2f08e31891cbf429ced91373a22fbd90138003"
+    },
+    "evidence/mesh-agent-transport-round2/server-promotion-completion-focused-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-promotion-flight-red-provenance.json": {
+      "bytes": 1893,
+      "sha256": "004a74e62587dd824d6b3de3b29fd6b95867d26783ae1b74fb2622504a2df0a9"
+    },
+    "evidence/mesh-agent-transport-round2/server-promotion-flight-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-promotion-header-red-provenance.json": {
+      "bytes": 1314,
+      "sha256": "eeb04e54869a698552aa7b40b2641f2c8a37f30d725dfa194426e12781d8616c"
+    },
+    "evidence/mesh-agent-transport-round2/server-promotion-header-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-clippy.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-current-focused-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-final-clippy-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-final-clippy.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-final-fmt-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-final-fmt.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-green-provenance.json": {
+      "bytes": 1057,
+      "sha256": "1b94cbbe0b141cee6cb6fcd00f486e5007c3e3c56e094c59ee352aa1d791c96b"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-header-order-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-queued-owner-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-queued-owner-red-provenance.json": {
+      "bytes": 764,
+      "sha256": "dd826b9b5128212c47fe9c6a0d0687e816b3e1c2db46d96fb92d8d296d797347"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-queued-owner-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-stream-reuse-red-provenance.json": {
+      "bytes": 1121,
+      "sha256": "00e8254b89e63c54a45407ed147d1db7c542789e045e4d61bfa0508ccbdc7169"
+    },
+    "evidence/mesh-agent-transport-round2/server-shadow-stream-reuse-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-terminal-slot-churn-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-terminal-slot-priming-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/server-terminal-slot-red-provenance.json": {
+      "bytes": 42515,
+      "sha256": "996588e0677b3132edecb991a906786efa1ef9dca14ee953c211209d05c25524"
+    },
+    "evidence/mesh-agent-transport-round2/server-terminal-slot-red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/server-terminal-slot-writes-green.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/shared-codec-step.txt": {
+      "bytes": 888,
+      "sha256": "dfe4933b56ad249b274cc89e149a81c3015939cd61f58cc674bb9736d9bb9947"
+    },
+    "evidence/mesh-agent-transport-round2/shared-contract-commit.txt": {
+      "bytes": 848,
+      "sha256": "c458c94e734800272df6be86bb12a61736b40e43c9228a06868919e8d3639b68"
+    },
+    "evidence/mesh-agent-transport-round2/shared-contract-step.txt": {
+      "bytes": 415,
+      "sha256": "85bdce36972e2bc8e04f311bd34dd6b0bc107bdae373eee4f4fc08bf5b68674e"
+    },
+    "evidence/mesh-agent-transport-round2/shared-helper-step.txt": {
+      "bytes": 759,
+      "sha256": "db7f60ddd2f1ed619594b2c568e769388f3130532692f7f79d0cb1965e847fbd"
+    },
+    "evidence/mesh-agent-transport-round2/shared-pty-tests-commit.txt": {
+      "bytes": 1102,
+      "sha256": "0064f7a5aad8dd51ae7300be9a5ee1c3302886bc8524ca72962339e9c371e8d7"
+    },
+    "evidence/mesh-agent-transport-round2/shared-pty-tests-step.txt": {
+      "bytes": 606,
+      "sha256": "a2c90a42f7ce8a66ce5da4b546628c5c947740c974b6357ff939fedac123171f"
+    },
+    "evidence/mesh-agent-transport-round2/shared-session-step.txt": {
+      "bytes": 1114,
+      "sha256": "611cec6b812c35817c705a53be68160ac9642230646cb6002e8d07c9b030dffa"
+    },
+    "evidence/mesh-agent-transport-round2/shared-writer-fuzz-load-after.txt": {
+      "bytes": 33,
+      "sha256": "9d56b4c85faaff8eff1cedc0eb80f47ff331282f7eafffb6557740e352c0ce7e"
+    },
+    "evidence/mesh-agent-transport-round2/shared-writer-fuzz-load-before.txt": {
+      "bytes": 33,
+      "sha256": "b7578ac8c6b3b889e370386f3a1eaea5e3b97bab4b643b29f0a9c3af3e47cf69"
+    },
+    "evidence/mesh-agent-transport-round2/shared-writer-geometry-layout.txt": {
+      "bytes": 646,
+      "sha256": "71833141f0599cbb28e5328a46d636fd0c3dc69359c5e5cd1950c7eb2a927b1f"
+    },
+    "evidence/mesh-agent-transport-round2/shared-writer-layout-artifact-hashes.txt": {
+      "bytes": 307,
+      "sha256": "39d4f1fad8a1ac653c7493944ad452018f78e710e86bbb9c034225459233204a"
+    },
+    "evidence/mesh-agent-transport-round2/shared-writer-peer-layout.txt": {
+      "bytes": 766,
+      "sha256": "84b85d8e49a456b60aa679843f32f5c0334837705ce46e7414de98bd7693a3e2"
+    },
+    "evidence/mesh-agent-transport-round2/shared-writer-source-matrix.txt": {
+      "bytes": 3151,
+      "sha256": "d7a3cc454d60c650e36d6c58fc4990fa9719993fb6a743855b10bedc60815fa6"
+    },
+    "evidence/mesh-agent-transport-round2/shared-writer-start.txt": {
+      "bytes": 864,
+      "sha256": "83e7d9f6ea983035d07ccf191c57580c93e72781d266d04a608f3b6cc5f1b451"
+    },
+    "evidence/mesh-agent-transport-round2/shim-deferral-component-green-provenance.json": {
+      "bytes": 2809,
+      "sha256": "1ace284c4ca5188d79f3f67fc42899ec37d50150181e3109112e227331d53783"
+    },
+    "evidence/mesh-agent-transport-round2/shim-deferral-final-build.jsonl": {
+      "bytes": 14100,
+      "sha256": "26122f58eb5f8ec1f92d3f2461b700465e9ac2cdfd9f21acade4ec13bd8bb9ce"
+    },
+    "evidence/mesh-agent-transport-round2/shim-deferral-final-old-provenance.json": {
+      "bytes": 1628,
+      "sha256": "df347491ee1e18a160aa03cfa9aa7ddaceb288f57290e3f9920048bbb7ed1cd6"
+    },
+    "evidence/mesh-agent-transport-round2/shim-deferral-final-provenance.json": {
+      "bytes": 2919,
+      "sha256": "64c6e10ed9ad0de3c680a764624ccbcf7ad280f7751289d151a6f483102af562"
+    },
+    "evidence/mesh-agent-transport-round2/shim-deferral-proposal.txt": {
+      "bytes": 1427,
+      "sha256": "ecdd71319722461ff5bfc9069eefeb794533d9b47bbd98ec5b32ca3e1a0730e2"
+    },
+    "evidence/mesh-agent-transport-round2/shim-deferral-red-provenance.json": {
+      "bytes": 1001,
+      "sha256": "ce5fe3d50c43e656b4fbec5c61a9d53dcc13ee428c52238fdac031a33f723520"
+    },
+    "evidence/mesh-agent-transport-round2/shim-deferral-review-step.txt": {
+      "bytes": 1379,
+      "sha256": "b5324ff4262636c7c72f8ddf4659014ecb884c4b2fa59bea85fc31860c9d8809"
+    },
+    "evidence/mesh-agent-transport-round2/shim-frame-module-commit.txt": {
+      "bytes": 974,
+      "sha256": "166457519952070633d73538aed825ca3c52df62f11cf0c97a8f313266c81fb0"
+    },
+    "evidence/mesh-agent-transport-round2/shim-frame-step.txt": {
+      "bytes": 848,
+      "sha256": "3edc1e594011b407a11e4ae6eaedc8c6e683adc8459f5079c100ca8213e07152"
+    },
+    "evidence/mesh-agent-transport-round2/shim-frame-tests-commit.txt": {
+      "bytes": 902,
+      "sha256": "069603075e02c0e92b828757141d49443237e62b3d1776bf99de9be4069ca6a9"
+    },
+    "evidence/mesh-agent-transport-round2/shim-legacy-blocked-red-provenance.json": {
+      "bytes": 3731,
+      "sha256": "24f1960c761ea5a6a8b8c9b936b1dfb5a9f5574138df9b18a6fcc1c72f8d400f"
+    },
+    "evidence/mesh-agent-transport-round2/shim-legacy-final-build.jsonl": {
+      "bytes": 14101,
+      "sha256": "fe906fa7fac0c68f607dd3df814ac6a518ed862cbf1f9506e2b3950f3e5e25b2"
+    },
+    "evidence/mesh-agent-transport-round2/shim-legacy-final-provenance.json": {
+      "bytes": 2860,
+      "sha256": "572c03cc4380c6fc33c80ac15fb8e0a424bdbe6e88266fbb3b746a17f5420d02"
+    },
+    "evidence/mesh-agent-transport-round2/shim-legacy-fresh-red-provenance.json": {
+      "bytes": 4458,
+      "sha256": "3260d0405e00b77f082eda753a80fa484a81e64555ce20cd421758721426524a"
+    },
+    "evidence/mesh-agent-transport-round2/shim-pause-fuzz-asan-provenance.json": {
+      "bytes": 2199,
+      "sha256": "6a59ab6a6a6094ddcd453bb5dc0c3a3e66e31191b227908c22db7443d0b5cf61"
+    },
+    "evidence/mesh-agent-transport-round2/shim-reservation-proposal.txt": {
+      "bytes": 1140,
+      "sha256": "e3d6bd8d28e6c04ae665312fb9813e8cc04370b9bab6819c4c536e66dfd32a80"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-checkpoint-provenance.json": {
+      "bytes": 194848,
+      "sha256": "db10bf8edfb04041eb5dc311e972340a8908d7cad00df5355868aeb4e71fe1a2"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-exact-provenance.json": {
+      "bytes": 205013,
+      "sha256": "d7f7cc04dd60c4d92bb0cec6673c5936e48836281e8ad9b6114ca861be7f3949"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-exact-summary.json": {
+      "bytes": 13866,
+      "sha256": "e8d524cccc324bd8482888e28bbda179954111c9330366f81f1b0f29dd854fbf"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-module-commit.txt": {
+      "bytes": 977,
+      "sha256": "21a97b3c9afb23d67047ccd440cc7b70110564c70b3110beb9c0b7649115b62d"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-module-exact-provenance.json": {
+      "bytes": 205260,
+      "sha256": "12010b3fea7fdc5bfaf3c70631d9519bbf886f6cccde3dceced6752793ed9874"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-module-exact-summary.json": {
+      "bytes": 14290,
+      "sha256": "2640660c9e38ee1ecd6da259bad96e12fa7217fc821ed6b8940a934c82da8835"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-module-step.txt": {
+      "bytes": 778,
+      "sha256": "ce3ec1fed988de4915899b8734d51a0f3e0d93429228888075782f9fa9a66863"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-regressions-commit.txt": {
+      "bytes": 850,
+      "sha256": "9ef6423818c26edff781314d81291b15674a675aeef5c3bf3d2fbc6e46b84d29"
+    },
+    "evidence/mesh-agent-transport-round2/shim-session-regressions-step.txt": {
+      "bytes": 649,
+      "sha256": "d3fbe2964e7b4848f1be1deb5d99b1152a0c3a5fede4e4c015cadd0f4363e712"
+    },
+    "evidence/mesh-agent-transport-round2/silent-review-test-commit.txt": {
+      "bytes": 811,
+      "sha256": "c78386f2e6da2c80de7187035789e6e60b949c010b0f132c9536e22dade10a10"
+    },
+    "evidence/mesh-agent-transport-round2/silent-review-test-step.txt": {
+      "bytes": 521,
+      "sha256": "94365222145c1e5825e995e154d9a82ceca84a47066ae06a0b008c0783f282b6"
+    },
+    "evidence/mesh-agent-transport-round2/stale-checkpoint-finding.txt": {
+      "bytes": 1281,
+      "sha256": "2295422a5ecfd186125be410cf2a8042305452df680c31ab49b3d2d8a2817325"
+    },
+    "evidence/mesh-agent-transport-round2/standby-api-commit.txt": {
+      "bytes": 706,
+      "sha256": "85bae3ba287efbcae95501e6322e31d0e816f2f639d554458515f1d000a5306d"
+    },
+    "evidence/mesh-agent-transport-round2/standby-api-step.txt": {
+      "bytes": 592,
+      "sha256": "8386361a549d8c20199f0a5820df7d746b09558fb6c7e4f55d24e06a85aa4427"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-0.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-0/node-firewall-observed.nft": {
+      "bytes": 94893,
+      "sha256": "68e0978f0e7d02de2e590410f1ae605deaa3a0399cb5ea3955921a5f1a3938fe"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-0/node-firewall.nft": {
+      "bytes": 147,
+      "sha256": "036904a0e1d01bc7bdaaedd1c1c6c4c0e0dbe8be3a407f5b67e66877da4d291a"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-0/server-firewall-observed.nft": {
+      "bytes": 94937,
+      "sha256": "d1c4ee4cd8d1ffd31fb30e7a4b4de13b84c7801a9bbf98625f8db59ed4bd2d6e"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-0/server-firewall.nft": {
+      "bytes": 192,
+      "sha256": "2fdae9aaaf454525a0633ba42b80b6f66a933310be54ca28507551bd98e7e19e"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-150.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-150/node-firewall-observed.nft": {
+      "bytes": 94893,
+      "sha256": "2286219a6b7a8fdf0190841c9b4ed13a1fdb8ec82a95f913cb7651a9367b9382"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-150/node-firewall.nft": {
+      "bytes": 147,
+      "sha256": "036904a0e1d01bc7bdaaedd1c1c6c4c0e0dbe8be3a407f5b67e66877da4d291a"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-150/server-firewall-observed.nft": {
+      "bytes": 94937,
+      "sha256": "0005a32c3e436132925bae09fd2bd72f6d2511b0226de37bb74c9574c614fa10"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-150/server-firewall.nft": {
+      "bytes": 192,
+      "sha256": "2fdae9aaaf454525a0633ba42b80b6f66a933310be54ca28507551bd98e7e19e"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-300.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-300/node-firewall-observed.nft": {
+      "bytes": 94893,
+      "sha256": "aa39d608c1d595daf3de174874f7c6acaea1c4e6ccd6eaa932f626d7fffbc869"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-300/node-firewall.nft": {
+      "bytes": 147,
+      "sha256": "036904a0e1d01bc7bdaaedd1c1c6c4c0e0dbe8be3a407f5b67e66877da4d291a"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-300/server-firewall-observed.nft": {
+      "bytes": 94937,
+      "sha256": "6f068be811600978de251c2baf016677080863cc81fd8e94256f77832ebed702"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-namespace-300/server-firewall.nft": {
+      "bytes": 192,
+      "sha256": "2fdae9aaaf454525a0633ba42b80b6f66a933310be54ca28507551bd98e7e19e"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-scale-guarded.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-scale-legacy.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/standby-basic-scale-unguarded.exit": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "evidence/mesh-agent-transport-round2/standby-contract.txt": {
+      "bytes": 874,
+      "sha256": "d6c79f77e4cc993229e1121a7c455a2d94dfa158e9ff65b98ea39407b0b2b243"
+    },
+    "evidence/mesh-agent-transport-round2/standby-parser-commit.txt": {
+      "bytes": 1071,
+      "sha256": "26b87b88cf2776d65b54357f0ab2ba7d659be41815fe1b60fc7abfa77417cacc"
+    },
+    "evidence/mesh-agent-transport-round2/standby-parser-step.txt": {
+      "bytes": 649,
+      "sha256": "f4e31cb1d0b118f6ee7444f50361057884ed8c4a0296e3aa6c2075464e2e7d66"
+    },
+    "evidence/mesh-agent-transport-round2/standby-proposal.txt": {
+      "bytes": 1065,
+      "sha256": "bb22afb50975d41b31f0d4508fa6c7ff5058f841fc3f731d856dfa22519dcce8"
+    },
+    "evidence/mesh-agent-transport-round2/standby-recovery-finding.txt": {
+      "bytes": 932,
+      "sha256": "c5e2fa33b098a091f5afbe151038cdbe1cef121fc84a4e87e384903e94afda76"
+    },
+    "evidence/mesh-agent-transport-round2/standby-scale-finding.txt": {
+      "bytes": 1484,
+      "sha256": "347ed83121951bdda529c50aa2ae6ea71ab888d33c68a95a9cbc7aec5f9810fd"
+    },
+    "evidence/mesh-agent-transport-round2/standby-server-commit.txt": {
+      "bytes": 1042,
+      "sha256": "8f1ca656b8af476df69dbd7324cecc4ed404c9853ed48ffd2d9574bd5ad5cdec"
+    },
+    "evidence/mesh-agent-transport-round2/standby-server-step.txt": {
+      "bytes": 607,
+      "sha256": "9c97ef41cdf330cea28c1f8cf79eb5d4222d5517cc4ed7e0103bbf2638c36439"
+    },
+    "evidence/mesh-agent-transport-round2/standby-tests-commit.txt": {
+      "bytes": 882,
+      "sha256": "e7f81d14009407fe40443c9ace6dad019c8f313e46e866f44135da2b20aa0624"
+    },
+    "evidence/mesh-agent-transport-round2/standby-tests-step.txt": {
+      "bytes": 488,
+      "sha256": "15753f405575b1cdda6c84630c8381950f2373ec4a1fb9cf14ab29e7ad148121"
+    },
+    "evidence/mesh-agent-transport-round2/start.txt": {
+      "bytes": 489,
+      "sha256": "556274cdb21592a07166cadc7244e9c2cc1f5e17c13a9bfcc86219368d2ef2a1"
+    },
+    "evidence/mesh-agent-transport-round2/warm-client-commit.txt": {
+      "bytes": 1258,
+      "sha256": "3ad031d3c9d407fdafd5f1b1ef12a872508a6c51fcb90f3a26d4e41e765c5081"
+    },
+    "evidence/mesh-agent-transport-round2/warm-client-step.txt": {
+      "bytes": 536,
+      "sha256": "f3f3f31134ccf470c6462c723c28d4e068a8fab347529564d13a4c56776cbca5"
+    },
+    "evidence/mesh-agent-transport-round2/warm-control-tests-commit.txt": {
+      "bytes": 940,
+      "sha256": "8e49a6d7de185ab76fa18346c60eb9fa6677c439185a9f931a988351e62be65b"
+    },
+    "evidence/mesh-agent-transport-round2/warm-control-tests-step.txt": {
+      "bytes": 520,
+      "sha256": "019ed06cf5202f4659c8b271482d099d07300548fe7276e73724ff886f663e07"
+    },
+    "evidence/mesh-agent-transport-round2/warm-down-commit.txt": {
+      "bytes": 1175,
+      "sha256": "b18c667228f6f1edb39ff12d151f694974cfda05c7b1e4c31639e5547453bb56"
+    },
+    "evidence/mesh-agent-transport-round2/warm-down-test-commit.txt": {
+      "bytes": 980,
+      "sha256": "8f085e8a88c1033ecc008589edba1ff1e27f1f89bc50ce7d97ab282ee3553df9"
+    },
+    "evidence/mesh-agent-transport-round2/warm-writer-investigation.txt": {
+      "bytes": 1637,
+      "sha256": "f12ec9ba393a76d6b75d236cb6a3e9a1a67a86094f8977d247a7208ad089283a"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "role": "behavioral fail-first server regression executable; no performance claim",
+  "head": "cf64f1d2",
+  "binary": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/infraternal_server-a12f73f27c9baa90",
+  "binary_sha256": "8e91c06c34677832afeb666c7a3c7c2c9aafc91c0d3103e293379e57895fc506",
+  "feature": "remote",
+  "source_sha256": {
+    "crates/infraternal-server/src/embedded.rs": "432752d78f010cebc5f77837f2e4a670f78c46eba9c5a17719daaf53e565a71e",
+    "crates/infraternal-server/src/embedded_writes.rs": "a69a93def04fe652e8a617f87fbc97bbac845ba89ab9ca91fd86911b581c18d7"
+  },
+  "log": "primary-ack-window-featured-red.log",
+  "result": "2 passed; 2 failed; 0.13s"
+}

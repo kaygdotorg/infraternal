@@ -1,0 +1,23 @@
+Keep input-only shared peers out of PTY viewer backpressure
+
+A primed shared writer intentionally has no ReadFrom cursor. If the
+ordinary viewer detaches, counting that parked peer as a viewer disables
+PTY POLLIN forever and blocks a producer despite detached draining being
+supported. Treat only shared peers without a cursor or output request as
+non-viewers; ordinary peers and active shared subscriptions keep their
+existing bounded backpressure behavior.
+
+The real PTY regression first blocked a1MiB producer for5s with only a
+parked peer. After the fix the producer completes before any output
+observer attaches, and its retained state remains readable. The long-line
+observer negotiates existing approximate repaint explicitly rather than
+changing faithful painter limits. No new state, allocation or task; both
+readiness scans remain bounded by32peers. Dropping the parked connection
+was rejected because it would discard warm writer ownership.
+Decisions13,41,215 preserve bounded output and shared input authority.
+
+Validation: fmt and strict shim all-target Clippy pass; shim library
+62PASS0FAIL12ignored42.64s. Exact production shim with test-only argument
+runner:13real PTY casesPASS4.43s. ShippingCLI tests land separately.
+
+Refs: #129

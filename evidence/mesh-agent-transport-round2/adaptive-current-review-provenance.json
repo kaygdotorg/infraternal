@@ -1,0 +1,15 @@
+{
+  "role": "Fresh unchanged ignored MAT-R5 current-source local review budget proof",
+  "head": "9bdefda3446c305feddedffd2f37ca8c1f35a8cd",
+  "profile": "debug existing real mTLS QUIC blackhole review;not productionPTY latency",
+  "executable": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/infraternal_agent-9fedebe24ed68543",
+  "executable_sha256": "8bc5d1ddef0546baca9b95807ae83a33c5589f1a029eb7bbe721afa79e3b2bc0",
+  "sources": {
+    "crates/plugins/remote/src/remote_quic.rs": "665584ffdd052384a2530fea5f57d872a049d9bfd01b2f354f5cf6edd6f20e6e",
+    "crates/infraternal-agent/src/remote_server_path.rs": "25b1982c5370c38dbb27af8c0a0bd4a08843e01bc55965e7998ded0ae7efe88b",
+    "crates/infraternal-agent/src/remote_server_path_tests.rs": "ca17ae5b8970e01ef6a0ec5d37b10f56a06a8144aaafc653be2b77d55f6e0d4d",
+    "crates/infraternal-agent/src/remote_client.rs": "d0ca56283ccaab4d2e91b4fba0570c8642ba3b19b170f7a974af8304758ad0c0",
+    "crates/infraternal-agent/src/remote_primed_native.rs": "b2609e58f3ab3f51a3e8c969b8663e5afca469221dc995bd9b3b85f247b23a2b"
+  },
+  "build_provenance": "root55275 warm-down regression build;parent confirmed no source changes afterward"
+}

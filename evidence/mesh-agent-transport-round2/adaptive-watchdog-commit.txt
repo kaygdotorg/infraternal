@@ -1,0 +1,21 @@
+Avoid repeated QUIC closure subscriptions in mesh liveness
+
+Keep one owned closure future across observations and take one coherent
+connection snapshot for current RTT and authenticated frame counters.
+Previously every50ms cancelled and registered another Notify waiter and
+read connection state separately for RTT and traffic, increasing shared
+connection-driver work at1000 concurrent guards.
+
+Preserve all24 post-decryption/dedup counters,50ms observations and the
+current RTT+200ms budget. Deadline enlargement and raw UDP counters were
+rejected because they prolong failure detection or admit replay/garbage
+as liveness. Decisions64,128,198,215 retain the selected QUIC engine and
+cancellation-owned watcher with no detached tasks or new state allocation.
+
+Validation: remote fmt, strict all-target Clippy and11real transport tests
+pass. Optimized1000-connection pin/old/pin comparison observed0/808/0 false
+cuts, all1000pairs live; host load varied and diagnostic overhead is
+qualified in adaptive-watchdog-evidence.md. This is connection-scale
+proof, not the remaining real-PTY fallback or local echo acceptance.
+
+Refs: #129

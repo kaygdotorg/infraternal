@@ -1,0 +1,16 @@
+Add an exact bounded cursor parser for primed native writers
+
+Negotiated standby writers need an output cursor without granting plugin
+or terminal-input authority. Parse one unsigned out_seq object within64B;
+reject unknown, duplicate, incomplete, trailing and non-object values.
+
+A failing regression exposed serde struct deserialization accepting[1].
+Check object shape before typed decoding; deny_unknown_fields alone is
+insufficient. Reusing general action dispatch would widen authority and
+allocations; an unbounded JSON value would lose the constant input bound.
+Decisions198,215 preserve the additive native-only extension.
+
+Validation: fmt and strict agent all-target Clippy pass; exact parser
+regression1PASS0FAIL. Fuzz target and integration land separately.
+
+Refs: #129
