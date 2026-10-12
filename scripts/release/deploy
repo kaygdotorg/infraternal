@@ -118,7 +118,9 @@ def main():
         receipt = json.loads(result.stdout)
         if receipt.get("state") != "deployed" or receipt.get("ca_unlocked") is not True:
             raise ValueError("remote deployment not confirmed")
-        if not args.staging:
+        # Production refs identify the running executable. A web-only swap
+        # retains that executable, so its candidate cannot become this identity.
+        if not args.staging and not args.web_only:
             tag = "prod-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + args.sha[:12]
             # A concurrent main update must fail this push, never rewrite history.
             # The two refs move together; failure is reported as deployed/unrecorded.
