@@ -40,7 +40,7 @@ export interface SetupDemo {
   dispose(): void;
 }
 
-/** `slow` stretches the background stages (`&slow=3` for stills); the prompt still arrives at `PROMPT_MS`. */
+/** `slow` stretches every timing (`&slow=3` for stills), the wait for the prompt included. */
 export function createSetupDemo(failStage: SetupStageId | undefined, slow = 1): SetupDemo {
   const history = new Map<string, SetupEvent[]>();
   const listeners = new Map<string, Set<(event: SetupEvent) => void>>();
@@ -109,10 +109,10 @@ export function createSetupDemo(failStage: SetupStageId | undefined, slow = 1): 
       for (const target of targets) {
         this.targets.set(target.id, { attempt: 0, hostId: crypto.randomUUID() });
         const at = (ms: number, fn: () => void): void => later(ms, () => { if (!this.ended) fn(); });
-        at(150, () => this.send(target.id, "check", "Checking SSH and host support."));
-        at(450, () => this.send(target.id, "check", "Signed in.", { authentication: { method: "network", network: "netbird" } }));
-        at(800, () => this.send(target.id, "install", "Uploading the infraternal agent."));
-        at(PROMPT_MS, () => {
+        at(150 * slow, () => this.send(target.id, "check", "Checking SSH and host support."));
+        at(450 * slow, () => this.send(target.id, "check", "Signed in.", { authentication: { method: "network", network: "netbird" } }));
+        at(800 * slow, () => this.send(target.id, "install", "Uploading the infraternal agent."));
+        at(PROMPT_MS * slow, () => {
           const { hostId } = this.targets.get(target.id)!;
           // `done` is "the shell is attachable" (D255); the background stages follow as setup events.
           this.send(target.id, "done", "The shell is ready.", { host_id: hostId });
