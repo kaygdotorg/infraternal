@@ -352,8 +352,12 @@ pub fn run(mut config: Config) -> io::Result<()> {
             // A fast viewer permits PTY progress. Lagging viewers catch up from
             // the ring or a snapshot; when every viewer stalls the old bounded
             // backpressure rule still applies until their daemon links detach.
+            // A parked shared writer has no output subscription. Its input/Ack
+            // ownership must not turn detached output draining into backpressure.
             let can_read = !drained
-                && (peers.is_empty()
+                && (peers
+                    .iter()
+                    .all(|p| p.shared_writer && p.cursor.is_none() && p.request.is_none())
                     || peers.iter().any(|p| {
                         p.pending.is_empty() && p.cursor.is_some_and(|seq| seq == ring.head())
                     }));
