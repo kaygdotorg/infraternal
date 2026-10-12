@@ -1,4 +1,5 @@
 //! Real TLS/QUIC actor admission and enrolled UID regression fixtures, #78.
+use infraternal_agent::remote_native::NativeChannel;
 
 use super::*;
 use infraternal_agent::{
@@ -18,7 +19,7 @@ use openssl::{
 };
 use std::time::Duration;
 
-fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
+pub(crate) fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
     identities_for_name("localhost")
 }
 
@@ -286,7 +287,7 @@ pub(crate) fn server_material() -> (Identity, crate::ca::CaMaterial) {
 }
 
 #[path = "remote_revocation_tests.rs"]
-mod revocation;
+pub(crate) mod revocation;
 
 #[path = "remote_review_tests.rs"]
 mod independent_review;
@@ -377,5 +378,275 @@ async fn claude_review_idle_anonymous_sockets_cannot_starve_host_handshakes() {
     assert!(
         dialed.is_ok(),
         "64 idle anonymous sockets exhausted every host handshake slot"
+    );
+}
+
+#[path = "remote_probe_tests.rs"]
+mod candidate_proofs;
+
+#[path = "remote_standby_tests.rs"]
+mod standby;
+
+#[path = "remote_listener_tests.rs"]
+mod additional_listeners;
+
+#[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
+#[path = "remote_mesh_namespace_tests.rs"]
+mod mesh_namespace;
+
+// Shared native fixtures prove replacement identity and cancelled delivery.
+async fn adapter_connect_control(
+    address: SocketAddr,
+    identity: &Identity,
+    root: &X509,
+) -> (quinn::Endpoint, quinn::Connection, NativeChannel) {
+    adapter_connect_control_with_window(address, identity, root, false).await
+}
+async fn adapter_connect_control_with_window(
+    address: SocketAddr,
+    identity: &Identity,
+    root: &X509,
+    limited: bool,
+) -> (quinn::Endpoint, quinn::Connection, NativeChannel) {
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let mut config = remote_quic::client_config(identity, std::slice::from_ref(root)).unwrap();
+    if limited {
+        let mut transport = quinn::TransportConfig::default();
+        transport
+            .stream_receive_window(4096u32.into())
+            .receive_window(8192u32.into());
+        config.transport_config(Arc::new(transport));
+    }
+    endpoint.set_default_client_config(config);
+    let connection = endpoint
+        .connect(address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let (send, receive) = connection.open_bi().await.unwrap();
+    let channel = NativeChannel::control(send, receive).unwrap();
+    (endpoint, connection, channel)
+}
+
+fn adapter_hello() -> Frame<'static> {
+    Frame::Hello {
+        version: 1,
+        caps: remote_quic::REMOTE_WRITER_BINDING,
+        client_info: "fixture",
+    }
+}
+
+/// Generates a fresh native pair for actor cancellation/backpressure regressions.
+pub(crate) async fn native_link_pair() -> (
+    Arc<RemoteLink>,
+    infraternal_agent::remote_native::NativeChannel,
+    quinn::Endpoint,
+    quinn::Endpoint,
+    quinn::Connection,
+) {
+    use infraternal_agent::remote_native::NativeChannel;
+    let (server, node, root, _) = identities();
+    let listener = quinn::Endpoint::server(
+        remote_quic::server_config(&server, std::slice::from_ref(&root)).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let mut config = remote_quic::client_config(&node, std::slice::from_ref(&root)).unwrap();
+    let mut transport = quinn::TransportConfig::default();
+    transport
+        .stream_receive_window(4096u32.into())
+        .receive_window(8192u32.into());
+    config.transport_config(Arc::new(transport));
+    endpoint.set_default_client_config(config);
+    let outgoing = endpoint
+        .connect(listener.local_addr().unwrap(), "localhost")
+        .unwrap();
+    let (peer, admitted) = tokio::join!(outgoing, async {
+        listener.accept().await.unwrap().await.unwrap()
+    });
+    let peer = peer.unwrap();
+    let (send, receive) = peer.open_bi().await.unwrap();
+    let control = NativeChannel::control(send, receive).unwrap();
+    let hello = Frame::Hello {
+        version: 1,
+        caps: remote_quic::REMOTE_WRITER_BINDING,
+        client_info: "native cancellation fixture",
+    };
+    Transmit::default().send(&control, 0, &hello).await.unwrap();
+    let link = Arc::new(RemoteLink::quic(admitted).await.unwrap());
+    link.hello(&hello).await.unwrap();
+    let mut wire = Vec::new();
+    infraternal_protocol::encode_muxed_frame_into(0, &hello, &mut wire).unwrap();
+    link.write(0, &hello, &wire).await.unwrap();
+    assert!(matches!(
+        Receive::default().next(&control).await.unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    let mut received = bytes::BytesMut::new();
+    link.read(&mut received, &mut [0; 4096]).await.unwrap();
+    (link, control, listener, endpoint, peer)
+}
+
+#[tokio::test]
+async fn retired_native_writer_frames_cannot_close_or_ack_its_replacement() {
+    let (server, node, root, _) = identities();
+    let listener = quinn::Endpoint::server(
+        remote_quic::server_config(&server, std::slice::from_ref(&root)).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let address = listener.local_addr().unwrap();
+    let (old_sent, sent) = tokio::sync::oneshot::channel();
+    let (done, keep_open) = tokio::sync::oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let (_endpoint, connection, control) = adapter_connect_control(address, &node, &root).await;
+        Transmit::default()
+            .send(&control, 0, &adapter_hello())
+            .await
+            .unwrap();
+        let mut control_rx = Receive::default();
+        let response = control_rx.next(&control).await.unwrap();
+        let binding = remote_quic::negotiate_binding(&connection, &response.frame).unwrap();
+        let first =
+            NativeChannel::terminal(remote_quic::accept_bound(&binding).await.unwrap()).unwrap();
+        assert!(matches!(
+            Receive::default().next(&first).await.unwrap().frame,
+            Frame::AttachTerm { .. }
+        ));
+        Transmit::default()
+            .send(&first, 42, &Frame::Ack { in_seq_acked: 10 })
+            .await
+            .unwrap();
+        old_sent.send(()).unwrap();
+        let second =
+            NativeChannel::terminal(remote_quic::accept_bound(&binding).await.unwrap()).unwrap();
+        assert!(matches!(
+            Receive::default().next(&second).await.unwrap().frame,
+            Frame::AttachTerm { .. }
+        ));
+        Transmit::default()
+            .send(&second, 42, &Frame::Ack { in_seq_acked: 20 })
+            .await
+            .unwrap();
+        let _ = keep_open.await;
+    });
+    let connection = listener.accept().await.unwrap().await.unwrap();
+    let link = RemoteLink::quic(connection).await.unwrap();
+    link.hello(&adapter_hello()).await.unwrap();
+    let mut muxed = Vec::new();
+    let greeting = adapter_hello();
+    infraternal_protocol::encode_muxed_frame_into(0, &greeting, &mut muxed).unwrap();
+    link.write(0, &greeting, &muxed).await.unwrap();
+    let mut received = bytes::BytesMut::new();
+    let mut scratch = vec![0; 4096];
+    link.read(&mut received, &mut scratch).await.unwrap();
+    received.clear();
+    let attach = Frame::AttachTerm {
+        session_id: &[1; 16],
+        last_out_seq: 0,
+        last_in_seq: 0,
+    };
+    muxed.clear();
+    infraternal_protocol::encode_muxed_frame_into(42, &attach, &mut muxed).unwrap();
+    link.write(42, &attach, &muxed).await.unwrap();
+    sent.await.unwrap();
+    let close = Frame::Close {
+        code: 1000,
+        reason: "rebind fixture",
+    };
+    let mut closing = Vec::new();
+    infraternal_protocol::encode_muxed_frame_into(42, &close, &mut closing).unwrap();
+    link.write(42, &close, &closing).await.unwrap();
+    link.write(42, &attach, &muxed).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        link.read(&mut received, &mut scratch),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        infraternal_protocol::decode_muxed_frame(&received)
+            .unwrap()
+            .frame,
+        Frame::Ack { in_seq_acked: 20 }
+    );
+    received.clear();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            link.read(&mut received, &mut scratch)
+        )
+        .await
+        .is_err()
+    );
+    done.send(()).unwrap();
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_native_read_retains_dequeued_packet() {
+    let (link, control, _listener, _endpoint, _peer) = native_link_pair().await;
+    let (ready, held) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = tokio::sync::oneshot::channel();
+    let held_link = link.clone();
+    let holder = tokio::spawn(async move {
+        held_link.hold_writer_map(ready, release_rx).await;
+    });
+    held.await.unwrap();
+    Transmit::default()
+        .send(
+            &control,
+            0,
+            &Frame::Result {
+                call_id: 91,
+                ok: true,
+                json: b"{}",
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !link.control_packet_ready().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut received = bytes::BytesMut::new();
+    let mut scratch = [0; 4096];
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            link.read(&mut received, &mut scratch)
+        )
+        .await
+        .is_err()
+    );
+    release.send(()).unwrap();
+    holder.await.unwrap();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        link.read(&mut received, &mut scratch),
+    )
+    .await
+    .expect("select cancellation must retain the dequeued frame")
+    .unwrap();
+    assert!(matches!(
+        infraternal_protocol::decode_muxed_frame(&received)
+            .unwrap()
+            .frame,
+        Frame::Result { call_id: 91, .. }
+    ));
+    received.clear();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            link.read(&mut received, &mut scratch)
+        )
+        .await
+        .is_err(),
+        "frame delivered only once"
     );
 }

@@ -34,6 +34,7 @@ fn check(backend: Backend) {
     Device::addresses(proposed).unwrap();
     let accepted = Config {
         local_key: None,
+        server: None,
         node: NodeId(1),
         version: 1,
         addresses: Addresses {

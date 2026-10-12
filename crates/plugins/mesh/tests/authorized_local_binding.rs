@@ -43,6 +43,7 @@ fn check(backend: Backend) {
     let identity = node.up().unwrap();
     let mut old = Config {
         local_key: None,
+        server: None,
         node: NodeId(1),
         version: 1,
         addresses: Addresses {

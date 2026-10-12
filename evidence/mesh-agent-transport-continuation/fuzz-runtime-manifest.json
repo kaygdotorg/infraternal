@@ -1,0 +1,27 @@
+{
+  "libstdc++.so.6": {
+    "source": "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib/libstdc++.so.6",
+    "bytes": 3492992,
+    "sha256": "47c4e32721428eb2078bb9fb0670805f94821b21601f2b191bea4a1f1b223e2d"
+  },
+  "libgcc_s.so.1": {
+    "source": "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib/libgcc_s.so.1",
+    "bytes": 201560,
+    "sha256": "e80a9d87e1a0b8249700f459767b257b01969c79bee3c8fb15e35e1e9c4da055"
+  },
+  "libm.so.6": {
+    "source": "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6",
+    "bytes": 1283232,
+    "sha256": "935fd3fa15c35746041cfa475003571dc51b9ce0c395034ac9d50bb8e1583919"
+  },
+  "libc.so.6": {
+    "source": "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6",
+    "bytes": 2470400,
+    "sha256": "ef3843ed24108fc3cfde4095cdb12e0643b9953f4b902bad8152d002fc0cbbe3"
+  },
+  "ld-linux-x86-64.so.2": {
+    "source": "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib64/ld-linux-x86-64.so.2",
+    "bytes": 276272,
+    "sha256": "e2e9975273f65f7cb730f4fcc8a9a5aae62763b6263de877a8b896311819d7b6"
+  }
+}

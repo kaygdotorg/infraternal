@@ -1,9 +1,8 @@
 //! Tests private control endpoints and replacement-path trust before any key is exported [217], #154.
 
 use super::*;
+use crate::restart_binary::fixture::Signed;
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
-
-const HANDOFF_NOTE: &[u8; 28] = b"\x0c\0\0\0\x04\0\0\0ACFIINFRATERNAL\0\x01\0\0\0";
 
 struct Directory(PathBuf);
 impl Directory {
@@ -53,31 +52,84 @@ fn copy_private_image(source: &Path, target: &Path) {
     std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// Add the compatibility record to a copied test ELF without changing its executable image.
-fn copy_marked_image(source: &Path, target: &Path) {
-    let mut image = std::fs::read(source).unwrap();
-    assert_eq!(&image[..7], b"\x7fELF\x02\x01\x01");
-    let table = usize::try_from(u64::from_le_bytes(image[32..40].try_into().unwrap())).unwrap();
-    let stride = usize::from(u16::from_le_bytes([image[54], image[55]]));
-    let count = usize::from(u16::from_le_bytes([image[56], image[57]]));
-    assert_eq!(stride, 56, "test fixture expects ELF64 program headers");
-    let note = (0..count)
-        .map(|index| table + index * stride)
-        .find(|program| u32::from_le_bytes(image[*program..*program + 4].try_into().unwrap()) == 4)
-        .expect("test ELF must contain a PT_NOTE entry");
+fn strip_image(image: &Path) {
+    let child = std::process::Command::new("strip")
+        .arg("--strip-all")
+        .arg(image)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let output = bounded_output(child, Duration::from_secs(30), "strip test image");
+    assert!(
+        output.status.success(),
+        "strip test image failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
-    // This fixture is inspected by Opened::open but never executed. Pointing
-    // PT_NOTE at an appended record keeps the original loadable image intact.
-    let offset = image.len().next_multiple_of(4);
-    image.resize(offset, 0);
-    image.extend_from_slice(HANDOFF_NOTE);
-    image[note + 8..note + 16].copy_from_slice(&u64::try_from(offset).unwrap().to_le_bytes());
-    image[note + 32..note + 40]
-        .copy_from_slice(&u64::try_from(HANDOFF_NOTE.len()).unwrap().to_le_bytes());
-    image[note + 40..note + 48]
-        .copy_from_slice(&u64::try_from(HANDOFF_NOTE.len()).unwrap().to_le_bytes());
-    std::fs::write(target, image).unwrap();
-    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700)).unwrap();
+/// Cache one stripped source image; each test still signs a separate private copy.
+fn stripped_test_image(source: &Path) -> PathBuf {
+    if source
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".all-stripped"))
+    {
+        return source.to_owned();
+    }
+    let target_root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".cache/codex-scratch/infraternal")
+        },
+        PathBuf::from,
+    );
+    let cache = target_root.join("restart-test-images");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Include source identity so a rebuilt test executable cannot reuse stale fixture bytes.
+    let source_metadata = std::fs::metadata(source).unwrap();
+    let modified = source_metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut image_name = source
+        .file_name()
+        .expect("test image has a name")
+        .to_os_string();
+    image_name.push(format!(
+        ".{}-{modified}.all-stripped",
+        source_metadata.len()
+    ));
+    let image = cache.join(&image_name);
+    if !image.exists() {
+        let mut staging_name = image_name;
+        staging_name.push(format!(".{}", uuid::Uuid::new_v4().simple()));
+        let staging = cache.join(staging_name);
+        copy_private_image(source, &staging);
+        strip_image(&staging);
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+        match std::fs::hard_link(&staging, &image) {
+            Ok(()) => std::fs::remove_file(&staging).unwrap(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(&staging).unwrap();
+            }
+            Err(error) => panic!("could not retain the stripped test image: {error}"),
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&image).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.mode() & 0o777, 0o700);
+    image
+}
+
+/// Sign a stripped byte copy at an owner-only path so admission exercises release verification.
+fn copy_signed_private_image(source: &Path, target: &Path) -> Signed {
+    let source = stripped_test_image(source);
+    let bytes = std::fs::read(source).unwrap();
+    Signed::new(target.to_owned(), &bytes)
 }
 
 fn bounded_output(
@@ -151,9 +203,9 @@ async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(executable(&binary).is_err());
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(executable(&binary).is_ok());
+    assert!(executable(&binary).is_err());
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
-    assert!(executable(&binary).is_ok());
+    assert!(executable(&binary).is_err());
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(executable(&binary).is_err());
 }
@@ -199,10 +251,7 @@ fn replacement_never_exports_to_a_general_purpose_binary() {
         }
     }
     let source = Probe(std::sync::atomic::AtomicUsize::new(0));
-    let _replacement = Replacement::new(
-        crate::restart_binary::Opened::open(PathBuf::from("/usr/bin/bash")).unwrap(),
-        Some(&source),
-    );
+    assert!(crate::restart_binary::Opened::open(PathBuf::from("/usr/bin/bash")).is_err());
     assert_eq!(
         source.0.load(std::sync::atomic::Ordering::Relaxed),
         0,
@@ -217,8 +266,8 @@ fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
     }
     let directory = Directory::new();
     let binary = directory.0.join("infraternal");
-    copy_marked_image(&std::env::current_exe().unwrap(), &binary);
-    let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+    let signed = copy_signed_private_image(&std::env::current_exe().unwrap(), &binary);
+    let opened = signed.open().unwrap();
     assert!(infraternal_server::ca_handoff_binary::capable(&opened.file).unwrap());
     assert!(!opened.warm);
     let original = opened.file.metadata().unwrap().ino();
@@ -226,7 +275,7 @@ fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
     std::fs::copy("/usr/bin/bash", &binary).unwrap();
     assert_eq!(opened.file.metadata().unwrap().ino(), original);
     assert_ne!(std::fs::metadata(&binary).unwrap().ino(), original);
-    assert!(Replacement::new(opened, None).input.is_none());
+    assert!(Replacement::new(opened, None).unwrap().input.is_none());
 }
 
 #[test]
@@ -236,18 +285,14 @@ fn root_owned_marked_target_requires_protected_root_parents() {
     }
     let directory = Directory::new();
     let binary = directory.0.join("infraternal");
-    copy_marked_image(&std::env::current_exe().unwrap(), &binary);
-    let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+    let signed = copy_signed_private_image(&std::env::current_exe().unwrap(), &binary);
+    let opened = signed.open().unwrap();
     assert!(opened.warm);
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
-    assert!(
-        !crate::restart_binary::Opened::open(binary.clone())
-            .unwrap()
-            .warm
-    );
+    assert!(!Signed::existing(binary.clone()).open().unwrap().warm);
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::copy("/usr/bin/bash", &binary).unwrap();
-    assert!(!crate::restart_binary::Opened::open(binary).unwrap().warm);
+    assert!(Signed::existing(binary).open().is_err());
 }
 
 #[test]
@@ -258,11 +303,38 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
         let directory = PathBuf::from(std::env::var_os("INFRATERNAL_RESTART_FD_TEST").unwrap());
         let retained = directory.join("retained");
         if retained.exists() {
-            // argv[0] keeps the former install path; use inode identity to
-            // recognize the image reached through the already-open fd.
+            // Execution uses a sealed memfd snapshot, while the renamed source
+            // inode remains intact beside the overwritten install pathname.
+            let expected_source_inode: u64 =
+                std::fs::read_to_string(directory.join("source-inode"))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+            let expected_image_inode: u64 = std::fs::read_to_string(directory.join("image-inode"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(
+                std::env::current_exe()
+                    .unwrap()
+                    .as_os_str()
+                    .as_bytes()
+                    .starts_with(b"/memfd:"),
+                "replacement must execute the sealed image descriptor"
+            );
             assert_eq!(
                 std::fs::metadata("/proc/self/exe").unwrap().ino(),
-                std::fs::metadata(&retained).unwrap().ino()
+                expected_image_inode
+            );
+            assert_eq!(
+                std::fs::metadata(&retained).unwrap().ino(),
+                expected_source_inode
+            );
+            assert_ne!(
+                std::fs::metadata(directory.join("candidate"))
+                    .unwrap()
+                    .ino(),
+                expected_source_inode
             );
             assert_eq!(
                 std::fs::read_link("/proc/self/fd/0").unwrap(),
@@ -271,16 +343,29 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
             return;
         }
         let binary = directory.join("candidate");
-        copy_private_image(&std::env::current_exe().unwrap(), &binary);
-        let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+        let signed = copy_signed_private_image(&std::env::current_exe().unwrap(), &binary);
+        let source_inode = std::fs::metadata(&binary).unwrap().ino();
+        let opened = signed.open().unwrap();
+        std::fs::write(directory.join("source-inode"), source_inode.to_string()).unwrap();
+        std::fs::write(
+            directory.join("image-inode"),
+            opened.file.metadata().unwrap().ino().to_string(),
+        )
+        .unwrap();
         std::fs::rename(&binary, directory.join("retained")).unwrap();
+        assert_eq!(
+            std::fs::metadata(directory.join("retained")).unwrap().ino(),
+            source_inode
+        );
         std::fs::copy("/usr/bin/bash", &binary).unwrap();
+        assert_ne!(std::fs::metadata(&binary).unwrap().ino(), source_inode);
         // Keep cleanup with the outer process: successful exec replaces Rust destructors.
-        let error = Replacement::new(opened, None).exec();
+        let error = Replacement::new(opened, None).unwrap().exec();
         panic!("fd replacement failed: {}", error.kind());
     }
     let directory = Directory::new();
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
+    let source = stripped_test_image(&std::env::current_exe().unwrap());
+    let child = std::process::Command::new(source)
         .args(["--exact", NAME, "--nocapture"])
         .env("INFRATERNAL_RESTART_FD_TEST", &directory.0)
         .stdin(std::process::Stdio::piped())
@@ -468,7 +553,8 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
         });
         return;
     }
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
+    let child_image = stripped_test_image(&std::env::current_exe().unwrap());
+    let child = std::process::Command::new(child_image)
         .args(["--exact", NAME, "--nocapture"])
         .env("INFRATERNAL_EARLY_HUP_TEST", "1")
         .stdin(std::process::Stdio::null())
@@ -495,10 +581,8 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let mut control = Control::start(&directory.0).unwrap();
-            let (received, sent) = tokio::join!(
-                control.requested(None),
-                request(&directory.0, Some(Path::new("/usr/bin/bash")))
-            );
+            let (received, sent) =
+                tokio::join!(control.requested(None), request(&directory.0, None));
             assert!(received.is_ok());
             assert!(!sent.unwrap());
         });
@@ -530,7 +614,7 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         "request_uid=Some({})",
         nix::unistd::Uid::effective().as_raw()
     )));
-    assert!(logs.contains("/usr/bin/bash"));
+    assert!(logs.contains("server_restart_request"));
     assert!(logs.contains("cold"));
     assert!(!logs.contains("seed") && !logs.contains("key_bytes") && !logs.contains("key_length"));
 }
@@ -542,15 +626,15 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
     if let Ok(stage) = std::env::var("INFRATERNAL_CLOSED_STDIN_TEST") {
         let path = PathBuf::from(std::env::var_os("INFRATERNAL_CLOSED_STDIN_BINARY").unwrap());
         let mut opened = if stage == "before" {
-            Some(crate::restart_binary::Opened::open(path.clone()).unwrap())
+            Some(Signed::existing(path.clone()).open().unwrap())
         } else {
             None
         };
         nix::unistd::close(0).unwrap();
         let opened = opened
             .take()
-            .unwrap_or_else(|| crate::restart_binary::Opened::open(path).unwrap());
-        let error = Replacement::new(opened, None).exec();
+            .unwrap_or_else(|| Signed::existing(path).open().unwrap());
+        let error = Replacement::new(opened, None).unwrap().exec();
         panic!(
             "closed stdin must not overwrite the checked executable fd: {}",
             error.kind()
@@ -594,8 +678,10 @@ int main(void) {
             "native stdin probe compile failed: {}",
             String::from_utf8_lossy(&compiled.stderr)
         );
+        strip_image(&target);
         // The inherited shared umask may make compiler output group-writable.
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _signed = Signed::new(target.clone(), &std::fs::read(&target).unwrap());
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--nocapture"])
             .env("INFRATERNAL_CLOSED_STDIN_TEST", stage)
@@ -662,3 +748,7 @@ fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "restart_path_review_tests.rs"]
+mod path_review;

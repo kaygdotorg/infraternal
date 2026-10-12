@@ -1,0 +1,9 @@
+{
+  "target": "x86_64-unknown-linux-musl",
+  "size_bytes": 20705152,
+  "base_commit": "a5f744fb",
+  "base_size_bytes": 20614656,
+  "delta_bytes": 90496,
+  "static_limit_bytes": 16404816,
+  "sha256": "157261533ec08036009b50368fe6676edcdfdecdff8fc39b9f5959df0a3f8a2e"
+}

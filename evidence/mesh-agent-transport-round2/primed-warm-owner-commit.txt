@@ -1,0 +1,21 @@
+Keep capability-negotiated native fallback writers warm before switching
+
+When live mesh and enrolled fallback support primed writers, park the
+fallback with prime intent, validate its cached capabilities, send client
+Hello once and start its owned native supervisor before control activation.
+Keep this supervisor across switching so existing shim writers need no new
+TLS or ordinary-writer replacement. TCP and legacy standby remain unchanged.
+
+The transport owner captures its retirement guard before spawning and
+aborts children when dropped. A regression showed abort-before-first-poll
+leaked the connection when the guard was created inside the async body;
+the captured owner fixes that cancellation case. Detached tasks, another
+handshake at failover and global stream-mode promotion were rejected.
+Decisions64,198,215 preserve uid/capability authority and scoped lifetime.
+
+Validation: fmt and strict agent all-target mesh,remote Clippy pass;
+serial agent67PASS0FAIL11ignored23.22s plus transport2PASS. Real server
+priming/backpressure integration and namespace latency remain separate
+acceptance gates; no terminal timing claim is made by these unit tests.
+
+Refs: #129

@@ -1,0 +1,58 @@
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal-agent)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/plugins/ssh)
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal-server)
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 59s
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 42s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/release-pipeline-r4/target/debug/deps/infraternal-f9b68484307f0a80)
+
+running 27 tests
+test cli::command_tree::backmerge_tests::restart_inherits_private_state_before_or_after_the_command ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... ok
+
+thread 'restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca' (167734) panicked at crates/infraternal/src/restart_recovery_tests.rs:187:17:
+replacement did not recover: 
+running 1 test
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca ... FAILED
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... ok
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... ok
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin has been running for over 60 seconds
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode has been running for over 60 seconds
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... ok
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution has been running for over 60 seconds
+test restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode has been running for over 60 seconds
+test restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode ... ok
+test restart_binary::audit_tests::symlink_parent_escape_and_writable_candidates_are_refused ... ok
+METRIC unverified_replacements_accepted=0 candidates=4 executed=0
+test restart_binary::audit_tests::unsigned_or_tampered_replacement_is_refused_before_exec ... ok
+test restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running ... ok
+test restart_binary::audit_tests::verification_twenty_megabytes ... ignored, optimized weighted 20 MiB signature and admission measurement
+test restart_image::tests::probe_never_inherits_the_control_descriptor ... ok
+test restart_image::tests::snapshot_refuses_every_mutation_and_preserves_source_offset ... ok
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... ok
+
+failures:
+
+failures:
+    restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca
+
+test result: FAILED. 25 passed; 1 failed; 1 ignored; 0 measured; 47 filtered out; finished in 329.12s
+
+error: test failed, to rerun pass `-p infraternal --bin infraternal`

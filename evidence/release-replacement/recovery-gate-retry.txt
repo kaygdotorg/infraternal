@@ -1,0 +1,84 @@
+Running as unit: run-p2347735-i6541636.scope; invocation ID: 9922c7e015e54795a4f5f034f5299228
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.81s
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.95s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/release-pipeline-r4/target/debug/deps/infraternal-f9b68484307f0a80)
+
+running 25 tests
+test cli::command_tree::backmerge_tests::restart_inherits_private_state_before_or_after_the_command ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+
+thread 'restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null' (2365417) panicked at crates/infraternal/src/restart_tests.rs:507:5:
+stage=after
+
+running 1 test
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... FAILED
+
+failures:
+
+failures:
+    restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.01s
+
+
+
+thread 'restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null' (2365751) panicked at crates/infraternal/src/restart_tests.rs:456:62:
+called `Result::unwrap()` on an `Err` value: Kind(InvalidData)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... FAILED
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... ok
+VERIFIED_EXEC case=replacement 
+running 1 test
+
+running 1 test
+RECOVERY same_pid=true ca_unlocked=false serving=true
+test restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.01s
+
+
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+VERIFIED_EXEC case=late 
+running 1 test
+
+running 1 test
+RECOVERY same_pid=true ca_unlocked=false serving=true
+test restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.01s
+
+
+test restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca ... ok
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... ok
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... ok
+test restart_binary::audit_tests::symlink_parent_escape_and_writable_candidates_are_refused ... ok
+METRIC unverified_replacements_accepted=0 candidates=4 executed=0
+test restart_binary::audit_tests::unsigned_or_tampered_replacement_is_refused_before_exec ... ok
+test restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running ... ok
+test restart_image::tests::snapshot_refuses_every_mutation_and_preserves_source_offset ... ok
+test restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode ... ok
+
+failures:
+
+failures:
+    restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null
+
+test result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 47 filtered out; finished in 53.35s
+
+error: test failed, to rerun pass `-p infraternal --bin infraternal`

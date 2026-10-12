@@ -1,0 +1,3 @@
+Running as unit: run-p2269283-i6463184.scope; invocation ID: 32e6796428bf422eaab9dc3c08ed9b50
+{"machine": "infraternal-dev", "cores": 12, "load_start": [42.521484375, 46.38427734375, 46.23779296875]}
+{"binary": "/home/kayg/.cache/codex-scratch/release-pipeline-r4/baseline-target/x86_64-unknown-linux-musl/release/infraternal", "samples": 25, "gap_p50_ms": 60.768447001464665, "gap_max_ms": 418.0998309966526, "total_p50_ms": 80.24114799627569, "total_max_ms": 573.5877640036051, "refusal_samples": 1394, "sampling_interval_ms": 1, "same_pid": true, "users": 50, "retained_hosts": 10000, "live_ptys": 0, "load_end": [43.20068359375, 46.4609375, 46.263671875]}

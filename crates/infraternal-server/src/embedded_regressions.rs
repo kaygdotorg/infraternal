@@ -13,6 +13,8 @@ fn connection() -> (AgentConnection, UnixStream) {
             scratch: vec![0; 4096],
             encode: Vec::new(),
             next_call_id: 1,
+            #[cfg(feature = "remote")]
+            owned_control: None,
         },
         peer,
     )
@@ -25,8 +27,11 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         last_out_seq: 0,
         last_in_seq: 0,
         last_input_end: 0,
+        unacknowledged: BytesMut::new(),
+        input_credit: watch::channel(0).0,
         credit: 0,
         awaiting_ack: false,
+        replaying: false,
         output,
     }
 }
@@ -1022,3 +1027,9 @@ async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
     assert_eq!(second.duration_since(first), RECONNECT_FLOOR * 2);
     assert_eq!(third.duration_since(second), RECONNECT_FLOOR * 4);
 }
+
+#[path = "embedded_path_tests.rs"]
+mod path_tests;
+
+#[path = "embedded_credit_tests.rs"]
+mod credit_tests;

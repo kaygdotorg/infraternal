@@ -49,6 +49,8 @@ enum Command {
     Input(u64, Vec<u8>),
     Credit(u32),
     Resize(u16, u16, u16, u16),
+    #[cfg(feature = "remote")]
+    Cursor(u64),
 }
 // Dropping cancellation retires a stalled handshake as well as queued commands.
 struct Stream {
@@ -120,15 +122,18 @@ async fn writer(
             0,
             &Frame::Hello {
                 version: 1,
-                caps: (if socket.native_stream_id().is_some() {
-                    infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
-                } else {
-                    0
-                }) | (if renewal {
-                    infraternal_plugin_api::channel::LIVE_RENEWAL
-                } else {
-                    0
-                }),
+                caps: infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+                    | (if socket.native_stream_id().is_some() {
+                        infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
+                            | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
+                    } else {
+                        0
+                    })
+                    | (if renewal {
+                        infraternal_plugin_api::channel::LIVE_RENEWAL
+                    } else {
+                        0
+                    }),
                 client_info: "infraternal agent",
             },
         )
@@ -397,8 +402,18 @@ async fn run_channel(
     let mut events = plugins.subscribe();
     let (plugin_replies, mut results) = mpsc::channel(8);
     let worker = crate::plugin_control::Worker::start(plugins.clone(), plugin_replies);
-    let manager = Manager::detect().await;
-    let exe = std::env::current_exe()?;
+    let running = std::env::current_exe()?;
+    // A sealed/deleted image has no install pathname for an indirect init
+    // launcher. Use the existing detached shim mode and direct kernel image.
+    let anonymous = running
+        .as_os_str()
+        .as_encoded_bytes()
+        .ends_with(b" (deleted)");
+    let (manager, exe) = if anonymous {
+        (Manager::Detached, PathBuf::from("/proc/self/exe"))
+    } else {
+        (Manager::detect().await, running)
+    };
     let retirements = sessions::SessionEvents::new(&state)?;
     let mut registry = crate::lifecycle::Registry::default();
     for session in sessions::discover(&state).await? {
@@ -628,6 +643,30 @@ async fn run_channel(
 #[allow(clippy::too_many_lines)]
 #[cfg(feature = "remote")]
 pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) -> io::Result<()> {
+    run_bound_terminal_mode(channel, state, false).await
+}
+
+/// Accept optional per-stream priming intent on a capability-negotiated connection.
+/// Ordinary writers omit the marker, including new writers after promotion.
+/// The supervisor must verify native priming capability and cancel on lost authority.
+/// # Errors
+/// Refuses malformed priming intent or the same attachment/framing failures
+/// as `run_bound_terminal`; ordinary unmarked streams retain normal semantics.
+#[cfg(feature = "remote")]
+pub async fn run_negotiated_bound_terminal(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+) -> io::Result<()> {
+    run_bound_terminal_mode(channel, state, true).await
+}
+
+#[cfg(feature = "remote")]
+#[allow(clippy::too_many_lines)]
+async fn run_bound_terminal_mode(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    allow_priming: bool,
+) -> io::Result<()> {
     let writer_id = channel
         .native_stream_id()
         .filter(|id| *id != 0 && id & 1 == 0)
@@ -635,19 +674,35 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     let _retire = RetireChannel(channel);
     let state = sessions::state(state)?;
     let mut receive = Receive::default();
-    let (id, cursor, input) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let first = receive.next(channel).await?;
-        match first.frame {
-            Frame::AttachTerm {
-                session_id,
-                last_out_seq,
-                last_in_seq,
-            } => Ok((*session_id, last_out_seq, last_in_seq)),
-            _ => Err(sessions::invalid("native terminal AttachTerm required")),
-        }
-    })
-    .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let (id, cursor, input, primed) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let first = receive.next(channel).await?;
+            // Shared intent is ordered on this writer, so a binding already in
+            // flight across promotion cannot become an ordinary replacement.
+            let primed = matches!(
+                first.frame,
+                Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.prime",
+                    input_json: b"{}",
+                }
+            ) && allow_priming;
+            let first = if primed {
+                receive.next(channel).await?
+            } else {
+                first
+            };
+            match first.frame {
+                Frame::AttachTerm {
+                    session_id,
+                    last_out_seq,
+                    last_in_seq,
+                } => Ok((*session_id, last_out_seq, last_in_seq, primed)),
+                _ => Err(sessions::invalid("native terminal AttachTerm required")),
+            }
+        })
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
     let path = sessions::rendezvous(&state, id);
     let (tx, rx) = mpsc::channel(8);
     let (commands, command_rx) = mpsc::channel(8);
@@ -657,6 +712,11 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
             let command = match decoded.frame {
                 Frame::Input { in_seq, bytes } => Command::Input(in_seq, bytes.to_vec()),
                 Frame::Credit { bytes } => Command::Credit(bytes),
+                Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.cursor",
+                    input_json,
+                } if primed => Command::Cursor(crate::remote_cursor::decode(input_json)?),
                 Frame::Resize {
                     cols,
                     rows,
@@ -683,7 +743,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     tokio::select! {
         result = dispatch => result,
         result = &mut writer => result,
-        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => {
+        result = terminal_mode(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx, primed) => {
             result?;
             // Successful terminal returns can queue a final Close (gone session,
             // unsupported shim or refused request). Its sole sender is now gone:
@@ -703,9 +763,14 @@ struct Link {
     reader: Reader,
 }
 impl Link {
-    async fn connect(path: PathBuf, id: [u8; 16], writer: u32) -> io::Result<Self> {
+    async fn connect(path: PathBuf, id: [u8; 16], writer: u32, shared: bool) -> io::Result<Self> {
+        let session = if shared {
+            sessions::connect_shared_writer(path, id, writer).await?
+        } else {
+            sessions::connect_writer(path, id, writer).await?
+        };
         Ok(Self {
-            session: sessions::connect_writer(path, id, writer).await?,
+            session,
             transmit: Vec::new(),
             reader: Reader::default(),
         })
@@ -836,8 +901,9 @@ async fn relink(
     id: [u8; 16],
     stream: u32,
     tx: &mpsc::Sender<Message>,
+    primed: bool,
 ) -> io::Result<Option<Link>> {
-    match Link::connect(path.to_path_buf(), id, stream).await {
+    match Link::connect(path.to_path_buf(), id, stream, primed).await {
         Ok(link) => Ok(Some(link)),
         Err(error) if sessions::gone(&error) => {
             if !recorded_end(path, id, stream, tx).await? {
@@ -860,6 +926,20 @@ async fn terminal(
     commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
+    terminal_mode(path, id, stream, cursor, last_input, commands, tx, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn terminal_mode(
+    path: PathBuf,
+    id: [u8; 16],
+    stream: u32,
+    cursor: u64,
+    last_input: u64,
+    commands: session_commands::Receiver,
+    tx: mpsc::Sender<Message>,
+    primed: bool,
+) -> io::Result<()> {
     match terminal_run(
         path.clone(),
         id,
@@ -868,6 +948,7 @@ async fn terminal(
         last_input,
         commands,
         tx.clone(),
+        primed,
     )
     .await
     {
@@ -893,11 +974,12 @@ async fn terminal_run(
     last_input: u64,
     mut commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
+    primed: bool,
 ) -> io::Result<()> {
     // Install ownership before output requests can exhaust credit. Dropping this
     // guard on cancellation/ordered exit releases only this window, even when
     // several windows or daemon connections share a shim.
-    let Some(link) = relink(&path, id, stream, &tx).await? else {
+    let Some(link) = relink(&path, id, stream, &tx, primed).await? else {
         return Ok(());
     };
     let mut owner = if link.session.supports_owner {
@@ -909,7 +991,7 @@ async fn terminal_run(
                     io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
                 ) =>
             {
-                relink(&path, id, stream, &tx).await?;
+                relink(&path, id, stream, &tx, primed).await?;
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -920,7 +1002,11 @@ async fn terminal_run(
     let mut session = Some(link);
     // Hello.head is a stable split between bytes already present on this shim
     // link and output produced while the attach is being established.
-    let mut replay_until = session.as_ref().map(|link| link.session.head.max(cursor));
+    let mut replay_until = (!primed).then(|| {
+        session
+            .as_ref()
+            .map_or(cursor, |link| link.session.head.max(cursor))
+    });
     if session
         .as_ref()
         .is_none_or(|s| s.session.caps & SEQUENCED_INPUT == 0)
@@ -944,11 +1030,13 @@ async fn terminal_run(
         ));
     }
     emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
-    session
-        .as_mut()
-        .ok_or_else(|| sessions::invalid("missing shim"))?
-        .send(&Shim::ReadFrom(cursor))
-        .await?;
+    if !primed {
+        session
+            .as_mut()
+            .ok_or_else(|| sessions::invalid("missing shim"))?
+            .send(&Shim::ReadFrom(cursor))
+            .await?;
+    }
     #[cfg(feature = "plugin-host-facts")]
     let _window = crate::lifecycle::windows::Attachment::new(path.clone());
     let mut output = relay::Output::attach(cursor);
@@ -1058,7 +1146,7 @@ async fn terminal_run(
             deadline = None;
         }
         if output.needs_snapshot() && session.is_none() {
-            let Some(mut next) = relink(&path, id, stream, &tx).await? else {
+            let Some(mut next) = relink(&path, id, stream, &tx, primed).await? else {
                 return Ok(());
             };
             let written = input_state(&mut next).await?;
@@ -1095,10 +1183,35 @@ async fn terminal_run(
                 match command {
                     Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
                     _ if finished_peer => {}
+                    #[cfg(feature = "remote")]
+                    Command::Cursor(cursor) if primed => {
+                        // The server alone knows which output reached leg A.
+                        // Reset only this shadow relay, before its ordered Credit;
+                        // already queued duplicates remain bounded and are trimmed
+                        // by the server rather than charged to browser credit again.
+                        output = relay::Output::attach(cursor);
+                        pending = None;
+                        deadline = None;
+                        if session.is_none() {
+                            let Some(mut next) = relink(&path, id, stream, &tx, true).await? else { return Ok(()); };
+                            let written = input_state(&mut next).await?;
+                            emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+                            session = Some(next);
+                        }
+                        let link = session.as_mut().ok_or_else(|| sessions::invalid("missing shim"))?;
+                        // Primed relays begin their replay fence only when a delivered
+                        // cursor subscribes to output, never while parked for input.
+                        replay_until = Some(link.session.head.max(cursor));
+                        link.send(&Shim::ReadFrom(cursor)).await?;
+                        if replay_until.is_some_and(|fence| cursor >= fence) {
+                            replay_complete(&tx, stream, id, cursor).await?;
+                            replay_until = None;
+                        }
+                    }
                     other => {
                         let detached = session.is_none();
                         if detached {
-                            let Some(mut next) = relink(&path, id, stream, &tx).await? else { return Ok(()); };
+                            let Some(mut next) = relink(&path, id, stream, &tx, primed).await? else { return Ok(()); };
                                             input_state(&mut next).await?;
                             session = Some(next);
                         }
@@ -1107,6 +1220,8 @@ async fn terminal_run(
                             Command::Input(seq, bytes) => peer.send(&Shim::SequencedInput(seq, bytes)).await?,
                             Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
                             Command::Credit(_) => return Err(sessions::invalid("unexpected credit dispatch")),
+                            #[cfg(feature = "remote")]
+                            Command::Cursor(_) => return Err(sessions::invalid("unnegotiated terminal cursor")),
                         }
                         if detached {
                             // Reconnecting the same writer can supersede

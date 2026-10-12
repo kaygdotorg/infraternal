@@ -510,6 +510,7 @@ mod tests {
         };
         Config {
             local_key: None,
+            server: None,
             node: NodeId(0),
             version: 1,
             addresses: address(1),

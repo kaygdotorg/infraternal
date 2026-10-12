@@ -17,6 +17,8 @@ pub(crate) struct Registry {
     sender: mpsc::Sender<Job>,
     events: tokio::sync::broadcast::Sender<Vec<u8>>,
     pending: std::sync::Arc<std::sync::Mutex<Option<PendingWorker>>>,
+    paths: tokio::sync::watch::Sender<Option<std::net::IpAddr>>,
+    link: std::sync::Arc<std::sync::Mutex<infraternal_plugin_api::server_path::ServerLink>>,
 }
 type Factory = Box<dyn FnOnce() -> Result<PluginRegistry, PluginError> + Send>;
 struct PendingWorker {
@@ -39,7 +41,26 @@ enum Job {
             Result<(), infraternal_plugin_api::admission::OpenRefusal>,
         >,
     },
+    #[cfg(any(test, feature = "remote"))]
+    Paths {
+        result: tokio::sync::oneshot::Sender<()>,
+    },
 }
+/// Publish intent before releasing a caller; contradictory proposals erase stale paths.
+fn publish_paths(
+    registry: &PluginRegistry,
+    paths: &tokio::sync::watch::Sender<Option<std::net::IpAddr>>,
+) {
+    let preferred = registry.preferred_server().unwrap_or_default();
+    paths.send_if_modified(|current| {
+        if *current == preferred {
+            return false;
+        }
+        *current = preferred;
+        true
+    });
+}
+
 impl Registry {
     #[cfg(test)]
     pub(crate) fn new(registry: PluginRegistry) -> Self {
@@ -50,9 +71,17 @@ impl Registry {
         mode: crate::plugins::ExecutionMode,
         installation: Option<crate::plugins::Installation>,
     ) -> Self {
-        Self::from_factory(Box::new(move || {
+        let registry = Self::from_factory(Box::new(move || {
             crate::plugins::registry_at(mode, Some(&state), installation.as_ref())
-        }))
+        }));
+        if matches!(mode, crate::plugins::ExecutionMode::Embedded) {
+            registry.set_server_link(infraternal_plugin_api::server_path::ServerLink {
+                kind: infraternal_plugin_api::server_path::ServerLinkKind::Local,
+                endpoint: None,
+                reason: infraternal_plugin_api::server_path::ServerLinkReason::Local,
+            });
+        }
+        registry
     }
     fn from_factory(factory: Factory) -> Self {
         let (sender, incoming) = mpsc::channel::<Job>(8);
@@ -60,6 +89,8 @@ impl Registry {
         Self {
             sender,
             events,
+            paths: tokio::sync::watch::channel(None).0,
+            link: std::sync::Arc::default(),
             pending: std::sync::Arc::new(std::sync::Mutex::new(Some(PendingWorker {
                 factory,
                 incoming,
@@ -77,6 +108,8 @@ impl Registry {
         }) = pending.take()
         {
             let notifications = self.events.clone();
+            let paths = self.paths.clone();
+            let link = self.link.clone();
             std::thread::Builder::new()
                 .name("node-plugins".into())
                 .spawn(move || {
@@ -84,7 +117,15 @@ impl Registry {
                         return;
                     };
                     while let Some(job) = incoming.blocking_recv() {
+                        if let Ok(link) = link.lock() {
+                            registry.set_server_link(&link);
+                        }
                         match job {
+                            #[cfg(any(test, feature = "remote"))]
+                            Job::Paths { result } => {
+                                publish_paths(&registry, &paths);
+                                let _ = result.send(());
+                            }
                             Job::Admit {
                                 action,
                                 context,
@@ -119,6 +160,7 @@ impl Registry {
                                         let _ = notifications.send(event);
                                     }
                                 }
+                                publish_paths(&registry, &paths);
                                 let _ = result.send(response);
                             }
                         }
@@ -146,6 +188,28 @@ impl Registry {
         receive
             .await
             .map_err(|_| OpenRefusal::ResourceUnavailable)?
+    }
+
+    /// Resolve retained component intent before dialing, without inventing a plugin action.
+    #[cfg(any(test, feature = "remote"))]
+    pub(crate) async fn initialize_paths(&self) -> Result<(), PluginError> {
+        self.start()?;
+        let (result, receive) = tokio::sync::oneshot::channel();
+        self.sender
+            .try_send(Job::Paths { result })
+            .map_err(|_| PluginError::Rejected)?;
+        receive.await.map_err(|_| PluginError::Rejected)?;
+        Ok(())
+    }
+    /// Transport updates neither start the lazy worker nor enter kernel code.
+    pub(crate) fn set_server_link(&self, value: infraternal_plugin_api::server_path::ServerLink) {
+        if let Ok(mut link) = self.link.lock() {
+            *link = value;
+        }
+    }
+    #[cfg(any(test, feature = "remote"))]
+    pub(crate) fn server_paths(&self) -> tokio::sync::watch::Receiver<Option<std::net::IpAddr>> {
+        self.paths.subscribe()
     }
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
         self.events.subscribe()
@@ -633,6 +697,74 @@ mod tests {
                 session_count: 200
             })
         );
+    }
+
+    struct ProposedPath {
+        destination: Option<std::net::IpAddr>,
+        link: infraternal_plugin_api::server_path::ServerLink,
+    }
+    impl AgentPlugin for ProposedPath {
+        fn descriptor(&self) -> &'static PluginDescriptor {
+            &DESCRIPTOR
+        }
+        fn preferred_server(&self) -> Option<std::net::IpAddr> {
+            self.destination
+        }
+        fn set_server_link(&mut self, link: &infraternal_plugin_api::server_path::ServerLink) {
+            self.link = link.clone();
+        }
+        fn call(&mut self, _: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+            if input == b"null" {
+                self.destination = None;
+            }
+            serde_json::to_vec(&self.link).map_err(|_| PluginError::Rejected)
+        }
+    }
+    #[tokio::test]
+    async fn retained_path_and_observed_transport_cross_the_lazy_worker() {
+        use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
+        let mut plugins = PluginRegistry::default();
+        plugins
+            .register(Box::new(ProposedPath {
+                destination: Some("10.254.0.1".parse().unwrap()),
+                link: ServerLink::default(),
+            }))
+            .unwrap();
+        let registry = Registry::new(plugins);
+        let mut paths = registry.server_paths();
+        let observed = ServerLink {
+            kind: ServerLinkKind::Fallback,
+            endpoint: Some("127.0.0.1:7443".parse().unwrap()),
+            reason: ServerLinkReason::MeshRefused,
+        };
+        registry.set_server_link(observed.clone());
+        assert!(
+            registry.pending.lock().unwrap().is_some(),
+            "transport observation cannot start kernel work"
+        );
+        registry.initialize_paths().await.unwrap();
+        assert_eq!(
+            *paths.borrow_and_update(),
+            Some("10.254.0.1".parse().unwrap())
+        );
+        let output = registry
+            .call("fixture.read".into(), b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ServerLink>(&output).unwrap(),
+            observed
+        );
+        assert!(
+            !paths.has_changed().unwrap(),
+            "an unchanged path cannot cause a replacement loop"
+        );
+        registry
+            .call("fixture.read".into(), b"null".to_vec())
+            .await
+            .unwrap();
+        paths.changed().await.unwrap();
+        assert!(paths.borrow_and_update().is_none());
     }
     struct Directory(PathBuf);
     impl Directory {

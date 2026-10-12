@@ -1,0 +1,10 @@
+{
+  "role": "Only the CLI integration fixture changes after the frozen performance build; all product/server/agent code unchanged",
+  "changes": {
+    "crates/infraternal/tests/shim.rs": {
+      "frozen_sha256": "b732de9efb69a34e28691fad6485d0d638830b27fb966165e9aced50578927f5",
+      "current_sha256": "d39671f9dd492d4e64b2b2636ddb7cab6ad3bbce446586fe787b6163c832f12c"
+    }
+  },
+  "red_log_sha256": "5ed090b175496cb03075febc8c124a00d8e5828f56c139b2732474811ada99c0"
+}

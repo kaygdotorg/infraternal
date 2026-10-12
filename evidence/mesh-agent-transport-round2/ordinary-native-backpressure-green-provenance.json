@@ -1,0 +1,29 @@
+{
+  "role": "Focused real Unix handshake regression after the observed Attach(7) vs Attach(15) failure",
+  "source_hashes": {
+    "crates/infraternal-agent/src/sessions.rs": "0f7e717b34bef339d4bcf39eaff0099d30f966c624c13e51a2190a5e0827ab81",
+    "crates/infraternal-agent/tests/unit/sessions.rs": "2817330b89d1f167fe8bb06238ec3052207a34444511e83cc49e3db5c84d5aae",
+    "crates/infraternal-shim/src/frame.rs": "4f4af998fe90114f5bfe98aed687946aada16a94758fadfe21b1fc558cdd170e",
+    "crates/infraternal-shim/src/session.rs": "eb02f3cb418a3601e367d512a2dae0aec906e86250e5199f62fdc1fa3c020f2c",
+    "Cargo.lock": "927e5badbef20ab3032f0308348b7a8c71dd62f54d3d4373564c4c97145af561"
+  },
+  "command": [
+    "/home/kayg/.nix-profile/bin/rustup",
+    "run",
+    "1.99.0",
+    "cargo",
+    "test",
+    "-p",
+    "infraternal-agent",
+    "--features",
+    "remote,mesh",
+    "--lib",
+    "ordinary_native_writer_negotiates_queue_backpressure_without_shared_selection",
+    "--",
+    "--nocapture"
+  ],
+  "exit_code": 0,
+  "sources_unchanged": true,
+  "archived_output": "evidence/mesh-agent-transport-round2/ordinary-native-backpressure-green.log.gz",
+  "output_sha256": "a6c2cd2730a16d54503800b63a829176b7c82c0930d10b8b0a6b28d86f343a85"
+}

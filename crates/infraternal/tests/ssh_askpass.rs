@@ -9,19 +9,76 @@ use infraternal_plugin_ssh::{
     credentials::{CredentialConfig, CredentialSession},
     transport::{Credentials, Secret},
 };
-use std::process::Stdio;
+use std::{
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    path::PathBuf,
+    process::Stdio,
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 use tokio::process::Command;
+
+/// Shares a private stripped copy of the real CLI across this test binary.
+///
+/// The peer-image digest runs before a prompt reply. The unstripped debug CLI
+/// contains large debug sections, so this fixture strips a private copy while
+/// retaining the real CLI code. SHA-256 also stays optimized in dev/test builds
+/// so test-only artifacts do not consume the fixed prompt deadline.
+struct AskpassImage {
+    directory: PathBuf,
+    path: PathBuf,
+}
+impl Drop for AskpassImage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn askpass_image() -> Arc<AskpassImage> {
+    static IMAGE: OnceLock<Mutex<Weak<AskpassImage>>> = OnceLock::new();
+    let cache = IMAGE.get_or_init(|| Mutex::new(Weak::new()));
+    let mut cached = cache.lock().unwrap();
+    if let Some(image) = cached.upgrade() {
+        return image;
+    }
+
+    let directory = common::scratch().join(format!(
+        "askpass-image-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let path = directory.join("infraternal");
+    std::fs::copy(env!("CARGO_BIN_EXE_infraternal"), &path).unwrap();
+    let stripped = std::process::Command::new("strip")
+        .arg("--strip-unneeded")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        stripped.status.success(),
+        "strip the askpass test CLI: {}",
+        String::from_utf8_lossy(&stripped.stderr)
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let image = Arc::new(AskpassImage { directory, path });
+    *cached = Arc::downgrade(&image);
+    image
+}
 
 #[tokio::test]
 async fn real_cli_askpass_refuses_unregistered_parent_and_cleans_helper() {
     let parent = common::scratch();
     let root = parent.join(format!("a-{}", std::process::id()));
+    let askpass_image = askpass_image();
     let session = CredentialSession::prepare(
         &CredentialConfig {
             scratch: root.clone(),
             ssh_agent: "unused".into(),
             ssh_add: "unused".into(),
-            askpass_binary: env!("CARGO_BIN_EXE_infraternal").into(),
+            askpass_binary: askpass_image.path.clone(),
         },
         Credentials::Password(Secret::new(b"synthetic-prompt-reply".to_vec())),
     )
@@ -57,6 +114,7 @@ async fn real_cli_askpass_refuses_unregistered_parent_and_cleans_helper() {
 async fn real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes() {
     use tokio::io::AsyncWriteExt;
     let root = common::scratch().join(format!("e-{}", std::process::id()));
+    let askpass_image = askpass_image();
     let passphrase = Secret::new(b"synthetic-key-unlock\n".to_vec());
     let mut generating = Command::new("openssl")
         .args([
@@ -83,7 +141,7 @@ async fn real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes() {
             scratch: root.clone(),
             ssh_agent: "/usr/bin/ssh-agent".into(),
             ssh_add: "/usr/bin/ssh-add".into(),
-            askpass_binary: env!("CARGO_BIN_EXE_infraternal").into(),
+            askpass_binary: askpass_image.path.clone(),
         },
         Credentials::PrivateKey {
             key: Secret::new(generated.stdout),

@@ -34,6 +34,7 @@ mod release_http;
 mod release_latest;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
+pub mod release_manifest;
 pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]
@@ -62,12 +63,17 @@ mod remote_renewal;
 #[cfg(feature = "remote")]
 mod remote_runtime;
 #[cfg(feature = "remote")]
+mod remote_standby;
+#[cfg(feature = "remote")]
+pub mod remote_standby_request;
+#[cfg(feature = "remote")]
 mod remote_startup;
 mod runtime;
 mod server_tls;
 mod terminal_exit;
 mod web_assets;
 mod websocket;
+mod websocket_input;
 
 #[cfg(feature = "remote")]
 pub use remote_runtime::RemoteService;

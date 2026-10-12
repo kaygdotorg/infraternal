@@ -1,0 +1,14 @@
+test(shim): verify shipping CLI queue deferral and legacy control progress
+
+Exercise global shared-input pressure with the real production CLI and PTY:
+retain a200KB suffix after900KB accepted input, preserve independent writers,
+release40dropped deferred peers, and keep legacy output/fresh negotiation
+usable while input waits. Existing duplicate/replay/geometry tests also run.
+Reject component-only runners as shipping integration evidence or changing
+legacy replacement semantics. Decisions D13, D128, D198, D215.
+The small test-only QueueProbe is Copy to satisfy strict by-value Clippy.
+
+Validation: fmt/strict CLI shim-test Clippy pass; default shipping shim suite
+18 passed,0failed. Exact raw cli-shim-*.log under evidence continuation.
+
+Refs: #129

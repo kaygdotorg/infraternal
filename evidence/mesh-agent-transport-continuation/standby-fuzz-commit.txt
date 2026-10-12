@@ -1,0 +1,13 @@
+test(fuzz): reject ambiguous standby and activation transport objects
+
+Exercise exact production64-byte standby/activation parsers, duplicate and
+unknown fields, object shape and canonical serialization. Preserve strict
+empty activation rather than accepting a generic JSON value. Existing
+libFuzzer/serde dependencies remain; decisions D12, D40, D215.
+
+Validation: fmt/strict target Clippy with shipping server SSH feature pass;
+exact-source ASAN seed smoke passes. Four production admission/parser checks
+pass. Full campaign is pending the perf VM lock; no timing acceptance claim.
+Raw fuzz-standby-*.log, seed smoke and exact-source provenance preserved.
+
+Refs: #129

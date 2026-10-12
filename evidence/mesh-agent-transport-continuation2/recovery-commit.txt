@@ -1,0 +1,12 @@
+docs(evidence): preserve validated server and parser continuation checkpoints
+
+Recover the completed atomic server, shipping CLI and parser proof records
+from the interrupted WIP so the existing checkpoints remain reviewable.
+Retain the three perf-VM ASAN summaries and source/runtime hashes; exclude
+the slow fuzz artifact and duplicate issue histories instead of committing
+a corpus or folding completed source modules into a new lane commit.
+D64, D128, D198, D215; no source or foundational dependency change.
+Validation: recovered manifest hashes checked; three campaign exits zero,
+zero reported crashes; whitespace gate passed. Final head gate follows.
+
+Refs: #129

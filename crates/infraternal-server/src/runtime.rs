@@ -535,6 +535,11 @@ async fn build_router_core(
     let agent = if let Some(agent) = supplied_agent {
         agent
     } else {
+        // Resolve the exact running inode in the spawn child, including sealed
+        // replacement images whose display name is not an executable pathname.
+        #[cfg(target_os = "linux")]
+        let executable = std::path::PathBuf::from("/proc/self/exe");
+        #[cfg(not(target_os = "linux"))]
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
         EmbeddedAgent::spawn(executable)
     };
@@ -582,9 +587,12 @@ async fn build_router_core(
                 id: "server".to_owned(),
                 ip: observed_server_ip,
                 server: true,
+                server_paths: true,
                 actor: local_node,
                 #[cfg(feature = "remote")]
                 authority: None,
+                #[cfg(feature = "remote")]
+                listeners: Some(hosts.clone()),
             }))
             .await
             .map_err(|_| ServerError::InvalidConfiguration)?;

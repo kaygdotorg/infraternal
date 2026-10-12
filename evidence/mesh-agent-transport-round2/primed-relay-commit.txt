@@ -1,0 +1,22 @@
+Add per-stream priming to the common native terminal relay
+
+A standby writer must query durable input state without displacing the
+ordinary writer or reading output ahead of its cursor. Negotiate native
+priming capability, then require canonical transport.prime before that
+stream's AttachTerm. Unmarked writers continue ordinary attachment even
+after the enclosing connection is promoted.
+
+Use the shared-writer shim helper, send its authoritative Ack before any
+input, and move only the shadow output cursor before existing credit can
+fund reads. Keep the same relay, retained-input/reconnect behavior and
+bounded command queue. Connection-wide mutable priming mode was rejected:
+a binding crossing promotion could otherwise steal the ordinary writer.
+The exported relay entry point states its supervisor authority invariant.
+Decisions198,215 preserve native-only additive negotiation and TCP v1.
+
+Validation: fmt and strict all-target mesh,remote agent Clippy pass.
+Serial agent suite67PASS0FAIL11ignored23.22s; transport2PASS. Four real
+QUIC/Unix priming cases pass after the recorded marker failure; their
+standalone test module lands separately.
+
+Refs: #129

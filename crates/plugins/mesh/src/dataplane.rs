@@ -53,6 +53,9 @@ pub struct Config {
     /// Legacy snapshots lack it and cannot replace an accepted node identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_key: Option<PublicKey>,
+    /// Explicit server identity; older persisted snapshots cannot propose a route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<NodeId>,
     pub node: NodeId,
     pub version: u64,
     pub addresses: Addresses,
@@ -73,6 +76,9 @@ pub struct Chunk {
     /// Repeated in every part so a split snapshot cannot change its binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_key: Option<PublicKey>,
+    /// Repeated on every chunk and checked before applying the complete policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<NodeId>,
     pub node: NodeId,
     pub from_version: Option<u64>,
     pub version: u64,

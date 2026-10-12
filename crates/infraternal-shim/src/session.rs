@@ -3,7 +3,7 @@
 use crate::{
     frame::{
         APPROXIMATE_SNAPSHOT, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT,
-        SESSION_OWNER,
+        SESSION_OWNER, SHARED_WRITER,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -86,10 +86,15 @@ enum InputReply {
 struct Peer {
     stream: UnixStream,
     decoder: Decoder,
+    // One decoder-owned deferred frame plus at most one CHUNK of trailing wire.
+    trailing: Vec<u8>,
+    deferred: Option<u64>,
     attached: bool,
     caps: u64,
     input_reply: Option<InputReply>,
     writer: Option<u32>,
+    // Selection mode belongs to this socket, never to the retained writer cursor.
+    shared_writer: bool,
     ack_queued: u64,
     size: (u16, u16, u16, u16),
     cursor: Option<u64>,
@@ -99,18 +104,54 @@ struct Peer {
     request: Option<Request>,
 }
 impl Peer {
+    /// Capacity cannot hide a malformed range. Shared requests reserve space
+    /// before acceptance; neither geometry nor durable ownership changes here.
+    fn input_waits(
+        &self,
+        sequence: u64,
+        length: usize,
+        accepted: u64,
+        available: usize,
+        reserved: bool,
+    ) -> io::Result<bool> {
+        if self.caps & SHARED_WRITER == 0 && !reserved {
+            return Ok(false);
+        }
+        let end = sequence
+            .checked_add(length as u64)
+            .ok_or_else(invalid_input)?;
+        if sequence > accepted {
+            return Err(invalid_input());
+        }
+        let unseen = usize::try_from(end.saturating_sub(accepted)).map_err(|_| invalid_input())?;
+        if unseen > 0 && reserved && self.caps & SHARED_WRITER == 0 {
+            // Reserved space is unavailable to a fresh legacy request. Keep
+            // capacity refusal, while duplicates and control requests proceed.
+            return Err(invalid_input());
+        }
+        Ok(unseen > 0 && (reserved || unseen > available))
+    }
     /// Ownership links never enter writer replacement or output backpressure.
     fn attach(&mut self, caps: u64) -> io::Result<()> {
         if self.attached {
             return Err(invalid_input());
         }
         self.attached = true;
-        self.caps = caps & (SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SESSION_OWNER);
+        self.caps = caps
+            & (SEQUENCED_INPUT
+                | MULTI_WRITER
+                | APPROXIMATE_SNAPSHOT
+                | SESSION_OWNER
+                | SHARED_WRITER);
         if self.caps & SESSION_OWNER != 0 {
             if self.caps != SESSION_OWNER {
                 return Err(invalid_input());
             }
             self.writer = None;
+        } else if self.caps & SHARED_WRITER != 0
+            && self.caps & (SEQUENCED_INPUT | MULTI_WRITER) != (SEQUENCED_INPUT | MULTI_WRITER)
+        {
+            return Err(invalid_input());
         } else if self.caps & MULTI_WRITER != 0 {
             if self.caps & SEQUENCED_INPUT == 0 {
                 return Err(invalid_input());
@@ -304,7 +345,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
     let mut terminal = Terminal::new(config.cols, config.rows)?;
     let mut ring = Ring::new(config.ring_capacity);
     let mut input = VecDeque::new();
-    let mut cursors = Inputs::default();
+    let mut cursors = Inputs::with_geometry((config.cols, config.rows, 0, 0));
     let mut peers: Vec<Peer> = Vec::new();
     let mut exit = None;
     let mut exit_deadline = None;
@@ -314,6 +355,7 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
     let readiness_deadline = config
         .readiness
         .then(|| Instant::now() + Duration::from_secs(10));
+    let mut next_deferred = 0_u64;
     loop {
         if readiness_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             if exit.is_none() {
@@ -331,6 +373,43 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                     .code()
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
+        }
+        // The oldest deferred request reserves newly freed queue space. Smaller
+        // fresh inputs cannot repeatedly consume it; duplicates need no space.
+        let oldest = peers.iter().filter_map(|p| p.deferred).min();
+        let mut retired = Vec::new();
+        for (index, p) in peers.iter_mut().enumerate() {
+            if p.deferred.is_none() && p.trailing.is_empty() {
+                continue;
+            }
+            let mut trailing = std::mem::take(&mut p.trailing);
+            match consume_peer(
+                &trailing,
+                p,
+                &mut pty,
+                &mut terminal,
+                &ring,
+                &mut config,
+                &mut input,
+                &mut cursors,
+                exit.is_some() && drained,
+                oldest.is_some() && p.deferred != oldest,
+                &mut next_deferred,
+            ) {
+                Ok((false, used)) => {
+                    trailing.drain(..used);
+                    p.trailing = trailing;
+                }
+                Ok((true, _)) | Err(_) => retired.push(index),
+            }
+        }
+        for index in retired.into_iter().rev() {
+            peers.remove(index);
+        }
+        if peers.iter().filter_map(|p| p.deferred).min() != oldest {
+            // Successful admission (or malformed-peer removal) advances the
+            // reservation before polling; another deferred frame may now fit.
+            continue;
         }
         for p in &mut peers {
             if p.caps & SEQUENCED_INPUT != 0
@@ -443,12 +522,14 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             }
             for (index, p) in peers.iter().enumerate() {
                 let mut flags = PollFlags::empty();
-                if input.len() < MAX_FRAME {
+                if p.deferred.is_none() && p.trailing.is_empty() {
                     flags |= PollFlags::POLLIN;
                 }
                 if !p.pending.is_empty() {
                     flags |= PollFlags::POLLOUT;
                 }
+                // Empty flags still observe HUP. A deferred peer is retired on
+                // HUP without reading; live deferred sockets create no wakeups.
                 fds[index + 3] = PollFd::new(p.stream.as_fd(), flags);
             }
             // Once the owned child exits, a descendant may hold the slave open
@@ -498,10 +579,13 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                         let mut next = Peer {
                             stream,
                             decoder: Decoder::default(),
+                            trailing: Vec::new(),
+                            deferred: None,
                             attached: false,
                             caps: 0,
                             input_reply: None,
                             writer: Some(0),
+                            shared_writer: false,
                             ack_queued: 0,
                             size: (config.cols, config.rows, 0, 0),
                             cursor: None,
@@ -515,7 +599,8 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                             caps: SEQUENCED_INPUT
                                 | MULTI_WRITER
                                 | APPROXIMATE_SNAPSHOT
-                                | SESSION_OWNER,
+                                | SESSION_OWNER
+                                | SHARED_WRITER,
                             session: config.session,
                             pid: std::process::id(),
                             cols: config.cols,
@@ -599,35 +684,30 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             if flags.contains(PollFlags::POLLOUT) && p.flush().is_err() {
                 disconnect = true;
             }
-            if flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
+            if p.deferred.is_some() && flags.contains(PollFlags::POLLHUP) {
+                disconnect = true;
+            }
+            if p.deferred.is_none() && flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
                 let mut bytes = [0; CHUNK];
                 match p.stream.read(&mut bytes) {
                     Ok(0) => disconnect = true,
                     Ok(n) => {
-                        // Temporarily move only decoder ownership so the callback
-                        // can mutate Peer while borrowing its reusable frame bytes.
-                        let mut decoder = std::mem::take(&mut p.decoder);
-                        let mut acknowledged_exit = false;
-                        let result = decoder.feed_with(&bytes[..n], |frame| {
-                            if acknowledged_exit {
-                                return Ok(());
-                            }
-                            acknowledged_exit = handle(
-                                frame,
-                                p,
-                                &mut pty,
-                                &mut terminal,
-                                &ring,
-                                &mut config,
-                                &mut input,
-                                &mut cursors,
-                                exit.is_some() && drained,
-                            )?;
-                            Ok(())
-                        });
-                        p.decoder = decoder;
-                        if result.is_err() || acknowledged_exit {
-                            disconnect = true;
+                        let reserved = oldest.is_some();
+                        match consume_peer(
+                            &bytes[..n],
+                            p,
+                            &mut pty,
+                            &mut terminal,
+                            &ring,
+                            &mut config,
+                            &mut input,
+                            &mut cursors,
+                            exit.is_some() && drained,
+                            reserved,
+                            &mut next_deferred,
+                        ) {
+                            Ok((false, used)) => p.trailing.extend_from_slice(&bytes[used..n]),
+                            Ok((true, _)) | Err(_) => disconnect = true,
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -636,23 +716,87 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             }
             disconnects[index] = disconnect;
         }
-        // A reattachment supersedes only the same writer. Legacy writer zero
-        // keeps v1 replacement semantics; selected viewers never evict siblings.
-        for index in (0..peers.len()).rev() {
+        // Coexisting ordinary/shared sockets use the same durable input cursor.
+        // Replacement stays within a mode, including legacy writer zero. Decide
+        // before removal so rejected successors and shifting indices cannot evict
+        // a live peer; no admission failure mutates retained writer ownership.
+        for index in 0..peers.len() {
             let p = &peers[index];
             let duplicate = p.attached
                 && p.writer.is_some_and(|id| {
-                    peers[index + 1..]
-                        .iter()
-                        .any(|next| next.attached && next.writer == Some(id))
+                    peers[index + 1..].iter().enumerate().any(|(offset, next)| {
+                        !disconnects[index + 1 + offset]
+                            && next.attached
+                            && next.writer == Some(id)
+                            && next.shared_writer == p.shared_writer
+                    })
                 });
-            if disconnects[index] || duplicate {
+            disconnects[index] |= duplicate;
+        }
+        for index in (0..peers.len()).rev() {
+            if disconnects[index] {
                 peers.remove(index);
             }
         }
     }
 }
+/// Stop exactly at an unaccepted input frame; trailing wire belongs to this peer.
 #[allow(clippy::too_many_arguments)]
+fn consume_peer(
+    bytes: &[u8],
+    p: &mut Peer,
+    pty: &mut Pty,
+    terminal: &mut Terminal,
+    ring: &Ring,
+    config: &mut Config,
+    input: &mut VecDeque<u8>,
+    cursors: &mut Inputs,
+    exited: bool,
+    mut reserved: bool,
+    next_deferred: &mut u64,
+) -> io::Result<(bool, usize)> {
+    let mut decoder = std::mem::take(&mut p.decoder);
+    let mut acknowledged_exit = false;
+    let mut paused = false;
+    let result = decoder.feed_until(bytes, |frame| {
+        if acknowledged_exit {
+            return Ok(true);
+        }
+        match handle(
+            frame, p, pty, terminal, ring, config, input, cursors, exited, reserved,
+        ) {
+            Ok(acknowledged) => {
+                if p.deferred.take().is_some() {
+                    // The completed request releases its ticket. Fresh input in
+                    // the same read must yield to already waiting peers; give it
+                    // a new ticket on the next pause. Duplicates/control are free.
+                    reserved = true;
+                }
+                acknowledged_exit = acknowledged;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                paused = true;
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    });
+    p.decoder = decoder;
+    let used = result?;
+    if paused {
+        if p.deferred.is_none() {
+            p.deferred = Some(*next_deferred);
+            *next_deferred = next_deferred.checked_add(1).ok_or_else(invalid_input)?;
+        }
+        debug_assert!(bytes.len() - used <= CHUNK);
+    } else {
+        p.deferred = None;
+    }
+    Ok((acknowledged_exit, used))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
@@ -663,13 +807,9 @@ fn handle<'a>(
     input: &mut VecDeque<u8>,
     cursors: &mut Inputs,
     exited: bool,
+    reserved: bool,
 ) -> io::Result<bool> {
-    let invalid = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid shim request ordering or payload",
-        )
-    };
+    let invalid = invalid_request;
     let frame = frame.into();
     if let FrameRef::Owned(Frame::Attach(caps)) = frame {
         p.attach(caps)?;
@@ -685,7 +825,11 @@ fn handle<'a>(
         return Err(invalid());
     }
     if !p.attached
-        || (p.writer.is_none() && !matches!(&frame, FrameRef::Owned(Frame::SelectWriter(_))))
+        || (p.writer.is_none()
+            && !matches!(
+                &frame,
+                FrameRef::Owned(Frame::SelectWriter(_) | Frame::SelectSharedWriter(_))
+            ))
     {
         return Err(invalid());
     }
@@ -695,13 +839,26 @@ fn handle<'a>(
         }
         let writer = p.writer.ok_or_else(invalid)?;
         let accepted = cursors.get(p.writer)?.accepted;
+        if p.input_waits(
+            offset.unwrap_or(accepted),
+            bytes.len(),
+            accepted,
+            MAX_FRAME - input.len(),
+            reserved,
+        )? {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
         if cursors.get(p.writer)?.accepted > accepted {
             // Only newly accepted input changes the active size [74]. Replayed
             // duplicate bytes cannot steal the last typist's terminal geometry.
             if cursors.active_writer != Some(writer) {
-                p.resize(pty, terminal, ring, config)?;
-                cursors.active_writer = Some(writer);
+                p.size = cursors.get(p.writer)?.requested_size;
+                let applied = p.resize(pty, terminal, ring, config)?;
+                p.size = cursors.finish_resize(p.writer, applied)?;
+                if applied {
+                    cursors.active_writer = Some(writer);
+                }
             }
         }
         if offset.is_some() && p.input_reply.is_none() {
@@ -728,8 +885,17 @@ fn handle<'a>(
     };
     match frame {
         Frame::SelectWriter(id) if p.caps & MULTI_WRITER != 0 && p.writer.is_none() && id != 0 => {
-            cursors.select(id)?;
+            cursors.select(id, p.size)?;
             p.writer = Some(id);
+        }
+        Frame::SelectSharedWriter(id)
+            if p.caps & SHARED_WRITER != 0 && p.writer.is_none() && id != 0 =>
+        {
+            // Priming cannot invent a cursor or alter geometry, accepted input,
+            // or an existing peer. Its input is deduplicated by this same writer.
+            cursors.get(Some(id))?;
+            p.writer = Some(id);
+            p.shared_writer = true;
         }
         Frame::InputStateRequest if p.caps & SEQUENCED_INPUT != 0 && p.writer.is_some() => {
             p.input_reply = Some(InputReply::State);
@@ -744,10 +910,13 @@ fn handle<'a>(
                 return Err(invalid());
             }
             p.size = (cols, rows, px_w, px_h);
-            if (cursors.active_writer.is_none() || cursors.active_writer == p.writer)
-                && p.resize(pty, terminal, ring, config)?
-            {
-                cursors.active_writer = p.writer;
+            cursors.request_resize(p.writer, p.size)?;
+            if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
+                let applied = p.resize(pty, terminal, ring, config)?;
+                p.size = cursors.finish_resize(p.writer, applied)?;
+                if applied {
+                    cursors.active_writer = p.writer;
+                }
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
@@ -779,6 +948,10 @@ mod measurements;
 struct InputCursors {
     written: u64,
     accepted: u64,
+    // Inactive Resize is staged for the next typist. Keep the last successful
+    // size separately so allocation refusal cannot overwrite durable geometry.
+    requested_size: (u16, u16, u16, u16),
+    accepted_size: (u16, u16, u16, u16),
 }
 impl InputCursors {
     fn accept(&mut self, seq: u64, bytes: &[u8], queue: &mut VecDeque<u8>) -> io::Result<()> {
@@ -814,6 +987,13 @@ mod sequenced_checks;
 /// Static error copy keeps malformed writer data out of diagnostics.
 fn invalid_input() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid shim writer input")
+}
+
+fn invalid_request() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid shim request ordering or payload",
+    )
 }
 #[cfg(test)]
 #[path = "../tests/unit/session_resize.rs"]

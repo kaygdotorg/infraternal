@@ -40,6 +40,7 @@ pub const ACTIONS: &[ActionDef] = &[
         Effect::Read,
         &[
             "Read the node component's state and applied policy version.",
+            "Inspect the active server link and its reason: mesh or the enrolled fallback port.",
             "Use --json for the machine record.",
         ],
     ),
@@ -152,6 +153,7 @@ impl Owner {
 pub struct MeshNodePlugin {
     owner: Arc<Mutex<Owner>>,
     changed: AtomicBool,
+    server_link: infraternal_plugin_api::server_path::ServerLink,
 }
 impl MeshNodePlugin {
     /// Bind one process-owned component to its validated public-state directory.
@@ -163,6 +165,7 @@ impl MeshNodePlugin {
                 path: Some(path.to_owned()),
             })),
             changed: AtomicBool::new(false),
+            server_link: infraternal_plugin_api::server_path::ServerLink::default(),
         }
     }
 }
@@ -174,6 +177,7 @@ impl Default for MeshNodePlugin {
                 path: None,
             })),
             changed: AtomicBool::new(false),
+            server_link: infraternal_plugin_api::server_path::ServerLink::default(),
         }
     }
 }
@@ -238,6 +242,26 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
     }
 }
 impl AgentPlugin for MeshNodePlugin {
+    fn preferred_server(&self) -> Option<std::net::IpAddr> {
+        let mut owner = self.owner.lock().ok()?;
+        let node = owner.node().ok()?;
+        if !node.enabled() || !node.active() {
+            return None;
+        }
+        let config = node.config()?;
+        let server = config.server?;
+        if server == config.node {
+            return None;
+        }
+        config
+            .peers
+            .get(&server)
+            .map(|peer| peer.peer.addresses.ipv4.into())
+    }
+    fn set_server_link(&mut self, link: &infraternal_plugin_api::server_path::ServerLink) {
+        self.server_link = link.clone();
+    }
+
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
@@ -276,7 +300,7 @@ impl AgentPlugin for MeshNodePlugin {
                 json!({"state":"Off","version":null})
             }
             Request::Status => {
-                json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy)})
+                json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link})
             }
             Request::Configure(chunk) => {
                 let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
@@ -382,6 +406,114 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     #[test]
+    #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
+    // Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
+    #[allow(clippy::too_many_lines)]
+    fn applied_server_route_and_observed_link_survive_only_explicit_component_up() {
+        use crate::{
+            dataplane::{DefaultPolicy, Peer, PeerPolicy},
+            policy::{
+                model::{Addresses, NodeId},
+                rules::TrafficPolicy,
+            },
+        };
+        assert_eq!(nix::unistd::geteuid().as_raw(), 0, "namespace owner");
+        assert_ne!(
+            std::fs::read_link("/proc/self/ns/net").expect("own namespace"),
+            std::fs::read_link("/proc/1/ns/net").expect("host namespace"),
+            "kernel fixture requires a private network namespace"
+        );
+        let mut plugin = MeshNodePlugin::default();
+        assert!(plugin.preferred_server().is_none());
+        plugin.call("mesh.up", b"{}").expect("up");
+        let (_, key) = crate::wireguard::Key::generate().expect("public peer fixture");
+        let mut chunk = Chunk {
+            server: Some(NodeId(2)),
+            local_key: None,
+            node: NodeId(1),
+            from_version: None,
+            version: 1,
+            index: 0,
+            last: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.1".parse().expect("IPv4"),
+                ipv6: "fd01::1".parse().expect("IPv6"),
+            },
+            default_policy: DefaultPolicy::Allow,
+            upserted: std::collections::BTreeMap::from([(
+                NodeId(2),
+                PeerPolicy {
+                    peer: Peer {
+                        key,
+                        addresses: Addresses {
+                            ipv4: "10.254.0.2".parse().expect("IPv4"),
+                            ipv6: "fd01::2".parse().expect("IPv6"),
+                        },
+                        endpoint: None,
+                    },
+                    inbound: TrafficPolicy::All,
+                    outbound: TrafficPolicy::All,
+                },
+            )]),
+            merged: std::collections::BTreeMap::new(),
+            removed: Vec::new(),
+        };
+        plugin
+            .call(
+                "mesh.configure",
+                &serde_json::to_vec(&chunk).expect("chunk"),
+            )
+            .expect("stage");
+        assert!(
+            plugin.preferred_server().is_none(),
+            "staged routes cannot move a live transport"
+        );
+        chunk.index = 1;
+        chunk.last = true;
+        chunk.upserted.clear();
+        plugin
+            .call(
+                "mesh.configure",
+                &serde_json::to_vec(&chunk).expect("chunk"),
+            )
+            .expect("apply");
+        assert_eq!(
+            plugin.preferred_server(),
+            Some("10.254.0.2".parse().expect("IPv4"))
+        );
+        let observed = infraternal_plugin_api::server_path::ServerLink {
+            kind: infraternal_plugin_api::server_path::ServerLinkKind::Fallback,
+            endpoint: Some("127.0.0.1:7443".parse().expect("endpoint")),
+            reason: infraternal_plugin_api::server_path::ServerLinkReason::MeshRefused,
+        };
+        plugin.set_server_link(&observed);
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("status"))
+                .expect("public status");
+        assert_eq!(
+            status["server_link"],
+            serde_json::to_value(&observed).expect("observed link")
+        );
+        plugin.call("mesh.down", b"{}").expect("down");
+        assert!(plugin.preferred_server().is_none());
+        plugin.call("mesh.up", b"{}").expect("up");
+        chunk.server = Some(chunk.node);
+        chunk.version = 2;
+        chunk.index = 0;
+        plugin
+            .call(
+                "mesh.configure",
+                &serde_json::to_vec(&chunk).expect("chunk"),
+            )
+            .expect("local server");
+        assert!(
+            plugin.preferred_server().is_none(),
+            "a local server does not dial itself"
+        );
+        plugin.call("mesh.down", b"{}").expect("cleanup");
+    }
+
+    #[test]
     fn node_actions_register_without_kernel_work_and_hide_machine_calls() {
         let mut registry = infraternal_plugin_api::PluginRegistry::default();
         registry
@@ -428,6 +560,7 @@ mod tests {
         plugin.call("mesh.up", b"{}").expect("start");
         let chunk = Chunk {
             local_key: None,
+            server: None,
             node: NodeId(1),
             from_version: None,
             version: 1,

@@ -1,0 +1,22 @@
+{
+  "head": "7a56c00fe8f3d769429e14aadef621b43d4f5a24",
+  "profile": "GNU release opt-level3, full LTO,1codegen unit,unwind,strip; standalone transport diagnostic only",
+  "imports": "production remote plugin dependency plus exact #[path] DialRuntime and unchanged fixture body",
+  "registry_artifacts": 214,
+  "lock_registry_version_source_checksum_mismatches": 0,
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "executable": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness-pinned",
+  "executable_bytes": 7908000,
+  "executable_sha256": "e9aef615cc550b86fde5bffb404ce2772a7e2d9a47d8cefbf7ff8c231e5d6164",
+  "sources": {
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/remote/src/remote_quic.rs": "665584ffdd052384a2530fea5f57d872a049d9bfd01b2f354f5cf6edd6f20e6e",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/remote/src/remote_tls.rs": "5ac6f37dd5b0def3fcb05a27dab806c291d97c591df39a6d4b5840f81ebc328c",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-agent/src/remote_dial_runtime.rs": "da792cc70ba69a66961d353f5c42c92dfbabdf152069408aab52cabac5f68ded",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-agent/src/remote_mesh_idle_tests.rs": "4bad7780c05c08768f1a4395e848414bfaa47c08a65a6cc311c9f4f41dc4108e",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/Cargo.toml": "1cd1f61c7d42042d10a23a0c3ecc8819f54b862a42eb75a0285247573c94ff1d",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/Cargo.lock": "3411f08f33eb1ef9a47e4cc2427f2697243f28a5d3eb556c48fd59e491721c78",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/src/lib.rs": "a9bff0f1e3ae898db3fbdbc72139159c1723132be163cd1166834146d5c2084e"
+  },
+  "diagnostic_overhead": "Companion production observer adds one authenticated stats snapshot per actual guard poll;32-bin sampled gap histogram, not packet timestamps.",
+  "candidate": "one pinned closure future; one coherent stats snapshot; unchanged currentRTT+200ms/50ms/24 authenticated counters"
+}

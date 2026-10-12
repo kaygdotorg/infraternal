@@ -5,7 +5,7 @@
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
 
 use infraternal_shim::frame::{
-    APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT,
+    APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
 use nix::{
     sys::inotify::{AddWatchFlags, InitFlags, Inotify},
@@ -215,14 +215,14 @@ pub async fn connect_sequenced(path: PathBuf, id: [u8; 16]) -> io::Result<Sessio
     connect_with(path, id, SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT).await
 }
 
-/// Select a stable leg-B writer in the surviving shim before querying cursors.
+/// Select a stable leg-B writer and advertised queue deferral before querying cursors.
 /// # Errors
 /// Refuses old shims without writer isolation instead of borrowing another device's Ack.
 pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Result<Session> {
     let mut session = connect_with(
         path,
         id,
-        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT,
+        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER,
     )
     .await?;
     if session.caps & MULTI_WRITER == 0 || writer == 0 {
@@ -249,6 +249,32 @@ pub async fn own(path: PathBuf, id: [u8; 16]) -> io::Result<Option<Session>> {
     })
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
+/// Share an existing durable writer without replacing its ordinary local peer.
+/// The caller owns this connection and must leave output parked until promotion.
+/// # Errors
+/// Refuses old shims before sending the additive selector, or a reserved writer.
+pub async fn connect_shared_writer(
+    path: PathBuf,
+    id: [u8; 16],
+    writer: u32,
+) -> io::Result<Session> {
+    if writer == 0 {
+        return Err(invalid("shared shim writer must be nonzero"));
+    }
+    let mut session = connect_with(
+        path,
+        id,
+        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER,
+    )
+    .await?;
+    let required = SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER;
+    if session.caps & required != required {
+        return Err(invalid("shim lacks shared writer capability"));
+    }
+    send(&mut session.peer, &Frame::SelectSharedWriter(writer)).await?;
+    Ok(session)
 }
 
 async fn connect_with(path: PathBuf, id: [u8; 16], requested: u64) -> io::Result<Session> {
@@ -436,16 +462,13 @@ impl SessionEvents {
     }
 }
 
-// std::process pre_exec would require unsafe code to mark an inherited raw fd
-// CLOEXEC. The POSIX shell closes the job's leg-B fd 3 before executing any init
-// helper or shim. The target user's shell must never inherit the trusted channel.
+// The audited shim policy closes leg-B fd3 before direct exec. Avoid a shell:
+// anonymous images need /proc/self/exe to resolve while the child is still
+// running the infraternal image, rather than the shell's image [217].
 fn isolated(program: &Path) -> Command {
-    let mut command = Command::new("/bin/sh");
-    infraternal_shim::prepare_child(command.as_std_mut());
+    let mut command = Command::new(program);
+    infraternal_shim::prepare_child_without_control(command.as_std_mut());
     command.stdin(Stdio::null());
-    command
-        .args(["-c", "exec 3<&-; exec \"$@\"", "infraternal-shim-launch"])
-        .arg(program);
     command
 }
 

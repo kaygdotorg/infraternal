@@ -431,6 +431,7 @@ mod tests {
         };
         Config {
             local_key: None,
+            server: None,
             node: NodeId(1),
             version: 1,
             addresses: address(1),

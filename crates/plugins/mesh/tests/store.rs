@@ -34,7 +34,7 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
         .attach(
             "host",
             key(2),
-            Some("192.0.2.1:51820".parse().unwrap()),
+            Some("192.0.2.1:44000".parse().unwrap()),
             false,
         )
         .await
@@ -57,7 +57,7 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
         .attach(
             "host",
             key(2),
-            Some("192.0.2.1:51820".parse().unwrap()),
+            Some("192.0.2.1:44000".parse().unwrap()),
             false,
         )
         .await
@@ -195,7 +195,7 @@ async fn absent_discovery_preserves_the_last_known_endpoint() {
     let pool = pool().await;
     let store = Store::new(pool);
     let (server, _) = store.attach("server", key(1), None, true).await.unwrap();
-    let address = "192.0.2.1:51820".parse().unwrap();
+    let address = "192.0.2.1:44000".parse().unwrap();
     let (node, _) = store
         .attach("host", key(2), Some(address), false)
         .await

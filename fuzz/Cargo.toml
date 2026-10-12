@@ -186,8 +186,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "remote_cursor_decode"
+path = "fuzz_targets/remote_cursor_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "release_channel"
 path = "fuzz_targets/release_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "remote_standby_decode"
+path = "fuzz_targets/remote_standby_decode.rs"
 test = false
 doc = false
 bench = false

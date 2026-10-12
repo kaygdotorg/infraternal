@@ -41,6 +41,31 @@ fn status(value: &Value) -> Result<String, PluginError> {
         let address: std::net::Ipv6Addr = address.parse().map_err(|_| PluginError::Rejected)?;
         write!(text, "\n  IPv6     {address}").map_err(|_| PluginError::Rejected)?;
     }
+    if let Some(link) = value.get("server_link") {
+        use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
+        let link: ServerLink =
+            serde_json::from_value(link.clone()).map_err(|_| PluginError::Rejected)?;
+        let kind = match link.kind {
+            ServerLinkKind::Disconnected => "Disconnected",
+            ServerLinkKind::Local => "Local",
+            ServerLinkKind::Fallback => "Fallback (enrolled port)",
+            ServerLinkKind::Mesh => "Mesh",
+        };
+        let reason = match link.reason {
+            ServerLinkReason::Connecting => "Connecting to the enrolled server.",
+            ServerLinkReason::Local => "Server on this node.",
+            ServerLinkReason::MeshUnavailable => "Mesh path unavailable.",
+            ServerLinkReason::MeshProven => "Authenticated mesh path proven.",
+            ServerLinkReason::MeshRefused => "Mesh path refused; retrying.",
+            ServerLinkReason::MeshInterrupted => "Mesh path interrupted.",
+            ServerLinkReason::MeshDisabled => "Mesh path withdrawn.",
+        };
+        write!(text, "\n  Server   {kind}\n  Reason   {reason}")
+            .map_err(|_| PluginError::Rejected)?;
+        if let Some(endpoint) = link.endpoint {
+            write!(text, "\n  Link     {endpoint}").map_err(|_| PluginError::Rejected)?;
+        }
+    }
     write!(text, "\n  Next     {next}").map_err(|_| PluginError::Rejected)?;
     Ok(text)
 }
@@ -86,4 +111,50 @@ fn peers(value: &Value) -> Result<String, PluginError> {
         text.push_str("\n\n  Next  Send traffic to establish an unproven direct path.");
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+    use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
+    #[test]
+    fn status_explains_the_observed_server_transport() {
+        for (kind, reason, label, explanation) in [
+            (
+                ServerLinkKind::Mesh,
+                ServerLinkReason::MeshProven,
+                "Server   Mesh",
+                "Authenticated mesh path proven.",
+            ),
+            (
+                ServerLinkKind::Fallback,
+                ServerLinkReason::MeshInterrupted,
+                "Server   Fallback (enrolled port)",
+                "Mesh path interrupted.",
+            ),
+            (
+                ServerLinkKind::Fallback,
+                ServerLinkReason::MeshRefused,
+                "Server   Fallback (enrolled port)",
+                "Mesh path refused; retrying.",
+            ),
+        ] {
+            let link = ServerLink {
+                kind,
+                reason,
+                endpoint: Some("10.254.0.1:7443".parse().expect("fixture address")),
+            };
+            let value = serde_json::json!({"state":"On","peer_count":2,"server_link":link});
+            let text = status(&value).expect("human status");
+            assert!(text.contains(label));
+            assert!(text.contains(explanation));
+            assert!(text.contains("Link     10.254.0.1:7443"));
+        }
+    }
+    #[test]
+    fn legacy_status_remains_readable_and_invalid_link_is_refused() {
+        assert!(status(&serde_json::json!({"state":"On","peer_count":0})).is_ok());
+        assert!(status(&serde_json::json!({"state":"On","peer_count":0,"server_link":{"kind":"Mesh","reason":"MeshProven","endpoint":"invalid input"}})).is_err());
+    }
 }

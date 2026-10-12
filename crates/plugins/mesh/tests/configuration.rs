@@ -86,7 +86,7 @@ fn chunks_fit_body_budget_and_one_peer_delta_does_not_repeat_the_snapshot() {
     let mut next = config.clone();
     next.version += 1;
     next.peers.get_mut(&NodeId(3)).unwrap().peer.endpoint =
-        Some("192.0.2.3:51820".parse().unwrap());
+        Some("192.0.2.3:44000".parse().unwrap());
     let delta = configuration::chunks(Some(&config), &next).unwrap();
     assert_eq!(delta.len(), 1);
     assert_eq!(delta[0].upserted.len(), 1);
@@ -121,4 +121,18 @@ fn large_valid_port_policy_is_split_without_a_port_count_cap() {
         }
     }
     assert_eq!(assembled, policy);
+}
+
+#[test]
+fn compiled_chunks_identify_the_server_and_old_snapshots_have_no_proposal() {
+    let coord = coordinator();
+    let config =
+        configuration::compile(&coord, NodeId(2), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
+    assert_eq!(config.server, Some(NodeId(1)));
+    let chunks = configuration::chunks(None, &config).unwrap();
+    assert!(chunks.iter().all(|chunk| chunk.server == config.server));
+    let mut old = serde_json::to_value(&config).unwrap();
+    old.as_object_mut().unwrap().remove("server");
+    let old: infraternal_plugin_mesh::dataplane::Config = serde_json::from_value(old).unwrap();
+    assert_eq!(old.server, None);
 }

@@ -39,3 +39,12 @@ pub const MAX_CONTROL_JSON: usize = 32_768;
 /// this reserve does not claim to include full payload buffers. u32 stream IDs
 /// retain their protocol range; this limits concurrent streams on one connection.
 pub const MAX_TERMINAL_STREAMS: usize = (4 * 1024 * 1024) / (32 * 1024);
+/// The peer accepts additive applied server-path proposals from its node plugins [215].
+pub const SERVER_PATH_PROPOSALS: u64 = 1 << 3;
+
+/// The server can park an enrolled fallback without replacing its active host actor [215].
+pub const REMOTE_STANDBY: u64 = 1 << 4;
+
+/// Native standby writers can share durable shim cursors before path activation [215].
+/// Both peers negotiate this bit before using the bounded per-writer cursor request.
+pub const REMOTE_PRIMED_WRITERS: u64 = 1 << 5;

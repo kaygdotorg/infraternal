@@ -1,0 +1,71 @@
+{
+  "role": "Agent module gates after ordinary writer queue capability red to green",
+  "source_hashes": {
+    "crates/infraternal-agent/src/sessions.rs": "0f7e717b34bef339d4bcf39eaff0099d30f966c624c13e51a2190a5e0827ab81",
+    "crates/infraternal-agent/tests/unit/sessions.rs": "2817330b89d1f167fe8bb06238ec3052207a34444511e83cc49e3db5c84d5aae",
+    "crates/infraternal-shim/src/frame.rs": "4f4af998fe90114f5bfe98aed687946aada16a94758fadfe21b1fc558cdd170e",
+    "crates/infraternal-shim/src/session.rs": "eb02f3cb418a3601e367d512a2dae0aec906e86250e5199f62fdc1fa3c020f2c",
+    "Cargo.lock": "927e5badbef20ab3032f0308348b7a8c71dd62f54d3d4373564c4c97145af561"
+  },
+  "checks": [
+    {
+      "command": [
+        "/home/kayg/.nix-profile/bin/rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "fmt",
+        "-p",
+        "infraternal-agent",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/evidence/mesh-agent-transport-round2/ordinary-native-backpressure-fmt.log",
+      "archived_output": "evidence/mesh-agent-transport-round2/ordinary-native-backpressure-fmt.log.gz",
+      "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": [
+        "/home/kayg/.nix-profile/bin/rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "clippy",
+        "-p",
+        "infraternal-agent",
+        "--features",
+        "remote,mesh",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/evidence/mesh-agent-transport-round2/ordinary-native-backpressure-clippy.log",
+      "archived_output": "evidence/mesh-agent-transport-round2/ordinary-native-backpressure-clippy.log.gz",
+      "output_sha256": "b3728a22fbc4628092d214a32de76afdea0265a8e0f4e55bf1afbbdc3973acfd"
+    },
+    {
+      "command": [
+        "/home/kayg/.nix-profile/bin/rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "-p",
+        "infraternal-agent",
+        "--features",
+        "remote,mesh",
+        "--lib",
+        "--",
+        "--test-threads=4"
+      ],
+      "exit_code": 0,
+      "log": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/evidence/mesh-agent-transport-round2/ordinary-native-backpressure-unit.log",
+      "archived_output": "evidence/mesh-agent-transport-round2/ordinary-native-backpressure-unit.log.gz",
+      "output_sha256": "0b4651997f9b2dce38cc7de7e095a21686e685444afcd69decbb255cb3789d69"
+    }
+  ],
+  "sources_unchanged": true
+}

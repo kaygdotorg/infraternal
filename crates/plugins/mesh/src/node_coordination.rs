@@ -7,6 +7,25 @@ use crate::{
 };
 use infraternal_plugin_api::node_channel::NodeChannel;
 use std::sync::Arc;
+type ServerListener = Option<(
+    std::net::IpAddr,
+    Box<dyn infraternal_plugin_api::server_path::ListenerLease>,
+)>;
+
+/// Keep a working listener until its replacement is actually bound.
+async fn update_listener(
+    channel: &dyn NodeChannel,
+    address: std::net::IpAddr,
+    listener: &mut ServerListener,
+) {
+    if listener
+        .as_ref()
+        .is_none_or(|(current, _)| *current != address)
+        && let Ok(Some(lease)) = channel.listen_server(address).await
+    {
+        *listener = Some((address, lease));
+    }
+}
 /// One event-driven worker belongs to the generic plugin lifecycle; disabling
 /// aborts and joins it. A disconnect never deletes durable mesh membership.
 // Keep acknowledged-version recovery and source invalidation in one event loop.
@@ -22,6 +41,7 @@ pub async fn run(
     let mut binding = None;
     let mut installed: Option<Snapshot> = None;
     let mut refresh_identity = true;
+    let mut listener: ServerListener = None;
     loop {
         if refresh_identity || binding.is_none() {
             refresh_identity = false;
@@ -100,7 +120,8 @@ pub async fn run(
             // do not change packet policy. Keep the node's acknowledged version
             // as the delta base, avoiding an unchanged snapshot/fsync per node.
             let changed = old.as_ref().is_none_or(|old| {
-                old.node != config.node
+                old.server != config.server
+                    || old.node != config.node
                     || old.addresses != config.addresses
                     || old.default_policy != config.default_policy
                     || old.peers != config.peers
@@ -111,7 +132,10 @@ pub async fn run(
                     return;
                 };
                 let mut failed = false;
-                for chunk in chunks {
+                for mut chunk in chunks {
+                    if !channel.supports_server_paths() {
+                        chunk.server = None;
+                    }
                     let Ok(input) = serde_json::to_vec(&chunk) else {
                         return;
                     };
@@ -136,6 +160,17 @@ pub async fn run(
                 }
             }
         }
+        if binding.is_none() {
+            // Local off and membership removal own listener teardown too.
+            listener = None;
+        } else if channel.is_server()
+            && let Some(snapshot) = &installed
+            && let Some(node) = binding
+            && let Ok(config) = snapshot.config(node)
+        {
+            let address = std::net::IpAddr::V4(config.addresses.ipv4);
+            update_listener(channel.as_ref(), address, &mut listener).await;
+        }
         // No retry timer or heartbeat. Reconnect, local up/down, or committed
         // policy change is the only wakeup. Closed sources retire the worker.
         tokio::select! {
@@ -153,9 +188,19 @@ mod tests {
     use infraternal_plugin_api::PluginOperation;
     use std::sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+    struct Lease(Arc<AtomicUsize>);
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
     struct Channel {
+        server: bool,
+        leases: Arc<AtomicUsize>,
+        refuse_listener: AtomicBool,
+        listened: tokio::sync::Notify,
         notices: Mutex<Option<tokio::sync::watch::Sender<()>>>,
         enabled: AtomicBool,
         refuse_delta: AtomicBool,
@@ -165,8 +210,15 @@ mod tests {
     }
     impl Channel {
         fn new() -> Arc<Self> {
+            Self::with_server(false)
+        }
+        fn with_server(server: bool) -> Arc<Self> {
             let (notices, _) = tokio::sync::watch::channel(());
             Arc::new(Self {
+                server,
+                leases: Arc::default(),
+                refuse_listener: AtomicBool::new(false),
+                listened: tokio::sync::Notify::new(),
                 notices: Mutex::new(Some(notices)),
                 enabled: AtomicBool::new(true),
                 refuse_delta: AtomicBool::new(false),
@@ -193,13 +245,37 @@ mod tests {
     }
     impl NodeChannel for Channel {
         fn id(&self) -> &'static str {
-            "00000000-0000-4000-8000-000000000001"
+            if self.server {
+                "server"
+            } else {
+                "00000000-0000-4000-8000-000000000001"
+            }
         }
         fn observed_ip(&self) -> std::net::IpAddr {
             std::net::Ipv4Addr::new(192, 0, 2, 1).into()
         }
         fn is_server(&self) -> bool {
-            false
+            self.server
+        }
+        fn supports_server_paths(&self) -> bool {
+            self.server
+        }
+        fn listen_server(
+            &self,
+            _address: std::net::IpAddr,
+        ) -> PluginOperation<'_, Option<Box<dyn infraternal_plugin_api::server_path::ListenerLease>>>
+        {
+            Box::pin(async move {
+                if self.refuse_listener.load(Ordering::Acquire) {
+                    return Err("Listener refused.");
+                }
+                self.leases.fetch_add(1, Ordering::AcqRel);
+                self.listened.notify_one();
+                Ok(Some(Box::new(Lease(self.leases.clone()))
+                    as Box<
+                        dyn infraternal_plugin_api::server_path::ListenerLease,
+                    >))
+            })
         }
         fn changes(&self) -> tokio::sync::watch::Receiver<()> {
             self.notices.lock().unwrap().as_ref().unwrap().subscribe()
@@ -211,14 +287,22 @@ mod tests {
                     self.queried.notify_one();
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
-                            public_key: PublicKey([2; 32]),
-                            port: 51820,
+                            public_key: PublicKey([if self.server { 1 } else { 2 }; 32]),
+                            port: 44000,
                         },
                     ))
                     .map_err(|_| "encoding failed");
                 }
                 assert_eq!(action, "mesh.configure");
                 assert!(input.len() <= infraternal_plugin_api::MAX_ACTION_BYTES);
+                if !self.server {
+                    assert!(
+                        serde_json::from_slice::<serde_json::Value>(&input)
+                            .unwrap()
+                            .get("server")
+                            .is_none()
+                    );
+                }
                 let chunk: crate::dataplane::Chunk = serde_json::from_slice(&input).unwrap();
                 self.frames
                     .lock()
@@ -260,6 +344,77 @@ mod tests {
         service
     }
     #[tokio::test]
+    async fn refused_listener_replacement_preserves_the_current_lease() {
+        let channel = Channel::with_server(true);
+        let old = "127.0.0.1".parse().unwrap();
+        let new = "127.0.0.2".parse().unwrap();
+        let mut listener = None;
+        update_listener(channel.as_ref(), old, &mut listener).await;
+        assert_eq!(channel.leases.load(Ordering::Acquire), 1);
+        channel.refuse_listener.store(true, Ordering::Release);
+        update_listener(channel.as_ref(), new, &mut listener).await;
+        assert_eq!(listener.as_ref().unwrap().0, old);
+        assert_eq!(channel.leases.load(Ordering::Acquire), 1);
+        channel.refuse_listener.store(false, Ordering::Release);
+        update_listener(channel.as_ref(), new, &mut listener).await;
+        assert_eq!(listener.as_ref().unwrap().0, new);
+        assert_eq!(channel.leases.load(Ordering::Acquire), 1);
+        drop(listener);
+        assert_eq!(channel.leases.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn server_listener_belongs_to_applied_enabled_worker() {
+        let service = service().await;
+        let channel = Channel::with_server(true);
+        channel.enabled.store(false, Ordering::Release);
+        let task = tokio::spawn(run(
+            service.dataplane(),
+            service,
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            channel.queried.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(channel.leases.load(Ordering::Acquire), 0);
+        channel.enabled.store(true, Ordering::Release);
+        channel.changed();
+        channel.wait().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            channel.listened.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(channel.leases.load(Ordering::Acquire), 1);
+        channel.enabled.store(false, Ordering::Release);
+        channel.changed();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while channel.leases.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        channel.enabled.store(true, Ordering::Release);
+        channel.changed();
+        channel.wait().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            channel.listened.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(channel.leases.load(Ordering::Acquire), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(channel.leases.load(Ordering::Acquire), 0);
+    }
+    #[tokio::test]
     async fn refused_delta_recovers_immediately_and_closed_channel_retires_worker() {
         let service = service().await;
         let store = service.dataplane();
@@ -275,7 +430,7 @@ mod tests {
             .attach(
                 "00000000-0000-4000-8000-000000000001",
                 PublicKey([2; 32]),
-                Some("192.0.2.1:51820".parse().unwrap()),
+                Some("192.0.2.1:44000".parse().unwrap()),
                 false,
             )
             .await
@@ -366,7 +521,7 @@ mod tests {
             .attach(
                 "00000000-0000-4000-8000-000000000001",
                 PublicKey([2; 32]),
-                Some("192.0.2.1:51820".parse().unwrap()),
+                Some("192.0.2.1:44000".parse().unwrap()),
                 false,
             )
             .await
@@ -408,7 +563,7 @@ mod tests {
             .attach(
                 "00000000-0000-4000-8000-000000000001",
                 PublicKey([2; 32]),
-                Some("192.0.2.1:51820".parse().unwrap()),
+                Some("192.0.2.1:44000".parse().unwrap()),
                 false,
             )
             .await

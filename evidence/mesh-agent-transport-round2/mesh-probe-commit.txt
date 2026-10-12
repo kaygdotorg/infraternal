@@ -1,0 +1,18 @@
+Keep mesh probes independent of the previous transport RTT
+
+A slow fallback could configure the next healthy mesh path with a2.5s
+keepalive, while its authenticated freshness guard uses the new mesh RTT
+plus200ms. A real-mTLS regression with previous RTT5s failed before the
+first keepalive, despite the new path remaining healthy.
+
+Remove the cross-path RTT parameter. New mesh transports emit100ms
+keepalives; the guard continues measuring their own authenticated ACKs
+and current RTT. Increasing the guard deadline to accommodate unrelated
+old RTT was rejected because it would prolong silent-cut recovery.
+Decisions128,198,215 retain the selected transport and bounded probes.
+
+Validation: fmt and strict agent all-target mesh,remote Clippy pass.
+Real healthy-mesh regression passes after its recorded failure; serial
+agent67PASS0FAIL11ignored and transport2PASS. Test lands separately.
+
+Refs: #129

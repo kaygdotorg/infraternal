@@ -1,0 +1,54 @@
+{
+  "bootstrap_and_move_us": 9980624,
+  "configured_rtt_jitter_ms": 30,
+  "configured_rtt_ms": 300,
+  "direct": {
+    "n": 31,
+    "p50_us": 313272,
+    "p99_us": 327442
+  },
+  "expected_bytes": 22833,
+  "fallback": {
+    "n": 31,
+    "p50_us": 312653,
+    "p99_us": 330788
+  },
+  "fallback_us": 332341,
+  "head_profile": "primed-writer",
+  "lifecycle_complete": true,
+  "live_nodes": 2,
+  "live_terminals": 1,
+  "load": "0.45 0.28 0.24 2/2250 134627",
+  "load_start": "0.43 0.18 0.21 1/2236 132550",
+  "machine": "infraternal-perf-test",
+  "mesh": {
+    "n": 31,
+    "p50_us": 306018,
+    "p99_us": 328238
+  },
+  "move_from_observed_working_mesh_us": 1609960,
+  "moving_input_bytes": 22134,
+  "namespaces": 2,
+  "node_peer_counters": [
+    999,
+    72516,
+    429036
+  ],
+  "node_wireguard_port": 47077,
+  "public_inventory": 1000,
+  "real_kernel": true,
+  "real_pty": true,
+  "received_bytes": 22833,
+  "restart_us": 2153308,
+  "server_peer_counters": [
+    999,
+    429204,
+    71172
+  ],
+  "server_wireguard_port": 59542,
+  "silent_cut_to_echo_us": 332341,
+  "silent_cut_to_fallback_status_us": 1126664,
+  "stateful_input_firewall": true,
+  "wireguard_port_grants": 0,
+  "working_mesh_observation_interval_ms": 200
+}

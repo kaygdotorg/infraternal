@@ -102,9 +102,11 @@ impl Control {
                             continue;
                         }
                     };
-                    match crate::restart_binary::Opened::open(target.clone()) {
+                    match crate::restart_binary::Opened::open_reload(target.clone()) {
                         Ok(binary) => {
-                            let replacement = Replacement::new(binary, source);
+                            let Ok(replacement) = Replacement::new(binary, source) else {
+                                record_request("SIGHUP", None, Some(&target), "refused"); continue;
+                            };
                             record_request("SIGHUP", None, Some(&replacement.binary.path), replacement.outcome());
                             return Ok(replacement);
                         }
@@ -127,16 +129,25 @@ impl Control {
             }
             let request =
                 tokio::time::timeout(Duration::from_secs(2), read_request(&mut socket)).await;
-            let Ok(Ok(binary)) = request else {
+            let Ok(Ok((binary, reload))) = request else {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
             };
-            let Ok(opened) = crate::restart_binary::Opened::open(binary.clone()) else {
+            let opened = if reload {
+                crate::restart_binary::Opened::open_reload(binary.clone())
+            } else {
+                crate::restart_binary::Opened::open(binary.clone())
+            };
+            let Ok(opened) = opened else {
                 record_request("socket", peer.as_ref(), Some(&binary), "refused");
                 let _ = socket.write_all(b"REFUSED\n").await;
                 continue;
             };
-            let replacement = Replacement::new(opened, source);
+            let Ok(replacement) = Replacement::new(opened, source) else {
+                record_request("socket", peer.as_ref(), Some(&binary), "refused");
+                let _ = socket.write_all(b"REFUSED\n").await;
+                continue;
+            };
             let reply = if replacement.input.is_some() {
                 b"RESTARTING\n".as_slice()
             } else {
@@ -168,7 +179,7 @@ impl Drop for Control {
     }
 }
 
-async fn read_request(socket: &mut UnixStream) -> io::Result<PathBuf> {
+async fn read_request(socket: &mut UnixStream) -> io::Result<(PathBuf, bool)> {
     let length = usize::from(socket.read_u16().await?);
     if length == 0 || length > MAX_PATH {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -177,17 +188,19 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<PathBuf> {
     socket.read_exact(&mut bytes).await?;
     let path = PathBuf::from(String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidInput)?);
     if path == Path::new(".") {
-        return current_binary();
+        return current_binary().map(|path| (path, true));
     }
     if !path.is_absolute() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    Ok(path)
+    Ok((path, false))
 }
 
 fn current_binary() -> io::Result<PathBuf> {
     let running = std::env::current_exe()?;
-    if running.as_os_str().as_bytes().ends_with(b" (deleted)") {
+    if running.as_os_str().as_bytes().ends_with(b" (deleted)")
+        || running.as_os_str().as_bytes().starts_with(b"/memfd:")
+    {
         // ExecStart/our pinned exec argv[0] retains the configured install path.
         // Reopen its newly installed inode rather than the vanished old image.
         let configured = std::env::args_os()
@@ -204,6 +217,7 @@ fn current_binary() -> io::Result<PathBuf> {
     Ok(running)
 }
 
+#[cfg(test)]
 fn executable(binary: &Path) -> io::Result<()> {
     crate::restart_binary::Opened::open(binary.to_owned()).map(|_| ())
 }
@@ -218,8 +232,9 @@ pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<bo
             } else {
                 std::env::current_dir()?.join(path)
             };
-            executable(&original)?;
-            std::fs::canonicalize(original)
+            // The receiver owns signature admission and the image probe. Sending
+            // the original path preserves symlink refusal and avoids doing the expensive work twice.
+            Ok::<_, io::Error>(original)
         })
         .transpose()?;
     let mut socket = UnixStream::connect(data.join("restart/control.sock")).await?;
@@ -245,6 +260,8 @@ pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<bo
 pub(crate) struct Replacement {
     binary: crate::restart_binary::Opened,
     input: Option<std::os::unix::net::UnixStream>,
+    recovery: crate::restart_binary::Opened,
+    recovery_input: Option<std::os::unix::net::UnixStream>,
 }
 impl Replacement {
     fn outcome(&self) -> &'static str {
@@ -253,63 +270,83 @@ impl Replacement {
     pub(crate) fn new(
         binary: crate::restart_binary::Opened,
         source: Option<&dyn infraternal_server::ca::CaKeySource>,
-    ) -> Self {
+    ) -> io::Result<Self> {
+        // Pin recovery before exporting anything or dropping the serving future.
+        let recovery = crate::restart_binary::Opened::running()?;
+        let recovery_input = if recovery.warm {
+            source.and_then(|source| infraternal_server::ca_handoff::prepare(source).ok())
+        } else {
+            None
+        };
         let input = if binary.warm {
             source.and_then(|source| infraternal_server::ca_handoff::prepare(source).ok())
         } else {
             None
         };
-        Self { binary, input }
+        Ok(Self {
+            binary,
+            input,
+            recovery,
+            recovery_input,
+        })
     }
     pub(crate) fn exec(self) -> io::Error {
-        let execute = || -> io::Result<()> {
-            let argv = std::iter::once(self.binary.path.as_os_str().to_owned())
-                .chain(std::env::args_os().skip(1))
-                .map(|argument| {
-                    CString::new(argument.as_bytes())
-                        .map_err(|_| io::ErrorKind::InvalidInput.into())
-                })
-                .collect::<io::Result<Vec<_>>>()?;
-            let environment = std::env::vars_os()
-                .map(|(key, value)| {
-                    let mut entry = key.as_bytes().to_vec();
-                    entry.push(b'=');
-                    entry.extend_from_slice(value.as_bytes());
-                    CString::new(entry).map_err(|_| io::ErrorKind::InvalidInput.into())
-                })
-                .collect::<io::Result<Vec<_>>>()?;
-            // Retain ownership through exec: open may itself return fd0 when
-            // cleanup previously closed stdin. Dropping that File would close it.
-            let null = if self.input.is_none() {
-                Some(std::fs::File::open("/dev/null")?)
-            } else {
-                None
-            };
-            if let Some(input) = &self.input {
-                nix::unistd::dup2_stdin(input)?;
-            } else {
-                nix::unistd::dup2_stdin(null.as_ref().ok_or(io::ErrorKind::Other)?)?;
-            }
-            // dup2(oldfd, oldfd) preserves CLOEXEC. Stdin must survive even when
-            // the newly opened null input was already descriptor zero.
-            nix::fcntl::fcntl(
-                std::io::stdin(),
-                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-            )?;
-
-            // Execute exactly the checked inode; no pathname lookup occurs after
-            // exporting the CA. O_CLOEXEC closes this fd in the successor.
-            queue_reload()?;
-            nix::unistd::fexecve(&self.binary.file, &argv, &environment)?;
-            Ok(())
-        };
-        let error = execute()
-            .err()
-            .unwrap_or_else(|| io::ErrorKind::Other.into());
-        // An exec error must not leave queued signing material on stdin.
-        let _ = nix::unistd::close(0);
-        error
+        let error = execute_image(&self.binary, self.input.as_ref());
+        drop(self.input);
+        tracing::warn!(error_kind = ?error.kind(), outcome = "recovering", "invalid image refused; recovering current image");
+        // The first receiver may have been mapped to stdin. A separate frame is
+        // essential: failed exec must never reuse or partially consume that frame.
+        execute_image(&self.recovery, self.recovery_input.as_ref())
     }
+}
+
+fn execute_image(
+    binary: &crate::restart_binary::Opened,
+    input: Option<&std::os::unix::net::UnixStream>,
+) -> io::Error {
+    let execute = || -> io::Result<()> {
+        let argv = std::iter::once(binary.path.as_os_str().to_owned())
+            .chain(std::env::args_os().skip(1))
+            .map(|argument| {
+                CString::new(argument.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let environment = std::env::vars_os()
+            .map(|(key, value)| {
+                let mut entry = key.as_bytes().to_vec();
+                entry.push(b'=');
+                entry.extend_from_slice(value.as_bytes());
+                CString::new(entry).map_err(|_| io::ErrorKind::InvalidInput.into())
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        // Retain ownership through exec: open may itself return fd0 when
+        // cleanup previously closed stdin. Dropping that File would close it.
+        let null = if input.is_none() {
+            Some(std::fs::File::open("/dev/null")?)
+        } else {
+            None
+        };
+        if let Some(input) = input {
+            nix::unistd::dup2_stdin(input)?;
+        } else {
+            nix::unistd::dup2_stdin(null.as_ref().ok_or(io::ErrorKind::Other)?)?;
+        }
+        // dup2(oldfd, oldfd) preserves CLOEXEC. Stdin must survive even when
+        // the newly opened null input was already descriptor zero.
+        nix::fcntl::fcntl(
+            std::io::stdin(),
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+        )?;
+
+        // Execute exactly the checked inode; no pathname lookup occurs after
+        // exporting the CA. O_CLOEXEC closes this fd in the successor.
+        queue_reload()?;
+        binary.image.execute(&argv, &environment)?;
+        Ok(())
+    };
+    execute()
+        .err()
+        .unwrap_or_else(|| io::ErrorKind::Other.into())
 }
 
 /// Report one local restart request using the shared action definition.
@@ -343,7 +380,7 @@ pub(crate) fn run(
         _ => super::output::refuse(
             json,
             infraternal_plugin_remote::RESTART.id,
-            "Server restart unavailable",
+            "Server replacement refused",
             "Use the running service account, its data directory and an executable binary.",
             1,
         ),
@@ -359,14 +396,11 @@ pub(crate) fn replace(
     shutdown_runtime(runtime);
     let target = replacement.binary.path.clone();
     let error = replacement.exec();
-    tracing::error!(target = ?target, error_kind = ?error.kind(), outcome = "cold", "server replacement exec failed");
-    super::output::refuse(
-        json,
-        infraternal_plugin_remote::RESTART.id,
-        "Could not execute the replacement server",
-        "Recover service with the retained binary; a cold start requires an administrator CA unlock.",
-        1,
-    )
+    tracing::error!(target = ?target, error_kind = ?error.kind(), outcome = "recovering_in_process", json, "replacement and recovery exec refused; resuming current code");
+    // If even the pinned old image cannot exec (for example kernel resource
+    // pressure), retain its prepared stdin and dispatch the same invocation in
+    // the already-loaded code. Normal recovery never returns from fexecve.
+    super::run_invocation()
 }
 
 #[cfg(test)]
@@ -400,3 +434,7 @@ fn record_request(
     tracing::info!(service_pid = std::process::id(), request_pid = ?pid, request_uid = ?uid, target = ?target,
         outcome, origin, "server_restart_request");
 }
+
+#[cfg(test)]
+#[path = "restart_recovery_tests.rs"]
+mod recovery_tests;

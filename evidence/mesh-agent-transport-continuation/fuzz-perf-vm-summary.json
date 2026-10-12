@@ -1,0 +1,20 @@
+{
+  "remote_cursor_decode": {
+    "exit": 0,
+    "executions": 3733258,
+    "completed": true,
+    "crashes_reported": false
+  },
+  "remote_standby_decode": {
+    "exit": 0,
+    "executions": 2799572,
+    "completed": true,
+    "crashes_reported": false
+  },
+  "shim_frame_decode": {
+    "exit": 0,
+    "executions": 1621,
+    "completed": true,
+    "crashes_reported": false
+  }
+}

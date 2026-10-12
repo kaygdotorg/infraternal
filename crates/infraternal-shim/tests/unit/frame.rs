@@ -182,6 +182,61 @@ fn borrowed_and_owned_decoders_agree_at_every_fragment_boundary() {
 }
 
 #[test]
+fn deferred_frame_keeps_its_borrowed_storage_and_ordered_trailing_bytes() {
+    let first = Frame::SequencedInput(3, vec![7; 100]);
+    let second = Frame::InputStateRequest;
+    let mut wire = first.encode().unwrap();
+    let boundary = wire.len();
+    wire.extend(second.encode().unwrap());
+    let mut decoder = Decoder::default();
+    assert_eq!(decoder.feed_until(&wire, |_| Ok(false)).unwrap(), boundary);
+    let mut seen = Vec::new();
+    assert_eq!(
+        decoder
+            .feed_until(&[], |frame| {
+                seen.push(frame.into_owned());
+                Ok(true)
+            })
+            .unwrap(),
+        0
+    );
+    decoder
+        .feed_until(&wire[boundary..], |frame| {
+            seen.push(frame.into_owned());
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(seen, vec![first, second]);
+}
+
+#[test]
+fn maximum_deferred_frame_retries_without_growing_storage() {
+    let wire = Frame::SequencedInput(0, vec![0; MAX_FRAME - 9])
+        .encode()
+        .unwrap();
+    let mut decoder = Decoder::default();
+    for chunk in wire.chunks(16 * 1024) {
+        assert_eq!(
+            decoder.feed_until(chunk, |_| Ok(false)).unwrap(),
+            chunk.len()
+        );
+    }
+    let capacity = decoder.bytes.capacity();
+    assert_eq!(decoder.bytes.len(), MAX_FRAME + 4);
+    assert!(capacity <= 2 * (MAX_FRAME + 4));
+    for _ in 0..32 {
+        assert_eq!(decoder.feed_until(&[], |_| Ok(false)).unwrap(), 0);
+        assert_eq!(decoder.bytes.capacity(), capacity);
+    }
+    eprintln!(
+        "METRIC deferred_decoder_capacity_per_peer={capacity} peers=32 aggregate_decoder_bytes={} trailing_wire_max_per_peer=16384 aggregate_trailing_wire_max=524288",
+        32 * capacity
+    );
+    decoder.feed_until(&[], |_| Ok(true)).unwrap();
+    assert_eq!(decoder.bytes, []);
+}
+
+#[test]
 #[ignore = "release codec and allocation-path measurement"]
 fn codec_reuse_measurement() {
     use super::{Decoder, Frame, FrameRef};
@@ -277,4 +332,22 @@ fn approximate_snapshot_codec_is_bounded_and_canonical() {
         Frame::decode(&maximum).is_err(),
         "overflowing additive frame"
     );
+}
+
+#[test]
+fn shared_writer_selector_is_fixed_length_and_fragment_safe() {
+    let wire = [5, 0, 0, 0, 0x1d, 4, 3, 2, 1];
+    let frame = Frame::decode(&wire[4..]).expect("additive shared writer selection");
+    assert_eq!(frame.encode().unwrap(), wire);
+    assert_eq!(FrameRef::decode(&wire[4..]).unwrap().into_owned(), frame);
+    for split in 0..=wire.len() {
+        let mut decoder = Decoder::default();
+        let mut frames = decoder.feed(&wire[..split]).unwrap();
+        frames.extend(decoder.feed(&wire[split..]).unwrap());
+        assert_eq!(frames, vec![frame.clone()]);
+    }
+    for body in [&[0x1d][..], &[0x1d, 1, 2, 3], &[0x1d, 1, 2, 3, 4, 5]] {
+        assert!(Frame::decode(body).is_err());
+        assert!(FrameRef::decode(body).is_err());
+    }
 }

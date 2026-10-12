@@ -20,6 +20,7 @@ fn fixture() -> (PathBuf, Node) {
     node.up().unwrap();
     node.chunk(Chunk {
         local_key: None,
+        server: None,
         node: NodeId(1),
         from_version: None,
         version: 1,

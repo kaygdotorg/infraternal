@@ -16,6 +16,11 @@ pub const APPROXIMATE_SNAPSHOT: u64 = 4;
 /// Capability bit 3 selects an ownership-only link. It neither selects a writer
 /// nor reads output; closing it releases the window independently of data credit.
 pub const SESSION_OWNER: u64 = 8;
+/// Capability bit 4 permits a shared peer and bounded sequenced-input deferral.
+/// It requires [`SEQUENCED_INPUT`] and [`MULTI_WRITER`]. Deferral applies
+/// independently of peer selection mode; ordinary writer selection and
+/// replacement remain unchanged.
+pub const SHARED_WRITER: u64 = 16;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +48,7 @@ pub enum Frame {
     ReadFrom(u64),
     SnapshotRequest,
     Snapshot(u64, Vec<u8>),
-    /// Additive 0x1B, legal only after selecting `APPROXIMATE_SNAPSHOT`.
+    /// Additive 0x1C, legal only after selecting `APPROXIMATE_SNAPSHOT`.
     SnapshotWithFlags(u64, u8, Vec<u8>),
     Signal(u8),
     SequencedInput(u64, Vec<u8>),
@@ -51,6 +56,8 @@ pub enum Frame {
     InputStateRequest,
     InputState(u64, u64),
     SelectWriter(u32),
+    /// Additive 0x1D; shares an existing nonzero writer without evicting its ordinary peer.
+    SelectSharedWriter(u32),
     Exited(i32, u64),
     ExitAck,
     Error(u16, String),
@@ -263,6 +270,10 @@ impl Frame {
                 body.push(0x1b);
                 put!(writer);
             }
+            Self::SelectSharedWriter(writer) => {
+                body.push(0x1d);
+                put!(writer);
+            }
             Self::Exited(status, seq) => {
                 body.push(0x20);
                 put!(status);
@@ -318,6 +329,7 @@ impl Frame {
             0x19 => Self::InputStateRequest,
             0x1a => Self::InputState(p.u64()?, p.u64()?),
             0x1b => Self::SelectWriter(u32::from_le_bytes(p.take()?)),
+            0x1d => Self::SelectSharedWriter(u32::from_le_bytes(p.take()?)),
             0x1c => {
                 let seq = p.u64()?;
                 let flags = p.take::<1>()?[0];
@@ -367,10 +379,27 @@ impl Decoder {
         bytes: &[u8],
         mut consume: impl FnMut(FrameRef<'_>) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.feed_until(bytes, |frame| {
+            consume(frame)?;
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    /// Consume a prefix, retaining the complete current frame when the callback
+    /// returns false. The caller retains the unused suffix and retries, including
+    /// with an empty slice, before reading more bytes. No payload is copied on pause.
+    /// # Errors
+    /// Returns framing or callback errors without accepting a deferred frame.
+    pub fn feed_until(
+        &mut self,
+        bytes: &[u8],
+        mut consume: impl FnMut(FrameRef<'_>) -> io::Result<bool>,
+    ) -> io::Result<usize> {
         // Copy contiguous runs rather than repeatedly parsing the same length
         // for every payload byte. At most one validated frame is retained.
         let mut rest = bytes;
-        while !rest.is_empty() {
+        loop {
             let target = if self.bytes.len() < 4 {
                 4
             } else {
@@ -381,6 +410,16 @@ impl Decoder {
                 }
                 length + 4
             };
+            if self.bytes.len() == target && target > 4 {
+                if !consume(FrameRef::decode(&self.bytes[4..])?)? {
+                    return Ok(bytes.len() - rest.len());
+                }
+                self.bytes.clear();
+                continue;
+            }
+            if rest.is_empty() {
+                return Ok(bytes.len());
+            }
             let count = (target - self.bytes.len()).min(rest.len());
             self.bytes.extend_from_slice(&rest[..count]);
             rest = &rest[count..];
@@ -390,13 +429,8 @@ impl Decoder {
                 if length == 0 || length > MAX_FRAME {
                     return Err(invalid());
                 }
-                if self.bytes.len() == length + 4 {
-                    consume(FrameRef::decode(&self.bytes[4..])?)?;
-                    self.bytes.clear();
-                }
             }
         }
-        Ok(())
     }
 }
 

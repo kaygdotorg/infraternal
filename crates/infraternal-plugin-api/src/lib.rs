@@ -18,6 +18,7 @@ pub const VERSION: &str = env!("INFRATERNAL_VERSION");
 /// Static header avoids a per-download formatting allocation [226].
 pub const RELEASE_USER_AGENT: &str = concat!("infraternal/", env!("INFRATERNAL_VERSION"));
 pub mod routing;
+pub mod server_path;
 
 #[cfg(feature = "socket-host")]
 use bytes::Bytes;
@@ -457,6 +458,12 @@ pub struct ActionReply {
 
 /// A plugin implementation that can be routed without feature-specific agent code.
 pub trait AgentPlugin: Send {
+    /// Propose an applied server address; disabled components return none.
+    fn preferred_server(&self) -> Option<std::net::IpAddr> {
+        None
+    }
+    /// Receive the host's actual authenticated transport status.
+    fn set_server_link(&mut self, _link: &server_path::ServerLink) {}
     /// Static action and settings metadata.
     fn descriptor(&self) -> &'static PluginDescriptor;
     /// Machine-only control actions are omitted from human API/MCP/CLI discovery.
@@ -542,6 +549,30 @@ impl PluginRegistry {
     pub fn update_context(&mut self, context: admission::NodeContext) {
         for plugin in &mut self.plugins {
             plugin.update_context(context);
+        }
+    }
+
+    /// Resolve component proposals without choosing between conflicting routes.
+    /// # Errors
+    /// Refuses contradictory server addresses rather than depending on registration order.
+    pub fn preferred_server(&self) -> Result<Option<std::net::IpAddr>, PluginError> {
+        let mut selected = None;
+        for candidate in self
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.preferred_server())
+        {
+            if selected.is_some_and(|address| address != candidate) {
+                return Err(PluginError::Rejected);
+            }
+            selected = Some(candidate);
+        }
+        Ok(selected)
+    }
+    /// Publish transport status without exposing identity material to plugins.
+    pub fn set_server_link(&mut self, link: &server_path::ServerLink) {
+        for plugin in &mut self.plugins {
+            plugin.set_server_link(link);
         }
     }
     /// Registers one plugin whose descriptor is internally consistent.

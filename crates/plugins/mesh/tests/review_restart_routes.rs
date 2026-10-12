@@ -21,6 +21,7 @@ fn restart_retires_orphan_peer_host_routes() {
     node.up().unwrap();
     node.chunk(Chunk {
         local_key: None,
+        server: None,
         node: NodeId(1),
         from_version: None,
         version: 1,

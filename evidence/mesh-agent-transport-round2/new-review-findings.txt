@@ -1,0 +1,11 @@
+D215 #129 round2 follow-up review findings, source confirmed.
+
+RemoteLink pops a received packet then awaits the native stream-map mutex while setup holds that mutex across network binding/priming. Cancelling read_incoming can discard the dequeued packet. Regression and durable pending ownership are under repair.
+
+Shadow hedge awaits cursor/credit/input network writes inside the shared actor; a blocked secondary can delay healthy primary control and acknowledgements. Owned per-writer flights are under repair.
+
+Cached promotion Acks call generic replay with replaying=true, bypassing bounded owned writes. Primary owned flights currently advance on socket completion without a durable Ack window. Behavioral fail-first tests are compiling with the remote feature; initial default-feature run matched zero tests and is invalid evidence.
+
+Global shim accepted queue remains 1MiB across retained writer identities; a per-writer flight bound alone cannot bound aggregate queue across writer churn. Corrected real PTY fixture failed against immutable old production shim: 0 passed; 1 failed; 0.55s, UnexpectedEOF after900000 accepted bytes and a200000-byte shared writer input. Log: evidence/mesh-agent-transport-round2/shim-deferral-red.log. Earlier READY marker race was fixed before this reproduction. Shared-writer-only bounded deferral contract was proposed on this issue before implementation; frozen ordinary capacity behavior remains unchanged.
+
+No completion or performance acceptance claimed. Final real terminal0/150/300ms namespace gates, all review tests and final fast gate remain required.

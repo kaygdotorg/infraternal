@@ -1,0 +1,20 @@
+{
+  "head": "9fc0f890b965b2399b1be54d7b11a48ea0e9766c",
+  "profile": "GNU release opt-level3, full LTO,1codegen unit,unwind,strip; standalone transport diagnostic only",
+  "imports": "production remote plugin dependency plus exact #[path] DialRuntime and unchanged fixture body",
+  "registry_artifacts": 214,
+  "lock_registry_version_source_checksum_mismatches": 0,
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "executable": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness-baseline",
+  "executable_bytes": 7904416,
+  "executable_sha256": "af87af749c10d28b54d465994745857a80094d04dcde1f66e58d762c16236b8e",
+  "sources": {
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/remote/src/remote_quic.rs": "6486ffc68c849ca2b06daea87c38ca8046af921ddd723f3fb6d4ffe0ae6dc194",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/remote/src/remote_tls.rs": "5ac6f37dd5b0def3fcb05a27dab806c291d97c591df39a6d4b5840f81ebc328c",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-agent/src/remote_dial_runtime.rs": "da792cc70ba69a66961d353f5c42c92dfbabdf152069408aab52cabac5f68ded",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-agent/src/remote_mesh_idle_tests.rs": "7d48b6e2ef1b4a44e07db0f8e9a6f9d1dd2e1d4c3ab5f6d2f3b37908861800ac",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/Cargo.toml": "1cd1f61c7d42042d10a23a0c3ecc8819f54b862a42eb75a0285247573c94ff1d",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/Cargo.lock": "3411f08f33eb1ef9a47e4cc2427f2697243f28a5d3eb556c48fd59e491721c78",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/src/lib.rs": "a9bff0f1e3ae898db3fbdbc72139159c1723132be163cd1166834146d5c2084e"
+  }
+}
