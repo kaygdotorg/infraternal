@@ -1,0 +1,5 @@
+total 69796
+-rw-r--r-- 1 root root       50 Oct 12 10:26 image-load.log
+-rw-r--r-- 1 root root 71464295 Oct 12 10:25 target-image.tar.gz
+infraternal-perf-test
+0.60 0.62 0.58 1/225 163822

@@ -1,0 +1,3 @@
+[addhost-fixes2 47ca472d] test(agent): keep functional replay independent of performance counters
+ 2 files changed, 61 insertions(+), 25 deletions(-)
+ create mode 100644 docs/verification/addhost-round3/functional-no-perf.py

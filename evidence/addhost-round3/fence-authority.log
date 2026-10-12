@@ -1,0 +1,11 @@
+Running as unit: run-p1996734-i10384300.scope; invocation ID: 2bb8f950301742458bc254001a58ca40
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.67s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-round3/target/debug/deps/infraternal_server-aaf76c8bf1e2d913)
+
+running 3 tests
+test enrollment::authority::tests::admission_uses_enrolled_uid_and_exact_public_identity_validity ... ok
+test enrollment::authority::tests::renewal_preserves_overlap_and_refuses_changed_key_or_expired_predecessor ... ok
+test enrollment::authority::tests::revocation_is_owner_bound_and_denies_admission_and_renewal_after_commit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 331 filtered out; finished in 0.33s
+

@@ -1,0 +1,2 @@
+Oct 12 10:38:57 infraternal-dev systemd[908]: Started run-p2128536-i10516101.scope - [systemd-run] /usr/bin/sh -c "mkdir -p \"\$TMPDIR\"; chmod 700 \"\$TMPDIR\"; cargo fmt --all && cargo fmt --all --check && cargo clippy -p infraternal-server --features remote --all-targets --locked -- -D warnings && cargo test -p infraternal-server --features remote --lib bootstrap_runtime::remote_backend::tests --locked".
+Oct 12 10:40:18 infraternal-dev systemd[908]: run-p2128536-i10516101.scope: Consumed 1min 33.445s CPU time, 2.7G memory peak.

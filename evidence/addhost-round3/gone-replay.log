@@ -1,0 +1,19 @@
+Running as unit: run-p2287995-i10675560.scope; invocation ID: 02fa716683d84990b0f9d053e07b0431
+
+running 1 test
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... FAILED
+
+failures:
+
+---- daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up stdout ----
+
+thread 'daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up' (2288010) panicked at crates/infraternal-agent/src/daemon_gone_tests.rs:98:56:
+called `Result::unwrap()` on an `Err` value: Error { kind: InvalidInput, message: "path must be shorter than SUN_LEN" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 66 filtered out; finished in 0.04s
+

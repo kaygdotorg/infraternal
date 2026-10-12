@@ -1,0 +1,23 @@
+Running as unit: run-p1962543-i10350110.scope; invocation ID: 909d4377cb3341eaaad0e4a5d7008cd8
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.91s
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/addhost-round3/target/debug/deps/install-0f36f33fa55ec148)
+
+running 1 test
+test enrollment_process_exit_71_is_not_reported_as_directory_refusal ... FAILED
+
+failures:
+
+---- enrollment_process_exit_71_is_not_reported_as_directory_refusal stdout ----
+
+thread 'enrollment_process_exit_71_is_not_reported_as_directory_refusal' (1963164) panicked at crates/plugins/ssh/tests/install.rs:1159:5:
+assertion failed: failure.message.starts_with("Joining the host to this server failed.")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    enrollment_process_exit_71_is_not_reported_as_directory_refusal
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.16s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test install`
