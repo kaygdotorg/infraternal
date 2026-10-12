@@ -1,0 +1,52 @@
+{
+  "reply": {
+    "failed": true,
+    "error_kind": "AlreadyExists"
+  },
+  "results": [
+    {
+      "family": "10.254.0.2",
+      "protocol": "tcp",
+      "before_id": "ba96028b",
+      "after_delete_id": "ba96028b",
+      "after_echo_id": "ba96028b",
+      "echoes": [
+        true,
+        true
+      ]
+    },
+    {
+      "family": "10.254.0.2",
+      "protocol": "udp",
+      "before_id": "813840cc",
+      "after_delete_id": "813840cc",
+      "after_echo_id": "813840cc",
+      "echoes": [
+        true,
+        true
+      ]
+    },
+    {
+      "family": "fd01:203:405::2",
+      "protocol": "tcp",
+      "before_id": "f3881b7e",
+      "after_delete_id": "f3881b7e",
+      "after_echo_id": "f3881b7e",
+      "echoes": [
+        true,
+        true
+      ]
+    },
+    {
+      "family": "fd01:203:405::2",
+      "protocol": "udp",
+      "before_id": "fe6a6b49",
+      "after_delete_id": "fe6a6b49",
+      "after_echo_id": "fe6a6b49",
+      "echoes": [
+        true,
+        true
+      ]
+    }
+  ]
+}

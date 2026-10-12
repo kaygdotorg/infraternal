@@ -1,0 +1,59 @@
+{
+  "family": "ipv6",
+  "backend": "nft",
+  "acknowledged": [
+    {
+      "applied": true,
+      "apply_us": 84843
+    },
+    {
+      "applied": true,
+      "apply_us": 78681
+    }
+  ],
+  "before": [
+    {
+      "src": "fd01:203:405::1",
+      "dst": "fd01:203:405::2",
+      "protocol": 6,
+      "sport": 42782,
+      "dport": 5540,
+      "id": "c90b3ede",
+      "zone": "0000"
+    },
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 41428,
+      "dport": 38084,
+      "id": "4493ff75",
+      "zone": "0000"
+    }
+  ],
+  "after": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 41428,
+      "dport": 38084,
+      "id": "4493ff75",
+      "zone": "0000"
+    }
+  ],
+  "recreated": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 41428,
+      "dport": 38084,
+      "id": "4493ff75",
+      "zone": "0000"
+    }
+  ],
+  "reverse": "",
+  "received": "",
+  "refused": true
+}
