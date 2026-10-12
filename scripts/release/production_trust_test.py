@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 import tempfile
+import os
 import unittest
 
 spec = importlib.util.spec_from_file_location("production_trust", Path(__file__).with_name("check-production-trust.py"))
@@ -12,7 +13,8 @@ spec.loader.exec_module(gate)
 
 class ProductionTrustTests(unittest.TestCase):
     def test_marker_survives_binary_padding_and_is_refused(self):
-        scratch = Path.home() / ".cache/codex-scratch/deploy-pipeline/tests"
+        scratch = Path(os.environ.get("INFRATERNAL_RELEASE_TEST_SCRATCH",
+                       str(Path.home() / ".cache/codex-scratch/deploy-pipeline/tests")))
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as root:
             binary = Path(root) / "image"

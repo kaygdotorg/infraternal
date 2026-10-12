@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import tempfile
+import os
 import unittest
 
 from deploy_remote import checksums, verify_signed
@@ -17,7 +18,8 @@ loader.exec_module(proof)
 
 class StagingArtifactsTests(unittest.TestCase):
     def test_distinct_images_and_version_are_authenticated_by_one_ephemeral_key(self):
-        scratch = Path.home() / ".cache/codex-scratch/deploy-pipeline/tests"
+        scratch = Path(os.environ.get("INFRATERNAL_RELEASE_TEST_SCRATCH",
+                       str(Path.home() / ".cache/codex-scratch/deploy-pipeline/tests")))
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as temporary:
             root = Path(temporary)
