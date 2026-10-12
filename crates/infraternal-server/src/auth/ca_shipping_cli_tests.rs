@@ -124,7 +124,7 @@ async fn shipping_start_with_ca(
     .unwrap();
     server
 }
-async fn shipping_fixture() -> (UnlockFixture, X509) {
+async fn shipping_auth_fixture() -> UnlockFixture {
     let mut f = unlock_fixture().await;
     for name in ["db", "runtime", "xdg-data"] {
         std::fs::DirBuilder::new()
@@ -169,6 +169,10 @@ async fn shipping_fixture() -> (UnlockFixture, X509) {
         .await
         .unwrap();
     std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    f
+}
+async fn shipping_fixture() -> (UnlockFixture, X509) {
+    let f = shipping_auth_fixture().await;
     let (identity, material) =
         crate::remote_runtime::tests::server_material_for_name("auth.example.test");
     let root = material.issuer().clone();
