@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 #[path = "remote_authority.rs"]
 pub(crate) mod authority;
+#[path = "bootstrap_retirement.rs"]
+mod bootstrap_retirement;
 pub use authority::HostAuthority;
 
 /// A host's immutable execution mode, bound into its invitation.
