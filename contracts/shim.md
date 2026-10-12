@@ -89,6 +89,7 @@ the PTY output stream since the session started.
 | 0x1A | shim → agent | `InputState` | u64 exclusive written offset, u64 exclusive accepted offset (cap bit 0) |
 | 0x1B | agent → shim | `SelectWriter` | u32 nonzero writer identity (cap bit 1; see additive section) |
 | 0x1C | shim → agent | `SnapshotWithFlags` | u64 seq, u8 flags, bytes VT (cap bit 2; see additive section) |
+| 0x1D | agent → shim | `SelectSharedWriter` | u32 existing nonzero writer identity (cap bit 3; see additive section) |
 | 0x20 | shim → agent  | `Exited`   | i32 status or −signal, u64 final_seq |
 | 0x21 | agent → shim  | `ExitAck`  | (empty). The shim deletes its socket and exits. |
 | 0x7F | both          | `Error`    | u16 code, utf-8 message |
@@ -225,3 +226,29 @@ Count each actually forwarded approximate repaint in the process counter
 `approximate_snapshots_total`; a pending repaint does not increment it twice.
 Legacy rejection is reported as a `terminal.snapshot_unavailable` Event with
 session identity and sequence, preserving the live mux stream.
+
+### Capability bit 3: SHARED_WRITER (#129, D215)
+
+Bit 3 requires bits 0 and 1. A supporting shim advertises all three; Attach
+selects them before the fixed-length `SelectSharedWriter` (0x1D, little-endian
+u32). Select exactly once before state, input or resize. Zero, an unknown
+writer, an unselected capability and malformed payloads are refused without
+changing another peer or allocating a new writer identity.
+
+An ordinary peer and a shared peer may coexist for the same durable writer.
+Their accepted/written cursors, input queue and duplicate trimming are shared;
+output cursors and socket backpressure are independent. Replacement disconnects the
+previous peer only within the same ordinary/shared mode. Ordinary `SelectWriter`
+semantics, caps-zero behavior and the 32-peer/512-writer bounds remain unchanged.
+Shared selection cannot change remembered geometry. Only newly accepted input
+selects its remembered geometry; replayed input cannot steal it.
+
+A parked shared peer queries the authoritative input state but does not request
+output until `ReadFrom` or `SnapshotRequest`. If only parked shared peers remain,
+the shim continues draining the PTY into its bounded terminal state and ring as
+when detached. Such peers are input/Ack subscribers, and cannot alone impose
+viewer backpressure. Ordinary peers retain the existing flow-control behavior.
+
+The authenticated infraternal agent chooses the identity from the existing
+server-assigned native writer binding. This capability grants no browser-selected
+identity, new session authority or guarantee across a shim/host crash.
