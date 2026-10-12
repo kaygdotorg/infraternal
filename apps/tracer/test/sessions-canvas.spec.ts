@@ -10,8 +10,13 @@ type Viewport = { width: number; height: number; touch?: boolean };
 const DESKTOP: Viewport = { width: 1440, height: 900 };
 const PHONE: Viewport = { width: 393, height: 852, touch: true };
 
-async function open(browser: Browser, viewport: Viewport, scene = 0, theme = "ink"): Promise<{ context: BrowserContext; page: Page }> {
+/** `signIns` seeds the account's sign-in count (hints.ts) before the page loads; 1 is a first sign-in. */
+async function open(browser: Browser, viewport: Viewport, scene = 0, theme = "ink", signIns = 1, blockStorage = false): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, hasTouch: !!viewport.touch, isMobile: !!viewport.touch });
+  await context.addInitScript(([n, block]) => {
+    if (block) { Storage.prototype.getItem = () => { throw new Error("blocked"); }; Storage.prototype.setItem = () => { throw new Error("blocked"); }; return; }
+    if (!localStorage.getItem("tracer.hints.mock")) localStorage.setItem("tracer.hints.mock", JSON.stringify({ signIns: n, shown: {} }));
+  }, [signIns, blockStorage] as const);
   const page = await context.newPage();
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none${scene ? `&sessions=${scene}` : ""}`);
   await expect(page.locator("[data-view='console'] .ui-window")).toHaveCount(4, { timeout: 20_000 });
@@ -144,19 +149,62 @@ test("the popover opens within 200 ms and closes within 130 ms; the keyboard is 
   } finally { await context.close(); }
 });
 
-test("closing a window never ends its session: a gentle toast, and Undo brings it back", async ({ browser }) => {
+test("closing a window never ends its session: a gentle toast, and Reopen brings it back", async ({ browser }) => {
   const { context, page } = await open(browser, DESKTOP);
   try {
     await windowOf(page, "build-01").locator("[data-action='close']").click();
     await expect(consoleWindows(page)).toHaveCount(3);
     const toast = page.locator(".ui-toast");
     await expect(toast.locator(".ui-toast-message")).toHaveText("Session keeps running");
-    await expect(toast.locator(".ui-toast-action")).toHaveText("Undo");
+    await expect(toast.locator(".ui-toast-action")).toHaveText("Reopen");
     expect(await stateOf(page, "build-01", "deploy")).toBe("detached");
+    await page.screenshot({ path: process.env.TOAST_SHOT ?? "/tmp/close-toast.png" });
     await toast.locator(".ui-toast-action").click();
     await expect(consoleWindows(page)).toHaveCount(4);
     expect(await stateOf(page, "build-01", "deploy")).toBe("open");
     await expect(consoleWindows(page).first().locator(".ui-window-host")).toHaveText("build-01");
+  } finally { await context.close(); }
+});
+
+test("the close toast teaches once per sign-in, in the first five sign-ins only", async ({ browser }) => {
+  test.setTimeout(120_000);
+  for (const signIns of [1, 2, 5, 6]) {
+    const { context, page } = await open(browser, DESKTOP, 0, "ink", signIns);
+    try {
+      // Counts every toast message that appears, so a still-visible first toast cannot hide a second one.
+      await page.evaluate(() => {
+        const w = window as unknown as { __toasts: string[] };
+        w.__toasts = [];
+        // The toast host is one element that is revealed and re-filled, so a show is "revealed" or "text changed while shown".
+        const host = document.querySelector(".ui-toast") as HTMLElement;
+        let was = !host.hidden, last = "";
+        new MutationObserver(() => {
+          const now = !host.hidden, text = host.querySelector(".ui-toast-message")?.textContent ?? "";
+          if (now && text && (!was || text !== last)) w.__toasts.push(text);
+          was = now; last = text;
+        }).observe(host, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
+      });
+      const seen = (): Promise<string[]> => page.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts);
+      await windowOf(page, "build-01").locator("[data-action='close']").click();
+      await expect(consoleWindows(page)).toHaveCount(3);
+      await page.waitForTimeout(500);
+      expect(await seen()).toEqual(signIns <= 5 ? ["Session keeps running"] : []);
+      // The second close in the same sign-in is silent, whatever the count.
+      await consoleWindows(page).first().locator("[data-action='close']").click();
+      await expect(consoleWindows(page)).toHaveCount(2);
+      await page.waitForTimeout(500);
+      expect(await seen()).toEqual(signIns <= 5 ? ["Session keeps running"] : []);
+    } finally { await context.close(); }
+  }
+});
+
+test("storage that throws shows no close toast", async ({ browser }) => {
+  const { context, page } = await open(browser, DESKTOP, 0, "ink", 1, true);
+  try {
+    await windowOf(page, "build-01").locator("[data-action='close']").click();
+    await expect(consoleWindows(page)).toHaveCount(3);
+    await page.waitForTimeout(500);
+    await expect(page.locator(".ui-toast")).toBeHidden();
   } finally { await context.close(); }
 });
 

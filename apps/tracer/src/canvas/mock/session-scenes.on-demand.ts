@@ -49,7 +49,7 @@ export function installSessionScenes(env: { cx: Ctx; inventory: MockInventory; /
       later(() => inventory.setActivity("edge-arm", "edge-shell", "ok"), 5200);
     } },
     { title: "Exited session", hint: "final screen · Run again · Dismiss", run() { reset(); later(() => { cx.win.openSession("build-01", "migrate"); }, 80); } },
-    { title: "Close keeps it running", hint: "detached · toast · Undo", run() {
+    { title: "Close keeps it running", hint: "detached · toast · Reopen", run() {
       reset();
       const rec = winOf("build-01");
       if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); later(() => cx.win.close(rec), settle); }

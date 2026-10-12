@@ -2,6 +2,7 @@
 import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
 import { registerSignOut } from "./sign-out";
 import { lastAccountKey, tabSessionKey } from "./account-storage";
+import { recordSignIn } from "./hints";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
@@ -240,6 +241,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
     saveBrowserId(lastAccountKey, userId);
+    recordSignIn(userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
@@ -541,6 +543,7 @@ async function showRecovery(): Promise<void> {
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
     activeUserId = userId;
     saveBrowserId(lastAccountKey, userId);
+    recordSignIn(userId);
     showWelcome(displayName ?? "", instant);
   });
   scheduleBackdrop();

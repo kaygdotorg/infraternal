@@ -8,6 +8,7 @@
  * `window.__tracerClusters` probe the specs drive. The canvas itself is the product code in `create.ts`; this file
  * only gives it mock adapters and calls its public operations.
  */
+import { teachOnce } from "../../hints";
 import type { WinRec } from "../context";
 import { isMacPlatform, shortcutLabel } from "../../../../../packages/ui/src/platform";
 import { PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
@@ -80,6 +81,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     float: true,
     dots: new URLSearchParams(location.search).get("dots") !== "0",
     adapters: {
+      teach: (hint) => teachOnce("mock", hint),
       sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       addHost: () => addHost.open(),
