@@ -31,6 +31,7 @@ pub(super) struct Attempt {
     uid: u32,
     destination: Option<(String, Option<String>)>,
     canary: Option<(EmbeddedAgent, [u8; 16])>,
+    retirement: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
 }
 // Cancellation before JoinMaterial reaches the installer has no Resources.host
 // to clean up. Release its unpublished ownership synchronously on every exit.
@@ -163,6 +164,7 @@ impl RemoteBackend {
                         uid,
                         destination: Some((address.to_owned(), lookup.clone())),
                         canary: None,
+                        retirement: None,
                     },
                 );
             }
@@ -331,36 +333,55 @@ impl Backend for RemoteBackend {
             Ok(())
         })
     }
+    fn retire_failed(&self, authority: &Authority, host: Uuid) -> Result<(), Failure> {
+        self.uid(authority, host)?;
+        let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
+        let attempt = attempts.get_mut(&host).ok_or_else(unavailable)?;
+        if attempt.retirement.is_none() {
+            let store = self.issuer.store().clone();
+            let owner = authority.owner.clone();
+            let now = unix_now()?;
+            // Fence synchronously: no SQLite or SSH await may preserve access
+            // after cancellation. The durable intent covers process restart.
+            let fence = store.1.cut(host).map_err(|_| unavailable())?;
+            attempt.retirement = Some(tokio::spawn(async move {
+                let _fence = fence;
+                store
+                    .retire_bootstrap(&owner, host, now)
+                    .await
+                    .map_err(|_| unavailable())
+            }));
+        }
+        Ok(())
+    }
     fn failed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
-            self.uid(authority, host)?;
-            // Logout cannot prevent cleanup of this exact batch's new authority.
-            if let Err(error) = self
-                .issuer
-                .store()
-                .revoke(&authority.owner, host, unix_now()?)
-                .await
-            {
-                // Revoke's UPDATE is a writer barrier: a previously queued
-                // commit must release its slot first. Only then may absence
-                // mean that cancelled publication never created this host.
-                let absent = matches!(error, crate::enrollment::EnrollmentError::Denied)
-                    && !sqlx::query_scalar::<_, bool>(
-                        "SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=?)",
-                    )
-                    .bind(host.as_bytes().as_slice())
-                    .fetch_one(&self.issuer.store().0)
-                    .await
-                    .map_err(|_| unavailable())?;
-                if !absent {
-                    return Err(unavailable());
-                }
-            }
-            self.completed_record(authority, host)
+            // Compatibility wrappers may not forward the synchronous hook.
+            self.retire_failed(authority, host)?;
+            let retirement = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .get_mut(&host)
+                .and_then(|attempt| attempt.retirement.take())
+                .ok_or_else(unavailable)?;
+            self.completed_record(authority, host)?;
+            // Dropping this acknowledgement detaches, never aborts, the exact
+            // writer. It keeps its queue position after the five-second caller
+            // deadline; tombstone and intent consumption still commit together.
+            retirement.await.map_err(|_| unavailable())?
         })
     }
     fn completed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
-        Box::pin(async move { self.completed_record(authority, host) })
+        Box::pin(async move {
+            self.uid(authority, host)?;
+            self.issuer
+                .store()
+                .complete_bootstrap(&authority.owner, host)
+                .await
+                .map_err(|_| unavailable())?;
+            self.completed_record(authority, host)
+        })
     }
 }
 fn cookie(authority: &Authority) -> Result<&str, Failure> {
@@ -544,6 +565,14 @@ mod tests {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/bootstrap_breakit2_tests.rs"
+        ));
+    }
+
+    mod review_cleanup {
+        //! Checks cancellation cleanup against unavailable real SQLite storage.
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_review_cleanup_tests.rs"
         ));
     }
 
@@ -754,6 +783,7 @@ mod tests {
                 uid: 1002,
                 destination: None,
                 canary: None,
+                retirement: None,
             },
         );
         f.backend.attempts.lock().unwrap().insert(
@@ -764,6 +794,7 @@ mod tests {
                 uid: 1003,
                 destination: None,
                 canary: None,
+                retirement: None,
             },
         );
         let guard = Unpublished {
@@ -929,6 +960,7 @@ mod tests {
                         uid: 1002,
                         destination: Some((format!("user@host-{index}.example.invalid"), None)),
                         canary: None,
+                        retirement: None,
                     },
                 );
             }
