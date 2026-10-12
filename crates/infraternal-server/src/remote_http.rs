@@ -391,6 +391,14 @@ async fn issue_invitation(
         .execute(&mut *transaction)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        // Retire unless proven completion discharges this obligation. The
+        // invitation acknowledgement may be cancelled after SQLite commits;
+        // its retirement ownership must survive in that same transaction.
+        sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
+            .bind(request.host_id.as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     }
     let invitation = JoinInvitation {
         host_id: request.host_id,
