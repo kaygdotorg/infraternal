@@ -1,0 +1,4 @@
+# Final-head and in-progress gate receipts are retained locally and quoted on #188.
+verify-final.log
+verify-milestone.log
+perf-functional.log

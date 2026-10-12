@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [features]
+staging-trust = []
 default = ["mesh", "cli-plugin", "ssh", "release"]
 cli-plugin = []
 mesh = ["dep:infraternal-plugin-mesh"]

@@ -1,0 +1,1 @@
+Started #188 on deploy-pipeline, base c0d01d2285b92ea8e452f10a3a0d8b479fa1bff8. Read #154 and #157 histories and D186/D217/D244/D250 plus architecture/process. Round4 missing from base: integrating origin/release-pipeline 5f74c655. No production deployment. Existing stop/start deploy cold-locks CA. Signing remains external; no provider or credential-store access.

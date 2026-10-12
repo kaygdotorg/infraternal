@@ -10,7 +10,10 @@ use openssl::{
 use sha2::{Digest, Sha256, Sha512};
 use std::{fs::File, os::unix::fs::FileExt};
 
+#[cfg(not(feature = "staging-trust"))]
 pub(crate) const TRUST: &str = include_str!("../../../release/allowed_signers");
+#[cfg(feature = "staging-trust")]
+pub(crate) const TRUST: &str = include_str!(concat!(env!("OUT_DIR"), "/staging-trust"));
 const NAMESPACE: &[u8] = b"infraternal-release";
 const MAX_SUMS: usize = 65_536;
 const MAX_SIGNATURE: usize = 1024;

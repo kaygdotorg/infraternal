@@ -1,0 +1,30 @@
+E
+======================================================================
+ERROR: test_two_deployments_in_one_second_retain_distinct_backups (__main__.DeploymentTests.test_two_deployments_in_one_second_retain_distinct_backups)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/scripts/release/deploy_test.py", line 214, in test_two_deployments_in_one_second_retain_distinct_backups
+    second = remote.apply(config)
+  File "/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/scripts/release/deploy_remote.py", line 223, in apply
+    backup(data, saved)
+    ~~~~~~^^^^^^^^^^^^^
+  File "/nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+  File "/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/scripts/release/deploy_test.py", line 211, in <lambda>
+    patch.object(remote, "backup", side_effect=lambda data, saved: saved.mkdir()), \
+                                                                   ~~~~~~~~~~~^^
+  File "/nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/home/kayg/.cache/codex-scratch/deploy-pipeline/tests/tmpogx0hzgf/backups/20261012T000000Z-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.016s
+
+FAILED (errors=1)

@@ -24,9 +24,12 @@ async fn unlock_fixture() -> UnlockFixture {
     let auth = fixture().await;
     let material = crate::ca::tests::test_material();
     let source = Arc::new(MemoryCaSource::cold_start(material.issuer().clone()));
-    // Follow the runner's TMPDIR so static/root proofs own their entire fixture
-    // tree rather than writing into another job's scratch directory (#154).
-    let root = std::env::temp_dir().join(format!("ca-administration-{}", Uuid::new_v4()));
+    // Explicit staging roots keep the VM fixture together; other shipping
+    // proofs continue to follow their runner's private TMPDIR.
+    let root = std::env::var_os("INFRATERNAL_CA_TEST_ROOT").map_or_else(
+        || std::env::temp_dir().join(format!("ca-administration-{}", Uuid::new_v4())),
+        |root| PathBuf::from(root).join(&Uuid::new_v4().simple().to_string()[..16]),
+    );
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

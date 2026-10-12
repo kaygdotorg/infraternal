@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Build and sign throwaway staging images, prove deployment only on the locked perf VM, and remove the run (#188 D1)."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import re
+import subprocess
+import tarfile
+import tempfile
+import uuid
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+HOST = "root@10.69.69.208"
+
+
+def command(arguments, **kwargs):
+    return subprocess.run(arguments, check=True, **kwargs)
+
+
+def bundle(destination, binary, key, version, overlay=b""):
+    destination.mkdir(mode=0o700)
+    image = destination / "infraternal"
+    shutil.copy2(binary, image)
+    if overlay:
+        with image.open("ab") as stream:
+            stream.write(overlay)
+    image.chmod(0o700)
+    shutil.copy2(image, destination / "infraternal-x86_64-musl")
+    # The x86-only staging run does not execute this placeholder. Production
+    # packaging still requires a separately built ARM image and its signature.
+    (destination / "infraternal-aarch64-musl").write_bytes(b"staging-unused-arm-payload\n")
+    (destination / "VERSION").write_text(version + "\n")
+    (destination / "web").mkdir()
+    (destination / "web/index.html").write_text("<title>infraternal staging fixture</title>\n")
+    entries = [(hashlib.sha256((destination / name).read_bytes()).hexdigest(), name) for name in
+               ("VERSION", "infraternal-x86_64-musl", "infraternal-aarch64-musl")]
+    (destination / "MANIFEST").write_text("infraternal-release-manifest-v1\nversion " + version +
+        "\nchannel edge\n" + "".join(digest + "  " + name + "\n" for digest, name in entries))
+    command(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", "infraternal-release", str(destination / "MANIFEST")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    (destination / "SHA256SUMS").write_text("".join(hashlib.sha256(file.read_bytes()).hexdigest() + "  " +
+        str(file.relative_to(destination)) + "\n" for file in sorted(destination.rglob("*"))
+        if file.is_file() and file.name not in {"SHA256SUMS", "MANIFEST", "MANIFEST.sig"}))
+
+
+def main():
+    os.umask(0o077)
+    scratch = Path.home() / ".cache/codex-scratch/deploy-pipeline"
+    scratch.mkdir(parents=True, exist_ok=True)
+    target = scratch / "target"
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS="2",
+               CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0",
+               INFRATERNAL_RELEASE_BUILD="1", TRACER_TEST_PORT="4388")
+    with tempfile.TemporaryDirectory(prefix="staging-", dir=scratch) as temporary:
+        local = Path(temporary)
+        key = local / "signing-key"
+        command(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "staging-run", "-f", str(key)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env["INFRATERNAL_STAGING_PUBLIC_KEY"] = str(key.with_suffix(".pub"))
+        command(["scripts/auth-toolchain"], cwd=REPOSITORY, env=env)
+        env["PATH"] = str(target / "auth-tools/zig") + ":" + env["PATH"]
+        command(["cargo", "build", "--locked", "--release", "-p", "infraternal", "--features", "staging-trust",
+                 "--target", "x86_64-unknown-linux-musl"], cwd=REPOSITORY, env=env)
+        # A concurrent ordinary gate may rebuild the same target without test
+        # trust. Retain our exact stage bytes before releasing the Cargo lock.
+        binary = local / "staging-image"
+        shutil.copy2(target / "x86_64-unknown-linux-musl/release/infraternal", binary)
+        stage_bytes = binary.read_bytes()
+        public_key = key.with_suffix(".pub").read_text().split()[1].encode()
+        if b"infraternal-staging-trust-v1" not in stage_bytes or public_key not in stage_bytes:
+            raise ValueError("staging image lost its per-run compiled authority")
+        compiled = command(["cargo", "test", "--locked", "-p", "infraternal-server", "--lib", "--features", "remote,staging-trust",
+                            "--no-run", "--message-format=json"], cwd=REPOSITORY, env=env, capture_output=True, text=True)
+        harness = None
+        for line in compiled.stdout.splitlines():
+            record = json.loads(line)
+            if record.get("reason") == "compiler-artifact" and record.get("profile", {}).get("test") and record.get("executable"):
+                harness = Path(record["executable"])
+        if harness is None:
+            raise ValueError("staging test executable missing")
+        transfer = local / "transfer"
+        transfer.mkdir(mode=0o700)
+        releases = transfer / "releases"
+        releases.mkdir(mode=0o700)
+        bundle(releases / "A", binary, key, "edge-20261012T000001Z")
+        bundle(releases / "B", binary, key, "edge-20261012T000002Z", b"\ninfraternal-staging-image-B\n")
+        broken = local / "broken-image"
+        broken.write_bytes(b"\x7fELFdeliberately-unusable-staging-image\n")
+        broken.chmod(0o700)
+        bundle(releases / "C", broken, key, "edge-20261012T000003Z")
+        public = key.with_suffix(".pub").read_text().split()
+        (transfer / "allowed_signers").write_text((REPOSITORY / "release/allowed_signers").read_text() +
+            '\nrelease@infraternal.com namespaces="infraternal-release" ' + public[0] + " " + public[1] + " infraternal-staging-trust-v1\n")
+        key.unlink()  # No private signing material is transported to the VM.
+        shutil.copy2(harness, transfer / "server-tests")
+        # Native test executables may use a toolchain-private interpreter. Ship
+        # that same runtime beside the fixture, never install it on the VM.
+        libraries = transfer / "lib"
+        libraries.mkdir(mode=0o700)
+        dynamic = command(["ldd", str(harness)], capture_output=True, text=True).stdout
+        for library in re.findall(r"=> (/[^\s]+)", dynamic):
+            shutil.copy2(library, libraries / Path(library).name)
+        headers = command(["readelf", "-l", str(harness)], capture_output=True, text=True).stdout
+        interpreter = re.search(r"Requesting program interpreter: ([^\]]+)", headers).group(1)
+        shutil.copy2(interpreter, libraries / "loader")
+        for name in ("deploy_remote.py", "staging_remote.py"):
+            shutil.copy2(REPOSITORY / "scripts/release" / name, transfer / name)
+        remote = "/root/infraternal-bench/deploy/r" + uuid.uuid4().hex[:8]
+        print(f"STAGING run={remote} waiting_for_exclusive_lock=true", flush=True)
+        # The lock surrounds extraction, fixture execution and all teardown. No
+        # file/unit on the VM is created while another benchmark owns the lock.
+        script = f'''set -eu
+umask 077
+mkdir -p {remote}
+cleanup() {{
+  for unit in $(systemctl list-units --all --plain --no-legend 'infraternal-deploy-*' | awk '{{print $1}}'); do
+    case "$(systemctl show "$unit" -p ExecStart --value)" in *{remote}*) systemctl stop "$unit"; systemctl reset-failed "$unit" || true;; esac
+  done
+  rm -rf -- {remote}
+  test ! -e {remote}
+  printf 'STAGING teardown_directory_absent=true\n'
+}}
+trap cleanup EXIT HUP INT TERM
+tar xf - --no-same-owner --no-same-permissions -C {remote}
+mkdir -p {remote}/bin {remote}/f
+ln -s {remote}/releases/A/infraternal {remote}/bin/infraternal
+ln -s {remote}/releases/A/infraternal-x86_64-musl {remote}/bin/infraternal-x86_64-musl
+ln -s {remote}/releases/A/infraternal-aarch64-musl {remote}/bin/infraternal-aarch64-musl
+cp -r {remote}/releases/A/web {remote}/web
+printf 'STAGING machine='; uname -n
+printf 'STAGING kernel='; uname -r
+printf 'STAGING load_before='; cut -d' ' -f1-3 /proc/loadavg
+INFRATERNAL_DEPLOY_TEST_ROOT={remote} INFRATERNAL_CA_TEST_ROOT={remote}/f TRACER_TEST_PORT=4388 {remote}/lib/loader --library-path {remote}/lib {remote}/server-tests --ignored --exact auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::signed_deploy_preserves_passkey_ca_and_live_sessions --nocapture --test-threads=1
+printf 'STAGING load_after='; cut -d' ' -f1-3 /proc/loadavg
+'''
+        # Only public fixtures and executables enter this stream, never session,
+        # plaintext CA or test signing private material.
+        import shlex
+        with subprocess.Popen(["netbird", "ssh", "--no-browser", HOST,
+                "flock -w 1800 /var/lock/perf-bench.lock sh -c " + shlex.quote(script)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as child:
+            with tarfile.open(fileobj=child.stdin, mode="w|") as archive:
+                for file in sorted(transfer.rglob("*")):
+                    if file.is_file():
+                        archive.add(file, arcname=str(file.relative_to(transfer)), recursive=False)
+            child.stdin.close()
+            transcript = child.stdout.read()
+            code = child.wait()
+        evidence = REPOSITORY / "evidence/deploy-pipeline/staging-proof.txt"
+        evidence.write_bytes(transcript)
+        print(transcript.decode(), end="")
+        if code != 0:
+            raise ValueError("staging acceptance failed; safe transcript retained")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        print("Staging proof failed; inspect the safe evidence transcript", file=__import__("sys").stderr)
+        raise SystemExit(1) from None

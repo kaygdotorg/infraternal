@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Ship one reviewed prebuilt dev release, then record its production identity [250]."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import tarfile
+import time
+import uuid
+
+from deploy_remote import checksums, verify_signed
+from dev_builder import gate_passed, private
+
+
+def command(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def git(*args):
+    return command("git", *args, capture_output=True, text=True).stdout.strip()
+
+
+def signed(directory):
+    verify_signed(directory, Path(__file__).resolve().parents[2] / "release/allowed_signers",
+                  directory / "infraternal", complete=True)
+    import hashlib
+    with (directory / "infraternal").open("rb") as server, (directory / "infraternal-x86_64-musl").open("rb") as payload:
+        equal = hashlib.file_digest(server, "sha256").digest() == hashlib.file_digest(payload, "sha256").digest()
+    if not equal:
+        raise ValueError("server and x86 payload must match")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("sha")
+    parser.add_argument("--web-only", action="store_true")
+    parser.add_argument("--review-clear", action="store_true", help="review has no unresolved P0/P1")
+    parser.add_argument("--staging", action="store_true", help="perf VM instance; never changes production refs")
+    parser.add_argument("--staging-port", type=int, default=4888)
+    parser.add_argument("--staging-pid", type=int)
+    args = parser.parse_args()
+    if not re.fullmatch(r"[0-9a-f]{40}", args.sha) or not args.review_clear:
+        parser.error("full dev SHA and --review-clear are required")
+    if args.staging and (not args.staging_pid or not 1024 <= args.staging_port <= 65535):
+        parser.error("staging requires its server PID and an unprivileged port")
+    directory = Path.home() / ".cache/infraternal-releases" / args.sha
+    git("fetch", "origin", "dev", "main")
+    git("merge-base", "--is-ancestor", args.sha, "origin/dev")
+    if not args.staging:
+        git("merge-base", "--is-ancestor", "origin/main", args.sha)
+    # Session arrives only on a caller-provided pipe; no credential-store access.
+    session = sys.stdin.buffer.read(4097).decode().strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", session):
+        raise ValueError("provide the administrator session through stdin")
+    host = "root@10.69.69.208" if args.staging else "root@10.69.69.50"
+    root = "/root/infraternal-bench/deploy" if args.staging else "/usr/local/share/infraternal"
+    remote_release = root + "/releases/" + args.sha
+    config = {"sha": args.sha, "root": root, "data": root + "/data" if args.staging else "/var/lib/infraternal",
+              "binary": root + "/bin/infraternal" if args.staging else "/usr/local/bin/infraternal",
+              "web": root + "/web", "web_only": args.web_only, "session": session,
+              "origin": "https://localhost" if args.staging else "https://infraternal.kayg.org",
+              "health": f"http://127.0.0.1:{args.staging_port}" if args.staging else "http://172.18.0.1:7011"}
+    state = directory.parent
+    private(state)
+    with (state / ".deploy.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        checksums(directory)
+        signed(directory)
+        if (directory / "SOURCE").read_text() != args.sha + "\n":
+            raise ValueError("build source mismatch")
+        gate = json.loads((directory / "GATE").read_text())
+        if gate.get("sha") != args.sha or gate.get("result") != "passed":
+            raise ValueError("release requires a successful full gate")
+        if gate.get("mode") == "status":
+            if not gate_passed(args.sha, gate["context"]):
+                raise ValueError("full-gate status is no longer successful")
+        elif gate.get("mode") != "local":
+            raise ValueError("unknown gate receipt mode")
+        if args.staging:
+            config["pid"] = args.staging_pid
+        else:
+            config["pid"] = int(command("netbird", "ssh", "--no-browser", host,
+                "systemctl show infraternal-server --property=MainPID --value",
+                capture_output=True, text=True).stdout.strip())
+        # Only regular immutable artifacts enter this transport archive.
+        incoming = remote_release + ".incoming-" + uuid.uuid4().hex
+        upload_command = ("set -e; umask 077; mkdir -p " + shlex.quote(root + "/releases")
+            + "; trap " + shlex.quote("rm -rf -- " + shlex.quote(incoming)) + " EXIT"
+            + "; if test -d " + shlex.quote(remote_release) + "; then tar tf - >/dev/null; else mkdir "
+            + shlex.quote(incoming) + " && tar xf - --no-same-owner --no-same-permissions -C "
+            + shlex.quote(incoming) + " && mv -T " + shlex.quote(incoming) + " "
+            + shlex.quote(remote_release) + "; fi")
+        # Stream payloads through the pipe rather than keeping two full bundle
+        # copies in Python memory. Session input is sent only in the later call.
+        with subprocess.Popen(["netbird", "ssh", "--no-browser", host, upload_command],
+                              stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL) as upload:
+            try:
+                archive(directory, upload.stdin)
+            finally:
+                upload.stdin.close()
+            if upload.wait() != 0:
+                raise ValueError("release transport failed")
+        command("netbird", "ssh", "--no-browser", host,
+                "umask 077; cat > " + shlex.quote(root + "/deploy-remote.py"),
+                input=Path(__file__).with_name("deploy_remote.py").read_bytes(), capture_output=True)
+        command("netbird", "ssh", "--no-browser", host,
+                "umask 077; cat > " + shlex.quote(root + "/allowed_signers"),
+                input=(Path(__file__).resolve().parents[2] / "release/allowed_signers").read_bytes(), capture_output=True)
+        result = command("netbird", "ssh", "--no-browser", host,
+                         "python3 " + shlex.quote(root + "/deploy-remote.py"),
+                         input=json.dumps(config).encode(), capture_output=True)
+        receipt = json.loads(result.stdout)
+        if receipt.get("state") != "deployed" or receipt.get("ca_unlocked") is not True:
+            raise ValueError("remote deployment not confirmed")
+        # Production refs identify the running executable. A web-only swap
+        # retains that executable, so its candidate cannot become this identity.
+        if not args.staging and not args.web_only:
+            tag = "prod-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + args.sha[:12]
+            # A concurrent main update must fail this push, never rewrite history.
+            # The two refs move together; failure is reported as deployed/unrecorded.
+            git("tag", "-a", tag, args.sha, "-m", "Production dev release " + args.sha + " (D250)")
+            try:
+                git("push", "--atomic", "origin", "refs/tags/" + tag, args.sha + ":refs/heads/main")
+            except subprocess.CalledProcessError:
+                print(json.dumps({"state": "deployed-unrecorded", "sha": args.sha, "tag": tag}))
+                raise SystemExit(1) from None
+        print(json.dumps(receipt))
+
+
+def archive(directory, output=None):
+    import io
+    stream = output if output is not None else io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w|") as bundle:
+        for file in sorted(directory.rglob("*")):
+            if file.is_symlink():
+                raise ValueError("release archive refuses symlinks")
+            if file.is_file():
+                bundle.add(file, arcname=str(file.relative_to(directory)), recursive=False)
+    return stream.getvalue() if output is None else None
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError, KeyError):
+        print("Deployment failed; inspect retained release and backup state", file=sys.stderr)
+        raise SystemExit(1) from None
