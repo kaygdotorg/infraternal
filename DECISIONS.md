@@ -2470,3 +2470,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      result that misses a target is fixed in the code, never by asking for a
      bigger machine. The owner's own Mac and iPhone are available for
      real-device checks on request.
+257. **Two crypto size options are decided by measurement (owner,
+     2026-10-12, #175, D243):** S1 — the static build drops OpenSSL's
+     AVX-512 AES-GCM code (about 659 KB) only if measurement shows no change
+     in keystroke latency and less than 5% bulk-throughput loss on an
+     AVX-512 machine; otherwise it stays. S2 — one crypto library: QUIC and
+     passkey verification move from ring onto the OpenSSL already in the
+     binary only if QUIC handshakes and passkey checks are no slower, the
+     replacement crates are maintained and AGPL-compatible, and the auth code
+     passes the strictest review; if the replacements look poorly
+     maintained, ring stays. Measure first; the orchestrator applies these
+     rules to the numbers and reports the outcome before anything ships.
