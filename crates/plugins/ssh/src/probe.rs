@@ -110,5 +110,7 @@ fn flag(value: &str) -> Result<bool, Failure> {
     }
 }
 fn invalid() -> Failure {
-    Failure::unsupported("This host did not return a supported Linux system check.")
+    Failure::unsupported(
+        "This host did not return a supported Linux system check. Check the SSH shell startup and run startup programs only in interactive shells, then try again.",
+    )
 }
