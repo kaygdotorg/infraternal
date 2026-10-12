@@ -45,6 +45,13 @@ def main():
     parser.add_argument("--case", choices=["clean", "tiny-disk", "readonly-home", "noexec-tmp", "foreign-base", "linger-off", "no-manager", "password-sudo", "no-sudo"], default="clean")
     parser.add_argument("--shell", choices=["bash", "zsh", "fish", "sh"], default="bash")
     args = parser.parse_args()
+    # Cargo feature removal can leave a valid test executable without this live
+    # fixture. A zero-test success must never count as provisioning evidence.
+    listing = subprocess.check_output([str(args.test_binary.resolve()), "--list"], text=True)
+    live_tests = [line.removesuffix(": test") for line in listing.splitlines()
+                  if line.endswith("breakit2_live_ssh_install_join_and_terminal: test")]
+    if len(live_tests) != 1:
+        raise RuntimeError("The controller must contain exactly one live host provisioning test; build with the remote feature")
     TARGET = args.container_name or args.container
     if not TARGET or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for char in TARGET):
         parser.error("--container-name must be a Docker fixture identifier")
@@ -118,7 +125,20 @@ def main():
         config = scratch / "config"
         config.write_text(f"# Generated public fixture policy, strict host keys.\nHost *\n UserKnownHostsFile {known}\n GlobalKnownHostsFile /dev/null\n StrictHostKeyChecking yes\n UpdateHostKeys no\n")
         wrapper = scratch / "ssh"
-        wrapper.write_text(f"#!/bin/sh\nexec /usr/bin/ssh -F '{config}' \"$@\"\n")
+        fdpass = ""
+        if os.environ.get("BREAKIT2_FDPASS_CANDIDATE") == "1":
+            # This experimental connector changes only the first owned master,
+            # never config inspection, later mux commands or trust admission.
+            candidate = ROOT / "evidence/addhost-fast/fdpass-candidate.py"
+            fdpass = (
+                'for argument; do\n'
+                '    if [ "$argument" = -M ]; then\n'
+                f"        exec /usr/bin/ssh -F '{config}' -o ProxyUseFdpass=yes "
+                f"-o 'ProxyCommand=/usr/bin/python3 {candidate} %h %p' \"$@\"\n"
+                '    fi\n'
+                'done\n'
+            )
+        wrapper.write_text(f"#!/bin/sh\n{fdpass}exec /usr/bin/ssh -F '{config}' \"$@\"\n")
         wrapper.chmod(0o700)
         if args.rtt:
             # Both delays and redirect devices live solely in the target netns.
@@ -133,7 +153,28 @@ def main():
         if args.expect_failure:
             environment["BREAKIT2_EXPECT_FAILURE"] = "1"
         time.sleep(0.3)
-        result = subprocess.run([str(args.test_binary.resolve()), "breakit2_live_ssh_install_join_and_terminal", "--ignored", "--nocapture"], input=private, env=environment, cwd=ROOT)
+        command = [str(args.test_binary.resolve()), live_tests[0], "--exact", "--ignored", "--nocapture"]
+        if os.environ.get("ADDHOST_FAST_TCP_PROFILE") == "1":
+            import threading
+            stop = threading.Event()
+            def sample():
+                started = time.monotonic()
+                while not stop.wait(0.2):
+                    snapshot = subprocess.run(["ss", "-tin", "dst", ip], capture_output=True, text=True, check=True)
+                    print(f"TCP_PROFILE elapsed_ms={(time.monotonic()-started)*1000:.3f}\n{snapshot.stdout}", flush=True)
+            sampler = threading.Thread(target=sample)
+            sampler.start()
+            try:
+                result = subprocess.run(command, input=private, env=environment, cwd=ROOT)
+            finally:
+                stop.set()
+                sampler.join()
+        else:
+            result = subprocess.run(command, input=private, env=environment, cwd=ROOT)
+        # Queue counters distinguish the requested delay from unintended fixture loss.
+        for device in ["eth0", "ifb0"] if args.rtt else ["eth0"]:
+            print(f"QDISC device={device}", flush=True)
+            docker("exec", TARGET, "tc", "-s", "qdisc", "show", "dev", device)
         docker("exec", TARGET, "python3", "-c", "from pathlib import Path; b=Path('/home/target/.local/share/infraternal'); print('CLEANUP base_present='+str(b.exists())+' launcher_present='+str(Path('/home/target/.local/bin/infraternal').exists())+' unit_present='+str(Path('/home/target/.config/systemd/user/infraternal-agent.service').exists())+' foreign_present='+str((b/'foreign').exists()))")
         if args.mode == "root":
             docker("exec", TARGET, "python3", "-c", "from pathlib import Path; print('ROOT_STATE base_present='+str(Path('/var/lib/infraternal').exists())+' launcher_present='+str(Path('/usr/local/bin/infraternal').exists())+' unit_present='+str(Path('/etc/systemd/system/infraternal-agent.service').exists()))")
