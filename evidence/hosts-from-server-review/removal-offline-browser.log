@@ -1,0 +1,12 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-fk8eekvs.js, chunk-px28wsnv.js, chunk-jg4fjafg.js, chunk-qs2w8cx9.js, chunk-wgm8jye7.js, chunk-1m8xc3pq.js, chunk-91cx0fbb.js, chunk-eegv10qw.js, chunk-yna24q16.js, chunk-7e0jhshq.js, chunk-6znv0srk.js, chunk-a6fj3zyq.js, chunk-gxvqf3b8.js, chunk-e14dkk8r.js, chunk-xpw2sbew.js, chunk-zmn3f48x.js, chunk-5w4mt5sr.js, chunk-g2gh0ry9.js, chunk-g80v6ky4.js, chunk-jspg4jgc.js, chunk-xrvdnyrh.js, chunk-na49xj9e.js, main.js, chunk-8n70sfjx.js, chunk-fn4w1xnh.js, chunk-9dhw6tbb.js, chunk-e141qt47.js, chunk-61hsycr2.js, chunk-vxjx20yy.js, chunk-etgp0ztr.js, chunk-8gqdshxw.js, chunk-bz09x5fh.js, chunk-tb19fd9s.js, chunk-eck1nw3y.js, chunk-cgj2hv56.js, chunk-7gaw2tr9.js, chunk-ygtesapm.js, chunk-fdheyxdx.js, chunk-yw398g6a.js, chunk-wahkkz81.js, chunk-eeam6zap.js, chunk-8cg9r7ak.js, chunk-axbkkqp1.js, chunk-vwynd1qy.js, chunk-abbv2tb1.js, chunk-2hghh05h.js, chunk-txhnxm7a.js, chunk-08j78fpw.js, chunk-tgqnmah2.js, chunk-aae1nejq.js, chunk-pw1mkc6e.js, chunk-9nf81k7g.js, chunk-py67nqk7.js, chunk-hkta4trb.js, chunk-t1g82d0j.js, chunk-9jaqempj.js, chunk-ge7rv3xs.js, chunk-dtfqw1ap.js, chunk-yq3yc65z.js, chunk-h42bc871.js, chunk-1khz9bc0.js, chunk-p34heh9b.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-qf4rj9z6.js, chunk-m2qkkjg2.js, chunk-smrfvp7n.js, chunk-dzhhabhn.js, chunk-0j0q17yj.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4395
+[WebServer] latency proxy listening on http://localhost:4394; upstream port=4395
+
+Running 1 test using 1 worker
+
+(node:4091309) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/hosts-removal-review.spec.ts:5:1 › an open palette removes withdrawn admission after opening its shell and reconnecting (4.1s)
+
+  1 passed (14.4s)
