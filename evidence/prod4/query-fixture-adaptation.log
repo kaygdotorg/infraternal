@@ -1,0 +1,15 @@
+Running as unit: run-p3733917-i7927815.scope; invocation ID: a5484297c02e44a3b2fe0a3e4b546416
+$ bun x tsc --project tsconfig.json
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-8wc4ytr4.js, chunk-dpg6mcx9.js, chunk-eq42k3zg.js, chunk-5wjqz9g6.js, chunk-tx31z0mx.js, chunk-nnd0sb1m.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-s85tcret.js, chunk-bq5y4rdz.js, chunk-97eyafwy.js, chunk-84n9pcex.js, chunk-6gtm055g.js, chunk-s6jh52xn.js, chunk-dr3c5pcf.js, chunk-wm3510af.js, chunk-vvwas7dr.js, chunk-t0afx66y.js, chunk-187jxk23.js, chunk-xpws1det.js, chunk-0q4zwmty.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-whfppg6a.js, chunk-cy2d0kq0.js, chunk-0s2j3b2v.js, chunk-9bn4h90m.js, chunk-5753zf8s.js, chunk-dw2rqqxm.js, chunk-0gpee0ec.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-yd4mmsn5.js, chunk-haypzapw.js, chunk-efsmmtrb.js, chunk-er0qa2hh.js, chunk-1hje8sjn.js, chunk-3twdb9jd.js, chunk-axbkkqp1.js, chunk-zkacb9g2.js, chunk-2rvmbbb9.js, chunk-8xgzax7e.js, chunk-1ep95r3t.js, chunk-1485nhpj.js, chunk-5q7m8dbj.js, chunk-gdpwxedj.js, chunk-r5217ptx.js, chunk-mqk6703g.js, chunk-abvwejtr.js, chunk-g2dqxymd.js, chunk-49az86e0.js, chunk-a9072xwd.js, chunk-f30vwhxj.js, chunk-4rxsj55b.js, chunk-ch66paaf.js, chunk-cewa3dbd.js, chunk-afpztg1r.js, chunk-41bhx44m.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-4qxkjkjv.js, chunk-v61c02s3.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-drwyk8m0.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:5295
+[WebServer] latency proxy listening on http://localhost:5294; upstream port=5295
+
+Running 2 tests using 1 worker
+
+(node:3753076) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/terminal-query-replay.spec.ts:67:1 › live terminal queries answer once; reattach and reload replay reaches no extra input (24.2s)
+  ✓  2 test/terminal-query-replay.spec.ts:112:1 › terminal Snapshot repaint never answers VT queries (7.6s)
+
+  2 passed (45.5s)

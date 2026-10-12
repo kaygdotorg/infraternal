@@ -1,0 +1,36 @@
+Running as unit: run-p4189898-i8383794.scope; invocation ID: d4d243b02671427c82a2cbb1a7f7d868
+$ bun x tsc --project tsconfig.json
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-72x14ahm.js, chunk-dpg6mcx9.js, chunk-kzwrqrrw.js, chunk-5wjqz9g6.js, chunk-ztde5h6s.js, chunk-5em29s29.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-f0ncpy28.js, chunk-64vt69gt.js, chunk-97eyafwy.js, chunk-84n9pcex.js, chunk-6gtm055g.js, chunk-rac6rfzm.js, chunk-dr3c5pcf.js, chunk-j8d6c940.js, chunk-d6jrm4zg.js, chunk-t0afx66y.js, chunk-p50pq14w.js, chunk-ey8tvckc.js, chunk-4y63nc64.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-twgbn2pv.js, chunk-yx8fw9sx.js, chunk-g1vfte0z.js, chunk-01qfhk1c.js, chunk-5753zf8s.js, chunk-ez3shw5m.js, chunk-vz5hty4x.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-231kme06.js, chunk-xhpv8h1g.js, chunk-07v6zhf8.js, chunk-1bn62xbj.js, chunk-1hje8sjn.js, chunk-vzyhr2b6.js, chunk-axbkkqp1.js, chunk-08xn25a3.js, chunk-5fb2bwc8.js, chunk-s27n1747.js, chunk-c1z1gdnw.js, chunk-n72csvdc.js, chunk-8cgx0763.js, chunk-gdpwxedj.js, chunk-4qw6rmbz.js, chunk-7063sw3f.js, chunk-sjnwd3mt.js, chunk-j0rncqhq.js, chunk-09g0v66n.js, chunk-qgavgz71.js, chunk-jbr75pke.js, chunk-fz609q2m.js, chunk-ae6zd40e.js, chunk-16zbejs1.js, chunk-0bcsg6n5.js, chunk-g07rch5r.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-te1tbjm6.js, chunk-yd6nfwkj.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-x1zp052f.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:5345
+[WebServer] latency proxy listening on http://localhost:5344; upstream port=5345
+
+Running 1 test using 1 worker
+
+(node:2651) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/terminal-query-replay.spec.ts:133:1 › a live query queued behind replay answers after the exact paint fence (26.4s)
+
+
+  1) test/terminal-query-replay.spec.ts:133:1 › a live query queued behind replay answers after the exact paint fence 
+
+    Error: expect(received).toBeGreaterThan(expected)
+
+    Expected: > 0
+    Received:   0
+
+    Call Log:
+    - Timeout 15000ms exceeded while waiting on the predicate
+
+      165 |   });
+      166 |   await waitForOutputToSettle(page, request);
+    > 167 |   await expect.poll(async () => (await mockState(request)).accepted_input_bytes, { timeout: 15_000 }).toBeGreaterThan(before.accepted_input_bytes);
+          |                                                                                                       ^
+      168 | });
+      169 |
+        at /home/kayg/Developer/infraternal/.worktrees/release-prod-4/apps/tracer/test/terminal-query-replay.spec.ts:167:103
+
+    Error Context: test-results/terminal-query-replay-a-li-fd285-after-the-exact-paint-fence/error-context.md
+
+  1 failed
+    test/terminal-query-replay.spec.ts:133:1 › a live query queued behind replay answers after the exact paint fence 

@@ -1,0 +1,37 @@
+Running as unit: run-p3113082-i7306981.scope; invocation ID: 75320d48af354ed284968f210228da0c
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-r3q43nxe.js, chunk-dpg6mcx9.js, chunk-jcmdzbc6.js, chunk-5wjqz9g6.js, chunk-ak5a8exr.js, chunk-w22nfb4c.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-0p58exd8.js, chunk-w9d17vzw.js, chunk-aegc6dk4.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-6cwppp3p.js, chunk-dr3c5pcf.js, chunk-gnzhm9a3.js, chunk-sjv412j0.js, chunk-t0afx66y.js, chunk-3tnphjr7.js, chunk-gnd56mcy.js, chunk-hrhp04j5.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-zbecpqtv.js, chunk-hmwt80hk.js, chunk-dr10hbz1.js, chunk-d697qr0n.js, chunk-5753zf8s.js, chunk-wstbw951.js, chunk-p05c5an5.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-qe09rysq.js, chunk-jaqaqc54.js, chunk-3ws9pm77.js, chunk-7fg67490.js, chunk-1hje8sjn.js, chunk-ap7e8b97.js, chunk-axbkkqp1.js, chunk-83991dvj.js, chunk-w64ykc5k.js, chunk-aa467j1r.js, chunk-avabkyn9.js, chunk-dfs9m1vk.js, chunk-f7b3wy5h.js, chunk-gdpwxedj.js, chunk-q6y451ra.js, chunk-tgyvpmta.js, chunk-xkz27ehg.js, chunk-4nxdkf09.js, chunk-nry7nem0.js, chunk-xvsvw5f9.js, chunk-m9nkfgcf.js, chunk-zfc6png4.js, chunk-r6bwr6gg.js, chunk-3y3b92pr.js, chunk-m097hfym.js, chunk-7djdvx08.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-8nga8mbz.js, chunk-6916567g.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-4dzyegnh.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:5245
+[WebServer] latency proxy listening on http://localhost:5244; upstream port=5245
+
+Running 2 tests using 1 worker
+
+(node:3113998) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/terminal-query-replay.spec.ts:64:1 › live terminal queries answer once; reattach and reload replay reaches no extra input (5.9s)
+(node:3114831) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  2 test/terminal-query-replay.spec.ts:109:1 › terminal Snapshot repaint never answers VT queries (7.5s)
+
+
+  1) test/terminal-query-replay.spec.ts:64:1 › live terminal queries answer once; reattach and reload replay reaches no extra input 
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+      69 |
+      70 |   const sent = await request.post(mockUrl("/__mock/text-output"), { data: { text: QUERY_OUTPUT, echo_input: false } });
+    > 71 |   expect(sent.ok()).toBe(true);
+         |                     ^
+      72 |   await expect.poll(async () => (await mockState(request)).accepted_input_bytes, { timeout: 15_000 }).toBeGreaterThan(0);
+      73 |   await waitForOutputToSettle(page, request);
+      74 |   const live = await mockState(request, true);
+        at /home/kayg/Developer/infraternal/.worktrees/release-prod-4/apps/tracer/test/terminal-query-replay.spec.ts:71:21
+
+    Error Context: test-results/terminal-query-replay-live-6d414-play-reaches-no-extra-input/error-context.md
+
+  1 failed
+    test/terminal-query-replay.spec.ts:64:1 › live terminal queries answer once; reattach and reload replay reaches no extra input 
+  1 passed (26.0s)
