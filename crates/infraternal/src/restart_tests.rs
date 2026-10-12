@@ -1,16 +1,39 @@
 //! Tests private control endpoints and replacement-path trust before any key is exported [217], #154.
 
 use super::*;
+use std::os::{fd::AsRawFd, unix::process::CommandExt};
+
+const HANDOFF_NOTE: &[u8; 28] = b"\x0c\0\0\0\x04\0\0\0ACFIINFRATERNAL\0\x01\0\0\0";
 
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        let path = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/ca-handoff")
-            .join(format!(
-                "c{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            ));
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || {
+                PathBuf::from(std::env::var_os("HOME").unwrap())
+                    .join(".cache/codex-scratch/infraternal")
+            },
+            PathBuf::from,
+        );
+        let path = root.join("restart-tests").join(format!(
+            "c{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        let socket = path.join("restart/control.sock");
+        assert!(
+            socket.as_os_str().as_encoded_bytes().len() < 108,
+            "restart fixture socket path exceeds Linux sun_path: {} bytes",
+            socket.as_os_str().as_encoded_bytes().len()
+        );
+
+        // The running unit-test image is also used as a replacement fixture.
+        // A shared build umask can make it group-writable, which the production
+        // validator correctly refuses; keep this private test image executable.
+        std::fs::set_permissions(
+            std::env::current_exe().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -22,6 +45,64 @@ impl Directory {
 impl Drop for Directory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn copy_private_image(source: &Path, target: &Path) {
+    std::fs::copy(source, target).unwrap();
+    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// Add the compatibility record to a copied test ELF without changing its executable image.
+fn copy_marked_image(source: &Path, target: &Path) {
+    let mut image = std::fs::read(source).unwrap();
+    assert_eq!(&image[..7], b"\x7fELF\x02\x01\x01");
+    let table = usize::try_from(u64::from_le_bytes(image[32..40].try_into().unwrap())).unwrap();
+    let stride = usize::from(u16::from_le_bytes([image[54], image[55]]));
+    let count = usize::from(u16::from_le_bytes([image[56], image[57]]));
+    assert_eq!(stride, 56, "test fixture expects ELF64 program headers");
+    let note = (0..count)
+        .map(|index| table + index * stride)
+        .find(|program| u32::from_le_bytes(image[*program..*program + 4].try_into().unwrap()) == 4)
+        .expect("test ELF must contain a PT_NOTE entry");
+
+    // This fixture is inspected by Opened::open but never executed. Pointing
+    // PT_NOTE at an appended record keeps the original loadable image intact.
+    let offset = image.len().next_multiple_of(4);
+    image.resize(offset, 0);
+    image.extend_from_slice(HANDOFF_NOTE);
+    image[note + 8..note + 16].copy_from_slice(&u64::try_from(offset).unwrap().to_le_bytes());
+    image[note + 32..note + 40]
+        .copy_from_slice(&u64::try_from(HANDOFF_NOTE.len()).unwrap().to_le_bytes());
+    image[note + 40..note + 48]
+        .copy_from_slice(&u64::try_from(HANDOFF_NOTE.len()).unwrap().to_le_bytes());
+    std::fs::write(target, image).unwrap();
+    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn bounded_output(
+    mut child: std::process::Child,
+    deadline: Duration,
+    description: &str,
+) -> std::process::Output {
+    let until = std::time::Instant::now() + deadline;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if std::time::Instant::now() >= until {
+            let process_group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+            let _ = nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGKILL);
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "{description} exceeded {deadline:?}; status={}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -136,7 +217,7 @@ fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
     }
     let directory = Directory::new();
     let binary = directory.0.join("infraternal");
-    std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+    copy_marked_image(&std::env::current_exe().unwrap(), &binary);
     let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
     assert!(infraternal_server::ca_handoff_binary::capable(&opened.file).unwrap());
     assert!(!opened.warm);
@@ -155,7 +236,7 @@ fn root_owned_marked_target_requires_protected_root_parents() {
     }
     let directory = Directory::new();
     let binary = directory.0.join("infraternal");
-    std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+    copy_marked_image(&std::env::current_exe().unwrap(), &binary);
     let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
     assert!(opened.warm);
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
@@ -174,16 +255,23 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
     const NAME: &str =
         "restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin";
     if std::env::var_os("INFRATERNAL_RESTART_FD_TEST").is_some() {
-        if std::env::current_exe().unwrap().file_name().unwrap() == "retained" {
+        let directory = PathBuf::from(std::env::var_os("INFRATERNAL_RESTART_FD_TEST").unwrap());
+        let retained = directory.join("retained");
+        if retained.exists() {
+            // argv[0] keeps the former install path; use inode identity to
+            // recognize the image reached through the already-open fd.
+            assert_eq!(
+                std::fs::metadata("/proc/self/exe").unwrap().ino(),
+                std::fs::metadata(&retained).unwrap().ino()
+            );
             assert_eq!(
                 std::fs::read_link("/proc/self/fd/0").unwrap(),
                 Path::new("/dev/null")
             );
             return;
         }
-        let directory = PathBuf::from(std::env::var_os("INFRATERNAL_RESTART_FD_TEST").unwrap());
         let binary = directory.join("candidate");
-        std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        copy_private_image(&std::env::current_exe().unwrap(), &binary);
         let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
         std::fs::rename(&binary, directory.join("retained")).unwrap();
         std::fs::copy("/usr/bin/bash", &binary).unwrap();
@@ -192,12 +280,16 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
         panic!("fd replacement failed: {}", error.kind());
     }
     let directory = Directory::new();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", NAME, "--nocapture"])
         .env("INFRATERNAL_RESTART_FD_TEST", &directory.0)
         .stdin(std::process::Stdio::piped())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
         .unwrap();
+    let output = bounded_output(child, Duration::from_secs(6), NAME);
     assert!(
         output.status.success(),
         "{}",
@@ -221,13 +313,22 @@ async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
     // Own the path independently of the mutable control borrow.
     let broken = async {
         let mut socket = UnixStream::connect(path).await.unwrap();
+        nix::sys::socket::shutdown(socket.as_raw_fd(), nix::sys::socket::Shutdown::Read).unwrap();
         socket.write_u16(1).await.unwrap();
         socket.write_all(b".").await.unwrap();
         socket.shutdown().await.unwrap();
         drop(socket);
     };
-    tokio::join!(receive, broken);
-    let (received, requested) = tokio::join!(control.requested(None), request(&directory.0, None));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(receive, broken)
+    })
+    .await
+    .expect("closed reply fixture must finish within 1 second");
+    let (received, requested) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(control.requested(None), request(&directory.0, None))
+    })
+    .await
+    .expect("valid request after a closed reply must finish within 5 seconds");
     assert!(received.is_ok());
     assert!(!requested.unwrap());
 }
@@ -238,9 +339,11 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
         "restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced";
     if std::env::var_os("INFRATERNAL_DELETED_BINARY_TEST").is_some() {
         let installed = std::env::current_exe().unwrap();
-        let staged = installed.with_extension("next");
-        std::fs::copy(&installed, &staged).unwrap();
-        std::fs::rename(&staged, &installed).unwrap();
+        // Linux rejects rename-overwrite while the destination is executing.
+        // Unlink this name first, then write a new inode while /proc/self/exe
+        // continues to pin the running image.
+        std::fs::remove_file(&installed).unwrap();
+        copy_private_image(Path::new("/proc/self/exe"), &installed);
         assert!(
             std::env::current_exe()
                 .unwrap()
@@ -253,13 +356,19 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
     }
     let directory = Directory::new();
     let installed = directory.0.join("installed");
-    std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
-    let output = std::process::Command::new(&installed)
+    // A hard link is an executable fixture without a write window after copy.
+    // The child unlinks only this name, leaving the cargo test image intact.
+    std::fs::hard_link(std::env::current_exe().unwrap(), &installed).unwrap();
+    let child = std::process::Command::new(&installed)
         .args(["--exact", NAME, "--nocapture"])
         .env("INFRATERNAL_DELETED_BINARY_TEST", "1")
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
         .unwrap();
+    let output = bounded_output(child, Duration::from_secs(6), NAME);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -273,7 +382,11 @@ async fn default_restart_opens_the_receiver_target_exactly_once() {
     let directory = Directory::new();
     let mut control = Control::start(&directory.0).unwrap();
     crate::restart_binary::reset_test_opens();
-    let (received, sent) = tokio::join!(control.requested(None), request(&directory.0, None));
+    let (received, sent) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(control.requested(None), request(&directory.0, None))
+    })
+    .await
+    .expect("default restart request must finish within 5 seconds");
     assert!(received.is_ok());
     assert!(sent.is_ok());
     assert_eq!(
@@ -285,7 +398,6 @@ async fn default_restart_opens_the_receiver_target_exactly_once() {
 
 #[test]
 fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
-    use std::os::unix::process::CommandExt;
     const NAME: &str = "restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter";
     if std::env::var_os("INFRATERNAL_RUNTIME_BOUND_TEST").is_some() {
         let mut child = std::process::Command::new("/bin/sleep")
@@ -356,12 +468,16 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
         });
         return;
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", NAME, "--nocapture"])
         .env("INFRATERNAL_EARLY_HUP_TEST", "1")
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
         .unwrap();
+    let output = bounded_output(child, Duration::from_secs(6), NAME);
     assert!(
         output.status.success(),
         "early SIGHUP ended the fresh image: {}\n{}",
@@ -395,10 +511,11 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .process_group(0)
         .spawn()
         .unwrap();
     let pid = child.id();
-    let output = child.wait_with_output().unwrap();
+    let output = bounded_output(child, Duration::from_secs(6), NAME);
     assert!(output.status.success());
     let logs = format!(
         "{}\n{}",
@@ -440,6 +557,7 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
         );
     }
     let mut failures = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
     for stage in ["before", "after"] {
         let directory = Directory::new();
         let target = directory.0.join("cold-exec-successor");
@@ -460,20 +578,39 @@ int main(void) {
             .arg("-o")
             .arg(&target)
             .env("TMPDIR", &directory.0)
-            .output()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
             .unwrap();
+        let compiled = bounded_output(
+            compiled,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            "native stdin probe compiler",
+        );
         assert!(
             compiled.status.success(),
             "native stdin probe compile failed: {}",
             String::from_utf8_lossy(&compiled.stderr)
         );
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        // The inherited shared umask may make compiler output group-writable.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--nocapture"])
             .env("INFRATERNAL_CLOSED_STDIN_TEST", stage)
             .env("INFRATERNAL_CLOSED_STDIN_BINARY", &target)
             .stdin(std::process::Stdio::null())
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
             .unwrap();
+        let output = bounded_output(
+            child,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            NAME,
+        );
         if !output.status.success() {
             failures.push(format!(
                 "stage={stage}\n{}\n{}",
