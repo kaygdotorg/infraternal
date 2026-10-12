@@ -1,0 +1,6 @@
+# Disposable musl/no-systemd compatibility target for #169, never a production host.
+FROM alpine:3.22
+RUN apk add --no-cache openssh-server openssh-client python3 openssl bash sudo \
+    && adduser -D -u 1101 -s /bin/bash target \
+    && passwd -d target
+CMD ["sleep", "infinity"]
