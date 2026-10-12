@@ -78,6 +78,19 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(set(bundle.getnames()), {"VERSION", "SHA256SUMS", "web/index.html"})
             self.assertEqual(bundle.extractfile("web/index.html").read(), b"new web")
 
+    def test_signed_metadata_bounds_fail_before_verification(self):
+        directory = self.bundle()
+        (directory / "MANIFEST").write_bytes(b"manifest")
+        (directory / "MANIFEST.sig").write_bytes(b"signature")
+        for name, limit in (("MANIFEST", 65536), ("MANIFEST.sig", 1024), ("VERSION", 128)):
+            original = (directory / name).read_bytes()
+            (directory / name).write_bytes(b"x" * (limit + 1))
+            with patch.object(remote.subprocess, "run") as verify:
+                with self.assertRaisesRegex(ValueError, "metadata exceeds bound"):
+                    remote.verify_signed(directory, self.root / "trust", directory / "infraternal")
+                verify.assert_not_called()
+            (directory / name).write_bytes(original)
+
     def test_real_online_backup_includes_committed_wal_pages(self):
         data = self.root / "data"
         data.mkdir()

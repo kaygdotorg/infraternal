@@ -36,7 +36,8 @@ def local_http(request):
 def verify_signed(directory, trust, image, complete=False):
     manifest_path = directory / "MANIFEST"
     signature = directory / "MANIFEST.sig"
-    if manifest_path.stat().st_size > 65536 or signature.stat().st_size > 1024:
+    if (manifest_path.stat().st_size > 65536 or signature.stat().st_size > 1024
+            or (directory / "VERSION").stat().st_size > 128):
         raise ValueError("release metadata exceeds bound")
     manifest = manifest_path.read_bytes()
     subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(trust),
@@ -74,6 +75,8 @@ def checksums(directory):
     if directory.is_symlink() or any(p.is_symlink() for p in directory.rglob("*")):
         raise ValueError("release refuses symlinks")
     seen = set()
+    if (directory / "SHA256SUMS").stat().st_size > 4 * 1024 * 1024:
+        raise ValueError("release checksum list exceeds bound")
     for line in (directory / "SHA256SUMS").read_text().splitlines():
         value, name = line.split("  ", 1)
         path = directory / name
