@@ -51,7 +51,39 @@ function heading(text: string): HTMLElement {
 
 export interface ChoiceItem { id: string; label: string; hint?: string; swatch?: { bg: string; accent: string } }
 
-/** A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one. */
+/**
+ * Decides once per list, and again only when its width changes (a ResizeObserver callback, never per frame), whether hints
+ * sit beside the names or under them. Measured in the inline layout, where the hint is `nowrap` and so reports its natural
+ * width: the list stacks when any row's name + gap + hint is wider than the room it has. One decision per list keeps every
+ * row's hint in the same place, and a stacked list does not jump when the selection changes.
+ */
+function fitHints(list: HTMLElement): void {
+  let width = -1;
+  const decide = (): void => {
+    if (!list.isConnected) { observer.disconnect(); return; }
+    if (list.clientWidth === 0) return;
+    list.removeAttribute("data-stacked");
+    const stack = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")].some((t) => {
+      const hint = t.querySelector<HTMLElement>(".ui-sp-hint")!;
+      return hint.textContent !== "" && t.querySelector<HTMLElement>(".ui-sp-label")!.offsetWidth + 10 + hint.scrollWidth > t.clientWidth;
+    });
+    if (stack) list.dataset.stacked = "";
+  };
+  const observer = new ResizeObserver(() => {
+    if (list.clientWidth === width) return;
+    width = list.clientWidth;
+    decide();
+  });
+  observer.observe(list);
+  void document.fonts?.ready.then(decide);
+}
+
+/**
+ * A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one.
+ * The name never wraps. A list reads as one: if the widest row cannot hold its name and hint on one line, every row of the
+ * list puts its hint under its name (`data-stacked` on the list, see `fitHints`), so text never collides at any width
+ * (TASTE: "Text never collides").
+ */
 function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void): HTMLElement {
   const block = document.createElement("section");
   block.append(heading(title));
@@ -65,7 +97,7 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
     row.className = "ui-sp-row";
     row.dataset.id = item.id;
     row.setAttribute("role", "radio");
-    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-label"></span><span class="ui-sp-hint"></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
+    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-text"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
     (row.querySelector(".ui-sp-label") as HTMLElement).textContent = item.label;
     (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = item.hint ?? "";
     const sw = row.querySelector<HTMLElement>(".ui-sp-swatch");
@@ -74,6 +106,7 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
     list.append(row);
   }
   block.append(list);
+  fitHints(list);
   block.dataset.kind = kind;
   block.dataset.current = current();
   return block;
