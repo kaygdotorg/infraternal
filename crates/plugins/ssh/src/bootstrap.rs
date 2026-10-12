@@ -876,6 +876,7 @@ fn emit(
         message,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         log_tail,
+        leftovers: None,
         authentication: metadata.authentication,
         host_id: metadata.host_id,
         failure,

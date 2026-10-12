@@ -58,6 +58,17 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
             Effect::Write,
         ),
         action(
+            "ssh.start-fresh",
+            "Start fresh on a host",
+            &[
+                "Select the host with leftovers from an earlier setup.",
+                "Start fresh to remove its proven leftovers and continue the setup steps.",
+            ],
+            "ssh.start-fresh",
+            "ssh.batch",
+            Effect::Write,
+        ),
+        action(
             "ssh.retry",
             "Retry a host",
             &[

@@ -180,6 +180,18 @@ pub enum FailureKind {
     HostKey,
     Unsupported,
     Install,
+    #[serde(rename = "stale_previous_attempt")]
+    StalePreviousAttempt,
+    #[serde(rename = "setup_running")]
+    SetupRunning,
+}
+
+/// Public, bounded findings from a host-local ownership check; paths belong in Details.
+#[derive(Clone, Debug, Serialize)]
+pub struct Leftovers {
+    pub challenge: uuid::Uuid,
+    pub mode: InstallMode,
+    pub findings: Vec<&'static str>,
 }
 
 /// Trusted installation boundary; no request chooses its diagnostic context.
@@ -372,4 +384,6 @@ pub struct Event {
     pub host_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leftovers: Option<Box<Leftovers>>,
 }
