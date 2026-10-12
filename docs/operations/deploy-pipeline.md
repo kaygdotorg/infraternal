@@ -75,6 +75,9 @@ health and an unlocked CA, and checks the installed bytes against the live
 PID's executable. The server must run as root: round 4 intentionally retains
 cold semantics for rootless replacement. The host needs Python 3, ssh-keygen
 and readable `/proc/<pid>/exe` for identity confirmation.
+Complete remote admission authenticates the server copy and each separately
+installed architecture payload against the signed manifest. The unsigned
+integrity list alone cannot authenticate a reused remote directory.
 
 Before replacement, the SQLite online-backup API saves a consistent committed
 database, including WAL pages. Other persisted state is copied without live
@@ -91,6 +94,8 @@ to the old image does not satisfy the successor identity check. Successful
 deploys point the installed server and both bootstrap payloads at the same
 release. Web-only deployment uses `--web-only` and swaps the staged directory
 live without requesting any restart.
+Web-only deployment preserves the existing production tag and main identity:
+its candidate commit has not replaced the running executable.
 
 Failure restores the previous web and installed links and requests the retained
 signed previous image through the same verified handoff. A database is never
@@ -99,8 +104,12 @@ separate, explicit cold data recovery. If the successor loses CA custody or
 exits, automatic rollback cannot recreate the unlocked key; the deploy reports
 failure and requires operator recovery. It never reports a locked rollback as
 successful. No journal or authentication response is printed.
+Alias or web restoration errors do not skip the retained process rollback.
+If those filesystem repairs fail, the script reports operator recovery even
+when the previous executable is serving with an unlocked CA; inspect the
+installed links and retained web directory before the next deployment.
 
-Only after remote acceptance does production get an annotated
+Only after remote acceptance of a binary deployment does production get an annotated
 `prod-<UTC-date>-<short-sha>` tag and an atomic push of that tag plus a
 fast-forward of remote main. No force push is used. A concurrent main change
 may refuse the push: the CLI reports `deployed-unrecorded` with the SHA and tag
