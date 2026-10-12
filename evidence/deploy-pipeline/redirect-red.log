@@ -1,0 +1,14 @@
+F
+======================================================================
+FAIL: test_ca_status_refuses_redirect_without_forwarding_session (__main__.DeploymentTests.test_ca_status_refuses_redirect_without_forwarding_session)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/scripts/release/deploy_test.py", line 102, in test_ca_status_refuses_redirect_without_forwarding_session
+    with self.assertRaises(OSError):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^
+AssertionError: OSError not raised
+
+----------------------------------------------------------------------
+Ran 1 test in 0.519s
+
+FAILED (failures=1)
