@@ -32,6 +32,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Check the compiled provider's key memory without creating or importing keys.
+    #[cfg(feature = "remote")]
+    #[command(name = "__key-memory-check", hide = true)]
+    KeyMemoryCheck,
     /// Print one compiled plugin action as step-by-step instructions.
     Skill { action: String },
     #[cfg(feature = "remote")]
@@ -238,6 +242,29 @@ fn main() -> ExitCode {
 fn dispatch(cli: Cli) -> ExitCode {
     let json = cli.json;
     match cli.command {
+        #[cfg(feature = "remote")]
+        Command::KeyMemoryCheck => {
+            // D244/#154 requires result 1 even for a non-root gate runner: the
+            // ordinary server path permits a development warning for non-root.
+            if infraternal_shim::openssl_secure::initialize() == 1 {
+                output::report(
+                    json,
+                    "internal.key-memory-check",
+                    "ready",
+                    "Key memory initialization=1; locked pages and dump exclusion enabled",
+                    "Run this check under an 8 MiB memlock limit.",
+                );
+                ExitCode::SUCCESS
+            } else {
+                output::refuse(
+                    json,
+                    "internal.key-memory-check",
+                    "Key memory refused",
+                    "Check the compiled provider and memlock limit.",
+                    1,
+                )
+            }
+        }
         Command::Skill { action } => run_skill(&action, json),
         #[cfg(feature = "remote")]
         Command::RemoveHost {
