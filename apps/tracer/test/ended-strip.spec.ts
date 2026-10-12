@@ -84,6 +84,47 @@ test("a restored ended window starts a new shell on click, and its strip stays u
   await expect(page.locator(".cl-sx-strip")).toHaveCount(1);
 });
 
+test("a refused new shell says why in the strip, and Try again recovers", async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const request = page.context().request;
+  await restoreEnded(page);
+  const win = page.locator(".ui-window[data-kind='terminal']").first();
+  const strip = win.locator(".cl-sx-strip");
+  await retry(() => request.post("/__mock/refuse-next-open"));
+  await strip.getByRole("button", { name: "New shell" }).click();
+  await expect(strip.locator(".cl-sx-strip-text")).toHaveText(/could not start a shell|unavailable/, { timeout: 10_000 });
+  await expect(strip).toHaveAttribute("data-result", "refused");
+  // The reason sits in the strip, not in a toast on the side.
+  await expect(page.locator(".ui-toast")).toBeHidden();
+  await page.mouse.move(2, 2);
+  const dir = resolve(import.meta.dirname, "..", "captures", "ended-strip");
+  await mkdir(dir, { recursive: true });
+  await page.screenshot({ path: resolve(dir, `${process.env.ENDED_STRIP_TAG ?? "after"}-refused-1440x900-ink.png`), animations: "disabled" });
+  await testInfo.attach("refused", { path: resolve(dir, `${process.env.ENDED_STRIP_TAG ?? "after"}-refused-1440x900-ink.png`), contentType: "image/png" });
+  await strip.getByRole("button", { name: "Try again" }).click();
+  await expect(strip).toHaveCount(0, { timeout: 5_000 });
+  await expect(win).toHaveAttribute("data-status", "live", { timeout: 10_000 });
+});
+
+test("Enter on the focused ended window starts a new shell, and the cross closes the window", async ({ page }) => {
+  test.setTimeout(120_000);
+  const request = page.context().request;
+  await restoreEnded(page);
+  const wins = page.locator(".ui-window[data-kind='terminal']");
+  const win = wins.first();
+  // Focus the window without touching the strip: click its empty body, then press Enter.
+  const box = (await win.boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + 160);
+  await page.keyboard.press("Enter");
+  await expect(win.locator(".cl-sx-strip")).toHaveCount(0, { timeout: 5_000 });
+  await expect(win).toHaveAttribute("data-status", "live", { timeout: 10_000 });
+  await expect.poll(async () => (await mockState(request)).session_id).not.toBe("");
+  // The other window closes with its cross.
+  const second = wins.nth(1);
+  await second.locator(".cl-sx-dismiss").click();
+  await expect(wins).toHaveCount(1);
+});
+
 test.describe("phone", () => {
   test.use({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true });
   test("the ended strip on a phone takes a tap", async ({ page }) => {
