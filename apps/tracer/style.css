@@ -181,6 +181,9 @@ button { color: inherit; }
   word-spacing: normal;
 }
 .terminal-host::-webkit-scrollbar { display: none; }
+/* The live cursor (D249): one box over the cursor cell, blinked by a compositor-only opacity animation. */
+.terminal-cursor-layer { position: absolute; pointer-events: none; will-change: opacity; }
+.terminal-cursor-layer[hidden] { display: none; }
 [data-focus-ring="on"] .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -3px; }
 .connection-status {
   position: absolute;

@@ -59,6 +59,7 @@ declare global {
       } | undefined;
       benchmarkFullRedraw: (iterations: number) => number[] | undefined;
       freezeCursorForTest: () => void;
+      cursorLayerState: () => TerminalClient["cursorLayerState"] | undefined;
       benchmarkOutputAt10MBps: () => Promise<{
         bytes: number;
         elapsedMs: number;
@@ -484,6 +485,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
           return (currentTerminal as unknown as { benchmarkFullRedraw: (count: number) => number[] }).benchmarkFullRedraw(iterations);
         },
         freezeCursorForTest: () => currentTerminal?.freezeCursorForTest(),
+        cursorLayerState: () => currentTerminal?.cursorLayerState,
         benchmarkOutputAt10MBps: () => {
           if (!currentTerminal) return undefined;
           return (currentTerminal as unknown as {
