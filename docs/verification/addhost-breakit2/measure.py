@@ -95,6 +95,13 @@ def main():
     }
     for command in cases.get(args.case, []):
         docker("exec", TARGET, "sh", "-c", command)
+    if os.environ.get("ADDHOST_FAST_STEP_PROFILE") == "1":
+        # Target-owned diagnostics contain fixed names/status/numbers only. The
+        # wrapper delegates untouched stdin and output to the actual shell.
+        wrapper_script = (ROOT / "evidence/addhost-fast/step-shell.sh").read_bytes()
+        docker("exec", "-i", TARGET, "/bin/sh", "-c",
+               "cat > /usr/local/bin/sh; chmod 755 /usr/local/bin/sh; : > /run/addhost-fast-step-times; chmod 666 /run/addhost-fast-step-times",
+               input=wrapper_script)
     script = (ROOT / "docs/verification/addhost-breakit2/sshd.py").read_text()
     if args.ssh_server == "netbird":
         if args.netbird_binary is None:
@@ -172,6 +179,8 @@ def main():
         else:
             result = subprocess.run(command, input=private, env=environment, cwd=ROOT)
         # Queue counters distinguish the requested delay from unintended fixture loss.
+        if os.environ.get("ADDHOST_FAST_STEP_PROFILE") == "1":
+            docker("exec", TARGET, "/bin/cat", "/run/addhost-fast-step-times")
         for device in ["eth0", "ifb0"] if args.rtt else ["eth0"]:
             print(f"QDISC device={device}", flush=True)
             docker("exec", TARGET, "tc", "-s", "qdisc", "show", "dev", device)
