@@ -88,4 +88,3 @@ Combined-source summary, verbatim:
 | static builds             | FAIL (1)     |
 +---------------------------+--------------+
 ```
-
