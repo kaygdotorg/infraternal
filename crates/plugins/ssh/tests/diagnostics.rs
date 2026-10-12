@@ -262,3 +262,20 @@ fn failure_diagnostics_distinguish_auth_trust_transport_and_channel_without_raw_
             .contains("private-sentinel")
     );
 }
+
+#[test]
+fn engine_failures_keep_their_ssh_boundary_without_remote_bytes() {
+    for (connection_setup, expected) in [(true, "transport"), (false, "channel")] {
+        let failure = classify(
+            b"private-engine-sentinel",
+            connection_setup,
+            MeshEvidence::default(),
+        );
+        assert_eq!(failure.diagnostic_kind(), expected);
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("private-engine-sentinel")
+        );
+    }
+}
