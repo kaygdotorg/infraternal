@@ -28,7 +28,7 @@ pub const LIST: ActionDef = ActionDef {
 };
 /// Inventory remains readable when transport is unavailable; disabling this feature cancels all its socket work.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
-    id: "remote-inventory",
+    id: "remote.host",
     settings: Some(SchemaRef(
         r#"{"type":"object","properties":{"enabled":{"type":"boolean","default":true}},"additionalProperties":false}"#,
     )),
@@ -200,6 +200,10 @@ async fn send(replies: &ReplySender, frame: Frame<'_>) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inventory_descriptor_is_valid_for_server_startup() {
+        assert!(DESCRIPTOR.validate().is_ok());
+    }
     #[test]
     fn list_input_refuses_parallel_authority_and_noncanonical_cursors() {
         assert!(decode_list(b"{}").is_some());
