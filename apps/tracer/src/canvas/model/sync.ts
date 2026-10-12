@@ -15,16 +15,19 @@ export interface DocumentSync {
 
 export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean = () => true): DocumentSync {
   let timer = 0;
+  let disposed = false;
   let revision = 0;
   const save = (): void => {
     timer = 0;
+    if (disposed) return;
     const models = [...cx.views.values()].filter((c) => persisted(c.view.id)).map((c) => c.view);
     revision += 1;
     void cx.adapters.store.save(toDocument(models, cx.state.metrics, revision));
   };
   return {
-    changed() { if (!timer) timer = window.setTimeout(save, 300); },
+    changed() { if (!disposed && !timer) timer = window.setTimeout(save, 300); },
     flush() { if (timer) { window.clearTimeout(timer); save(); } },
-    dispose() { window.clearTimeout(timer); },
+    /** After this nothing is written again: sign-out removes the document right after (D245). */
+    dispose() { disposed = true; window.clearTimeout(timer); timer = 0; },
   };
 }

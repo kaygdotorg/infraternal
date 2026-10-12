@@ -10,10 +10,15 @@
  *      connections, the canvas and its inbox, the core screen, and the tab's session pointers. It then shows the
  *      sign-in screen.
  *
- * What stays: purely local preferences (theme, font, window sizes, toolbar order) and the canvas layout, which is
- * stored per account id and only ever read back by that account. Nothing the server would have to vouch for is kept.
+ * 3. The browser forgets the account (D245): `clearAccountStorage` removes its canvas layout, its session list and the
+ *      tab's terminal pointers, after the teardown so the canvas's last flush cannot write them back, and the
+ *      stores ignore writes once disposed. The layout is restored from the server on the next sign-in.
+ *
+ * What stays: device preferences that hold no account data (theme, font, window sizes, toolbar order, device name,
+ * background and density). Other accounts' keys on the same browser are untouched.
  */
 import { logout } from "./auth";
+import { clearAccountStorage } from "./account-storage";
 import type { ToastController } from "../../../packages/ui/src/toast";
 import { mountConfirmTip, type ConfirmTipController } from "../../../packages/ui/src/tooltip";
 
@@ -21,16 +26,16 @@ import { mountConfirmTip, type ConfirmTipController } from "../../../packages/ui
 export type SignOutToast = Pick<ToastController, "show">;
 
 let teardown: (() => void) | undefined;
+let currentAccount: () => string | undefined = () => undefined;
 
-/** main.ts hands over the teardown: dispose every live part of the signed-in app and show the sign-in screen. */
-export function registerSignOut(run: () => void): void { teardown = run; }
+/**
+ * main.ts hands over the teardown (dispose every live part of the signed-in app and show the sign-in screen) and a
+ * way to read which account is signed in.
+ */
+export function registerSignOut(run: () => void, account: () => string | undefined): void { teardown = run; currentAccount = account; }
 
-/** Browser-held pointers to this session's terminals; the tab keeps only a public id, never a credential. */
-export function forgetSessionPointers(): void {
-  try {
-    for (const key of Object.keys(sessionStorage)) if (key.startsWith("tracer.session.")) sessionStorage.removeItem(key);
-  } catch { /* storage is optional */ }
-  // A `?session=` in the address would reattach the old terminal as soon as the next person signs in.
+/** A `?session=` in the address would reattach the old terminal as soon as the next person signs in. */
+function forgetSessionAddress(): void {
   const url = new URL(location.href);
   if (url.searchParams.has("session")) {
     url.searchParams.delete("session");
@@ -41,8 +46,10 @@ export function forgetSessionPointers(): void {
 /** Signs this device out. Rejects, leaving the screen untouched, when the server could not end the session. */
 export async function signOut(): Promise<void> {
   await logout();
-  forgetSessionPointers();
+  const account = currentAccount();
   teardown?.();
+  clearAccountStorage(account);
+  forgetSessionAddress();
 }
 
 /**

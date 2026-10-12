@@ -1,6 +1,7 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
 import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
 import { registerSignOut } from "./sign-out";
+import { lastAccountKey, tabSessionKey } from "./account-storage";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
@@ -229,7 +230,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
-    saveBrowserId("tracer.user-id", userId);
+    saveBrowserId(lastAccountKey, userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
@@ -420,7 +421,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
   screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
-  const sessionKey = activeUserId ? `tracer.session.${activeUserId}` : undefined;
+  const sessionKey = activeUserId ? tabSessionKey(activeUserId) : undefined;
   const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
   const hooks = {
     ...probeHooks,
@@ -517,7 +518,7 @@ async function showRecovery(): Promise<void> {
   document.documentElement.removeAttribute("data-ui-font");
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
     activeUserId = userId;
-    saveBrowserId("tracer.user-id", userId);
+    saveBrowserId(lastAccountKey, userId);
     showWelcome(displayName ?? "", instant);
   });
   scheduleBackdrop();
@@ -561,7 +562,8 @@ let productCanvas: { dispose(): void } | undefined;
 /**
  * Lets go of the signed-in app and shows the sign-in screen: the terminals' connections, the canvas (with its inbox
  * and overlays), the core screen, the frame meter and the test double's handle. Used when the server says the session
- * is gone and when the person signs out (sign-out.ts). Local preferences stay.
+ * is gone and when the person signs out (sign-out.ts). Local preferences stay; sign-out
+ * removes the account's stored data afterwards (sign-out.ts).
  */
 function endSession(message = ""): void {
   welcomeEffect?.destroy();
@@ -584,7 +586,7 @@ function endSession(message = ""): void {
   activeUserId = undefined;
   renderAuth(false, message);
 }
-registerSignOut(() => endSession());
+registerSignOut(() => endSession(), () => activeUserId);
 
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
