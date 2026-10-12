@@ -48,6 +48,8 @@ enum Command {
     Input(u64, Vec<u8>),
     Credit(u32),
     Resize(u16, u16, u16, u16),
+    #[cfg(feature = "remote")]
+    Cursor(u64),
 }
 // Dropping cancellation retires a stalled handshake as well as queued commands.
 struct Stream {
@@ -92,6 +94,7 @@ async fn writer(
                 caps: infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
                     | (if socket.native_stream_id().is_some() {
                         infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
+                            | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
                     } else {
                         0
                     })
@@ -461,6 +464,30 @@ async fn run_channel(
 #[allow(clippy::too_many_lines)]
 #[cfg(feature = "remote")]
 pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) -> io::Result<()> {
+    run_bound_terminal_mode(channel, state, false).await
+}
+
+/// Accept optional per-stream priming intent on a capability-negotiated connection.
+/// Ordinary writers omit the marker, including new writers after promotion.
+/// The supervisor must verify native priming capability and cancel on lost authority.
+/// # Errors
+/// Refuses malformed priming intent or the same attachment/framing failures
+/// as `run_bound_terminal`; ordinary unmarked streams retain normal semantics.
+#[cfg(feature = "remote")]
+pub async fn run_negotiated_bound_terminal(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+) -> io::Result<()> {
+    run_bound_terminal_mode(channel, state, true).await
+}
+
+#[cfg(feature = "remote")]
+#[allow(clippy::too_many_lines)]
+async fn run_bound_terminal_mode(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    allow_priming: bool,
+) -> io::Result<()> {
     let writer_id = channel
         .native_stream_id()
         .filter(|id| *id != 0 && id & 1 == 0)
@@ -468,19 +495,35 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     let _retire = RetireChannel(channel);
     let state = sessions::state(state)?;
     let mut receive = Receive::default();
-    let (id, cursor, input) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let first = receive.next(channel).await?;
-        match first.frame {
-            Frame::AttachTerm {
-                session_id,
-                last_out_seq,
-                last_in_seq,
-            } => Ok((*session_id, last_out_seq, last_in_seq)),
-            _ => Err(sessions::invalid("native terminal AttachTerm required")),
-        }
-    })
-    .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let (id, cursor, input, primed) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let first = receive.next(channel).await?;
+            // Shared intent is ordered on this writer, so a binding already in
+            // flight across promotion cannot become an ordinary replacement.
+            let primed = matches!(
+                first.frame,
+                Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.prime",
+                    input_json: b"{}",
+                }
+            ) && allow_priming;
+            let first = if primed {
+                receive.next(channel).await?
+            } else {
+                first
+            };
+            match first.frame {
+                Frame::AttachTerm {
+                    session_id,
+                    last_out_seq,
+                    last_in_seq,
+                } => Ok((*session_id, last_out_seq, last_in_seq, primed)),
+                _ => Err(sessions::invalid("native terminal AttachTerm required")),
+            }
+        })
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
     let path = state
         .join("sessions")
         .join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()));
@@ -492,6 +535,11 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
             let command = match decoded.frame {
                 Frame::Input { in_seq, bytes } => Command::Input(in_seq, bytes.to_vec()),
                 Frame::Credit { bytes } => Command::Credit(bytes),
+                Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.cursor",
+                    input_json,
+                } if primed => Command::Cursor(crate::remote_cursor::decode(input_json)?),
                 Frame::Resize {
                     cols,
                     rows,
@@ -514,7 +562,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
     tokio::select! {
         result = dispatch => result,
         result = writer(channel, rx, None, false, false) => result,
-        result = terminal(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx) => result,
+        result = terminal_mode(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx, primed) => result,
     }
 }
 
@@ -525,9 +573,14 @@ struct Link {
     reader: Reader,
 }
 impl Link {
-    async fn connect(path: PathBuf, id: [u8; 16], writer: u32) -> io::Result<Self> {
+    async fn connect(path: PathBuf, id: [u8; 16], writer: u32, shared: bool) -> io::Result<Self> {
+        let session = if shared {
+            sessions::connect_shared_writer(path, id, writer).await?
+        } else {
+            sessions::connect_writer(path, id, writer).await?
+        };
         Ok(Self {
-            session: sessions::connect_writer(path, id, writer).await?,
+            session,
             transmit: Vec::new(),
             reader: Reader::default(),
         })
@@ -579,10 +632,26 @@ async fn terminal(
     stream: u32,
     cursor: u64,
     last_input: u64,
-    mut commands: session_commands::Receiver,
+    commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
-    let mut session = Some(Link::connect(path.clone(), id, stream).await?);
+    terminal_mode(path, id, stream, cursor, last_input, commands, tx, false).await
+}
+
+/// Shared standby writers keep the authoritative input handshake, but delay
+/// output serialization until a delivered cursor precedes explicit credit.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn terminal_mode(
+    path: PathBuf,
+    id: [u8; 16],
+    stream: u32,
+    cursor: u64,
+    last_input: u64,
+    mut commands: session_commands::Receiver,
+    tx: mpsc::Sender<Message>,
+    primed: bool,
+) -> io::Result<()> {
+    let mut session = Some(Link::connect(path.clone(), id, stream, primed).await?);
     if session
         .as_ref()
         .is_none_or(|s| s.session.caps & SEQUENCED_INPUT == 0)
@@ -606,11 +675,13 @@ async fn terminal(
         ));
     }
     emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
-    session
-        .as_mut()
-        .ok_or_else(|| sessions::invalid("missing shim"))?
-        .send(&Shim::ReadFrom(cursor))
-        .await?;
+    if !primed {
+        session
+            .as_mut()
+            .ok_or_else(|| sessions::invalid("missing shim"))?
+            .send(&Shim::ReadFrom(cursor))
+            .await?;
+    }
     let mut output = relay::Output::attach(cursor);
     let mut pending: Option<Shim> = None;
     let mut deadline = None;
@@ -690,7 +761,7 @@ async fn terminal(
             }
         }
         if output.needs_snapshot() && session.is_none() {
-            let mut next = Link::connect(path.clone(), id, stream).await?;
+            let mut next = Link::connect(path.clone(), id, stream, primed).await?;
             let written = input_state(&mut next).await?;
             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
             // A credit deadline discards only the daemon's pending frame,
@@ -705,10 +776,28 @@ async fn terminal(
                 let Some(command) = command else { return Ok(()); };
                 match command {
                     Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
+                    #[cfg(feature = "remote")]
+                    Command::Cursor(cursor) if primed => {
+                        // The server alone knows which output reached leg A.
+                        // Reset only this shadow relay, before its ordered Credit;
+                        // already queued duplicates remain bounded and are trimmed
+                        // by the server rather than charged to browser credit again.
+                        output = relay::Output::attach(cursor);
+                        pending = None;
+                        deadline = None;
+                        if session.is_none() {
+                            let mut next = Link::connect(path.clone(), id, stream, true).await?;
+                            let written = input_state(&mut next).await?;
+                            emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+                            session = Some(next);
+                        }
+                        session.as_mut().ok_or_else(|| sessions::invalid("missing shim"))?
+                            .send(&Shim::ReadFrom(cursor)).await?;
+                    }
                     other => {
                         let detached = session.is_none();
                         if detached {
-                            let mut next = Link::connect(path.clone(), id, stream).await?;
+                            let mut next = Link::connect(path.clone(), id, stream, primed).await?;
                                             input_state(&mut next).await?;
                             session = Some(next);
                         }
@@ -717,6 +806,8 @@ async fn terminal(
                             Command::Input(seq, bytes) => peer.send(&Shim::SequencedInput(seq, bytes)).await?,
                             Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
                             Command::Credit(_) => return Err(sessions::invalid("unexpected credit dispatch")),
+                            #[cfg(feature = "remote")]
+                            Command::Cursor(_) => return Err(sessions::invalid("unnegotiated terminal cursor")),
                         }
                         if detached {
                             // Reconnecting the same writer can supersede
