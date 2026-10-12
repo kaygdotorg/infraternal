@@ -379,6 +379,21 @@ impl Installation {
         let mut script = String::from(
             "# INFRATERNAL_SETUP_STEPS_V1\nset -u\nsetup_step() {\n    printf 'STEP %s\\n' \"$1\"\n    if sh -c \"$2\"; then :; else status=$?; printf 'FAIL %s %s\\n' \"$1\" \"$status\"; exit 0; fi\n}\n",
         );
+        // Share only representation: each fresh child still executes the full
+        // immutable prelude, ownership checks and its own body with errexit.
+        // Root steps retain their existing independent privilege wrapper.
+        let shared = matches!(self.mode, InstallMode::Rootless);
+        if shared {
+            writeln!(script, "setup_common={}", shell_quote(&self.script("")))
+                .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
+        }
+        let argument = |body: &str| {
+            if shared {
+                format!("\"$setup_common\"{}", shell_quote(body))
+            } else {
+                shell_quote(&self.script(body))
+            }
+        };
         if let Some(upload) = upload {
             script = script.replace(
                 "# INFRATERNAL_SETUP_STEPS_V1",
@@ -388,12 +403,8 @@ impl Installation {
                 "exit 0; fi",
                 "if [ \"$1\" = upload ]; then exit \"$status\"; fi; exit 0; fi",
             );
-            writeln!(
-                script,
-                "setup_step upload {}",
-                shell_quote(&self.script(upload))
-            )
-            .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
+            writeln!(script, "setup_step upload {}", argument(upload))
+                .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
         }
         for (name, body) in [
             ("join", setup_scripts::join(&join.url)),
@@ -410,12 +421,8 @@ impl Installation {
         ] {
             // A fresh child shell keeps errexit active even when its parent
             // observes status. Testing a shell function would suppress errexit.
-            writeln!(
-                script,
-                "setup_step {name} {}",
-                shell_quote(&self.script(&body))
-            )
-            .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
+            writeln!(script, "setup_step {name} {}", argument(&body))
+                .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
         }
         script.push_str("printf 'DONE\\n'\n");
         Ok(script)
