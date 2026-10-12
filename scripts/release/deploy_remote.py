@@ -69,7 +69,9 @@ def verify_signed(directory, trust, image, complete=False):
         if hashlib.file_digest(stream, "sha256").hexdigest() != entries["infraternal-x86_64-musl"]:
             raise ValueError("signed server image mismatch")
     for name in required:
-        artifact = image if name == "infraternal-x86_64-musl" and not complete else directory / name
+        if name == "infraternal-x86_64-musl" and not complete:
+            continue  # The retained executable was already authenticated above.
+        artifact = directory / name
         with artifact.open("rb") as stream:
             if hashlib.file_digest(stream, "sha256").hexdigest() != entries[name]:
                 raise ValueError("signed artifact mismatch")
