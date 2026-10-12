@@ -286,3 +286,6 @@ async fn configured_release_cli_cold_lock_real_passkey_unlock_and_cold_restart()
 
 #[path = "ca_bootstrap_cli_tests.rs"]
 mod bootstrap_cli;
+
+#[path = "deploy_staging_tests.rs"]
+mod deploy_staging;

@@ -744,15 +744,18 @@ pub(crate) async fn attach_all(
     browsers
 }
 pub(crate) fn shim_pids(directory: &std::path::Path, sessions: &[[u8; 16]]) -> Vec<i32> {
+    shim_pids_at(
+        &directory.parent().unwrap().join("r/infraternal/sessions"),
+        sessions,
+    )
+}
+
+pub(crate) fn shim_pids_at(runtime: &std::path::Path, sessions: &[[u8; 16]]) -> Vec<i32> {
     sessions
         .iter()
         .map(|id| {
             let socket = UnixStream::connect(
-                directory
-                    .parent()
-                    .unwrap()
-                    .join("r/infraternal/sessions")
-                    .join(format!("{}.sock", uuid::Uuid::from_bytes(*id).simple())),
+                runtime.join(format!("{}.sock", uuid::Uuid::from_bytes(*id).simple())),
             )
             .unwrap();
             getsockopt(&socket, sockopt::PeerCredentials).unwrap().pid()
