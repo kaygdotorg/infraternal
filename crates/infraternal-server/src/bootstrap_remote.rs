@@ -293,6 +293,14 @@ impl Backend for RemoteBackend {
                 Ok(())
             })
             .await?;
+            // The primary exit proves retirement; cancellation after this point
+            // must not try another writer against the already retired session.
+            self.attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .get_mut(&host)
+                .ok_or_else(unavailable)?
+                .canary = None;
             self.authorize(authority)
                 .await
                 .map_err(|error| error.at(InstallStep::Readiness))
@@ -389,10 +397,12 @@ async fn canary_registered(
     }
     let result = tokio::time::timeout(Duration::from_secs(10), canary_output(actor, session)).await
         .unwrap_or_else(|_| Err(Failure::install("The host connected, but its terminal did not answer. Check its service and try again.")));
-    let cleanup = finish_canary(actor, session).await;
-    result
-        .and(cleanup)
-        .map_err(|error| error.at(InstallStep::Readiness))
+    // Success includes the primary stream's exit proof. Reattaching then races
+    // private-session retirement and can turn that proof into a handshake error.
+    if result.is_err() {
+        let _ = finish_canary(actor, session).await;
+    }
+    result.map_err(|error| error.at(InstallStep::Readiness))
 }
 
 async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
@@ -422,6 +432,7 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
             .map_err(|_| unavailable())?;
     }
     let mut received = Vec::new();
+    let mut confirmed = false;
     while let Some(event) = output.recv().await {
         match event {
             // A fast first command may be included in the initial faithful
@@ -431,15 +442,28 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
                     return Err(unavailable());
                 }
                 received.extend_from_slice(&bytes);
-                if received
+                confirmed = received
                     .windows(marker.len())
-                    .any(|window| window == marker.as_bytes())
-                {
-                    return Ok(());
+                    .any(|window| window == marker.as_bytes());
+            }
+            TerminalOutput::Event { event_json } => {
+                let notice: serde_json::Value =
+                    serde_json::from_slice(&event_json).map_err(|_| unavailable())?;
+                if notice["type"] == "terminal.exited" {
+                    // The routed, authenticated exit must name this private session.
+                    let exited = notice["session_id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .is_some_and(|id| id.as_bytes() == &session);
+                    return if confirmed && exited && notice["status"] == 0 {
+                        Ok(())
+                    } else {
+                        Err(unavailable())
+                    };
                 }
             }
             TerminalOutput::Closed { .. } => break,
-            _ => {}
+            TerminalOutput::Ack { .. } => {}
         }
     }
     Err(unavailable())

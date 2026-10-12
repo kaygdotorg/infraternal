@@ -228,7 +228,6 @@ async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
 }
 
 #[tokio::test]
-#[ignore = "#169 regression: primary exit must retire readiness without another attachment"]
 async fn readiness_accepts_primary_exit_without_reattaching_to_a_retired_session() {
     let (socket, peer) = UnixStream::pair().unwrap();
     let task = tokio::spawn(terminal_peer(peer, false, Retirement::Retired, false, None));
