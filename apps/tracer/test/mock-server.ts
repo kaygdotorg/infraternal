@@ -28,6 +28,7 @@ const MAX_MOCK_OUTPUT = 1024 * 1024;
 const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
 const MAX_TRACE_EVENTS = 120_000;
+const MAX_ATTACH_HISTORY = 64;
 const DIST_ROOT = resolve(import.meta.dirname, "../dist");
 const TEST_DOUBLE_HEADER = "X-Infraternal-Test-Double";
 
@@ -66,6 +67,8 @@ interface Connection {
   session: MockSession;
   credit: number;
   outputCursor: bigint;
+  inputCursor: bigint;
+  replayUntil: bigint | undefined;
   attached: boolean;
   /** The client stream the terminal uses (1 until a new shell opens another). */
   stream: number;
@@ -106,6 +109,7 @@ const retiredSessions = new Map<string, { status: number; finalSeq: number }>();
 /** Interrupt exactly the first final answer to test recovery between its two ordered frames. */
 const interruptedRetirements = new Set<string>();
 let attachCount = 0;
+const attachHistory: Array<{ last_out_seq: string; output_sequence: string }> = [];
 const traceEvents: TraceEvent[] = [];
 
 const perfSink = createPerfSink(FRONT_PORT);
@@ -150,6 +154,8 @@ webSockets.on("connection", (socket, request) => {
     session,
     credit: 0,
     outputCursor: 0n,
+    inputCursor: 0n,
+    replayUntil: undefined,
     attached: false,
     stream: 1,
     goneStreams: new Set(),
@@ -255,6 +261,9 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method === "POST" && url.pathname === "/__mock/text-output") {
     const body = await readJson(request);
     if (typeof body?.text !== "string") return sendJson(response, 400, { error: "text output must be a string" });
+    if (body.echo_input !== undefined && typeof body.echo_input !== "boolean") {
+      return sendJson(response, 400, { error: "echo_input must be boolean" });
+    }
     const bytes = new TextEncoder().encode(body.text);
     if (bytes.byteLength > MAX_MESSAGE) return sendJson(response, 413, { error: "text output exceeds one frame" });
     const connection = [...connections].find((candidate) => candidate.session === session && candidate.attached && isSocketOpen(candidate.socket));
@@ -263,10 +272,32 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     }
     // Keep the visual metrics fixture on the same bounded Output path as normal PTY output.
     session.fixtureOutput = bytes;
+    if (body.echo_input === false) session.echoMode = "none";
     session.ringStartSequence = 0n;
     session.snapshotFrames = [];
     session.outputLength = bytes.byteLength;
     flushOutput(connection);
+    return sendJson(response, 200, { bytes: bytes.byteLength });
+  }
+  if (request.method === "POST" && url.pathname === "/__mock/query-snapshot") {
+    const body = await readJson(request);
+    if (typeof body?.text !== "string") return sendJson(response, 400, { error: "snapshot text must be a string" });
+    const bytes = new TextEncoder().encode(body.text);
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_MESSAGE) {
+      return sendJson(response, 413, { error: "query snapshot must fit one nonempty frame" });
+    }
+    // An intentionally adversarial repaint fixture: a screen restore must not
+    // answer terminal queries even if its bytes contain query sequences.
+    session.fixtureOutput = bytes;
+    session.ringStartSequence = BigInt(bytes.byteLength);
+    session.snapshotFrames = [{ outSeq: BigInt(bytes.byteLength), bytes }];
+    session.snapshotCount = 0;
+    session.output.fill(0);
+    session.echoOutputLength = 0;
+    session.outputLength = bytes.byteLength;
+    session.writtenInput = 0n;
+    session.acceptedInputBytes = 0;
+    session.echoedText = "";
     return sendJson(response, 200, { bytes: bytes.byteLength });
   }
   if (request.method === "POST" && url.pathname === "/__mock/fixture") {
@@ -414,6 +445,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       socket_open_count: socketOpenCount,
       socket_close_count: socketCloseCount,
       attach_count: attachCount,
+      attach_history: attachHistory,
       attached_stream_ids: [...connections].filter((connection) => connection.attached).map((connection) => connection.stream),
       session_id: session.sessionIdText,
       active_socket_count: connections.size,
@@ -673,6 +705,12 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   switch (frame.type) {
     case "Hello":
       connection.resumeExpected = (frame.caps & 1n) !== 0n;
+      if (!connection.resumeExpected) {
+        // A connection without Resume creates a fresh writer; its input cursor
+        // starts at zero even though accepted_input_bytes remains cumulative.
+        connection.inputCursor = 0n;
+        connection.session.writtenInput = 0n;
+      }
       sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: 0n, clientInfo: "infraternal-mock-test-double/0.1" });
       connection.welcomeTimer = setTimeout(() => sendWelcome(connection), 0);
       return;
@@ -687,6 +725,7 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
         return;
       }
       connection.resumeAccepted = true;
+      connection.inputCursor = connection.session.writtenInput;
       if (connection.welcomeTimer) clearTimeout(connection.welcomeTimer);
       sendWelcome(connection);
       return;
@@ -702,6 +741,7 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       }
       // A fresh open gets fresh terminal state; only Resume reuses an existing session.
       connection.session = session = createSession(connection.session, selectedFixture);
+      connection.inputCursor = 0n;
       sendFrame(connection.socket, 0, {
         type: "Result",
         callId: frame.callId,
@@ -726,6 +766,9 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
   switch (frame.type) {
     case "AttachTerm":
       attachCount += 1;
+      if (attachHistory.length < MAX_ATTACH_HISTORY) {
+        attachHistory.push({ last_out_seq: frame.lastOutSeq.toString(), output_sequence: String(connection.session.outputLength) });
+      }
       if (goneSessions.has(uuidText(frame.sessionId))) {
         connection.goneStreams.add(streamId);
         const exit = retiredSessions.get(uuidText(frame.sessionId));
@@ -744,7 +787,8 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       }
       connection.attached = true;
       connection.outputCursor = frame.lastOutSeq;
-      sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.session.writtenInput });
+      connection.replayUntil = BigInt(connection.session.outputLength);
+      sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.inputCursor });
       flushOutput(connection);
       return;
     case "Credit":
@@ -777,11 +821,11 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
 }
 
 function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array): void {
-  if (sequence > connection.session.writtenInput || sequence + BigInt(bytes.byteLength) > 0xffff_ffff_ffff_ffffn) {
+  if (sequence > connection.inputCursor || sequence + BigInt(bytes.byteLength) > 0xffff_ffff_ffff_ffffn) {
     connection.socket.close(1002, "input sequence gap in test double");
     return;
   }
-  const alreadyWritten = Number(connection.session.writtenInput - sequence);
+  const alreadyWritten = Number(connection.inputCursor - sequence);
   const duplicateBytes = Math.min(bytes.byteLength, alreadyWritten);
   const fresh = bytes.subarray(duplicateBytes);
   if (fresh.byteLength > 0) {
@@ -789,7 +833,8 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
       connection.socket.close(1011, "test-double output limit reached");
       return;
     }
-    connection.session.writtenInput += BigInt(fresh.byteLength);
+    connection.inputCursor += BigInt(fresh.byteLength);
+    connection.session.writtenInput = connection.inputCursor;
     connection.session.acceptedInputBytes += fresh.byteLength;
     connection.session.echoedText += new TextDecoder().decode(fresh);
     const echoed = echoBytes(connection.session, fresh);
@@ -806,7 +851,7 @@ function acceptInput(connection: Connection, sequence: bigint, bytes: Uint8Array
     connection.socket.close(4001, "test-double forced input acknowledgement drop");
     return;
   }
-  sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.session.writtenInput });
+  sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.inputCursor });
   flushOutput(connection);
 }
 
@@ -849,20 +894,43 @@ function flushOutput(connection: Connection): void {
     connection.credit -= repaintBytes;
     connection.session.snapshotCount += snapshots.length;
   }
+  flushReplayComplete(connection);
   const availableEnd = BigInt(connection.session.outputLength);
   while (connection.credit > 0 && connection.outputCursor < availableEnd) {
+    flushReplayComplete(connection);
     const absoluteOffset = Number(connection.outputCursor);
     const fixtureLength = connection.session.fixtureOutput.byteLength;
     const source = absoluteOffset < fixtureLength ? connection.session.fixtureOutput : connection.session.output;
     const offset = absoluteOffset < fixtureLength ? absoluteOffset : absoluteOffset - fixtureLength;
     const sourceEnd = absoluteOffset < fixtureLength ? fixtureLength : fixtureLength + connection.session.echoOutputLength;
-    const length = Math.min(MAX_MESSAGE, connection.credit, sourceEnd - absoluteOffset);
+    const replayRemaining = connection.replayUntil === undefined
+      ? Number.POSITIVE_INFINITY
+      : Number(connection.replayUntil - connection.outputCursor);
+    const length = Math.min(MAX_MESSAGE, connection.credit, sourceEnd - absoluteOffset, replayRemaining);
+    if (length <= 0) break;
     const bytes = source.subarray(offset, offset + length);
     sendFrame(connection.socket, connection.stream, { type: "Output", outSeq: connection.outputCursor, bytes },
       connection.traceEnabled ? connection.outputCursor : undefined, length);
     connection.outputCursor += BigInt(length);
     connection.credit -= length;
+    flushReplayComplete(connection);
   }
+}
+
+/** Places the mock's restore boundary after replay and before later live output. */
+function flushReplayComplete(connection: Connection): void {
+  const fence = connection.replayUntil;
+  if (fence === undefined || connection.outputCursor < fence) return;
+  sendFrame(connection.socket, connection.stream, {
+    type: "Event",
+    subId: 0,
+    eventJson: new TextEncoder().encode(JSON.stringify({
+      type: "terminal.replay_complete",
+      session_id: connection.session.sessionIdText,
+      out_seq: connection.outputCursor.toString(),
+    })),
+  });
+  connection.replayUntil = undefined;
 }
 
 function sendWelcome(connection: Connection): void {
@@ -1012,6 +1080,7 @@ function resetMockState(): void {
   retiredSessions.clear();
   interruptedRetirements.clear();
   attachCount = 0;
+  attachHistory.length = 0;
   traceEvents.length = 0;
   session = createSession();
 }

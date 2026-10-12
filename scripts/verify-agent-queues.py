@@ -32,6 +32,9 @@ def run(binary):
             # new writers and must start at zero, even on an existing PTY.
             sessions.append((session, client.out, client.acked if index == 0 else 0))
             client.send(1, 0x0f, struct.pack('<H', 0) + b'\x04done')
+        session_by_stream = {
+            stream: session for stream, (session, _, _) in enumerate(sessions, 1)
+        }
         # Hold InputState, before the terminal task can drain even one command.
         # More than eight requests now deterministically fills the bounded queue.
         for stream, (session, out, ack) in enumerate(sessions, 1):
@@ -51,7 +54,7 @@ def run(binary):
                 client.send(stream, 0x10, struct.pack('<Q', offset + begin) + payload[begin:end])
         closed = set()
         while len(closed) < len(payloads):
-            stream, kind, _ = client.read()
+            stream, kind, _ = client.read_ignoring_replay_complete(session_by_stream)
             assert kind == 0x0f and stream in payloads, (stream, kind)
             closed.add(stream)
         assert client.child.poll() is None
@@ -76,7 +79,7 @@ def run(binary):
                 ends[stream] = offset + end
                 client.send(stream, 0x10, struct.pack('<Q', offset + begin) + payload[begin:end])
             while any(acknowledgments[stream] < end for stream, end in ends.items()):
-                stream, kind, body = client.read()
+                stream, kind, body = client.read_ignoring_replay_complete(session_by_stream)
                 assert stream in outputs, (stream, kind)
                 if kind == 0x11:
                     seq = struct.unpack('<Q', body[:8])[0]
@@ -88,7 +91,7 @@ def run(binary):
                 else:
                     raise AssertionError((stream, kind, body))
         while any(len(outputs[stream]) < len(payload) for stream, (_, payload) in payloads.items()):
-            stream, kind, body = client.read()
+            stream, kind, body = client.read_ignoring_replay_complete(session_by_stream)
             if kind == 0x13:
                 continue
             assert kind == 0x11 and struct.unpack('<Q', body[:8])[0] == cursors[stream]
@@ -97,7 +100,7 @@ def run(binary):
         for stream, (_, payload) in payloads.items():
             assert outputs[stream] == payload
         client.send(0, 0x08, struct.pack('<QQ', 123, 456))
-        assert client.read() == (0, 0x09, struct.pack('<QQ', 123, 456))
+        assert client.read_ignoring_replay_complete(session_by_stream) == (0, 0x09, struct.pack('<QQ', 123, 456))
         # A genuinely dead shim must close its own stream, preserving siblings.
         dead = barriers[0]
         with socket.socket(socket.AF_UNIX) as peer:
@@ -105,11 +108,11 @@ def run(binary):
             hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
             os.kill(struct.unpack('<I', hello[27:31])[0], signal.SIGKILL)
         while True:
-            stream, kind, _ = client.read()
+            stream, kind, _ = client.read_ignoring_replay_complete(session_by_stream)
             if stream == 1 and kind == 0x0f:
                 break
         client.send(0, 0x08, struct.pack('<QQ', 789, 101))
-        assert client.read() == (0, 0x09, struct.pack('<QQ', 789, 101))
+        assert client.read_ignoring_replay_complete(session_by_stream) == (0, 0x09, struct.pack('<QQ', 789, 101))
         print(f'queue overload: 12 streams retired then replayed x 65 Input frames; {sum(len(p) for _, p in payloads.values())} payload bytes exactly once; dead shim isolated; daemon Ping: PASS', flush=True)
     finally:
         for barrier in barriers:

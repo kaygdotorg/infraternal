@@ -264,6 +264,11 @@ export class TerminalClient {
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
+  /** Existing-session restores suppress parser replies until the server's replay fence has painted. */
+  private suppressReplayResponses = false;
+  private replayResponseFence: bigint | undefined;
+  /** Scoped only around synchronous renderer writes; keyboard input arrives in later event tasks. */
+  private suppressTerminalResponses = false;
   private renderIdleTimer = 0;
   private rendererCursorBlinking = false;
   /**
@@ -327,7 +332,11 @@ export class TerminalClient {
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
       if (this.attached) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     });
-    this.terminal.onData((data) => { this.wakeTerminal(); this.handleInput(data); });
+    this.terminal.onData((data) => {
+      this.wakeTerminal();
+      if (this.suppressTerminalResponses) return;
+      this.handleInput(data);
+    });
     this.terminal.onScroll((offset) => {
       this.wakeTerminal();
       if (offset !== 0) this.prediction?.unsafeScreen();
@@ -338,9 +347,11 @@ export class TerminalClient {
     const known = config.attachSessionId ?? config.initialSessionId;
     if (known && isCanonicalUuid(known)) {
       // A page reload has no pending-input buffer or writer capability. Start
-      // a fresh writer at zero, replay output from zero, and let server-owned
-      // session authorization validate this nonsecret convenience identifier.
+      // a fresh writer at zero. The renderer restores the old screen silently
+      // through the replay fence; server-owned session authorization validates
+      // this nonsecret convenience identifier.
       this.sessionId = uuidBytes(known);
+      this.suppressReplayResponses = true;
     }
     this.scheduleFit();
     this.ownsConnection = config.connection === undefined;
@@ -783,6 +794,15 @@ export class TerminalClient {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
+          } else if (notice.type === "terminal.replay_complete") {
+            const sequence = requireString(notice.out_seq);
+            if (!/^(0|[1-9][0-9]*)$/.test(sequence)) throw new Error("invalid replay cursor");
+            const fence = BigInt(sequence);
+            // The ordered event follows every replay frame and any Snapshot
+            // repaint, so its cursor must equal the received PTY boundary.
+            if (fence !== this.receivedOutSeq) throw new Error("replay cursor mismatch");
+            this.replayResponseFence = fence;
+            this.releaseReplayResponsesAfterPaint();
           } else if (notice.type === "terminal.exited") {
             if (!Number.isSafeInteger(notice.status) || !Number.isSafeInteger(notice.final_seq) || (notice.final_seq as number) < 0) throw new Error("invalid exit");
             const status = notice.status as number;
@@ -981,6 +1001,8 @@ export class TerminalClient {
     this.ackedInSeq = 0n;
     this.inputQueue.clear();
     this.outputQueue.clear();
+    this.replayResponseFence = undefined;
+    this.suppressReplayResponses = this.sessionId !== undefined;
     this.pendingSnapshot?.bytes.fill(0);
     this.pendingSnapshot = undefined;
     this.prediction?.resetForSnapshot();
@@ -1131,13 +1153,14 @@ export class TerminalClient {
       this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
-      this.terminal.write(snapshot.bytes, () => {
+      this.writeSuppressingTerminalResponses(snapshot.bytes, () => {
         if (epoch !== this.cursorEpoch) { this.snapshotWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "writeCallback", callbackAt);
         // Ghostty calls this from the rAF after its render loop draws the write; another rAF adds a full frame.
         const paintedAt = performance.now();
         this.lastOutSeq = snapshot.outSeq;
+        this.releaseReplayResponsesAfterPaint();
         this.snapshotWriteInFlight = false;
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
         this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
@@ -1162,7 +1185,7 @@ export class TerminalClient {
       const writeSequence = this.lastOutSeq;
       this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
-      this.terminal.write(region, () => {
+      const onWritten = (): void => {
         if (epoch !== this.cursorEpoch) { this.outputWriteLength = 0; this.outputWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(writeSequence, this.outputWriteLength, "writeCallback", callbackAt);
@@ -1170,6 +1193,7 @@ export class TerminalClient {
         const paintedAt = performance.now();
         const consumed = this.outputWriteLength;
         this.lastOutSeq += BigInt(consumed);
+        this.releaseReplayResponsesAfterPaint();
         this.traceRange(writeSequence, consumed, "paint", paintedAt);
         if (this.predictionScreenUnsafe()) this.prediction?.unsafeScreen();
         else {
@@ -1183,7 +1207,9 @@ export class TerminalClient {
         this.returnCredit(consumed);
         this.drainOutput();
         this.tryAttach();
-      });
+      };
+      if (this.suppressReplayResponses) this.writeSuppressingTerminalResponses(region, onWritten);
+      else this.terminal.write(region, onWritten);
       // The terminal state includes these bytes now; only their paint is a frame away. Reconcile the
       // prediction against them at once, so a key typed in that frame is placed from a consistent cursor.
       if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
@@ -1192,6 +1218,29 @@ export class TerminalClient {
     }
     this.finishExit();
     this.tryAttach();
+  }
+
+  /**
+   * Ghostty emits all parser replies synchronously from write() through the same
+   * onData event used for keyboard input. This scoped gate drops only those
+   * write-time replies; real key events run in a later task and remain enabled.
+   */
+  private writeSuppressingTerminalResponses(bytes: Uint8Array, callback: () => void): void {
+    const previous = this.suppressTerminalResponses;
+    this.suppressTerminalResponses = true;
+    try {
+      this.terminal.write(bytes, callback);
+    } finally {
+      this.suppressTerminalResponses = previous;
+    }
+  }
+
+  /** A replay fence takes effect only after the renderer has parsed and painted every byte before it. */
+  private releaseReplayResponsesAfterPaint(): void {
+    if (this.replayResponseFence !== undefined && this.lastOutSeq >= this.replayResponseFence) {
+      this.suppressReplayResponses = false;
+      this.replayResponseFence = undefined;
+    }
   }
 
   /** Wait for paint callbacks so a clean exit never discards its final bytes. */

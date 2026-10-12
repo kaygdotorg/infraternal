@@ -114,6 +114,11 @@ impl Pty {
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave));
+        // Keep only locale values from the host environment; all other inherited
+        // variables stay scrubbed, and an explicit user locale remains authoritative.
+        for (name, value) in crate::session_locale_environment() {
+            command.env(name, value);
+        }
         // Preserve zsh's supported profile location for isolated canaries.
         if let Some(directory) = std::env::var_os("ZDOTDIR") {
             command.env("ZDOTDIR", directory);
@@ -374,5 +379,59 @@ mod child_signal_tests {
             (reset[3] - baseline[3]) * 1000.0 / f64::from(count),
             reset[3] - baseline[3]
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod child_locale_tests {
+    use super::*;
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn spawned_login_shell_receives_selected_locale_without_other_host_variables() {
+        let expected = crate::locale::environment();
+        let pty = Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap();
+        let child = ChildGuard(pty.child);
+        let raw = std::fs::read(format!("/proc/{}/environ", child.0.id())).unwrap();
+        let actual = raw
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| {
+                let separator = entry.iter().position(|byte| *byte == b'=')?;
+                Some((&entry[..separator], &entry[separator + 1..]))
+            })
+            .collect::<Vec<_>>();
+        for (name, value) in expected {
+            let name = name.as_os_str().as_encoded_bytes();
+            let value = value.as_os_str().as_encoded_bytes();
+            assert!(
+                actual.iter().any(|(actual_name, actual_value)| {
+                    *actual_name == name && *actual_value == value
+                }),
+                "the login shell must receive the selected locale variable"
+            );
+        }
+        assert!(
+            actual
+                .iter()
+                .any(|(name, value)| *name == b"TERM" && *value == b"xterm-256color")
+        );
+        assert!(actual.iter().all(|(name, _)| {
+            *name == b"HOME"
+                || *name == b"USER"
+                || *name == b"LOGNAME"
+                || *name == b"SHELL"
+                || *name == b"TERM"
+                || *name == b"PATH"
+                || *name == b"ZDOTDIR"
+                || *name == b"LANG"
+                || name.starts_with(b"LC_")
+        }));
     }
 }

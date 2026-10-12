@@ -171,6 +171,17 @@ frames are binary, because they carry each keystroke and each output chunk.
   `Resume` and then `AttachTerm(last_out_seq)`. The server asks the agent,
   and the agent asks the shim with `ReadFrom`. The client gets the bytes
   from exactly `last_out_seq`, or a `Snapshot` if the ring has wrapped.
+- **Replay fence.** For each leg-B attach, the agent captures the shim's
+  `Hello.head_seq`. Replayed raw Output ends at that cursor; if an Output frame
+  crosses it, the agent splits the frame and sends an ordered
+  `terminal.replay_complete` Event before forwarding later live output. Its
+  JSON is `{"type":"terminal.replay_complete","session_id":"UUID","out_seq":"u64 decimal"}`.
+  Snapshot bytes are always silent. If a repaint advances beyond the current
+  fence, the fence advances to that Snapshot's `out_seq` and the Event follows
+  the repaint; otherwise the original fence remains until replay reaches it.
+  The browser suppresses VT replies while restoring replayed output or any
+  Snapshot, then allows replies from live output. The decimal string preserves
+  the full u64 cursor.
 - **Input.** The client keeps keystrokes that are not acknowledged. After a
   resume, it resends from the server's `in_seq_acked`. The server drops
   bytes below the offset that it already wrote. Thus, a keystroke is never
