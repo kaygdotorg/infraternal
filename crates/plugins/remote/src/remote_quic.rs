@@ -213,7 +213,9 @@ impl PeerFreshness {
     /// Return time without newly authenticated traffic. Counter wrap still
     /// changes this signature; duplicate and invalid packets never advance it.
     pub fn silence(&mut self, connection: &quinn::Connection) -> std::time::Duration {
-        let frames = authenticated_frames(connection);
+        self.recorded_silence(authenticated_frames(connection))
+    }
+    fn recorded_silence(&mut self, frames: [u64; 24]) -> std::time::Duration {
         if frames != self.frames {
             self.frames = frames;
             self.observed = tokio::time::Instant::now();
@@ -250,21 +252,29 @@ impl PeerFreshness {
     pub async fn interrupted_adaptive(&mut self, connection: &quinn::Connection) -> io::Result<()> {
         let mut observations = tokio::time::interval(std::time::Duration::from_millis(50));
         observations.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Preserve one closure subscription across observations instead of
+        // repeatedly locking Quinn and registering/cancelling its Notify waiter.
+        let mut closed = std::pin::pin!(connection.closed());
         loop {
             tokio::select! {
-                _ = connection.closed() => return Err(io::ErrorKind::BrokenPipe.into()),
+                _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
                 _ = observations.tick() => {
-                    let budget = connection.rtt().saturating_add(std::time::Duration::from_millis(200));
-                    if self.silence(connection) >= budget { return Err(io::ErrorKind::TimedOut.into()); }
+                    // One coherent state snapshot supplies both current RTT
+                    // and authenticated counters; raw UDP cannot buy liveness.
+                    let stats = connection.stats();
+                    let budget = stats.path.rtt.saturating_add(std::time::Duration::from_millis(200));
+                    if self.recorded_silence(authenticated_signature(stats.frame_rx)) >= budget { return Err(io::ErrorKind::TimedOut.into()); }
                 }
             }
         }
     }
 }
 fn authenticated_frames(connection: &quinn::Connection) -> [u64; 24] {
+    authenticated_signature(connection.stats().frame_rx)
+}
+fn authenticated_signature(frames: quinn::FrameStats) -> [u64; 24] {
     // Quinn records these only after decryption and packet deduplication. Do
     // not substitute udp_rx: unauthenticated datagrams can change that count.
-    let frames = connection.stats().frame_rx;
     [
         frames.acks,
         frames.ack_frequency,
