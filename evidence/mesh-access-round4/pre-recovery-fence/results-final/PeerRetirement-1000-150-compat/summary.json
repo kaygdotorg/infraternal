@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    7782400,
+    8323072,
+    8433664
+  ],
+  "projected_1000_nodes_rss_bytes": 8433664000,
+  "coordinator_three_live_workers_rss_bytes": 27160576,
+  "result": "PASS",
+  "change": "PeerRetirement",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "1.84 1.40 1.09 1/16882 358773",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.353,
+    150.123
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    999,
+    999
+  ],
+  "revocation_to_last_peer_refusing_us": 548390.336,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 136,
+      "last_packet_us": 365971.24,
+      "retired_us": 548390.336
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 282395.661,
+      "retired_us": 548390.336
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 136,
+      "last_packet_us": 365970.95,
+      "retired_us": 548390.336
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 281974.794,
+      "retired_us": 548390.336
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 134,
+      "last_packet_us": 354763.522,
+      "retired_us": 520701.984
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 281971.245,
+      "retired_us": 520701.984
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 134,
+      "last_packet_us": 354763.833,
+      "retired_us": 520701.984
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 281687.784,
+      "retired_us": 520701.984
+    }
+  ]
+}

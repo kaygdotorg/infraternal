@@ -1,0 +1,16 @@
+Running as unit: run-p3963918-i3964218.scope; invocation ID: a29af203e97546ba863b083415166b5b
+
+running 1 test
+test nft_split_snapshot_replay_requires_complete_identical_contents ... 
+thread 'nft_split_snapshot_replay_requires_complete_identical_contents' (3963931) panicked at crates/plugins/mesh/tests/policy_snapshot_ordering.rs:128:5:
+conflicting replay was not refused
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    nft_split_snapshot_replay_requires_complete_identical_contents
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.68s
+

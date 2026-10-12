@@ -150,6 +150,8 @@ pub struct NodeEnroll {
     pub name: String,
     /// Public `WireGuard` key only.
     pub public_key: [u8; 32],
+    /// Optional authenticated remote host explicitly authorized by node management.
+    pub host_id: Option<String>,
 }
 
 /// Node liveness observation supplied by the control-plane integration.
@@ -357,6 +359,12 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiEr
             validate_host(&input.name)?;
             if input.public_key == [0; 32] {
                 return Err(MeshApiError::InvalidInput);
+            }
+            if let Some(host) = &input.host_id {
+                let id = uuid::Uuid::parse_str(host).map_err(|_| MeshApiError::InvalidInput)?;
+                if id.to_string() != *host {
+                    return Err(MeshApiError::InvalidInput);
+                }
             }
         }
         MeshRequest::ObserveNode(input) => {
@@ -791,6 +799,19 @@ impl MeshService {
     ) -> Result<(u64, u64), MeshApiError> {
         let mut tx = self.begin_change().await?;
         authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
+        if let Some(host) = &request.host_id {
+            let id = uuid::Uuid::parse_str(host).map_err(|_| MeshApiError::InvalidInput)?;
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND revoked_at IS NULL)",
+            )
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_sql_error)?;
+            if !exists {
+                return Err(MeshApiError::NotFound);
+            }
+        }
         // Persist allocation history independently of live rows. Explicitly imported
         // IDs also advance allocation; exhaustion refuses before any identity is issued.
         let id: i64 = sqlx::query_scalar(
@@ -801,13 +822,23 @@ impl MeshService {
         .await
         .map_err(map_sql_error)?
         .ok_or(MeshApiError::Conflict)?;
-        sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us) VALUES (?,?,?,NULL,NULL)")
+        sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us,dataplane_host) VALUES (?,?,?,NULL,NULL,?)")
             .bind(id)
             .bind(&request.name)
             .bind(request.public_key.as_slice())
+            .bind(&request.host_id)
             .execute(&mut *tx)
             .await
             .map_err(map_sql_error)?;
+        if let Some(host) = &request.host_id {
+            // Only explicit management authority clears removal, atomically with
+            // binding. A later channel quoting a public key has no such authority [166].
+            sqlx::query("DELETE FROM mesh_dataplane_removed WHERE host=?")
+                .bind(host)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sql_error)?;
+        }
         let revision = self
             .finish_change(
                 tx,
@@ -815,7 +846,7 @@ impl MeshService {
                 "mesh.node.enroll",
                 &request.name,
                 now,
-                json!({"node_id":id,"name":request.name}),
+                json!({"node_id":id,"name":request.name,"host_id":request.host_id}),
                 None,
             )
             .await?;

@@ -190,6 +190,7 @@ mod tests {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let config = Config {
+            local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),
             version: 7,

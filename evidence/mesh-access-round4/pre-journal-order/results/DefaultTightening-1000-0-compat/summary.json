@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    8159232,
+    8278016,
+    8314880
+  ],
+  "projected_1000_nodes_rss_bytes": 8314880000,
+  "coordinator_three_live_workers_rss_bytes": 26099712,
+  "result": "PASS",
+  "change": "DefaultTightening",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 0,
+  "load": "1.16 1.68 1.05 1/9258 283236",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    0.051,
+    0.052
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    1000,
+    1000
+  ],
+  "revocation_to_last_peer_refusing_us": 1762003.035,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 296,
+      "last_packet_us": 1385179.42,
+      "retired_us": 1762003.035
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 296,
+      "last_packet_us": 1385232.214,
+      "retired_us": 1762003.035
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 307,
+      "last_packet_us": 1446251.351,
+      "retired_us": 1762003.035
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 307,
+      "last_packet_us": 1446266.706,
+      "retired_us": 1762003.035
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 296,
+      "last_packet_us": 1385384.706,
+      "retired_us": 1651483.895
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 296,
+      "last_packet_us": 1385240.334,
+      "retired_us": 1651483.895
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 307,
+      "last_packet_us": 1446265.224,
+      "retired_us": 1651483.895
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 307,
+      "last_packet_us": 1446396.009,
+      "retired_us": 1651483.895
+    }
+  ]
+}

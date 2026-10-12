@@ -83,6 +83,15 @@ pub struct EnrollmentStore(
 );
 
 impl EnrollmentStore {
+    /// Bind commit publication to the existing plugin runtime without retaining it.
+    /// Clones share this binding with every admitted transport and authority writer.
+    pub fn bind_plugins(&self, runtime: &crate::plugins::PluginRuntime) {
+        *self
+            .1
+            .plugins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime.downgrade();
+    }
     /// Use an already migrated server database. This creates no listener/timer.
     /// Each construction creates a distinct revocation scope; cloning retains it.
     #[must_use]

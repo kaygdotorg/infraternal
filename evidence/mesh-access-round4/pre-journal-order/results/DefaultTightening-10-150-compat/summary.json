@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    6336512,
+    6389760,
+    6213632
+  ],
+  "projected_1000_nodes_rss_bytes": 6389760000,
+  "coordinator_three_live_workers_rss_bytes": 12632064,
+  "result": "PASS",
+  "change": "DefaultTightening",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "1.78 1.17 0.57 1/11648 266888",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.133,
+    150.158
+  ],
+  "installed_peers_before": [
+    10,
+    10,
+    10
+  ],
+  "installed_peers_after": [
+    10,
+    10
+  ],
+  "revocation_to_last_peer_refusing_us": 509019.257,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 117,
+      "last_packet_us": 256695.671,
+      "retired_us": 508977.178
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186763.129,
+      "retired_us": 508977.178
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 124,
+      "last_packet_us": 294602.221,
+      "retired_us": 508977.178
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 278538.936,
+      "retired_us": 508977.178
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 117,
+      "last_packet_us": 256699.777,
+      "retired_us": 509019.257
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186703.837,
+      "retired_us": 509019.257
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 124,
+      "last_packet_us": 294787.155,
+      "retired_us": 509019.257
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 120,
+      "last_packet_us": 278385.803,
+      "retired_us": 509019.257
+    }
+  ]
+}

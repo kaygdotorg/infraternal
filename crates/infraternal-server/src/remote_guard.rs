@@ -18,6 +18,7 @@ pub(crate) struct Revocations {
     // Storage refusal must not let the last transport drop the cancellation
     // signal and permit a reconnect. Successful tombstones release this hold.
     cuts: Mutex<HashMap<Uuid, Arc<Revocation>>>,
+    pub(crate) plugins: Mutex<crate::plugins::WeakRuntime>,
     #[cfg(test)]
     pub(crate) publication_pause: Mutex<Option<Arc<PublicationPause>>>,
 }

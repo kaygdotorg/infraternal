@@ -1,0 +1,59 @@
+{
+  "family": "ipv6",
+  "backend": "compatibility",
+  "acknowledged": [
+    {
+      "applied": true,
+      "apply_us": 455753
+    },
+    {
+      "applied": true,
+      "apply_us": 673887
+    }
+  ],
+  "before": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 56488,
+      "dport": 59558,
+      "id": "a5841b3f",
+      "zone": "0000"
+    },
+    {
+      "src": "fd01:203:405::1",
+      "dst": "fd01:203:405::2",
+      "protocol": 6,
+      "sport": 38504,
+      "dport": 5540,
+      "id": "8357b18d",
+      "zone": "0000"
+    }
+  ],
+  "after": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 56488,
+      "dport": 59558,
+      "id": "a5841b3f",
+      "zone": "0000"
+    }
+  ],
+  "recreated": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 56488,
+      "dport": 59558,
+      "id": "a5841b3f",
+      "zone": "0000"
+    }
+  ],
+  "reverse": "",
+  "received": "",
+  "refused": true
+}

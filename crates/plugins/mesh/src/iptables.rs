@@ -37,6 +37,15 @@ impl Ownership {
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
+    apply_with_aliases(config, installed, &[], false, config)
+}
+pub(crate) fn apply_with_aliases(
+    config: &Config,
+    installed: bool,
+    aliases: &[crate::policy::model::Addresses],
+    fence: bool,
+    connections: &Config,
+) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
     let installed = if installed {
@@ -51,10 +60,30 @@ pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
     // Preflight both families before mutating either. Restore batches are atomic
     // per table; an interrupted table/family is fenced or rolled back by the caller.
     for (index, tool) in TOOLS.iter().enumerate() {
-        test(tool, &render(config, index == 1, installed[index]))?;
+        test(
+            tool,
+            &render_with_aliases(
+                config,
+                index == 1,
+                installed[index],
+                aliases,
+                fence,
+                connections,
+            ),
+        )?;
     }
     for (index, tool) in TOOLS.iter().enumerate() {
-        run(tool, &render(config, index == 1, installed[index]))?;
+        run(
+            tool,
+            &render_with_aliases(
+                config,
+                index == 1,
+                installed[index],
+                aliases,
+                fence,
+                connections,
+            ),
+        )?;
     }
     Ok(())
 }
@@ -148,8 +177,27 @@ fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
         .args(["-t", table, "-S", chain])
         .stderr(Stdio::null())
         .output()?;
+    // -S emits one canonical rule per line. Match the complete marker rule,
+    // including its table-selected chain, interface/state selector and verdict.
+    // Neither a containing comment nor a marker on another rule is authority.
+    let marker = match (table, chain) {
+        ("raw", GUARD) | ("filter", DELIVERY) => format!(
+            "-A {chain} -i {INTERFACE} -m comment --comment \"infraternal.mesh.v1\" -j RETURN"
+        ),
+        ("filter", "IFM_IN" | "IFM_OUT") => format!(
+            "-A {chain} -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment \"infraternal.mesh.v1\" -j ACCEPT"
+        ),
+        ("filter", "IFM_FWD") => {
+            format!("-A {chain} -m comment --comment \"infraternal.mesh.v1\" -j DROP")
+        }
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
     match output.status.code() {
-        Some(0) if String::from_utf8_lossy(&output.stdout).contains("infraternal.mesh.v1") => {
+        Some(0)
+            if String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == marker) =>
+        {
             Ok(true)
         }
         Some(0) => Err(io::ErrorKind::AlreadyExists.into()),
@@ -188,23 +236,44 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
     }
 }
 // Keep the complete per-family atomic restore batch visible together.
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
+    render_with_aliases(config, ipv6, installed, &[], false, config)
+}
+// A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
+#[allow(clippy::too_many_lines)]
+fn render_with_aliases(
+    config: &Config,
+    ipv6: bool,
+    installed: Ownership,
+    aliases: &[crate::policy::model::Addresses],
+    fence: bool,
+    connections: &Config,
+) -> String {
+    let connections = if fence { connections } else { config };
     let mut script = String::from("*raw\n");
     if installed.guard {
         let _ = writeln!(script, "-F {GUARD}");
     } else {
         let _ = writeln!(script, ":{GUARD} - [0:0]");
     }
-    let address = if ipv6 {
-        config.addresses.ipv6.to_string()
-    } else {
-        config.addresses.ipv4.to_string()
-    };
+    let addresses: Vec<_> = std::iter::once(&config.addresses)
+        .chain(aliases)
+        .map(|addresses| {
+            if ipv6 {
+                addresses.ipv6.to_string()
+            } else {
+                addresses.ipv4.to_string()
+            }
+        })
+        .collect();
     let _ = writeln!(
         script,
-        "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN\n-A {GUARD} -d {address} -j DROP"
+        "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN"
     );
+    for address in &addresses {
+        let _ = writeln!(script, "-A {GUARD} -d {address} -j DROP");
+    }
     if !installed.guard {
         let _ = writeln!(script, "-I PREROUTING 1 -j {GUARD}");
     }
@@ -219,8 +288,11 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
     // Translation preserves the incoming interface; lo remains node-local [231].
     let _ = writeln!(
         script,
-        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN\n-A {DELIVERY} -d {address} -j DROP"
+        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
     );
+    for address in &addresses {
+        let _ = writeln!(script, "-A {DELIVERY} -d {address} -j DROP");
+    }
     if !installed.delivery {
         // Older owned filter chains remain valid; add this fence atomically
         // when adopting them rather than duplicating their interface hooks.
@@ -241,20 +313,12 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
                 script,
                 "-A {chain} -m comment --comment infraternal.mesh.v1 -j DROP"
             );
-            continue;
         }
-        let _ = writeln!(
-            script,
-            "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment infraternal.mesh.v1 -j ACCEPT"
-        );
     }
     // Compact contiguous equal grants. An open 1,000-node allocation becomes
     // one range match per direction/family, without granting a gap in membership.
-    let mut groups = std::collections::BTreeMap::<
-        (usize, Option<crate::policy::rules::Port>),
-        std::collections::BTreeSet<u128>,
-    >::new();
-    for peer in config.peers.values() {
+    let mut groups = Groups::new();
+    for peer in connections.peers.values() {
         let address = if ipv6 {
             u128::from(peer.peer.addresses.ipv6)
         } else {
@@ -277,58 +341,64 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
             }
         }
     }
-    for ((direction, port), addresses) in groups {
-        let chain = CHAINS[direction];
-        let flag = if direction == 0 { "-s" } else { "-d" };
-        let range_flag = if direction == 0 {
-            "--src-range"
-        } else {
-            "--dst-range"
-        };
-        let mut ranges = Vec::<(u128, u128)>::new();
-        for address in addresses {
-            if let Some((_, end)) = ranges.last_mut()
-                && end.checked_add(1) == Some(address)
-            {
-                *end = address;
-            } else {
-                ranges.push((address, address));
-            }
+    render_connection_checks(&mut script, connections, ipv6, &groups);
+    for chain in &CHAINS[..2] {
+        // Retired original and reply indexes must not be recreated by loose
+        // tracking of a continuation packet. Preserve established permitted
+        // streams, but require an initiating SYN for fresh TCP state [242].
+        let _ = writeln!(
+            script,
+            "-A {chain} -p tcp -m conntrack --ctstate NEW ! --syn -j DROP"
+        );
+        {
+            // State with no current initiating permission must never fall
+            // through to the ordinary destination-port rules [242].
+            let _ = writeln!(
+                script,
+                "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED -j DROP"
+            );
         }
-        for (start, end) in ranges {
-            let display = |address: u128| {
-                if ipv6 {
-                    std::net::Ipv6Addr::from(address).to_string()
-                } else {
-                    {
-                        // v4 groups are populated only from u32 addresses above.
-                        let bytes = address.to_be_bytes();
-                        std::net::Ipv4Addr::from([bytes[12], bytes[13], bytes[14], bytes[15]])
-                            .to_string()
-                    }
-                }
-            };
-            let selector = if start == end {
-                format!("{flag} {}", display(start))
+        // Keep the exact v1 ownership marker for adoption of retained tables.
+        // On accepted revisions the preceding state check makes it unreachable.
+        let _ = writeln!(
+            script,
+            "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment infraternal.mesh.v1 -j ACCEPT"
+        );
+    }
+    if !fence {
+        for ((direction, port), addresses) in groups {
+            let chain = CHAINS[direction];
+            let flag = if direction == 0 { "-s" } else { "-d" };
+            let range_flag = if direction == 0 {
+                "--src-range"
             } else {
-                format!(
-                    "-m iprange {range_flag} {}-{}",
-                    display(start),
-                    display(end)
-                )
+                "--dst-range"
             };
-            let service = port.map_or_else(String::new, |port| {
-                format!(
-                    " -p {} --dport {}",
-                    if port.protocol == Protocol::Tcp {
-                        "tcp"
-                    } else {
-                        "udp"
-                    },
-                    port.number
-                )
-            });
-            let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
+            let ranges = address_ranges(addresses);
+            for (start, end) in ranges {
+                let display = |address| display_address(address, ipv6);
+                let selector = if start == end {
+                    format!("{flag} {}", display(start))
+                } else {
+                    format!(
+                        "-m iprange {range_flag} {}-{}",
+                        display(start),
+                        display(end)
+                    )
+                };
+                let service = port.map_or_else(String::new, |port| {
+                    format!(
+                        " -p {} --dport {}",
+                        if port.protocol == Protocol::Tcp {
+                            "tcp"
+                        } else {
+                            "udp"
+                        },
+                        port.number
+                    )
+                });
+                let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
+            }
         }
     }
     for chain in &CHAINS[..2] {
@@ -341,6 +411,95 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
     }
     script.push_str("COMMIT\n");
     script
+}
+
+type Groups = std::collections::BTreeMap<
+    (usize, Option<crate::policy::rules::Port>),
+    std::collections::BTreeSet<u128>,
+>;
+fn address_ranges(addresses: impl IntoIterator<Item = u128>) -> Vec<(u128, u128)> {
+    let mut ranges = Vec::<(u128, u128)>::new();
+    for address in addresses {
+        if let Some((_, end)) = ranges.last_mut()
+            && end.checked_add(1) == Some(address)
+        {
+            *end = address;
+        } else {
+            ranges.push((address, address));
+        }
+    }
+    ranges
+}
+fn display_address(address: u128, ipv6: bool) -> String {
+    if ipv6 {
+        std::net::Ipv6Addr::from(address).to_string()
+    } else {
+        let bytes = address.to_be_bytes();
+        std::net::Ipv4Addr::from([bytes[12], bytes[13], bytes[14], bytes[15]]).to_string()
+    }
+}
+// Conntrack selectors accept CIDRs, not address intervals. Cover an interval
+// exactly with aligned prefixes, never including a gap in member ownership.
+fn prefixes(mut start: u128, end: u128, ipv6: bool) -> Vec<String> {
+    let width = if ipv6 { 128 } else { 32 };
+    let mut result = Vec::new();
+    loop {
+        let remaining = end - start;
+        let size_bits = if remaining == u128::MAX {
+            128
+        } else {
+            (remaining + 1).ilog2()
+        };
+        let bits = start.trailing_zeros().min(size_bits).min(width);
+        result.push(format!("{}/{}", display_address(start, ipv6), width - bits));
+        if bits == 128 {
+            break;
+        }
+        let size = 1_u128 << bits;
+        if remaining < size {
+            break;
+        }
+        start += size;
+    }
+    result
+}
+fn render_connection_checks(script: &mut String, config: &Config, ipv6: bool, groups: &Groups) {
+    let local = if ipv6 {
+        config.addresses.ipv6.to_string()
+    } else {
+        config.addresses.ipv4.to_string()
+    };
+    for ((direction, port), addresses) in groups {
+        let (peer_field, local_field) = if *direction == 0 {
+            ("--ctorigsrc", "--ctorigdst")
+        } else {
+            ("--ctorigdst", "--ctorigsrc")
+        };
+        let service = port.map_or_else(String::new, |port| {
+            format!(
+                " --ctproto {} --ctorigdstport {}",
+                if port.protocol == Protocol::Tcp {
+                    "tcp"
+                } else {
+                    "udp"
+                },
+                port.number
+            )
+        });
+        for (start, end) in address_ranges(addresses.iter().copied()) {
+            for prefix in prefixes(start, end, ipv6) {
+                for (chain, packet_direction) in [
+                    (CHAINS[*direction], "ORIGINAL"),
+                    (CHAINS[1 - *direction], "REPLY"),
+                ] {
+                    let _ = writeln!(
+                        script,
+                        "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir {packet_direction} {peer_field} {prefix} {local_field} {local}{service} -j ACCEPT"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +516,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01u128 << 112) + u128::from(id)),
         };
         Config {
+            local_key: None,
             server: None,
             node: NodeId(0),
             version: 1,
@@ -380,6 +540,17 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+    #[test]
+    fn initiating_prefixes_cover_only_owned_intervals_even_at_family_boundaries() {
+        assert_eq!(prefixes(2, 3, false), ["0.0.0.2/31"]);
+        assert_eq!(prefixes(5, 6, false), ["0.0.0.5/32", "0.0.0.6/32"]);
+        assert_eq!(prefixes(0, u128::from(u32::MAX), false), ["0.0.0.0/0"]);
+        assert_eq!(prefixes(0, u128::MAX, true), ["::/0"]);
+        assert_eq!(
+            prefixes(u128::MAX, u128::MAX, true),
+            ["ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"]
+        );
     }
     #[test]
     fn contiguous_open_members_use_ranges_without_opening_gaps() {
@@ -408,8 +579,14 @@ mod tests {
                 delivery: true,
             },
         );
-        assert_eq!(rules.matches("ESTABLISHED,RELATED").count(), 2);
-        assert_eq!(rules.matches("-j DROP").count(), 5);
+        assert_eq!(rules.matches("ESTABLISHED,RELATED").count(), 4);
+        assert_eq!(rules.matches("-j DROP").count(), 9);
+        assert_eq!(
+            rules
+                .matches("-p tcp -m conntrack --ctstate NEW ! --syn -j DROP")
+                .count(),
+            2
+        );
         assert!(!rules.contains("-I INPUT"));
         assert!(!rules.contains("-m iprange"));
     }

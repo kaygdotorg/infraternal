@@ -204,7 +204,70 @@ impl Device {
             attribute(&mut payload, 8, &0x02_u32.to_ne_bytes())?;
             route.request(20, 4 | 0x100 | 0x400, &payload)?;
         }
+        // A removed identity can be explicitly re-enrolled at new host addresses.
+        // Reconcile the owned interface on every replay as well, so an abrupt
+        // stop during replacement cannot leave an old /32 or /128 alias live.
+        // Kernel-managed link-local prefixes are outside this host-address set.
+        for address in Self::host_addresses()? {
+            let (family, prefix, bytes, retained) = match address {
+                IpAddr::V4(address) => {
+                    (2, 32, address.octets().to_vec(), address == addresses.ipv4)
+                }
+                IpAddr::V6(address) => (
+                    10,
+                    128,
+                    address.octets().to_vec(),
+                    address == addresses.ipv6,
+                ),
+            };
+            if !retained {
+                let mut payload = vec![family, prefix, 0, 0];
+                payload.extend(index.to_ne_bytes());
+                attribute(&mut payload, 1, &bytes)?;
+                attribute(&mut payload, 2, &bytes)?;
+                if let Err(error) = route.request(21, 4, &payload)
+                    && error.raw_os_error() != Some(99)
+                {
+                    return Err(error);
+                }
+            }
+        }
         activate(index)
+    }
+    /// Read only local /32 and /128 aliases on the owned interface for recovery fencing.
+    pub(crate) fn host_addresses() -> io::Result<BTreeSet<IpAddr>> {
+        let index = index()?;
+        let mut route = Socket::open(SockProtocol::NetlinkRoute)?;
+        let mut addresses = BTreeSet::new();
+        for reply in route.request(22, 0x300, &[0; 8])? {
+            let header = reply.get(..8).ok_or(io::ErrorKind::InvalidData)?;
+            if netlink::u32_at(header, 4)? != index
+                || !matches!((header[0], header[1]), (2, 32) | (10, 128))
+            {
+                continue;
+            }
+            let mut local = None;
+            let mut address = None;
+            for field in netlink::attributes(&reply[8..])? {
+                match field.kind {
+                    1 => address = Some(field.payload),
+                    2 => local = Some(field.payload),
+                    _ => {}
+                }
+            }
+            let bytes = local.or(address).ok_or(io::ErrorKind::InvalidData)?;
+            let address = match header[0] {
+                2 => IpAddr::V4(std::net::Ipv4Addr::from(
+                    <[u8; 4]>::try_from(bytes).map_err(|_| io::ErrorKind::InvalidData)?,
+                )),
+                10 => IpAddr::V6(std::net::Ipv6Addr::from(
+                    <[u8; 16]>::try_from(bytes).map_err(|_| io::ErrorKind::InvalidData)?,
+                )),
+                _ => return Err(io::ErrorKind::InvalidData.into()),
+            };
+            addresses.insert(address);
+        }
+        Ok(addresses)
     }
     /// Apply peers through a temporary client; persistent node owners reuse `Client`.
     /// # Errors

@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/crates/plugins/mesh)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.42s

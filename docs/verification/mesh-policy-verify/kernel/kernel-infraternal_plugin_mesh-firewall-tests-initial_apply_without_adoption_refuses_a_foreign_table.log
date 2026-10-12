@@ -1,0 +1,7 @@
+Running as unit: run-p4110970-i4111270.scope; invocation ID: 8663a07f1151491baf06d1c8ac5f71cf
+
+running 1 test
+test firewall::tests::initial_apply_without_adoption_refuses_a_foreign_table ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.07s
+

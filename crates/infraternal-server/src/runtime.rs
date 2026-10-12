@@ -395,6 +395,7 @@ async fn remote_router(
         crate::remote_runtime::RemoteHosts,
         Option<RemoteListeners>,
         Option<crate::remote_http::InvitationIssuer>,
+        crate::enrollment::EnrollmentStore,
     ),
     ServerError,
 > {
@@ -453,7 +454,7 @@ async fn remote_router(
     let removal = crate::remote_removal::Removal::new(
         auth.clone(),
         pool.clone(),
-        enrollment_store,
+        enrollment_store.clone(),
         hosts.clone(),
         trust,
     );
@@ -465,6 +466,7 @@ async fn remote_router(
         hosts,
         listeners,
         issuer,
+        enrollment_store,
     ))
 }
 
@@ -556,7 +558,7 @@ async fn build_router_core(
         EmbeddedAgent::spawn(executable)
     };
     #[cfg(feature = "remote")]
-    let (ca_api, remote_api, hosts, listeners, issuer) = remote_router(
+    let (ca_api, remote_api, hosts, listeners, issuer, enrollment_store) = remote_router(
         auth.clone(),
         pool.clone(),
         enrollment,
@@ -588,6 +590,8 @@ async fn build_router_core(
         .with_plugin_descriptors(catalog.unwrap_or_else(infraternal_agent::plugins::descriptors));
     #[cfg(feature = "remote")]
     let ws_state = ws_state.with_remote_hosts(hosts.clone());
+    #[cfg(feature = "remote")]
+    enrollment_store.bind_plugins(&ws_state.plugins);
     #[cfg(not(feature = "remote"))]
     let listeners = None;
     if owns_node_workers {

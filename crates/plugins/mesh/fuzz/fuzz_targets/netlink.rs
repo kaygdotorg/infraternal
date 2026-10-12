@@ -7,6 +7,7 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     let _ = netlink::messages(data);
     let _ = netlink::host_address(data);
+    let _ = netlink::connection_tuple(data);
     if let Ok(attributes) = netlink::attributes(data) {
         for attribute in attributes {
             if attribute.nested {

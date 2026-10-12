@@ -1,0 +1,59 @@
+{
+  "family": "ipv4",
+  "backend": "compatibility",
+  "acknowledged": [
+    {
+      "applied": true,
+      "apply_us": 510040
+    },
+    {
+      "applied": true,
+      "apply_us": 581770
+    }
+  ],
+  "before": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 56583,
+      "dport": 45746,
+      "id": "ce55abbe",
+      "zone": "0000"
+    },
+    {
+      "src": "10.254.0.1",
+      "dst": "10.254.0.2",
+      "protocol": 6,
+      "sport": 56656,
+      "dport": 5540,
+      "id": "93c65658",
+      "zone": "0000"
+    }
+  ],
+  "after": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 56583,
+      "dport": 45746,
+      "id": "ce55abbe",
+      "zone": "0000"
+    }
+  ],
+  "recreated": [
+    {
+      "src": "10.220.0.2",
+      "dst": "10.220.0.1",
+      "protocol": 17,
+      "sport": 56583,
+      "dport": 45746,
+      "id": "ce55abbe",
+      "zone": "0000"
+    }
+  ],
+  "reverse": "",
+  "received": "",
+  "refused": true
+}

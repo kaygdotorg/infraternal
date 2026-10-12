@@ -245,7 +245,11 @@ mod tests {
     }
     impl NodeChannel for Channel {
         fn id(&self) -> &'static str {
-            if self.server { "server" } else { "host" }
+            if self.server {
+                "server"
+            } else {
+                "00000000-0000-4000-8000-000000000001"
+            }
         }
         fn observed_ip(&self) -> std::net::IpAddr {
             std::net::Ipv4Addr::new(192, 0, 2, 1).into()
@@ -328,6 +332,9 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('owner','owner',1,'fixture','owner','Owner')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)")
+            .bind(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap().as_bytes().as_slice())
+            .execute(&pool).await.unwrap();
         let service = MeshService::new(pool);
         service
             .dataplane()
@@ -421,7 +428,7 @@ mod tests {
         channel.wait().await;
         let (node, _) = store
             .attach(
-                "host",
+                "00000000-0000-4000-8000-000000000001",
                 PublicKey([2; 32]),
                 Some("192.0.2.1:44000".parse().unwrap()),
                 false,
@@ -512,7 +519,7 @@ mod tests {
         channel.wait().await;
         let (old, _) = store
             .attach(
-                "host",
+                "00000000-0000-4000-8000-000000000001",
                 PublicKey([2; 32]),
                 Some("192.0.2.1:44000".parse().unwrap()),
                 false,
@@ -530,7 +537,12 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .attach("host", PublicKey([2; 32]), None, false)
+                .attach(
+                    "00000000-0000-4000-8000-000000000001",
+                    PublicKey([2; 32]),
+                    None,
+                    false
+                )
                 .await
                 .is_err()
         );
@@ -539,7 +551,7 @@ mod tests {
                 "owner",
                 "mesh.node.enroll",
                 &serde_json::to_vec(
-                    &serde_json::json!({"name":"reenrolled","public_key":PublicKey([2;32])}),
+                    &serde_json::json!({"name":"reenrolled","public_key":PublicKey([2;32]),"host_id":"00000000-0000-4000-8000-000000000001"}),
                 )
                 .unwrap(),
                 1_800_000_000,
@@ -549,7 +561,7 @@ mod tests {
         channel.wait().await;
         let (new, _) = store
             .attach(
-                "host",
+                "00000000-0000-4000-8000-000000000001",
                 PublicKey([2; 32]),
                 Some("192.0.2.1:44000".parse().unwrap()),
                 false,

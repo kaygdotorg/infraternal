@@ -1,0 +1,33 @@
+    Blocking waiting for file lock on build directory
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/crates/plugins/mesh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 00s
+     Running tests/policy_enrollment_binding.rs (/home/kayg/.cache/codex-scratch/mesh-policy-verify/target/debug/deps/policy_enrollment_binding-e07df2feed38aaf7)
+
+running 3 tests
+test host_binding_requires_global_authority_and_existing_unrevoked_host ... FAILED
+test explicit_binding_preserves_identity_and_clears_removal_only_on_enrollment ... FAILED
+test noncanonical_host_binding_is_refused ... ok
+
+failures:
+
+---- host_binding_requires_global_authority_and_existing_unrevoked_host stdout ----
+
+thread 'host_binding_requires_global_authority_and_existing_unrevoked_host' (3953683) panicked at crates/plugins/mesh/tests/policy_enrollment_binding.rs:90:5:
+assertion `left == right` failed
+  left: InvalidInput
+ right: Denied
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- explicit_binding_preserves_identity_and_clears_removal_only_on_enrollment stdout ----
+
+thread 'explicit_binding_preserves_identity_and_clears_removal_only_on_enrollment' (3953681) panicked at crates/plugins/mesh/tests/policy_enrollment_binding.rs:62:57:
+called `Result::unwrap()` on an `Err` value: InvalidInput
+
+
+failures:
+    explicit_binding_preserves_identity_and_clears_removal_only_on_enrollment
+    host_binding_requires_global_authority_and_existing_unrevoked_host
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+error: test failed, to rerun pass `-p infraternal-plugin-mesh --test policy_enrollment_binding`

@@ -1,0 +1,7 @@
+Running as unit: run-p4123523-i4123823.scope; invocation ID: dfd0cccccbd541d59726eb0d200aba5c
+
+running 1 test
+test restart_retires_orphan_peer_host_routes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+

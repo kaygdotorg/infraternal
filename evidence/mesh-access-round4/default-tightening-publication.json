@@ -1,0 +1,36 @@
+[
+  {
+    "backend": "nft",
+    "revision": 1003,
+    "change_frames": 102,
+    "receiving_nodes": [
+      {
+        "node": 1,
+        "frames": 34,
+        "last_apply_us": 57951
+      },
+      {
+        "node": 2,
+        "frames": 34,
+        "last_apply_us": 36509
+      }
+    ]
+  },
+  {
+    "backend": "compat",
+    "revision": 1003,
+    "change_frames": 102,
+    "receiving_nodes": [
+      {
+        "node": 1,
+        "frames": 34,
+        "last_apply_us": 199210
+      },
+      {
+        "node": 2,
+        "frames": 34,
+        "last_apply_us": 154577
+      }
+    ]
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "nf_tables_equal_version_conflicting_snapshot_is_refused",
+    "exit": 0
+  },
+  {
+    "name": "nf_tables_snapshot_cannot_replace_local_node_identity",
+    "exit": 0
+  },
+  {
+    "name": "nf_tables_split_snapshot_replay_requires_complete_identical_contents",
+    "exit": 0
+  },
+  {
+    "name": "nft_equal_version_conflicting_snapshot_is_refused",
+    "exit": 0
+  },
+  {
+    "name": "nft_snapshot_cannot_replace_local_node_identity",
+    "exit": 0
+  },
+  {
+    "name": "nft_split_snapshot_replay_requires_complete_identical_contents",
+    "exit": 0
+  }
+]

@@ -1,0 +1,8 @@
+Running as unit: run-p4102774-i4103074.scope; invocation ID: e3590cfe0ee447e8a62c33d03f746b22
+
+running 1 test
+test real_kernel_chunked_peers ... METRIC kernel_peers machine=infraternal-dev peers=1000 apply_us=56748 single_peer_us=47 load=58.88 55.27 45.34 68/1561 4102791
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 44.08s
+

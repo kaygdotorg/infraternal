@@ -1,0 +1,16 @@
+Running as unit: run-p1154363-i5348326.scope; invocation ID: a81d976a40da4ac4b676c7495c9a39b9
+
+running 1 test
+test nft_equal_version_conflicting_snapshot_is_refused ... 
+thread 'nft_equal_version_conflicting_snapshot_is_refused' (1154364) panicked at crates/plugins/mesh/tests/policy_snapshot_ordering.rs:79:5:
+conflicting snapshot was accepted: Config { node: NodeId(1), version: 10, addresses: Addresses { ipv4: 10.254.0.1, ipv6: fd01::1 }, default_policy: Deny, peers: {NodeId(2): PeerPolicy { peer: Peer { key: PublicKey([126, 241, 205, 240, 94, 156, 153, 80, 116, 234, 93, 41, 48, 69, 193, 29, 129, 35, 153, 232, 183, 208, 123, 100, 219, 101, 222, 12, 202, 180, 132, 94]), addresses: Addresses { ipv4: 10.254.0.2, ipv6: fd01::2 }, endpoint: None }, inbound: All, outbound: All }} }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    nft_equal_version_conflicting_snapshot_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.48s
+

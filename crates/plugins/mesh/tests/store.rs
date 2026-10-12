@@ -84,7 +84,10 @@ async fn removed_host_cannot_restore_membership_without_authorized_enrollment() 
     let pool = pool().await;
     let store = Store::new(pool.clone());
     store.attach("server", key(1), None, true).await.unwrap();
-    let (node, _) = store.attach("host", key(2), None, false).await.unwrap();
+    let (node, _) = store
+        .attach("00000000-0000-4000-8000-000000000001", key(2), None, false)
+        .await
+        .unwrap();
     let old = store.config(node).await.unwrap();
     sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('owner','owner',1,'fixture','owner','Owner')").execute(&pool).await.unwrap();
     let service = MeshService::new(pool.clone());
@@ -93,20 +96,26 @@ async fn removed_host_cannot_restore_membership_without_authorized_enrollment() 
         .execute("owner", "mesh.node.delete", &input, 1_800_000_000)
         .await
         .unwrap();
-    assert!(store.attach("host", key(2), None, false).await.is_err());
-    assert!(store.attach("host", key(3), None, false).await.is_err());
-    sqlx::query("UPDATE mesh_state SET node_id_high_water=node_id_high_water+1,revision=revision+1 WHERE singleton=1").execute(&pool).await.unwrap();
-    let next: i64 = sqlx::query_scalar("SELECT node_id_high_water FROM mesh_state")
-        .fetch_one(&pool)
+    assert!(
+        store
+            .attach("00000000-0000-4000-8000-000000000001", key(2), None, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .attach("00000000-0000-4000-8000-000000000001", key(3), None, false)
+            .await
+            .is_err()
+    );
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)")
+        .bind(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap().as_bytes().as_slice())
+        .execute(&pool).await.unwrap();
+    service.execute("owner", "mesh.node.enroll", &serde_json::to_vec(&serde_json::json!({"name":"reenrolled","public_key":key(3),"host_id":"00000000-0000-4000-8000-000000000001"})).unwrap(), 1_800_000_000).await.unwrap();
+    let (new, _) = store
+        .attach("00000000-0000-4000-8000-000000000001", key(3), None, false)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO mesh_nodes(id,name,public_key) VALUES(?,'reenrolled',?)")
-        .bind(next)
-        .bind(key(3).0.as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
-    let (new, _) = store.attach("host", key(3), None, false).await.unwrap();
     assert_ne!(new, node);
     let config = store.config(new).await.unwrap();
     assert_ne!(config.addresses, old.addresses);

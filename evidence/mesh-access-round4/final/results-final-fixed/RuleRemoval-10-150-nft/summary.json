@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    6393856,
+    6377472,
+    6373376
+  ],
+  "projected_1000_nodes_rss_bytes": 6393856000,
+  "coordinator_three_live_workers_rss_bytes": 12914688,
+  "result": "PASS",
+  "change": "RuleRemoval",
+  "backend": "nft",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "0.50 1.19 1.18 1/406 376683",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.182,
+    150.149
+  ],
+  "installed_peers_before": [
+    10,
+    10,
+    10
+  ],
+  "installed_peers_after": [
+    10,
+    10
+  ],
+  "revocation_to_last_peer_refusing_us": 163054.365,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 87,
+      "last_packet_us": 90183.791,
+      "retired_us": 120741.439
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 86,
+      "last_packet_us": 89535.087,
+      "retired_us": 120741.439
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 87,
+      "last_packet_us": 89427.992,
+      "retired_us": 120741.439
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 86,
+      "last_packet_us": 89555.463,
+      "retired_us": 120741.439
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 87,
+      "last_packet_us": 89365.041,
+      "retired_us": 163054.365
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 86,
+      "last_packet_us": 89392.283,
+      "retired_us": 163054.365
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 87,
+      "last_packet_us": 89589.176,
+      "retired_us": 163054.365
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 86,
+      "last_packet_us": 89383.51,
+      "retired_us": 163054.365
+    }
+  ]
+}

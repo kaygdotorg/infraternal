@@ -24,7 +24,10 @@ pub struct Firewall {
     installed: bool,
     fallback_complete: bool,
     previous: Option<Config>,
+    previous_aliases: Vec<crate::policy::model::Addresses>,
     backend: Option<Backend>,
+    accepted: Option<Config>,
+    previous_fence: bool,
 }
 impl Firewall {
     /// Select the declared compatibility backend explicitly for real-engine validation.
@@ -86,13 +89,24 @@ impl Firewall {
             self.installed = false;
             if exists {
                 let output = Command::new(NFT)
-                    .args(["list", "table", "inet", TABLE])
+                    .args(["-j", "list", "table", "inet", TABLE])
                     .stderr(Stdio::null())
                     .output()?;
                 if !output.status.success() {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
-                if !String::from_utf8_lossy(&output.stdout).contains("infraternal.mesh.v1") {
+                let state: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+                // Only the table's own complete comment establishes ownership.
+                // A rule/set comment or an operator's longer comment cannot do so.
+                if !state["nftables"].as_array().is_some_and(|items| {
+                    items.iter().any(|item| {
+                        let table = &item["table"];
+                        table["family"] == "inet"
+                            && table["name"] == TABLE
+                            && table["comment"] == "infraternal.mesh.v1"
+                    })
+                }) {
                     return Err(io::ErrorKind::AlreadyExists.into());
                 }
                 self.installed = true;
@@ -100,10 +114,39 @@ impl Firewall {
         }
         Ok(())
     }
-    /// Atomically replace the entire node policy. Nothing runs between requests.
+    /// Install final network access rules and retire exactly the state no longer permitted.
     /// # Errors
-    /// Refuses unavailable nft or a failed transaction; an existing table stays unchanged.
+    /// Reports installation or retirement errors. Once installed, the new rules
+    /// remain restrictive on a cleanup error; the caller retries completion.
     pub fn apply(&mut self, config: &Config) -> io::Result<()> {
+        self.install_pending(config)?;
+        self.complete(config)
+    }
+    // The node persists public intent between installation and irreversible retirement.
+    pub(crate) fn install_pending(&mut self, config: &Config) -> io::Result<()> {
+        self.install(config, &[], false, config)
+    }
+    pub(crate) fn complete(&mut self, config: &Config) -> io::Result<()> {
+        crate::connection_state::retire(self.accepted.as_ref(), config)?;
+        self.accepted = Some(config.clone());
+        Ok(())
+    }
+    /// Fence both accepted and proposed addresses during an authorized replacement.
+    pub(crate) fn apply_with_aliases(
+        &mut self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+        connections: &Config,
+    ) -> io::Result<()> {
+        self.install(config, aliases, true, connections)
+    }
+    fn install(
+        &mut self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+        fence: bool,
+        connections: &Config,
+    ) -> io::Result<()> {
         self.select();
         // A table declaration can extend an existing table. First application
         // must therefore validate ownership even when no adapter called adopt.
@@ -111,18 +154,52 @@ impl Firewall {
             self.adopt()?;
         }
         if self.is_fallback() {
-            if let Err(error) = crate::iptables::apply(config, self.fallback_complete) {
+            if let Err(error) = crate::iptables::apply_with_aliases(
+                config,
+                self.fallback_complete,
+                aliases,
+                fence,
+                connections,
+            ) {
                 if let Some(old) = &self.previous {
-                    crate::iptables::apply(old, true)?;
+                    crate::iptables::apply_with_aliases(
+                        old,
+                        true,
+                        &self.previous_aliases,
+                        self.previous_fence,
+                        old,
+                    )?;
                 } else {
                     crate::iptables::remove()?;
                 }
                 return Err(error);
             }
         } else {
-            run(NFT, &["-f", "-"], &render(config, self.installed))?;
+            run(
+                NFT,
+                &["-f", "-"],
+                &render_with_aliases(config, self.installed, aliases, fence, connections),
+            )?;
         }
-        self.previous = self.is_fallback().then(|| config.clone());
+        // A fence has no new-connection rules. Its saved view therefore only
+        // needs the committed tuple rules plus the union of guarded addresses.
+        self.previous = self.is_fallback().then(|| {
+            if fence {
+                connections.clone()
+            } else {
+                config.clone()
+            }
+        });
+        self.previous_fence = fence;
+        self.previous_aliases = if self.is_fallback() {
+            let mut saved = aliases.to_vec();
+            if fence && config.addresses != connections.addresses {
+                saved.push(config.addresses);
+            }
+            saved
+        } else {
+            Vec::new()
+        };
         self.installed = true;
         self.fallback_complete = self.is_fallback();
         Ok(())
@@ -145,6 +222,8 @@ impl Firewall {
             self.installed = false;
             self.fallback_complete = false;
             self.previous = None;
+            self.accepted = None;
+            self.previous_aliases.clear();
         }
         Ok(())
     }
@@ -172,6 +251,18 @@ fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
 /// Render constant-time hash-set membership, independent of the peer count on the packet path.
 #[must_use]
 pub fn render(config: &Config, replace: bool) -> String {
+    render_with_aliases(config, replace, &[], false, config)
+}
+// Keep the complete owned inet transaction visible as one atomic batch.
+#[allow(clippy::too_many_lines)]
+fn render_with_aliases(
+    config: &Config,
+    replace: bool,
+    aliases: &[crate::policy::model::Addresses],
+    fence: bool,
+    connections: &Config,
+) -> String {
+    let connections = if fence { connections } else { config };
     let mut script = String::new();
     if replace {
         let _ = writeln!(script, "delete table inet {TABLE}");
@@ -190,7 +281,7 @@ pub fn render(config: &Config, replace: bool) -> String {
                     Some(Protocol::Udp) => "udp",
                 };
                 let mut entries = Vec::new();
-                for peer in config.peers.values() {
+                for peer in connections.peers.values() {
                     let address = if ipv6 {
                         peer.peer.addresses.ipv6.to_string()
                     } else {
@@ -229,28 +320,46 @@ pub fn render(config: &Config, replace: bool) -> String {
             }
         }
         let _ = writeln!(script, " chain {direction} {{");
-        let _ = writeln!(script, "  ct state established,related accept");
-        let field = if inbound { "saddr" } else { "daddr" };
-        for (family, suffix) in [("ip", "4"), ("ip6", "6")] {
-            let _ = writeln!(script, "  {family} {field} @{direction}{suffix}_all accept");
-            for protocol in ["tcp", "udp"] {
-                let _ = writeln!(
-                    script,
-                    "  {family} {field} . {protocol} dport @{direction}{suffix}_{protocol} accept"
-                );
+        // Exact retirement removes both kernel tuple directions. Loose TCP
+        // tracking can nevertheless classify a continuation as a fresh flow.
+        // Only an initiating SYN may create replacement TCP state [164,242].
+        let _ = writeln!(
+            script,
+            "  ct state new tcp flags & (fin | syn | rst | ack) != syn drop"
+        );
+        // Recovery must never reopen entries refused by saved intent [242].
+        let _ = writeln!(
+            script,
+            "  ct state established,related jump {direction}_state"
+        );
+        if !fence {
+            let field = if inbound { "saddr" } else { "daddr" };
+            for (family, suffix) in [("ip", "4"), ("ip6", "6")] {
+                let _ = writeln!(script, "  {family} {field} @{direction}{suffix}_all accept");
+                for protocol in ["tcp", "udp"] {
+                    let _ = writeln!(
+                        script,
+                        "  {family} {field} . {protocol} dport @{direction}{suffix}_{protocol} accept"
+                    );
+                }
             }
         }
         // ICMP errors are RELATED; unsolicited ICMP and all other protocols obey All or deny.
         let _ = writeln!(script, "  drop\n }}");
     }
+    render_connection_checks(&mut script, connections);
     // Destination NAT has completed at input/forward. Check delivery before
     // policy or conntrack acceptance: an underlay packet has no mesh identity.
     // Loopback delivery is node-local. Translation never turns an underlay
     // incoming interface into lo, so this preserves the ingress refusal [231].
-    let delivery = format!(
-        "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
-        config.addresses.ipv4, config.addresses.ipv6
-    );
+    let mut delivery = String::new();
+    for addresses in std::iter::once(&config.addresses).chain(aliases) {
+        let _ = write!(
+            delivery,
+            "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
+            addresses.ipv4, addresses.ipv6
+        );
+    }
     for (name, hook, interface, direction) in [
         ("input", "input", "iifname", "incoming"),
         ("output", "output", "oifname", "outgoing"),
@@ -271,10 +380,47 @@ pub fn render(config: &Config, replace: bool) -> String {
     // has no owner in this slice, even when a host enables IP forwarding.
     let _ = writeln!(
         script,
-        " chain ingress {{ type filter hook prerouting priority -310; policy accept; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop; }}\n}}",
-        config.addresses.ipv4, config.addresses.ipv6
+        " chain ingress {{ type filter hook prerouting priority -310; policy accept; {delivery} }}\n}}"
     );
     script
+}
+
+// Both packet directions consult the initiating tuple. A reply's ephemeral
+// destination port is never interpreted as permission to initiate [164,242].
+fn render_connection_checks(script: &mut String, config: &Config) {
+    for (chain, incoming) in [("incoming", true), ("outgoing", false)] {
+        let _ = writeln!(script, " chain {chain}_state {{");
+        for (reply, direction, field, local_field) in if incoming {
+            [
+                ("original", "incoming", "saddr", "daddr"),
+                ("reply", "outgoing", "daddr", "saddr"),
+            ]
+        } else {
+            [
+                ("original", "outgoing", "daddr", "saddr"),
+                ("reply", "incoming", "saddr", "daddr"),
+            ]
+        } {
+            for (family, suffix, local) in [
+                ("ip", "4", config.addresses.ipv4.to_string()),
+                ("ip6", "6", config.addresses.ipv6.to_string()),
+            ] {
+                let selector =
+                    format!("ct direction {reply} ct original {family} {local_field} {local}");
+                let _ = writeln!(
+                    script,
+                    "  {selector} ct original {family} {field} @{direction}{suffix}_all accept"
+                );
+                for protocol in ["tcp", "udp"] {
+                    let _ = writeln!(
+                        script,
+                        "  {selector} ct original protocol {protocol} ct original {family} {field} . ct original proto-dst @{direction}{suffix}_{protocol} accept"
+                    );
+                }
+            }
+        }
+        let _ = writeln!(script, "  drop\n }}");
+    }
 }
 
 #[cfg(test)]
@@ -291,6 +437,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
         };
         Config {
+            local_key: None,
             server: None,
             node: NodeId(1),
             version: 1,
@@ -318,8 +465,14 @@ mod tests {
     fn rule_count_is_independent_of_membership_and_policy_data_is_in_sets() {
         let mut config = config();
         let rules = render(&config, false);
-        assert_eq!(rules.matches(" accept").count(), 18);
-        assert_eq!(rules.matches(" drop").count(), 10);
+        assert_eq!(rules.matches(" accept").count(), 40);
+        assert_eq!(rules.matches(" drop").count(), 14);
+        assert_eq!(
+            rules
+                .matches("ct state new tcp flags & (fin | syn | rst | ack) != syn drop")
+                .count(),
+            2
+        );
         let peer = config.peers.get_mut(&NodeId(2)).expect("member");
         peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
             crate::policy::rules::Port {

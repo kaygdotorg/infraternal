@@ -1,0 +1,10 @@
+[
+  {
+    "name": "nf_tables_local_binding_and_address_recovery",
+    "exit": 101
+  },
+  {
+    "name": "nft_local_binding_and_address_recovery",
+    "exit": 101
+  }
+]

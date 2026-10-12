@@ -161,3 +161,23 @@ test("Mesh watch forwards server errors and stops delivering after unsubscribe",
   expect(events).toEqual([{ type: "error", error: "forbidden" }]);
   expect(transport.listeners.length).toBe(0);
 });
+
+
+test("Mesh enrollment carries an explicit authenticated host binding", async () => {
+  const transport = new RecordingTransport();
+  const client = new MeshClient(transport);
+  const publicKey = Array.from({ length: 32 }, () => 2);
+  await client.enrollNode({
+    name: "bound-host",
+    public_key: publicKey,
+    host_id: "00000000-0000-4000-8000-000000000001",
+  });
+  expect(transport.calls).toEqual([{
+    action: "mesh.node.enroll",
+    input: {
+      name: "bound-host",
+      public_key: publicKey,
+      host_id: "00000000-0000-4000-8000-000000000001",
+    },
+  }]);
+});

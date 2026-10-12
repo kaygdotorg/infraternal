@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    6344704,
+    6381568,
+    6332416
+  ],
+  "projected_1000_nodes_rss_bytes": 6381568000,
+  "coordinator_three_live_workers_rss_bytes": 12804096,
+  "result": "PASS",
+  "change": "PeerRetirement",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "1.24 1.17 1.16 1/17024 405037",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.125,
+    150.152
+  ],
+  "installed_peers_before": [
+    10,
+    10,
+    10
+  ],
+  "installed_peers_after": [
+    9,
+    9
+  ],
+  "revocation_to_last_peer_refusing_us": 462186.004,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 114,
+      "last_packet_us": 243828.095,
+      "retired_us": 437366.304
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186528.667,
+      "retired_us": 437366.304
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 114,
+      "last_packet_us": 243844.162,
+      "retired_us": 437366.304
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186531.98,
+      "retired_us": 437366.304
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 115,
+      "last_packet_us": 249764.0,
+      "retired_us": 462186.004
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186644.583,
+      "retired_us": 462186.004
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 115,
+      "last_packet_us": 249419.561,
+      "retired_us": 462186.004
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 186605.001,
+      "retired_us": 462186.004
+    }
+  ]
+}

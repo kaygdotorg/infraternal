@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    7888896,
+    8368128,
+    8318976
+  ],
+  "projected_1000_nodes_rss_bytes": 8368128000,
+  "coordinator_three_live_workers_rss_bytes": 27238400,
+  "result": "PASS",
+  "change": "PeerRetirement",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 0,
+  "load": "2.31 1.36 1.06 1/15177 349204",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    0.062,
+    0.053
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    999,
+    999
+  ],
+  "revocation_to_last_peer_refusing_us": 569458.612,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 105,
+      "last_packet_us": 282006.383,
+      "retired_us": 569458.612
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 105,
+      "last_packet_us": 282308.453,
+      "retired_us": 569458.612
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 105,
+      "last_packet_us": 282001.748,
+      "retired_us": 569458.612
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 105,
+      "last_packet_us": 282079.994,
+      "retired_us": 569458.612
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 102,
+      "last_packet_us": 265383.721,
+      "retired_us": 549550.491
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 102,
+      "last_packet_us": 265382.93,
+      "retired_us": 549550.491
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 102,
+      "last_packet_us": 265295.55,
+      "retired_us": 549550.491
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 102,
+      "last_packet_us": 265433.145,
+      "retired_us": 549550.491
+    }
+  ]
+}
