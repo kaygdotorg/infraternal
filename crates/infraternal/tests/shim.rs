@@ -110,9 +110,12 @@ impl Session {
         }
     }
     fn attach(&self, seq: u64) -> UnixStream {
+        self.attach_with_caps(seq, 0)
+    }
+    fn attach_with_caps(&self, seq: u64, caps: u64) -> UnixStream {
         let mut peer = self.connect();
         assert!(matches!(read(&mut peer), Frame::Hello { version: 1, .. }));
-        send(&mut peer, Frame::Attach(0));
+        send(&mut peer, Frame::Attach(caps));
         send(&mut peer, Frame::ReadFrom(seq));
         peer
     }
@@ -201,6 +204,14 @@ fn wait_for_stalled_head(session: &Session, minimum: u64, limit: u64) -> u64 {
 
 /// Wait for the detached shell's completion marker, then read the retained terminal state.
 fn wait_for_detached_completion(session: &Session, marker: &Path) -> (u64, String) {
+    wait_for_detached_completion_with_caps(session, marker, 0)
+}
+
+fn wait_for_detached_completion_with_caps(
+    session: &Session,
+    marker: &Path,
+    caps: u64,
+) -> (u64, String) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !marker.exists() {
         assert!(
@@ -211,7 +222,7 @@ fn wait_for_detached_completion(session: &Session, marker: &Path) -> (u64, Strin
     }
     // The completion marker is written only after the shell has emitted the flood and final line.
     // Reattach once after completion, so observation cannot create progress while it is detached.
-    let mut peer = session.attach(0);
+    let mut peer = session.attach_with_caps(0, caps);
     peer.set_read_timeout(Some(Duration::from_secs(60)))
         .unwrap();
     let mut seq = 0;
@@ -555,4 +566,274 @@ fn disallowed_signal_only_disconnects_peer() {
     );
     until(&mut peer, &mut seq, b"SIGNAL_ALIVE\r\n");
     session.finish(peer, seq);
+}
+
+/// Raw additive selection keeps this regression runnable against older shims.
+fn shared_selector(peer: &mut UnixStream, writer: u32) {
+    let mut wire = vec![5, 0, 0, 0, 0x1d];
+    wire.extend_from_slice(&writer.to_le_bytes());
+    peer.write_all(&wire).unwrap();
+}
+
+fn writer_peer(session: &Session, writer: u32, shared: bool) -> UnixStream {
+    let mut peer = session.connect();
+    let Frame::Hello {
+        version: 1, caps, ..
+    } = read(&mut peer)
+    else {
+        panic!("missing shim Hello");
+    };
+    assert!(!shared || caps & 8 != 0, "shared mode must be negotiated");
+    send(&mut peer, Frame::Attach(if shared { 11 } else { 3 }));
+    if shared {
+        shared_selector(&mut peer, writer);
+    } else {
+        send(&mut peer, Frame::SelectWriter(writer));
+    }
+    peer
+}
+
+fn writer_state(peer: &mut UnixStream) -> (u64, u64) {
+    send(peer, Frame::InputStateRequest);
+    loop {
+        match read(peer) {
+            Frame::InputState(written, accepted) => return (written, accepted),
+            Frame::InputAck(_) => {}
+            other => panic!("unexpected writer state reply: {other:?}"),
+        }
+    }
+}
+
+fn writer_output(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    while !output.windows(marker.len()).any(|bytes| bytes == marker) {
+        match read(peer) {
+            Frame::Output(offset, bytes) => {
+                assert_eq!(offset, *cursor);
+                *cursor += bytes.len() as u64;
+                output.extend(bytes);
+            }
+            Frame::InputAck(_) => {}
+            other => panic!("unexpected writer output: {other:?}"),
+        }
+    }
+    output
+}
+
+fn peer_closed(peer: &mut UnixStream) {
+    let mut backlog = Vec::new();
+    let result = peer.read_to_end(&mut backlog);
+    assert!(
+        result.is_ok()
+            || result.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset),
+        "replaced/refused peer must close"
+    );
+}
+
+#[test]
+fn shared_writer_coexists_and_replayed_input_is_written_once() {
+    let session = Session::new(8192, false);
+    let mut active = writer_peer(&session, 7, false);
+    send(&mut active, Frame::ReadFrom(0));
+    let setup = b"stty raw -echo; exec python3 -u -c 'import os; os.write(1,bytes.fromhex(\"52454144597c\")); exec(\"while True:\\n b=os.read(0,4096)\\n if not b: break\\n os.write(1,b)\")'\r";
+    send(&mut active, Frame::SequencedInput(0, setup.to_vec()));
+    let mut cursor = 0;
+    writer_output(&mut active, &mut cursor, b"READY|");
+    let mut shared = writer_peer(&session, 7, true);
+    assert_eq!(
+        writer_state(&mut shared),
+        (setup.len() as u64, setup.len() as u64)
+    );
+    send(
+        &mut active,
+        Frame::SequencedInput(setup.len() as u64, b"once|".to_vec()),
+    );
+    assert_eq!(writer_output(&mut active, &mut cursor, b"once|"), b"once|");
+    send(
+        &mut shared,
+        Frame::SequencedInput(setup.len() as u64, b"once|twice|".to_vec()),
+    );
+    assert_eq!(
+        writer_output(&mut active, &mut cursor, b"twice|"),
+        b"twice|"
+    );
+    let expected = setup.len() as u64 + 11;
+    assert_eq!(writer_state(&mut active), (expected, expected));
+    assert_eq!(writer_state(&mut shared), (expected, expected));
+    // No ReadFrom was issued on the parked peer: only bounded input replies.
+    drop(shared);
+    send(
+        &mut active,
+        Frame::SequencedInput(expected, b"alive|".to_vec()),
+    );
+    assert_eq!(
+        writer_output(&mut active, &mut cursor, b"alive|"),
+        b"alive|"
+    );
+}
+
+#[test]
+fn writer_replacement_is_per_mode_and_fresh_ordinary_writers_stay_optional() {
+    let session = Session::new(8192, false);
+    let mut ordinary = writer_peer(&session, 7, false);
+    assert_eq!(writer_state(&mut ordinary), (0, 0));
+    let mut shared = writer_peer(&session, 7, true);
+    assert_eq!(writer_state(&mut shared), (0, 0));
+    let mut next_ordinary = writer_peer(&session, 7, false);
+    assert_eq!(writer_state(&mut next_ordinary), (0, 0));
+    peer_closed(&mut ordinary);
+    assert_eq!(writer_state(&mut shared), (0, 0));
+    let mut next_shared = writer_peer(&session, 7, true);
+    assert_eq!(writer_state(&mut next_shared), (0, 0));
+    peer_closed(&mut shared);
+    assert_eq!(writer_state(&mut next_ordinary), (0, 0));
+    drop(next_ordinary);
+    let mut fresh = session.connect();
+    read(&mut fresh);
+    send(&mut fresh, Frame::Attach(11));
+    send(&mut fresh, Frame::SelectWriter(9));
+    assert_eq!(writer_state(&mut fresh), (0, 0));
+    assert_eq!(writer_state(&mut next_shared), (0, 0));
+}
+
+#[test]
+fn shared_writer_refusals_and_full_peer_limit_preserve_the_live_writer() {
+    let session = Session::new(8192, false);
+    let mut active = writer_peer(&session, 7, false);
+    assert_eq!(writer_state(&mut active), (0, 0));
+    for (caps, writer) in [(8, 7), (9, 7), (10, 7), (3, 7), (11, 0), (11, 99)] {
+        let mut refused = session.connect();
+        read(&mut refused);
+        send(&mut refused, Frame::Attach(caps));
+        shared_selector(&mut refused, writer);
+        peer_closed(&mut refused);
+        assert_eq!(writer_state(&mut active), (0, 0));
+    }
+    let mut repeated = writer_peer(&session, 7, true);
+    assert_eq!(writer_state(&mut repeated), (0, 0));
+    shared_selector(&mut repeated, 7);
+    peer_closed(&mut repeated);
+    assert_eq!(writer_state(&mut active), (0, 0));
+    let mut before_attach = session.connect();
+    read(&mut before_attach);
+    shared_selector(&mut before_attach, 7);
+    peer_closed(&mut before_attach);
+    assert_eq!(writer_state(&mut active), (0, 0));
+    let mut peers = Vec::new();
+    for _ in 0..31 {
+        let mut peer = session.connect();
+        assert!(matches!(read(&mut peer), Frame::Hello { .. }));
+        peers.push(peer);
+    }
+    let mut refused = session.connect();
+    peer_closed(&mut refused);
+    assert_eq!(writer_state(&mut active), (0, 0));
+}
+
+#[test]
+fn malformed_shared_successor_does_not_evict_the_live_shared_peer() {
+    let session = Session::new(8192, false);
+    let mut active = writer_peer(&session, 7, false);
+    assert_eq!(writer_state(&mut active), (0, 0));
+    let mut shared = writer_peer(&session, 7, true);
+    assert_eq!(writer_state(&mut shared), (0, 0));
+    let mut refused = session.connect();
+    read(&mut refused);
+    let mut coalesced = Frame::Attach(11).encode().unwrap();
+    for _ in 0..2 {
+        coalesced.extend_from_slice(&[5, 0, 0, 0, 0x1d, 7, 0, 0, 0]);
+    }
+    refused.write_all(&coalesced).unwrap();
+    peer_closed(&mut refused);
+    assert_eq!(writer_state(&mut active), (0, 0));
+    assert_eq!(writer_state(&mut shared), (0, 0));
+}
+
+#[test]
+fn shared_writer_restores_durable_geometry_after_another_writer_types() {
+    let session = Session::new(8192, false);
+    let mut ordinary = writer_peer(&session, 7, false);
+    assert_eq!(writer_state(&mut ordinary), (0, 0));
+    let mut shared = writer_peer(&session, 7, true);
+    assert_eq!(writer_state(&mut shared), (0, 0));
+    send(
+        &mut ordinary,
+        Frame::Resize {
+            cols: 120,
+            rows: 40,
+            px_w: 0,
+            px_h: 0,
+        },
+    );
+    let mut other = writer_peer(&session, 8, false);
+    send(&mut other, Frame::ReadFrom(0));
+    send(
+        &mut other,
+        Frame::Resize {
+            cols: 50,
+            rows: 20,
+            px_w: 0,
+            px_h: 0,
+        },
+    );
+    let command = b"printf 'ACTIVE8_%s\\n' OK\n";
+    send(&mut other, Frame::SequencedInput(0, command.to_vec()));
+    let mut cursor = 0;
+    writer_output(&mut other, &mut cursor, b"ACTIVE8_OK\r\n");
+    let mut shared_cursor = output_head(&session);
+    send(&mut shared, Frame::ReadFrom(shared_cursor));
+    let command = b"printf 'GEOMETRY7_%s|END|\\n' \"$(stty size | tr ' ' '_')\"\n";
+    send(&mut shared, Frame::SequencedInput(0, command.to_vec()));
+    let output = writer_output(&mut shared, &mut shared_cursor, b"|END|\r\n");
+    let expected = b"GEOMETRY7_40_120|END|\r\n";
+    assert!(
+        output
+            .windows(expected.len())
+            .any(|bytes| bytes == expected),
+        "shared input must use writer7 remembered geometry"
+    );
+}
+
+#[test]
+fn parked_shared_writer_does_not_stop_detached_pty_progress() {
+    let session = Session::new(8192, false);
+    let mut active = writer_peer(&session, 7, false);
+    send(&mut active, Frame::ReadFrom(0));
+    let marker = std::env::current_dir()
+        .unwrap()
+        .join(&session.state)
+        .join("parked-complete");
+    let setup = format!(
+        "stty raw -echo; exec python3 -u -c 'import os; os.write(1,b\"READY|\"); os.read(0,1); os.write(1,b\"x\"*1048576+b\"\\nDETACHED_DONE\\n\"); open(\"{}\",\"w\").write(\"done\")'\r",
+        marker.display()
+    );
+    send(
+        &mut active,
+        Frame::SequencedInput(0, setup.as_bytes().to_vec()),
+    );
+    let mut cursor = 0;
+    writer_output(&mut active, &mut cursor, b"READY|");
+    let mut parked = writer_peer(&session, 7, true);
+    assert_eq!(writer_state(&mut parked).1, setup.len() as u64);
+    drop(active);
+    // The input-only parked peer remains live, without an output read request.
+    send(
+        &mut parked,
+        Frame::SequencedInput(setup.len() as u64, b"!".to_vec()),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "parked input-only peer stopped detached PTY output"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Observing output only after completion cannot create the progress asserted above.
+    // The long wrapped flood need not fit faithful history provenance; this
+    // observer explicitly opts into the existing bounded approximate repaint.
+    let (head, screen) = wait_for_detached_completion_with_caps(&session, &marker, 4);
+    assert!(head > 1_000_000);
+    assert!(screen.contains("DETACHED_DONE"));
+    assert_eq!(writer_state(&mut parked).1, setup.len() as u64 + 1);
 }
