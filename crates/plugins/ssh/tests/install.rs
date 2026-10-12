@@ -30,6 +30,16 @@ impl SshSession for Local {
             // Map the remote user's home to isolated fixture storage without
             // changing the process's HOME or touching a real user's installation.
             let script = script.replace("$HOME", self.root.to_str().unwrap());
+            // Model a lease child that has forked but has not yet been scheduled
+            // to close its inherited parent lock; this exercises a real fd race.
+            let script = if self.root.join("delay-lease-exec").exists() {
+                script.replace(
+                    "(exec 9<&-; exec sleep 180)",
+                    "(sleep 1; exec 9<&-; exec sleep 180)",
+                )
+            } else {
+                script
+            };
             // A test-only public marker proves that the real shell has reached
             // its blocking admission read; yielding alone would not prove overlap.
             let script = if matches!(&input, Input::Signal(_)) {
@@ -342,6 +352,22 @@ async fn missing_payload_preserves_the_bootstrap_binary_remedy() {
         "The matching static infraternal binary is unavailable."
     );
     assert!(!fixture.base().exists());
+}
+
+#[tokio::test]
+async fn successful_stage_releases_the_parent_lock_from_its_lease_child() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root.join("delay-lease-exec"), b"").unwrap();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let lease = std::fs::read_to_string(fixture.base().join(".bootstrap-lock/lease")).unwrap();
+    let pid = lease.split_ascii_whitespace().next().unwrap();
+    assert!(
+        std::fs::symlink_metadata(format!("/proc/{pid}/fd/9")).is_err(),
+        "a successful upload must not leave its parent guard inherited by the lease"
+    );
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    transaction.rollback().await.unwrap();
 }
 
 struct NegotiatedChoices {
