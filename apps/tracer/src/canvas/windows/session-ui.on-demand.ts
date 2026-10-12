@@ -43,6 +43,8 @@ export interface SessionUiPart {
   toggleManager(rec: WinRec, anchor: HTMLElement, source: PopoverSource): void;
   closeManager(): void;
   arrived(rec: WinRec): void;
+  /** The host refused the new shell this window just asked for: the strip says why. False when this window asked for none. */
+  refused(rec: WinRec, message: string): boolean;
   /** Repaints an open manager (the inventory changed). */
   render(): void;
   dispose(): void;
@@ -76,44 +78,77 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const ours = Math.max(20, Math.floor((rec.card.body.clientWidth - 32) / ((coarse.matches ? 13 : 14) * 0.6)));
     return Math.min(1, Math.max(0.55, ours / theirs));
   };
+  /** What a window's strip says and does; the strip is one component whatever it reports (ended, exited, refused). */
+  interface StripView {
+    signature: string;
+    result: "ok" | "fail" | "ended" | "refused";
+    label: string;
+    text: string;
+    action?: { label: string; icon: string; run: () => void };
+    dismiss: { label: string; run: () => void };
+  }
+  /** Why the host would not start a shell in a window, in plain words, for the strip. */
+  const refusals = new WeakMap<WinRec, string>();
+  /** Windows that asked for a new shell and have not heard back: only they claim a refusal. */
+  const asked = new WeakSet<WinRec>();
+  const stripOf = (rec: WinRec, s: SessionRecord): StripView => {
+    const gone = Boolean(s.gone);
+    const failed = (s.exit?.code ?? 0) !== 0;
+    const dismiss = { label: gone ? "Close window" : "Dismiss", run: () => dismissSession(rec.model.host, s) };
+    if (gone) {
+      return {
+        signature: `${s.id}:gone:${s.exit?.code ?? ""}`, result: "ended", label: `${s.name} ended`,
+        text: `Session ended${s.exit ? ` · Exit ${s.exit.code}` : ""}`,
+        // The obvious next step: a new shell on the same host, in this same window.
+        ...(rec.binding?.openNew ? { action: { label: "New shell", icon: ICON.plus, run: () => newShell(rec) } } : {}), dismiss,
+      };
+    }
+    return {
+      signature: `${s.id}:${s.exit?.code ?? 0}`, result: failed ? "fail" : "ok", label: `${s.name} exited with code ${s.exit?.code ?? 0}`,
+      text: `Exited ${s.exit?.code ?? 0}`, action: { label: "Run again", icon: SESSION_ICON.again, run: () => inventory.runAgain(rec.model.host, s.id) }, dismiss,
+    };
+  };
+  const refusedStrip = (rec: WinRec, message: string): StripView => ({
+    signature: `refused:${message}`, result: "refused", label: message, text: message,
+    action: { label: "Try again", icon: ICON.plus, run: () => newShell(rec) }, dismiss: { label: "Close window", run: () => cx.win.close(rec) },
+  });
   const paint = (rec: WinRec): void => {
     if (!isTerminal(rec)) return;
     const s = recordOf(rec);
     const body = rec.card.body;
     const exited = s?.state === "exited";
-    rec.card.setStatus(exited ? "offline" : "live");
+    // The new shell has a session now (or the person moved on): a refusal no longer applies.
+    if (rec.model.sessionId) refusals.delete(rec);
+    rec.card.setStatus(exited || refusals.has(rec) ? "offline" : "live");
+    const refusal = refusals.get(rec);
     let strip = body.querySelector<HTMLElement>(".cl-sx-strip");
-    if (exited && s) {
+    const view: StripView | undefined = exited && s ? stripOf(rec, s) : refusal && !s ? refusedStrip(rec, refusal) : undefined;
+    if (view) {
       if (!strip) {
         strip = el("div", "cl-sx-strip ui-pill");
         strip.setAttribute("role", "group");
         body.append(strip);
       }
-      const failed = (s.exit?.code ?? 0) !== 0;
-      const gone = Boolean(s.gone);
       // Rebuilt only when what it says changes, so a refresh never resets a hover or a press on it.
-      const signature = gone ? `${s.id}:gone:${s.exit?.code ?? ""}` : `${s.id}:${s.exit?.code ?? 0}`;
-      if (strip.dataset.signature !== signature) {
-        strip.dataset.signature = signature;
-        strip.dataset.result = gone ? "ended" : failed ? "fail" : "ok";
-        strip.setAttribute("aria-label", gone ? `${s.name} ended` : `${s.name} exited with code ${s.exit?.code ?? 0}`);
+      if (strip.dataset.signature !== view.signature) {
+        strip.dataset.signature = view.signature;
+        strip.dataset.result = view.result;
+        strip.setAttribute("aria-label", view.label);
         const mark = el("span", "ui-mark");
-        mark.dataset.mark = gone ? "ended" : failed ? "fail" : "ok";
-        const text = el("span", "cl-sx-strip-text", gone ? `Session ended${s.exit ? ` · Exit ${s.exit.code}` : ""}` : `Exited ${s.exit?.code ?? 0}`);
-        const again = el("button", "cl-sx-again");
-        again.type = "button";
-        if (gone) {
-          // The obvious next step: a new shell on the same host, in this same window.
-          again.innerHTML = `${icon(ICON.plus)}<span>New shell</span>`;
-          again.addEventListener("click", () => newShell(rec, s));
-        } else {
-          again.innerHTML = `${icon(SESSION_ICON.again)}<span>Run again</span>`;
-          again.addEventListener("click", () => inventory.runAgain(rec.model.host, s.id));
+        mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : "fail";
+        const text = el("span", "cl-sx-strip-text", view.text);
+        const nodes: HTMLElement[] = [mark, text];
+        if (view.action) {
+          const act = el("button", "cl-sx-again");
+          act.type = "button";
+          act.innerHTML = `${icon(view.action.icon)}<span>${view.action.label}</span>`;
+          act.addEventListener("click", view.action.run);
+          nodes.push(act);
         }
-        const dismiss = button("cl-sx-dismiss", gone ? "Close window" : "Dismiss", ICON_X);
-        dismiss.dataset.tip = gone ? "Close window" : "Dismiss";
-        dismiss.addEventListener("click", () => dismissSession(rec.model.host, s));
-        strip.replaceChildren(mark, text, ...(gone && !rec.binding?.openNew ? [] : [again]), dismiss);
+        const dismiss = button("cl-sx-dismiss", view.dismiss.label, ICON_X);
+        dismiss.dataset.tip = view.dismiss.label;
+        dismiss.addEventListener("click", view.dismiss.run);
+        strip.replaceChildren(...nodes, dismiss);
       }
     } else strip?.remove();
     // Another device typed last: shown scaled to fit, with a badge that offers the size back.
@@ -192,15 +227,39 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     if (w && !w.owner.view.team) cx.win.close(w);
   };
   const dismissSession = (host: string, s: SessionRecord): void => { inventory.dismiss(host, s.id); closeWindowOf(host, s.id); };
-  /** An ended session's window starts a new shell on the same host in place; the ended record goes. */
-  const newShell = (rec: WinRec, s: SessionRecord): void => {
-    if (!rec.binding?.openNew) return;
+  /**
+   * An ended window starts a new shell on its host in place: the ended record goes and the strip with it, at once.
+   * The host and the login come from the window itself (its binding opens through the same host as before, and the
+   * host picks the preferred login), so nothing is chosen here. When the host refuses, `refused` brings the strip
+   * back with the reason; a window that cannot start one says so instead of doing nothing.
+   */
+  const newShell = (rec: WinRec): void => {
+    if (!rec.binding?.openNew) { refusals.set(rec, "This window cannot start a shell. Close it and open a new one."); paint(rec); return; }
+    const s = recordOf(rec);
+    refusals.delete(rec);
+    asked.add(rec);
     delete rec.model.sessionId;
-    inventory.dismiss(rec.model.host, s.id);
+    if (s) inventory.dismiss(rec.model.host, s.id);
     rec.binding.openNew();
     paint(rec);
     cx.store.changed();
   };
+  const refused = (rec: WinRec, message: string): boolean => {
+    if (!asked.delete(rec)) return false;
+    refusals.set(rec, message);
+    paint(rec);
+    return true;
+  };
+  // Enter on the focused window starts the new shell its strip offers (a button already takes Enter itself).
+  window.addEventListener("keydown", (event) => {
+    const rec = cx.state.activeWin;
+    if (!rec || event.key !== "Enter" || event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if ((event.target as Element | null)?.closest?.("input, textarea, button, a, [contenteditable], [role='dialog'], .ui-overlay-surface")) return;
+    const result = rec.card.body.querySelector<HTMLElement>(".cl-sx-strip")?.dataset.result;
+    if (result !== "ended" && result !== "refused") return;
+    event.preventDefault();
+    newShell(rec);
+  }, { signal });
 
   // ---- the manager --------------------------------------------------------------------------------
   class Manager {
@@ -508,6 +567,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     },
     closeManager() { manager?.close("keyboard"); },
     arrived(rec) { slideLabel(rec); flash(rec); },
+    refused,
     render() { manager?.render(); },
     dispose() { manager?.close("keyboard"); confirm?.close(false); },
   };

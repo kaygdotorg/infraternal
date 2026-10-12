@@ -33,7 +33,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session } : undefined);
     }, exited: (status) => {
       if (status === 0) cx.win.close(rec);
-    } });
+    }, refused: (message) => cx.sessionUi?.refused(rec, message) ?? false });
     rec.binding = binding;
     binding.mount(body);
     return;
