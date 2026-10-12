@@ -1,0 +1,38 @@
+Running as unit: run-p1483156-i14064428.scope; invocation ID: 139189ac1ceb4f7e8ed25fb19e2dd62d
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-plugin-api)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-shim)
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-protocol)
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-mesh)
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/remote)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/mesh)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/host-facts)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-server)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-agent)
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/release)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal)
+   Compiling infraternal-plugin-relay v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/relay)
+   Compiling infraternal-plugin-backup v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/backup)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 34s
+     Running tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/deploy-pipeline/target/debug/deps/ssh_askpass-617ca478b5d79487)
+
+running 3 tests
+test encrypted_key_without_passphrase_never_prompts_on_a_controlling_terminal ... ignored, run under the disposable controlling-terminal harness
+test real_cli_askpass_refuses_unregistered_parent_and_cleans_helper ... ok
+test real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes ... FAILED
+
+failures:
+
+---- real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes stdout ----
+
+thread 'real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes' (1503057) panicked at crates/infraternal/tests/ssh_askpass.rs:138:6:
+called `Result::unwrap()` on an `Err` value: Failure { kind: Auth, message: "The SSH private key or passphrase was refused.", log_tail: [], failed_step: None, exit_status: None, already_added: false, missing_binary: None, fingerprints: [], host_key_type: None, host_key_changed: false, choose_method: false, host_key_challenge: None }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 26.36s
+
+error: test failed, to rerun pass `-p infraternal --test ssh_askpass`

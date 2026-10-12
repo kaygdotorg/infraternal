@@ -32,8 +32,12 @@ Functional evidence:
 
 The initial milestone fast gate reports an SSH synthetic-key private-pipe
 authentication failure at `crates/infraternal/tests/ssh_askpass.rs:94`; no real
-credential investigation or waiver was applied. It continues through the
-existing static build gate. Complete final-head fast output is recorded on
+credential investigation or waiver was applied. The unchanged exact test
+passes on dev baseline c0d01d22 (`ssh-baseline.log`). Current-workspace proof
+with the existing SHA256 dependency optimized in dev/test passes both private
+key/unknown-parent cases (`ssh-original-fixture-optimized.log`), retaining the
+original fixture, deadlines and full-image verification. No crypto engine or
+release profile changed. Complete final-head fast output is recorded on
 #188 and retained separately as `verify-final.log`; no passing full-gate claim
 is made until every required row passes.
 

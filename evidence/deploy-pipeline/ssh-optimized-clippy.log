@@ -1,0 +1,21 @@
+   Compiling sha2 v0.10.9
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-plugin-api)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-shim)
+    Checking infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-protocol)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal)
+    Checking sqlx-core v0.8.6
+    Checking sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+    Checking sqlx v0.8.6
+    Checking infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-mesh)
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/remote)
+    Checking infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/host-facts)
+    Checking infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/release)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/ssh)
+    Checking infraternal-plugin-backup v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/backup)
+    Checking infraternal-plugin-relay v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/relay)
+    Checking infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/plugins/mesh)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/deploy-pipeline/crates/infraternal-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 59.77s
