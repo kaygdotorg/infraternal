@@ -7,7 +7,9 @@
  * - Sizes follow the viewport so a snapped view fills it (`metricsFor`).
  */
 import type { ViewModel } from "../model/types";
-import { DEFAULT_SIZES, columnWidth, peekWidth, type WindowSizes } from "../window-sizes";
+import { COLUMN_GAP, DEFAULT_SIZES, columnWidth, peekWidth, type WindowSizes } from "../window-sizes";
+
+export { COLUMN_GAP };
 
 export interface Pt { x: number; y: number }
 export interface Rect { x: number; y: number; w: number; h: number }
@@ -15,7 +17,6 @@ export interface Rect { x: number; y: number; w: number; h: number }
 export const CELL = 120;
 /** Space inside a box around the content: left, top (room for the view label), right, bottom. */
 export const MARGIN = { l: 48, t: 96, r: 48, b: 48 };
-export const COLUMN_GAP = 12;
 
 export interface Metrics { colW: number; /** A column's width in a strip of several on a phone (neighbours peek in); equal to `colW` elsewhere. */ peekW: number; clh: number; narrow: boolean; nodeW: number; nodeH: number }
 
@@ -30,7 +31,7 @@ export const metricsFor = (width: number, height: number, coarse: boolean, sizes
   // A view is as tall as the canvas area. It may get short (the on-screen keyboard is up): only the height changes,
   // never the width or a column count, so nothing rewraps and the camera does not scale the window down (D191).
   const clh = Math.max(120, Math.round(height));
-  return { colW, peekW: peekWidth(width, narrow, colW, COLUMN_GAP), clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
+  return { colW, peekW: peekWidth(width, narrow, colW, COLUMN_GAP, sizes), clh, narrow, nodeW: narrow ? 200 : 208, nodeH: 104 };
 };
 
 /** Size of the content (the tiled columns, or the graph canvas). */

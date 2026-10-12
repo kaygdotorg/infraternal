@@ -55,8 +55,8 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
   const windowSizes: WindowSizesApi = {
     groups: [
       { id: "phone", title: "Phones", options: [
-        { id: "full", label: "Full width", hint: "between the margins" },
-        { id: "edge", label: "Edge to edge", hint: "99% of the screen" },
+        { id: "full", label: "Full width", hint: "the whole screen, no neighbours showing" },
+        { id: "edge", label: "Edge to edge", hint: "neighbours peek in at the sides" },
         { id: "comfortable", label: "Comfortable", hint: "with margins" },
       ] },
       { id: "desktop", title: "Desktop", options: [
