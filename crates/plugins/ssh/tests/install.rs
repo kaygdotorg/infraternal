@@ -222,6 +222,43 @@ async fn breakit2_interrupted_lock_creation_allows_cleanup_and_retry() {
     retry.rollback().await.unwrap();
 }
 
+/// Models receipt allocation being unavailable until the owned payload is freed.
+/// The rollback still runs through the real shell and filesystem; the separate
+/// disposable-target test exercises a genuinely full home filesystem.
+struct ReceiptBudget(Local);
+impl SshSession for ReceiptBudget {
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            let guarded = format!(
+                r#"printf() {{
+    if [ "$1" = '%s %s fresh %s\n' ] && [ -e "$base/.bootstrap-lock/payload" ]; then return 1; fi
+    command printf "$@"
+}}
+{script}"#
+            );
+            self.0.run(&guarded, input).await
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "#169 T4: owned payload must be freed before receipt allocation"]
+async fn full_stage_frees_payload_before_allocating_a_cleanup_receipt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let cleanup = Installation::resume_cleanup(
+        Arc::new(ReceiptBudget(Local {
+            root: fixture.root.clone(),
+        })),
+        &fixture.target,
+        transaction.cleanup_coordinates(),
+    )
+    .unwrap();
+    cleanup.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+}
+
 #[tokio::test]
 async fn fresh_runtime_empty_directories_do_not_block_rollback_and_retry() {
     let fixture = Fixture::new();
