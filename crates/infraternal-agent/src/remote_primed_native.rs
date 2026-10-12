@@ -1,7 +1,40 @@
-//! Supervises bounded native relays, retaining partial binding progress across completed terminal jobs [215], #129.
+//! Owns bounded native standby relays independently of control activation; cancellation retires every shim socket [215], #129.
 use crate::{daemon, remote_native::NativeChannel, remote_quic::BindingConnection};
 use std::{io, path::PathBuf};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
+
+/// Only parked paths allocate this owned task. Its children never outlive the link.
+pub(super) struct Service {
+    task: JoinHandle<io::Result<()>>,
+}
+
+struct Retire(quinn::Connection);
+impl Drop for Retire {
+    fn drop(&mut self) {
+        self.0.close(0u32.into(), b"");
+    }
+}
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl Service {
+    pub(super) fn start(
+        connection: quinn::Connection,
+        binding: BindingConnection,
+        state: PathBuf,
+    ) -> Self {
+        // Capture the guard before spawning: abort may drop an unpolled future.
+        let retire = Retire(connection);
+        let task = tokio::spawn(async move {
+            // Closure, cancellation and panic all retire the owned transport.
+            let _retire = retire;
+            serve(&binding, state, true).await
+        });
+        Self { task }
+    }
+}
 
 /// Accept binding progress once and retain it across completed relay jobs.
 /// The caller already checked mTLS, uid and negotiated native capabilities.

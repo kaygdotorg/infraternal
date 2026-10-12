@@ -25,6 +25,7 @@ struct Link {
     kind: ServerLinkKind,
     proof: tokio::sync::Mutex<Option<Proof>>,
     standby: tokio::sync::watch::Sender<u64>,
+    native: Option<super::primed_native::Service>,
 }
 impl Drop for Link {
     fn drop(&mut self) {
@@ -120,6 +121,7 @@ async fn connect(
         kind,
         proof: tokio::sync::Mutex::new(None),
         standby: tokio::sync::watch::channel(0).0,
+        native: None,
     };
     if prove {
         let proof = tokio::time::timeout(PROBE_TIMEOUT, async {
@@ -142,7 +144,6 @@ async fn connect(
                     Ok(Proof::Tcp {
                         receive,
                         greeting: None,
-                        primed: false,
                     })
                 }
             }
@@ -212,7 +213,7 @@ async fn session(
                 registry,
                 proof,
                 &link.standby,
-                false,
+                link.native.is_some(),
             );
             if link.kind == ServerLinkKind::Mesh {
                 // Existing authenticated transport traffic supplies liveness;
@@ -262,6 +263,7 @@ async fn warming(
     live: &Link,
     identity: &RemoteIdentity,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    state: &std::path::Path,
 ) -> io::Result<Link> {
     let mut support = live.standby.subscribe();
     while *support.borrow_and_update() & infraternal_plugin_api::channel::REMOTE_STANDBY == 0 {
@@ -272,7 +274,7 @@ async fn warming(
     }
     let mut retry = Duration::from_secs(1);
     loop {
-        if let Ok(link) = connect(
+        if let Ok(mut link) = connect(
             identity,
             renewal,
             identity.endpoint,
@@ -281,18 +283,37 @@ async fn warming(
         )
         .await
         {
+            let prime = matches!(link.connected, Connected::Quic(_))
+                && *support.borrow() & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0;
             let result = tokio::time::timeout(PROBE_TIMEOUT, async {
                 let mut proof = link.proof.lock().await;
                 match proof.as_mut().ok_or(io::ErrorKind::InvalidData)? {
                     Proof::Quic(proof) => {
-                        proof.greeting =
-                            Some(park_channel(&proof.control, &mut proof.receive).await?);
+                        proof.greeting = Some(park_channel(&proof.control, &mut proof.receive, prime).await?);
+                        if prime {
+                            if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
+                                return Err(io::ErrorKind::PermissionDenied.into());
+                            }
+                            let Connected::Quic(connection) = &link.connected else {
+                                return Err(io::ErrorKind::InvalidData.into());
+                            };
+                            let hello = infraternal_protocol::decode_frame(proof.greeting.as_ref().ok_or(io::ErrorKind::InvalidData)?)
+                                .map_err(io::Error::other)?;
+                            if !matches!(hello.frame, infraternal_protocol::Frame::Hello { caps, .. }
+                                if caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0) {
+                                return Err(io::ErrorKind::InvalidData.into());
+                            }
+                            let binding = remote_quic::negotiate_binding(connection, &hello.frame)?;
+                            crate::transport::Transmit::default().send(&proof.control, 0, &super::client_greeting(renewal.is_some())).await?;
+                            proof.primed = true;
+                            link.native = Some(super::primed_native::Service::start(connection.clone(), binding, state.to_path_buf()));
+                        }
                     }
                     Proof::Tcp { receive, greeting } => {
                         let Connected::Tcp(connection) = &link.connected else {
                             return Err(io::ErrorKind::InvalidData.into());
                         };
-                        *greeting = Some(park_channel(&connection.channel, receive).await?);
+                        *greeting = Some(park_channel(&connection.channel, receive, false).await?);
                     }
                 }
                 Ok::<(), io::Error>(())
@@ -311,6 +332,7 @@ async fn warming(
 async fn park_channel<C: Channel>(
     channel: &C,
     receive: &mut crate::transport::Receive,
+    prime: bool,
 ) -> io::Result<Vec<u8>> {
     crate::transport::Transmit::default()
         .send(
@@ -319,7 +341,7 @@ async fn park_channel<C: Channel>(
             &infraternal_protocol::Frame::Call {
                 call_id: 0,
                 action_id: "transport.standby",
-                input_json: b"{}",
+                input_json: if prime { b"{\"prime\":true}" } else { b"{}" },
             },
         )
         .await?;
@@ -535,7 +557,7 @@ pub(super) async fn run(
             let active = session(&link, identity, state.clone(), renewal, registry.clone());
             let replacing = replacement(&link, identity, renewal, &registry, cooling);
             let mut preparing = (link.kind == ServerLinkKind::Mesh)
-                .then(|| Box::pin(warming(&link, identity, renewal)));
+                .then(|| Box::pin(warming(&link, identity, renewal, &state)));
             tokio::pin!(active, replacing);
             loop {
                 tokio::select! {
@@ -544,11 +566,11 @@ pub(super) async fn run(
                     result = async { preparing.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.await },
                         if preparing.is_some() && warm.is_none() => {
                         warm = result.ok();
-                        if warm.is_none() { preparing = Some(Box::pin(warming(&link, identity, renewal))); }
+                        if warm.is_none() { preparing = Some(Box::pin(warming(&link, identity, renewal, &state))); }
                     }
                     () = warm_closed(warm.as_ref()), if warm.is_some() => {
                         warm = None;
-                        preparing = Some(Box::pin(warming(&link, identity, renewal)));
+                        preparing = Some(Box::pin(warming(&link, identity, renewal, &state)));
                     }
                 }
             }
