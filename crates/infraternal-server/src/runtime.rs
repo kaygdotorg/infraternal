@@ -401,7 +401,8 @@ async fn remote_router(
     let hosts = crate::remote_runtime::RemoteHosts::from_source(
         enrollment.as_ref().map(|service| service.source.clone()),
     );
-    let enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
+    let mut enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
+    enrollment_store.2 = hosts.5.clone();
     // No provisioning batch survives a process restart. Consume its durable
     // retirement intent before any listener can admit the abandoned identity.
     enrollment_store
@@ -582,8 +583,12 @@ async fn build_router_core(
     )
     .await?;
     let local_node = agent.clone();
-    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent)
-        .await
+    #[cfg(feature = "remote")]
+    let ws_state =
+        WebSocketState::new_with_hosts(auth.clone(), pool.clone(), agent, hosts.clone()).await;
+    #[cfg(not(feature = "remote"))]
+    let ws_state = WebSocketState::new(auth.clone(), pool.clone(), agent).await;
+    let ws_state = ws_state
         .map_err(|_| ServerError::InvalidConfiguration)?
         .with_plugin_descriptors(catalog.unwrap_or_else(infraternal_agent::plugins::descriptors));
     #[cfg(feature = "remote")]

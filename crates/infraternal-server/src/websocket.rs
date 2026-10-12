@@ -96,12 +96,42 @@ pub(crate) struct WebSocketState {
 
 impl WebSocketState {
     /// Create bounded socket admission around the configured auth and agent services.
+    #[cfg(any(not(feature = "remote"), test))]
     pub(crate) async fn new(
         auth: Auth,
         pool: SqlitePool,
         agent: EmbeddedAgent,
     ) -> Result<Self, crate::plugins::PluginError> {
-        let plugins = crate::plugins::compiled(&pool).await?;
+        Self::new_inner(
+            auth,
+            pool,
+            agent,
+            #[cfg(feature = "remote")]
+            crate::remote_runtime::RemoteHosts::default(),
+        )
+        .await
+    }
+    #[cfg(feature = "remote")]
+    pub(crate) async fn new_with_hosts(
+        auth: Auth,
+        pool: SqlitePool,
+        agent: EmbeddedAgent,
+        hosts: crate::remote_runtime::RemoteHosts,
+    ) -> Result<Self, crate::plugins::PluginError> {
+        Self::new_inner(auth, pool, agent, hosts).await
+    }
+    async fn new_inner(
+        auth: Auth,
+        pool: SqlitePool,
+        agent: EmbeddedAgent,
+        #[cfg(feature = "remote")] hosts: crate::remote_runtime::RemoteHosts,
+    ) -> Result<Self, crate::plugins::PluginError> {
+        let plugins = crate::plugins::compiled_with_hosts(
+            &pool,
+            #[cfg(feature = "remote")]
+            hosts.clone(),
+        )
+        .await?;
         let (session_changes, _) = watch::channel(0_u64);
         let mut inventory = agent.session_inventory();
         let inventory_pool = pool.clone();
@@ -138,7 +168,7 @@ impl WebSocketState {
             agent,
             plugin_descriptors: &[],
             #[cfg(feature = "remote")]
-            remote_hosts: crate::remote_runtime::RemoteHosts::default(),
+            remote_hosts: hosts,
             #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
             #[cfg(test)]

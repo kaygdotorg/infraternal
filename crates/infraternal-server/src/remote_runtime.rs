@@ -37,6 +37,7 @@ pub(crate) struct RemoteHosts(
     Arc<Mutex<crate::plugins::WeakRuntime>>,
     Arc<std::sync::Mutex<Option<Arc<ListenerFactory>>>>,
     bool,
+    pub(crate) crate::remote_inventory::InventoryChanges,
 );
 
 /// Identity and admission limits are shared; this factory never retains its host map.
@@ -77,6 +78,7 @@ impl RemoteHosts {
             Arc::default(),
             Arc::default(),
             false,
+            crate::remote_inventory::InventoryChanges::default(),
         )
     }
     /// Classify the accepted destination, including a pre-existing wildcard listener.
@@ -132,6 +134,14 @@ impl RemoteHosts {
             factory,
             address: address.to_canonical(),
         }))
+    }
+    pub(crate) async fn online(&self, id: Uuid) -> bool {
+        self.actor(id).await.is_some_and(|actor| {
+            matches!(
+                *actor.session_inventory().borrow(),
+                crate::embedded::SessionInventoryState::Available(_)
+            )
+        })
     }
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
         self.0

@@ -55,6 +55,10 @@ mod remote_guard;
 #[cfg(feature = "remote")]
 pub mod remote_http;
 #[cfg(feature = "remote")]
+mod remote_inventory;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::inventory::decode_list as decode_host_inventory;
+#[cfg(feature = "remote")]
 mod remote_link;
 #[cfg(feature = "remote")]
 mod remote_renewal;
@@ -101,6 +105,8 @@ static COMPILED_PLUGINS: &[&infraternal_plugin_api::PluginDescriptor] = &[
     &infraternal_plugin_ssh::manifest::DESCRIPTOR,
     #[cfg(feature = "remote")]
     &infraternal_plugin_remote::DESCRIPTOR,
+    #[cfg(feature = "remote")]
+    &infraternal_plugin_remote::inventory::DESCRIPTOR,
     #[cfg(feature = "mesh")]
     &infraternal_plugin_mesh::descriptor::DESCRIPTOR,
     #[cfg(feature = "release")]

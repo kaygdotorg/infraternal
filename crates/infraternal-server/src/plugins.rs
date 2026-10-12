@@ -912,7 +912,25 @@ impl SocketPlugins {
 /// # Errors
 /// Refuses unavailable or inconsistent persisted feature settings.
 pub async fn compiled(pool: &sqlx::SqlitePool) -> Result<PluginRuntime, PluginError> {
+    compiled_with_hosts(
+        pool,
+        #[cfg(feature = "remote")]
+        crate::remote_runtime::RemoteHosts::default(),
+    )
+    .await
+}
+pub(crate) async fn compiled_with_hosts(
+    pool: &sqlx::SqlitePool,
+    #[cfg(feature = "remote")] hosts: crate::remote_runtime::RemoteHosts,
+) -> Result<PluginRuntime, PluginError> {
     let plugins: Vec<Arc<dyn Plugin>> = vec![
+        #[cfg(feature = "remote")]
+        Arc::new(infraternal_plugin_remote::inventory::InventoryPlugin(
+            Arc::new(crate::remote_inventory::Source {
+                pool: pool.clone(),
+                hosts,
+            }),
+        )),
         #[cfg(feature = "mesh")]
         Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone())),
         #[cfg(feature = "release")]
