@@ -154,6 +154,7 @@ function failureOf(target: Target): Failure | undefined {
   }
   if (/^refused/.test(name)) return { phase: 0, beforeLogin: true, kind: "auth", message: "The host refused the server key.", evidence: "The host answered on port 22 and refused the SSH identity." };
   if (/^running/.test(name)) return { phase: 0, beforeLogin: false, kind: "setup_running", message: "Another setup is still running on this host.", evidence: "A setup holds the lock on this host." };
+  if (/^nodetail/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "Setup stopped before this host was ready.", evidence: "Setup stopped before this host was ready." };
   if (/^connectfail/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "install", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", evidence: "The SSH connection setup failed." };
   if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;

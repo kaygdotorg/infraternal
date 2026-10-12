@@ -477,7 +477,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await openWizard(page);
     await addTyped(page, "connectfail.lab");
     await expect(page.getByRole("heading", { name: "Setting up connectfail.lab didn't finish" })).toBeVisible();
-    await expect(wizard(page).locator(".ah-lede")).toHaveText("Connecting to the host failed.");
+    // Page transitions briefly retain the outgoing progress summary in the DOM.
+    await expect(wizard(page).locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("Connecting to the host failed.");
     await expect(wizard(page).getByText("dropped", { exact: false })).toHaveCount(0);
     await wizard(page).locator(".ah-details summary").click();
     const details = wizard(page).locator(".ah-details pre");
@@ -486,3 +487,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await page.screenshot({ path: `../../evidence/addhost-netbird-connect/connect-failure-${viewport.width}.png` });
   });
 }
+
+test("empty failure Details do not fall back to the visible summary", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "nodetail.lab");
+  await expect(page.getByRole("heading", { name: "Setting up nodetail.lab didn't finish" })).toBeVisible();
+  await wizard(page).locator(".ah-details summary").click();
+  await expect(wizard(page).locator(".ah-details pre")).toHaveText("No additional diagnostic details were reported.");
+});
