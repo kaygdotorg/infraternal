@@ -1,0 +1,28 @@
+Running as unit: run-p2454865-i6648764.scope; invocation ID: e9014cf73fe14863863b5c9fab88e31e
+ENVIRONMENT machine=infraternal-dev cores=12 load=58.19 54.08 48.82 48/1647 2488028
+TARGET case=bash-clean status=0 canonical=True output_bytes=63 elapsed_ms=242.815 init=systemd uid=1101 sudo=yes user_manager=yes linger=yes
+TARGET case=zsh-clean status=0 canonical=True output_bytes=63 elapsed_ms=230.197 init=systemd uid=1101 sudo=yes user_manager=yes linger=yes
+TARGET case=fish-clean status=0 canonical=True output_bytes=63 elapsed_ms=316.903 init=systemd uid=1101 sudo=yes user_manager=yes linger=yes
+TARGET case=sh-clean status=0 canonical=True output_bytes=63 elapsed_ms=255.951 init=systemd uid=1101 sudo=yes user_manager=yes linger=yes
+TARGET case=zsh-env-print status=0 canonical=False output_bytes=87 elapsed_ms=271.591
+TARGET case=zsh-env-exit status=0 canonical=False output_bytes=0 elapsed_ms=415.982
+TARGET case=zsh-env-prompt status=0 canonical=True output_bytes=63 elapsed_ms=260.911 init=systemd uid=1101 sudo=yes user_manager=yes linger=yes
+TARGET case=zsh-env-tmux status=1 canonical=False output_bytes=0 elapsed_ms=222.461
+TARGET case=zsh-env-screen status=1 canonical=False output_bytes=34 elapsed_ms=200.354
+TARGET case=zsh-env-hang status=timeout canonical=False elapsed_ms=4018.692
+TARGET case=bash-rc-print status=0 canonical=False output_bytes=92 elapsed_ms=266.724
+TARGET case=fish-config-print status=0 canonical=False output_bytes=92 elapsed_ms=283.815
+TARGET case=root-passwordless status=0 canonical=True output_bytes=58 elapsed_ms=561.394 init=systemd uid=0 sudo=yes user_manager=yes linger=no
+TARGET case=password-sudo status=0 canonical=True output_bytes=62 elapsed_ms=241.735 init=systemd uid=1101 sudo=no user_manager=yes linger=yes
+TARGET case=no-sudo status=0 canonical=True output_bytes=62 elapsed_ms=232.003 init=systemd uid=1101 sudo=no user_manager=yes linger=yes
+TARGET case=linger-off status=0 canonical=True output_bytes=62 elapsed_ms=262.865 init=systemd uid=1101 sudo=yes user_manager=yes linger=no
+TARGET case=no-user-manager status=0 canonical=True output_bytes=61 elapsed_ms=258.163 init=systemd uid=1101 sudo=yes user_manager=no linger=no
+TARGET case=changed-host-key status=255 canonical=False output_bytes=0 elapsed_ms=60.334
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/docs/verification/addhost-breakit2/targets.py", line 122, in <module>
+    main()
+    ~~~~^^
+  File "/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/docs/verification/addhost-breakit2/targets.py", line 108, in main
+    assert not failed_startup, "SSH check is blocked by startup profiles: " + ", ".join(failed_startup)
+           ^^^^^^^^^^^^^^^^^^
+AssertionError: SSH check is blocked by startup profiles: zsh-env-print, zsh-env-exit, zsh-env-tmux, zsh-env-screen, zsh-env-hang, bash-rc-print, fish-config-print

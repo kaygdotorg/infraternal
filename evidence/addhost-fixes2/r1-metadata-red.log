@@ -1,0 +1,24 @@
+Running as unit: run-p2216123-i6410024.scope; invocation ID: 418b4b0fd1b14d2db7d27c08c41f4fb5
+    Blocking waiting for file lock on build directory
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-agent)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 32s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/infraternal_server-aaf76c8bf1e2d913)
+
+running 1 test
+
+thread 'bootstrap_runtime::remote_backend::canary_tests::failed_attachment_finishes_the_private_command' (2249626) panicked at crates/infraternal-server/src/bootstrap_canary_tests.rs:146:5:
+assertion `left == right` failed
+  left: Null
+ right: "readiness"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test bootstrap_runtime::remote_backend::canary_tests::failed_attachment_finishes_the_private_command ... FAILED
+
+failures:
+
+failures:
+    bootstrap_runtime::remote_backend::canary_tests::failed_attachment_finishes_the_private_command
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 328 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`
