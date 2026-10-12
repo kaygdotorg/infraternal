@@ -318,3 +318,46 @@ async fn reader_borrow_measurement() {
         }
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_native_writer_negotiates_queue_backpressure_without_shared_selection() {
+    use infraternal_shim::frame::Frame;
+    for advertised in [3, 15] {
+        let directory = Directory::new();
+        let path = state(Some(directory.0.clone()))
+            .unwrap()
+            .join("sessions/ordinary.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            super::send(
+                &mut peer,
+                &Frame::Hello {
+                    version: 1,
+                    caps: advertised,
+                    session: [1; 16],
+                    pid: 1,
+                    cols: 80,
+                    rows: 24,
+                    created: 0,
+                    head: 0,
+                    start: 0,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                super::Reader::default().read(&mut peer).await.unwrap(),
+                Frame::Attach(advertised),
+                "ordinary native writers need negotiated full-queue backpressure too"
+            );
+            assert_eq!(
+                super::Reader::default().read(&mut peer).await.unwrap(),
+                Frame::SelectWriter(7)
+            );
+        });
+        let session = super::connect_writer(path, [1; 16], 7).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(session.caps, advertised);
+    }
+}
