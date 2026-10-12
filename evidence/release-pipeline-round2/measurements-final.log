@@ -1,0 +1,29 @@
+Running as unit: run-p1343059-i43243248.scope; invocation ID: 88875c114b2647c59346373f1edcfa03
+ENVIRONMENT machine=infraternal-dev kernel=6.12.111+deb13-amd64 arch=x86_64 cores=8 cpu_weight=10000
+RUN source=baseline test=cross_architecture_cold_and_warm_cache_measurements load_before=['10.91', '21.47', '21.71']
+
+running 1 test
+METRIC name=add_host_get_arm64_binary payload_bytes=20971520 cold_ms=192.180 warm_p50_ms=100.341 samples=50 concurrent_hosts=8 eight_warm_ms=211.646 network_requests=4
+test release_payload::tests::cross_architecture_cold_and_warm_cache_measurements ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 5.65s
+
+RESULT source=baseline load_after=['10.28', '21.16', '21.61'] fixture_process_maxrss_kib=50012
+RUN source=fixed test=cross_architecture_cold_and_warm_cache_measurements load_before=['10.28', '21.16', '21.61']
+
+running 1 test
+METRIC name=add_host_get_arm64_binary payload_bytes=20971520 cold_ms=189.304 warm_p50_ms=97.751 samples=50 concurrent_hosts=8 eight_warm_ms=209.106 network_requests=4
+test release_payload::tests::cross_architecture_cold_and_warm_cache_measurements ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 5.49s
+
+RESULT source=fixed load_after=['9.78', '20.88', '21.51'] fixture_process_maxrss_kib=50256
+RUN source=fixed test=fifty_abandoned_downloads_startup_measurement load_before=['9.78', '20.88', '21.51']
+
+running 1 test
+METRIC name=release_cache_startup_cleanup abandoned_downloads=50 logical_bytes=1048576000 sparse_fixture=true retained_after_bytes=0 elapsed_ms=2.342
+test release_payload::tests::fifty_abandoned_downloads_startup_measurement ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.02s
+
+RESULT source=fixed load_after=['9.78', '20.88', '21.51'] fixture_process_maxrss_kib=50256

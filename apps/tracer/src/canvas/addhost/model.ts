@@ -39,7 +39,11 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "host-key": return "This host's key needs your OK";
     case "auth": return "Couldn't sign in to this host";
     case "unsupported": return "This host can't run the infraternal agent yet";
-    case "install": if (failure.already_added) return failure.message; if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`; return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
+    case "install":
+      if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
+        return `Get the ${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"} binary: ${failure.message}`;
+      }
+      if (failure.already_added) return failure.message; if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`; return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
     default: return "Something went wrong while setting up this host. Try again.";
   }
 }

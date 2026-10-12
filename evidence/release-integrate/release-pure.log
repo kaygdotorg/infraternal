@@ -1,0 +1,11 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+    Checking memchr v2.8.3
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-rp/crates/infraternal-plugin-api)
+   Compiling syn v3.0.6
+    Checking serde_json v1.0.151
+   Compiling serde_derive v1.0.229
+    Checking infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-rp/crates/plugins/release)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.44s

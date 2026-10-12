@@ -133,6 +133,23 @@ pub(crate) fn default_runner(
         let _ = remote;
         Arc::new(base)
     };
+    let binaries = BinaryPaths {
+        x86_64: std::env::var_os("INFRATERNAL_BOOTSTRAP_X86_64_BINARY").map_or_else(
+            || executable.with_file_name("infraternal-x86_64-musl"),
+            Into::into,
+        ),
+        aarch64: std::env::var_os("INFRATERNAL_BOOTSTRAP_AARCH64_BINARY").map_or_else(
+            || executable.with_file_name("infraternal-aarch64-musl"),
+            Into::into,
+        ),
+    };
+    // Linux exposes the exact running inode even after its installation path is
+    // atomically replaced. Input::File opens this in the server process [225].
+    let payloads = crate::release_payload::ReleasePayload::new(
+        "/proc/self/exe".into(),
+        binaries.clone(),
+        data_dir,
+    );
     Ok(Bootstrap::new(
         Arc::new(AutoAuth::new(Arc::new(TrustedOpenSsh::new(
             OpenSsh {
@@ -148,17 +165,9 @@ pub(crate) fn default_runner(
             data_dir.join("ssh-trust"),
         )))),
         backend,
-        BinaryPaths {
-            x86_64: std::env::var_os("INFRATERNAL_BOOTSTRAP_X86_64_BINARY").map_or_else(
-                || executable.with_file_name("infraternal-x86_64-musl"),
-                Into::into,
-            ),
-            aarch64: std::env::var_os("INFRATERNAL_BOOTSTRAP_AARCH64_BINARY").map_or_else(
-                || executable.with_file_name("infraternal-aarch64-musl"),
-                Into::into,
-            ),
-        },
-    ))
+        binaries,
+    )
+    .with_payload_source(payloads))
 }
 
 struct PendingRemoteRuntime {

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Downloads and verifies a public release with the two embedded release trust anchors [184,224].
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/common"
+[[ $# == 1 ]] && valid_version "$1" || { printf 'usage: scripts/release/verify VERSION\n' >&2; exit 2; }
+staging="$(mktemp -d "$release_scratch/verify.XXXXXX")"
+trap 'rm -rf -- "$staging"' EXIT
+verify_download "$1" "$staging"
+printf 'Verified infraternal %s (signature and all payload checksums).\n' "$1"

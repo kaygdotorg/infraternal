@@ -19,7 +19,12 @@ pub struct SelectedCommand<'a> {
 #[must_use]
 pub fn build(registry: &ActionRegistry) -> Command {
     let mut root = Command::new("infraternal")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(format!(
+            "{} ({})",
+            infraternal_plugin_api::VERSION,
+            infraternal_plugin_api::release_version::channel(infraternal_plugin_api::VERSION)
+                .unwrap_or("unknown")
+        ))
         .about("Manage infraternal servers and node components.")
         .disable_help_subcommand(true)
         .arg(

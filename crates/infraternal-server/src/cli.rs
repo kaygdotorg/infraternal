@@ -22,6 +22,10 @@ pub fn plugin() -> PluginDefinition {
             server_setup_token_action(),
         ],
     );
+    #[cfg(feature = "release")]
+    plugin
+        .actions
+        .extend(infraternal_plugin_release::descriptor::server_cli_actions());
     for action in &mut plugin.actions {
         if action.input_schema.properties.contains_key("remote_ca_dir") {
             action

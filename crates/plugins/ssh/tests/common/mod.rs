@@ -31,6 +31,9 @@ import socket
 import sys
 import time
 path = sys.argv[sys.argv.index('-S') + 1]
+# Publish a private socket at bind; chmod afterwards can race the client's
+# strict metadata check when the fixture is preempted on a loaded host.
+os.umask(0o177)
 listener = socket.socket(socket.AF_UNIX)
 listener.bind(path)
 os.chmod(path, 0o600)

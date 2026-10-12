@@ -1,0 +1,12 @@
+bun test v1.4.2 (744846f84)
+
+scripts/release/review.test.ts:
+PUBLICATION_ADMISSION same_host=true build_directories=2 list_requests=1 uploads=4 replaced_objects=0
+(pass) publication with two build directories admits only one writer [323.59ms]
+STORAGE_PREFLIGHT duplicate_result=true existing_objects=1 exit=1 stdout_bytes=0 stderr_bytes=46
+(pass) storage preflight refuses ambiguous existing-object results [40.22ms]
+
+ 2 pass
+ 0 fail
+ 5 expect() calls
+Ran 2 tests across 1 file. [534.00ms]

@@ -71,3 +71,39 @@ printf '%s\n' 'isolated-public-policy'
     let output = result.unwrap();
     assert_eq!(output.stdout, b"isolated-public-policy\n");
 }
+
+#[test]
+fn synthetic_master_socket_is_private_at_creation() {
+    use std::os::unix::fs::MetadataExt;
+    let root = common::scratch().join(format!(
+        "socket-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let fixture = common::master_fixture(&root);
+    // Delay the fixture's later chmod to make the bind/chmod race reproducible.
+    let script = std::fs::read_to_string(&fixture).unwrap().replace(
+        "os.chmod(path, 0o600)",
+        "time.sleep(0.1)\nos.chmod(path, 0o600)",
+    );
+    std::fs::write(&fixture, script).unwrap();
+    let socket = root.join("control");
+    let mut child = std::process::Command::new("/usr/bin/python3")
+        .arg(fixture)
+        .arg("-S")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    let mut metadata = None;
+    for _ in 0..1000 {
+        metadata = std::fs::symlink_metadata(&socket).ok();
+        if metadata.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(metadata.unwrap().mode() & 0o777, 0o600);
+}

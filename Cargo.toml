@@ -16,6 +16,7 @@ members = [
     "crates/plugins/host-facts",
     "crates/plugins/mesh",
     "crates/plugins/remote",
+    "crates/plugins/release",
 ]
 
 [workspace.package]

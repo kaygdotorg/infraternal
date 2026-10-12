@@ -40,6 +40,11 @@ struct PluginFactory {
 
 fn factories() -> &'static [PluginFactory] {
     &[
+        #[cfg(feature = "release")]
+        PluginFactory {
+            id: infraternal_plugin_release::descriptor::DESCRIPTOR.id,
+            build: release_plugin,
+        },
         #[cfg(feature = "plugin-server")]
         PluginFactory {
             id: infraternal_server::cli::ID,
@@ -93,6 +98,11 @@ fn build_registry(root: Option<&str>) -> Result<ActionRegistry, RegistryError> {
 #[cfg(feature = "plugin-host-facts")]
 fn host_plugin() -> PluginDefinition {
     infraternal_plugin_host_facts::DESCRIPTOR.cli_plugin(ActionTarget::Host)
+}
+
+#[cfg(feature = "release")]
+fn release_plugin() -> PluginDefinition {
+    infraternal_plugin_release::descriptor::DESCRIPTOR.cli_plugin(ActionTarget::Global)
 }
 
 fn cli_plugin() -> PluginDefinition {
@@ -569,4 +579,65 @@ fn ssh_askpass_action() -> ActionDefinition {
     )
     .hidden()
     .with_cli_handler(CliHandler::SshAskpass)
+}
+
+#[cfg(all(test, feature = "release"))]
+mod release_tests {
+    //! Preserves release operator paths and hosted discovery through lazy server metadata.
+    use super::{registry, registry_for};
+    use infraternal_plugin_api::CliHandler;
+
+    #[test]
+    fn server_commands_bind_release_without_losing_hosted_skills() {
+        let server = registry_for(Some("server")).expect("server registry");
+        for path in [
+            vec!["server", "channel"],
+            vec!["server", "release", "latest"],
+        ] {
+            let action = server.find(&path).expect("release operator command").action;
+            assert_eq!(action.cli_handler, CliHandler::ServerPlugin);
+            assert!(action.hosted.is_some());
+            let skill = crate::cli::skills::render_action(action).expect("operator skill");
+            assert!(skill.contains("VERSION") || skill.contains("unreviewed"));
+        }
+        let full = registry().expect("full registry");
+        for source in infraternal_plugin_release::descriptor::DESCRIPTOR.actions {
+            let path = source.id.split('.').collect::<Vec<_>>();
+            assert_eq!(
+                full.find(&path)
+                    .expect("hosted release action")
+                    .action
+                    .hosted,
+                Some(*source)
+            );
+        }
+        let tree = crate::cli::command_tree::build(&server);
+        let matches = tree
+            .try_get_matches_from([
+                "infraternal",
+                "server",
+                "--data",
+                "private-state",
+                "channel",
+                "edge",
+                "--yes",
+            ])
+            .expect("existing syntax");
+        let selected = crate::cli::command_tree::selected(&matches);
+        assert_eq!(
+            selected
+                .matches
+                .get_one::<String>("channel")
+                .map(String::as_str),
+            Some("edge")
+        );
+        assert_eq!(
+            selected
+                .matches
+                .get_one::<String>("data")
+                .map(String::as_str),
+            Some("private-state")
+        );
+        assert!(selected.matches.get_flag("yes"));
+    }
 }

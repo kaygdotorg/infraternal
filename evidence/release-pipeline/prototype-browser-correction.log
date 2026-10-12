@@ -1,0 +1,13 @@
+Running as unit: run-p3473164-i41179914.scope; invocation ID: 80d995915fc542ae97476b6d095da125
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-4qee8yh5.js, chunk-avcy94a0.js, chunk-sxcwef8m.js, chunk-9n6x4dkt.js, chunk-a895a34j.js, chunk-a7vc1x01.js, chunk-kjxhpfe0.js, chunk-0th2e7qk.js, chunk-vh457k4b.js, chunk-cqjxczw9.js, chunk-zfrs8pte.js, chunk-247np1vh.js, chunk-2gkknmk5.js, chunk-yvhhqffe.js, chunk-tchv8pdm.js, chunk-fv090ybv.js, chunk-ryfhk4qn.js, chunk-065hdb1d.js, chunk-whht21q0.js, main.js, chunk-4qw8adyp.js, chunk-rqzw75kv.js, chunk-9jq42agf.js, chunk-nnd0hkz4.js, chunk-a8rcspfb.js, chunk-c3b1096z.js, chunk-pmqz0n0w.js, chunk-zpatga97.js, chunk-82ezxk4a.js, chunk-gxk8gck7.js, chunk-1qqgctc9.js, chunk-3k66jaas.js, chunk-axbkkqp1.js, chunk-b6sjtjkr.js, chunk-x4av6zwt.js, chunk-pc70ndhx.js, chunk-wyph4egh.js, chunk-xksxkpks.js, chunk-prdq97cj.js, chunk-4gbz1fxg.js, chunk-0r96n8ek.js, chunk-rastny3t.js, chunk-90eqjk98.js, chunk-xmx4xtz6.js, chunk-k0vcxsgr.js, chunk-x603vc1g.js, chunk-z6h8pmd1.js, chunk-9a8xde6a.js, chunk-eq1n7yxv.js, chunk-fk9bpbmz.js, chunk-4mwzkr2d.js, chunk-mcymyhsg.js, chunk-6mkhmhqp.js, chunk-2fgh4bmn.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-sc6f2pxc.js, chunk-c85634fr.js, chunk-ssm15f13.js, chunk-0c5b2v3a.js, chunk-g2v3dx8h.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4818
+[WebServer] latency proxy listening on http://localhost:4817; upstream port=4818
+
+Running 1 test using 1 worker
+
+(node:3475070) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/add-host-prototype.spec.ts:33:1 › one chip field: typed hosts become chips, checkboxes and chips stay in sync (9.9s)
+
+  1 passed (17.4s)

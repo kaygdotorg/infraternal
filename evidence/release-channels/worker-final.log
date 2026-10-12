@@ -1,0 +1,11 @@
+bun test v1.4.2 (744846f84)
+
+scripts/release/worker.test.ts:
+(pass) signs stable and writes its channel pointer [30.04ms]
+(pass) signs edge and writes its channel pointer [1.07ms]
+(pass) refuses versions outside stable and UTC edge forms before bucket work [0.58ms]
+
+ 3 pass
+ 0 fail
+ 16 expect() calls
+Ran 3 tests across 1 file. [225.00ms]

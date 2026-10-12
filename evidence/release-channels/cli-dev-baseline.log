@@ -1,0 +1,46 @@
+Running as unit: run-p1219498-i47311399.scope; invocation ID: 78d078ad70a6460e9f074eec0c85d3bb
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/infraternal_server-2e762f2bc8cf85aa)
+
+running 1 test
+test auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit ... listed_live=true db_live_now=false expiry_event_received=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 8.79s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/mesh_parser-04c37d126f703080)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/mesh_review_plugin-bc76e07eaa75e549)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/mesh_review_policy-34e509218ae0c9ad)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/mesh_review_role_scope-3cfb8dadaeec6c91)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/plugin_host_review-db7f16938f989230)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/plugin_settings_review-34d5c9b73fe766ba)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

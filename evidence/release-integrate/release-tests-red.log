@@ -1,0 +1,89 @@
+Running as unit: run-p924430-i5118393.scope; invocation ID: 3d990299fb5f41d89982e82a3e303296
+    Blocking waiting for file lock on build directory
+   Compiling smallvec v1.16.2
+   Compiling tinystr v0.8.4
+   Compiling serde_core v1.0.229
+   Compiling zerotrie v0.2.5
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling futures-sink v0.3.34
+   Compiling slab v0.4.12
+   Compiling futures-util v0.3.34
+   Compiling tracing-core v0.1.36
+   Compiling icu_provider v2.3.1
+   Compiling log v0.4.34
+   Compiling tracing v0.1.44
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling serde v1.0.229
+   Compiling parking_lot_core v0.9.12
+   Compiling either v1.18.0
+   Compiling base64 v0.22.1
+   Compiling idna_adapter v1.2.2
+   Compiling parking_lot v0.12.5
+   Compiling num-traits v0.2.19
+   Compiling idna v1.1.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling futures-intrusive v0.5.0
+   Compiling flume v0.11.1
+   Compiling url v2.5.8
+   Compiling futures-executor v0.3.34
+   Compiling sha2 v0.10.9
+   Compiling atoi v2.0.0
+   Compiling futures-channel v0.3.34
+   Compiling crypto-common v0.1.7
+   Compiling serde_json v1.0.151
+   Compiling digest v0.10.7
+   Compiling sqlx-core v0.8.6
+   Compiling getrandom v0.4.3
+   Compiling nix v0.30.1
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-rp/crates/infraternal-plugin-api)
+   Compiling uuid v1.27.0
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-rp/crates/plugins/release)
+error[E0432]: unresolved imports `infraternal_plugin_api::Plugin`, `infraternal_plugin_api::ReplySender`
+   --> crates/plugins/release/src/socket.rs:5:16
+    |
+  5 |     Operation, Plugin, PluginDescriptor, ReplySender, SocketHost, SubscriptionRegistry,
+    |                ^^^^^^                    ^^^^^^^^^^^ no `ReplySender` in the root
+    |                |
+    |                no `Plugin` in the root
+    |
+note: found an item that was configured out
+   --> crates/infraternal-plugin-api/src/lib.rs:180:11
+    |
+179 | #[cfg(feature = "socket-host")]
+    |       ----------------------- the item is gated behind the `socket-host` feature
+180 | pub trait Plugin: Send + Sync {
+    |           ^^^^^^
+note: found an item that was configured out
+   --> crates/infraternal-plugin-api/src/lib.rs:148:12
+    |
+146 | #[cfg(feature = "socket-host")]
+    |       ----------------------- the item is gated behind the `socket-host` feature
+147 | #[derive(Clone)]
+148 | pub struct ReplySender {
+    |            ^^^^^^^^^^^
+
+error[E0425]: cannot find function `fresh_session_tx` in crate `infraternal_plugin_api`
+   --> crates/plugins/release/src/service.rs:112:49
+    |
+112 |                     || !infraternal_plugin_api::fresh_session_tx(
+    |                                                 ^^^^^^^^^^^^^^^^ not found in `infraternal_plugin_api`
+    |
+note: found an item that was configured out
+   --> crates/infraternal-plugin-api/src/lib.rs:203:14
+    |
+202 | #[cfg(feature = "socket-host")]
+    |       ----------------------- the item is gated behind the `socket-host` feature
+203 | pub async fn fresh_session_tx(
+    |              ^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0425, E0432.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `infraternal-plugin-release` (lib test) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `infraternal-plugin-release` (lib) due to 2 previous errors

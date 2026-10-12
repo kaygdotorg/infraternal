@@ -1,0 +1,146 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling stable_deref_trait v1.2.1
+   Compiling cfg-if v1.0.5
+   Compiling libc v0.2.190
+   Compiling syn v3.0.6
+   Compiling smallvec v1.16.2
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling synstructure v0.14.0
+   Compiling zerovec-derive v0.11.6
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling zerofrom v0.1.8
+   Compiling displaydoc v0.2.7
+   Compiling typenum v1.20.1
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling futures-core v0.3.34
+   Compiling pin-project-lite v0.2.17
+   Compiling tinystr v0.8.4
+   Compiling litemap v0.8.3
+   Compiling serde_core v1.0.229
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling writeable v0.6.4
+   Compiling lock_api v0.4.14
+   Compiling icu_locale_core v2.3.0
+   Compiling potential_utf v0.1.6
+   Compiling zerotrie v0.2.5
+   Compiling icu_normalizer_data v2.3.0
+   Compiling autocfg v1.5.1
+   Compiling icu_properties_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling block-buffer v0.10.4
+   Compiling bytes v1.12.1
+   Compiling futures-sink v0.3.34
+   Compiling serde v1.0.229
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling serde_derive v1.0.229
+   Compiling memchr v2.8.3
+   Compiling crossbeam-utils v0.8.23
+   Compiling percent-encoding v2.3.2
+   Compiling equivalent v1.0.2
+   Compiling form_urlencoded v1.2.2
+   Compiling idna_adapter v1.2.2
+   Compiling syn v2.0.119
+   Compiling foldhash v0.1.5
+   Compiling shlex v2.0.1
+   Compiling once_cell v1.21.4
+   Compiling slab v0.4.12
+   Compiling find-msvc-tools v0.1.14
+   Compiling thiserror v2.0.21
+   Compiling futures-task v0.3.34
+   Compiling cpufeatures v0.2.17
+   Compiling futures-io v0.3.34
+   Compiling allocator-api2 v0.2.21
+   Compiling futures-util v0.3.34
+   Compiling hashbrown v0.15.5
+   Compiling cc v1.6.0
+   Compiling tracing-core v0.1.36
+   Compiling tracing-attributes v0.1.31
+   Compiling idna v1.1.0
+   Compiling num-traits v0.2.19
+   Compiling thiserror-impl v2.0.21
+   Compiling parking v2.2.1
+   Compiling pkg-config v0.3.34
+   Compiling hashbrown v0.17.1
+   Compiling log v0.4.34
+   Compiling vcpkg v0.2.15
+   Compiling crc-catalog v2.5.0
+   Compiling libsqlite3-sys v0.30.1
+   Compiling crc v3.4.0
+   Compiling tracing v0.1.44
+   Compiling indexmap v2.14.2
+   Compiling event-listener v5.4.2
+   Compiling crossbeam-queue v0.3.14
+   Compiling url v2.5.8
+   Compiling hashlink v0.10.0
+   Compiling either v1.18.0
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling crypto-common v0.1.7
+   Compiling base64 v0.22.1
+   Compiling itoa v1.0.18
+   Compiling digest v0.10.7
+   Compiling tokio v1.53.2
+   Compiling parking_lot v0.12.5
+   Compiling spin v0.9.9
+   Compiling errno v0.3.14
+   Compiling ryu v1.0.23
+   Compiling zmij v1.0.23
+   Compiling signal-hook-registry v1.4.8
+   Compiling serde_urlencoded v0.7.1
+   Compiling flume v0.11.1
+   Compiling tokio-stream v0.1.19
+   Compiling atoi v2.0.0
+   Compiling futures-intrusive v0.5.0
+   Compiling sha2 v0.10.9
+   Compiling futures-executor v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling serde_json v1.0.151
+   Compiling sqlx-core v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling hex v0.4.3
+   Compiling heck v0.5.0
+   Compiling dotenvy v0.15.7
+   Compiling sqlx-macros-core v0.8.6
+   Compiling memoffset v0.9.1
+   Compiling cfg_aliases v0.2.2
+   Compiling getrandom v0.4.3
+   Compiling nix v0.30.1
+   Compiling sqlx-macros v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/review-release-pipeline/crates/infraternal-plugin-api)
+   Compiling sqlx v0.8.6
+   Compiling bitflags v2.13.2
+   Compiling uuid v1.27.0
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/review-release-pipeline/crates/infraternal-protocol)
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/review-release-pipeline/crates/plugins/release)
+   Compiling release-review-restart v0.1.0 (/home/kayg/.cache/codex-scratch/release-pipeline-review/restart-harness)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11m 33s
+     Running review_restart.rs (/home/kayg/.cache/codex-scratch/release-pipeline-review/harness-target/debug/deps/review_restart-fc67fe5cc6b69ba6)
+
+running 1 test
+RELEASE_METADATA_RESTART abrupt_stops=2 retained_before_bytes=131072 retained_after_bytes=131072
+
+thread 'restarted_latest_reclaims_metadata_after_process_stop' (3157703) panicked at review_restart.rs:86:5:
+assertion `left == right` failed: restarted lookup must reclaim abandoned metadata staging
+  left: 131072
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test restarted_latest_reclaims_metadata_after_process_stop ... FAILED
+
+failures:
+
+failures:
+    restarted_latest_reclaims_metadata_after_process_stop
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.76s
+
+error: test failed, to rerun pass `--test review_restart`

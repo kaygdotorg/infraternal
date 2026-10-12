@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Real PTY replay cannot precede explicit Credit or restart siblings on attach (#66)."""
 import argparse
-import os
 from pathlib import Path
 import select
 import struct
@@ -9,11 +8,11 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup
+from agent_fixture import Binary, cleanup, fixture_state
 
 
 def run(binary):
-    state = Path(f'target/ac{os.getpid()}')
+    state = fixture_state('ac')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
     try:

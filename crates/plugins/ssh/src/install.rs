@@ -28,6 +28,17 @@ impl BinaryPaths {
     }
 }
 
+/// Supplies a trusted architecture payload before any remote installation writes.
+/// Existing path-based adapters remain available; the server supplies its verified release resolver [225].
+pub trait PayloadSource: Send + Sync {
+    fn get(&self, architecture: Architecture) -> crate::transport::Operation<'_, PathBuf>;
+}
+impl PayloadSource for BinaryPaths {
+    fn get(&self, architecture: Architecture) -> crate::transport::Operation<'_, PathBuf> {
+        Box::pin(async move { Ok(BinaryPaths::get(self, architecture).to_owned()) })
+    }
+}
+
 /// One-time capability and pin are produced by trusted enrollment, never serialized by bootstrap.
 pub struct JoinMaterial {
     pub host: uuid::Uuid,

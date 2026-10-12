@@ -1,0 +1,4 @@
+Exact repository source; isolated manifest omits unrelated server/VT sanitizer engines.
+e43d5de6df74b66cd5d179c05ae03a23d33bc22c787590c2c3f01cf889c4421d  crates/infraternal-plugin-api/src/release_version.rs
+0d6c11a2dc4fcf190266d5ec546a941ea87eba5d410a0fbcded6713f536c6572  crates/plugins/release/src/pointer.rs
+20509e632fdb5ae5e1f8f926f0a918b4fb0c1f9e698e89a70f81bf9b3f477a73  fuzz/fuzz_targets/release_channel.rs

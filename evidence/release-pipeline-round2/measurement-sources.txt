@@ -1,0 +1,5 @@
+Exact-source optimized harness: same release modules, real infraternal-plugin-ssh, and shared Cargo.lock package versions; no behavior stubs.
+d9a060ff09a1b48cee41b8abc1006e7c8be91c10e9e4edefd8ce3fb5eac9aa6b  fixed crates/infraternal-server/src/release_payload.rs
+a52fcc801506bf172f351c55d2b0f930bdf3f3a7ff8d9f7ef82ad237b62f0c81  fixed crates/infraternal-server/src/release_http.rs
+e66d66fe28d46ef7244116f7eff17f580a4d487bdf229daca8db337ae1360e76  fixed crates/infraternal-server/src/release_verify.rs
+611be224255f808b73c49f0f392b698cf0acb8f779eb3002b3751fb0e474e4a4  baseline 087d2a70 release_payload.rs
