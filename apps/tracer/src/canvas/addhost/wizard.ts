@@ -779,7 +779,7 @@ export class Wizard {
   private detailsOf(job: Job): string {
     const failure = job.view.failure;
     const lines = [...(job.view.leftovers?.findings ?? []), failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", ...failureDiagnostics(failure, guideFor(job.entry.label, failure)).map((line) => line === failure?.message ? `The server said: ${line}` : line)].filter(Boolean);
-    return lines.join("\n") || job.view.message;
+    return lines.join("\n") || "No additional diagnostic details were reported.";
   }
 
   private renderFailure(page: HTMLElement): void {
