@@ -924,6 +924,10 @@ pub(crate) async fn compiled_with_hosts(
     #[cfg(feature = "remote")] hosts: crate::remote_runtime::RemoteHosts,
 ) -> Result<PluginRuntime, PluginError> {
     let plugins: Vec<Arc<dyn Plugin>> = vec![
+        #[cfg(feature = "mesh")]
+        Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone())),
+        #[cfg(feature = "release")]
+        Arc::new(crate::release_latest::plugin(pool.clone()).await?),
         #[cfg(feature = "remote")]
         Arc::new(infraternal_plugin_remote::inventory::InventoryPlugin(
             Arc::new(crate::remote_inventory::Source {
@@ -931,10 +935,6 @@ pub(crate) async fn compiled_with_hosts(
                 hosts,
             }),
         )),
-        #[cfg(feature = "mesh")]
-        Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone())),
-        #[cfg(feature = "release")]
-        Arc::new(crate::release_latest::plugin(pool.clone()).await?),
     ];
     PluginRuntime::new(plugins, "server")
         .with_store(pool.clone())
