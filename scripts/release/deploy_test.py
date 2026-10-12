@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise deployment refusal/rollback, real WAL backup and private control framing [250], #188."""
 import hashlib
+import fcntl
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.machinery
@@ -12,6 +13,7 @@ from pathlib import Path
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import tarfile
 import threading
@@ -205,6 +207,17 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(builder.os, "getloadavg", return_value=(9, 8, 7)), patch.object(builder, "run") as run:
             builder.cycle(self.root, self.root, self.root, "required-gate", 8, "a" * 40)
             run.assert_not_called()
+
+    def test_build_children_retain_the_same_lifetime_lock(self):
+        with (self.root / "build.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            info = os.fstat(lock.fileno())
+            with patch.object(builder, "BUILD_LOCK_FD", lock.fileno(), create=True):
+                builder.run(sys.executable, "-c",
+                            "import os,sys; s=os.fstat(int(sys.argv[1])); "
+                            "assert (s.st_dev,s.st_ino)==(int(sys.argv[2]),int(sys.argv[3]))",
+                            str(lock.fileno()), str(info.st_dev), str(info.st_ino),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def test_pruning_keeps_ten_complete_releases(self):
         for number in range(12):

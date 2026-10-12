@@ -12,8 +12,14 @@ import subprocess
 import time
 import urllib.request
 
+BUILD_LOCK_FD = None
+
 
 def run(*args, **kwargs):
+    if BUILD_LOCK_FD is not None:
+        # Python normally closes descriptors at exec. Compiler/package children
+        # must retain this same flock if the supervising builder exits abruptly.
+        kwargs.setdefault("pass_fds", (BUILD_LOCK_FD,))
     return subprocess.run(args, check=True, **kwargs)
 
 
@@ -135,6 +141,7 @@ def cycle(repo, cache, scratch, context, limit, start_sha, gate_mode="local"):
 
 
 def main():
+    global BUILD_LOCK_FD
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--gate-mode", choices=("local", "status"), default="local")
@@ -155,6 +162,7 @@ def main():
     private(scratch)
     with (cache / ".builder.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        BUILD_LOCK_FD = lock.fileno()
         while True:
             try:
                 cycle(args.repo.resolve(), cache, scratch, args.gate_context, args.load_limit, args.start_sha, args.gate_mode)
