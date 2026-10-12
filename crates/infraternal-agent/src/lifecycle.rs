@@ -1,4 +1,4 @@
-//! Tracks authenticated surviving shims and attached windows without per-session descriptors or idle timers [D13,D178,D217], #151/#154.
+//! Tracks authenticated surviving shims and attached windows with one shared process-exit readiness source and no idle timers [D13,D178,D217], #151/#154.
 
 use crate::sessions::Session;
 use infraternal_plugin_api::admission::NodeContext;
@@ -17,7 +17,7 @@ impl Live {
         // recorded lifetime; the birth parser also excludes dead states. Check
         // the executable link without following it: CA protection makes live
         // shims non-dumpable, denying ptrace-gated /proc/<pid>/exe traversal.
-        // The 400 ms host census and control events share this check; no task or file watcher is kept per shim.
+        // Lifecycle events recheck this identity; no task or timer runs per shim.
         self.path.exists()
             && birth(&self.process).is_ok_and(|value| value == Some(self.birth_ticks))
             && fs::symlink_metadata(self.process.join("exe"))
@@ -35,7 +35,7 @@ fn birth(process: &std::path::Path) -> io::Result<Option<u64>> {
 }
 
 #[derive(Default)]
-pub(crate) struct Registry(HashMap<[u8; 16], Live>);
+pub(crate) struct Registry(HashMap<[u8; 16], Live>, crate::process_exits::ProcessExits);
 
 impl Registry {
     pub(crate) fn insert(&mut self, session: &Session) -> io::Result<()> {
@@ -51,7 +51,14 @@ impl Registry {
             process,
             birth_ticks,
         };
+        // Authenticate lifetime across pidfd/kqueue registration: PID reuse
+        // between the Hello, birth read and kernel registration cannot claim an
+        // old session ID. A death during registration is already readable.
+        if !self.1.watch(session.id, session.pid)? {
+            return Ok(());
+        }
         if !live.alive() {
+            self.1.retain(|id| *id != session.id);
             return Ok(());
         }
         self.0.insert(session.id, live);
@@ -61,6 +68,20 @@ impl Registry {
     /// Removes shims whose process identity or rendezvous path has disappeared.
     pub(crate) fn refresh(&mut self) {
         self.0.retain(|_, live| live.alive());
+        self.1.retain(|id| self.0.contains_key(id));
+    }
+
+    /// One shared readiness future, cancelled safely at each dispatcher event.
+    pub(crate) async fn changed(&self) -> io::Result<Vec<[u8; 16]>> {
+        self.1.changed().await
+    }
+
+    /// Remove registered lifetimes reported dead even if their PID has since been reused.
+    pub(crate) fn exited(&mut self, ids: &[[u8; 16]]) {
+        for id in ids {
+            self.0.remove(id);
+        }
+        self.1.retain(|id| self.0.contains_key(id));
     }
 
     /// Stable live-session snapshot for the server and plugin context.
