@@ -1,0 +1,72 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-aj202t9a.js, chunk-px28wsnv.js, chunk-dskqbw2a.js, chunk-qs2w8cx9.js, chunk-kye2ddhj.js, chunk-699d00nk.js, chunk-91cx0fbb.js, chunk-eegv10qw.js, chunk-axn2xkgb.js, chunk-8s2wsk9h.js, chunk-6znv0srk.js, chunk-a6fj3zyq.js, chunk-gxvqf3b8.js, chunk-1fvj8803.js, chunk-xpw2sbew.js, chunk-9zhpq539.js, chunk-4rj9ytge.js, chunk-g2gh0ry9.js, chunk-178kc6na.js, chunk-5a8mg68p.js, chunk-mcnw85xk.js, chunk-na49xj9e.js, main.js, chunk-8n70sfjx.js, chunk-fn4w1xnh.js, chunk-9dhw6tbb.js, chunk-m4d20xch.js, chunk-3e1es6hq.js, chunk-4jw2ee32.js, chunk-h4cexvk6.js, chunk-8gqdshxw.js, chunk-za5mrcnn.js, chunk-a7emx7h5.js, chunk-eck1nw3y.js, chunk-cgj2hv56.js, chunk-0m7zk6hb.js, chunk-kxpnqxs3.js, chunk-zxbept6n.js, chunk-jf87g9fv.js, chunk-2sns05a5.js, chunk-eeam6zap.js, chunk-9k36b109.js, chunk-axbkkqp1.js, chunk-2new90t2.js, chunk-ap83w2rw.js, chunk-jdgpv21s.js, chunk-3qka25yn.js, chunk-0ey6pz1w.js, chunk-5e0pybg0.js, chunk-aae1nejq.js, chunk-0yqwwtd4.js, chunk-w0s2yd7q.js, chunk-yht11zw4.js, chunk-sj9v2bbq.js, chunk-rswavc2d.js, chunk-mn7afja6.js, chunk-6hr2vfsr.js, chunk-pz099pwt.js, chunk-fa28vbaf.js, chunk-91686bv6.js, chunk-kr608kzn.js, chunk-mnqse5cm.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-wz3d2e37.js, chunk-am5hjddj.js, chunk-smrfvp7n.js, chunk-dzhhabhn.js, chunk-73ykggyt.js
+[WebServer] latency proxy listening on http://localhost:4394; upstream port=4395
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4395
+
+Running 2 tests using 1 worker
+
+(node:3982393) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/hosts-from-server.spec.ts:5:1 › admitted hosts from another browser remain discoverable without saved windows (16.4s)
+(node:3985117) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  2 test/hosts-new-window-review.spec.ts:5:1 › New window offers an admitted host without a saved window (13.6s)
+
+
+  1) test/hosts-from-server.spec.ts:5:1 › admitted hosts from another browser remain discoverable without saved windows 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('#palette-results [role=option]').filter({ hasText: 'Open shell on another-device-host' })
+    Expected: 0
+    Received: 1
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" with timeout 5000ms
+      - waiting for locator('#palette-results [role=option]').filter({ hasText: 'Open shell on another-device-host' })
+        14 × locator resolved to 1 element
+           - unexpected value "1"
+
+
+      58 |   admitted = false; push?.();
+      59 |   await expect.poll(() => reads).toBeGreaterThan(2);
+    > 60 |   await expect(row).toHaveCount(0);
+         |                     ^
+      61 | });
+      62 |
+        at /home/kayg/Developer/infraternal/.worktrees/review-hosts-from-server/apps/tracer/test/hosts-from-server.spec.ts:60:21
+
+    attachment #1: admitted-offline-host (image/png) ───────────────────────────────────────────────
+    test-results/hosts-from-server-admitted-e5d47-rable-without-saved-windows/attachments/admitted-offline-host-f4effe050803289f7d4088ab8d678e0de4571884.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/hosts-from-server-admitted-e5d47-rable-without-saved-windows/error-context.md
+
+  2) test/hosts-new-window-review.spec.ts:5:1 › New window offers an admitted host without a saved window 
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: getByRole('option').filter({ hasText: 'Open shell on review-offline-host' })
+    Expected: visible
+    Timeout: 5000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toBeVisible" with timeout 5000ms
+      - waiting for getByRole('option').filter({ hasText: 'Open shell on review-offline-host' })
+
+
+      36 |   await page.keyboard.press("Escape");
+      37 |   await page.getByRole("button", { name: "New window", exact: true }).click();
+    > 38 |   await expect(remote).toBeVisible();
+         |                        ^
+      39 | });
+      40 |
+        at /home/kayg/Developer/infraternal/.worktrees/review-hosts-from-server/apps/tracer/test/hosts-new-window-review.spec.ts:38:24
+
+    Error Context: test-results/hosts-new-window-review-Ne-941ca-host-without-a-saved-window/error-context.md
+
+  2 failed
+    test/hosts-from-server.spec.ts:5:1 › admitted hosts from another browser remain discoverable without saved windows 
+    test/hosts-new-window-review.spec.ts:5:1 › New window offers an admitted host without a saved window 
