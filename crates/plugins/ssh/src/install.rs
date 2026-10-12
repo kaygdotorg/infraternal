@@ -65,6 +65,25 @@ pub struct Cleanup {
     mode: InstallMode,
 }
 
+/// One prepared public upload; input borrows cached bytes instead of copying them per host.
+struct PreparedPayload {
+    body: String,
+    reuse: bool,
+    packed: Option<Arc<[u8]>>,
+    binary: PathBuf,
+}
+impl PreparedPayload {
+    fn input(&self) -> Input<'_> {
+        if self.reuse {
+            Input::Empty
+        } else if let Some(bytes) = &self.packed {
+            Input::Bytes(bytes)
+        } else {
+            Input::File(&self.binary)
+        }
+    }
+}
+
 impl Installation {
     #[must_use]
     pub fn cleanup_coordinates(&self) -> Cleanup {
@@ -130,6 +149,15 @@ impl Installation {
     /// # Errors
     /// Reports binary, ownership, concurrent install or upload failure.
     pub async fn stage(&self, binary: &Path) -> Result<(), Failure> {
+        let payload = self.prepare_payload(binary).await?;
+        self.session
+            .run(&self.script(&payload.body), payload.input())
+            .await
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        Ok(())
+    }
+
+    async fn prepare_payload(&self, binary: &Path) -> Result<PreparedPayload, Failure> {
         let digest = crate::payload::digest(binary)
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
@@ -175,18 +203,12 @@ impl Installation {
             "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}",
             shell_quote(&digest)
         );
-        let input = if reuse {
-            Input::Empty
-        } else if let Some(bytes) = &packed {
-            Input::Bytes(bytes)
-        } else {
-            Input::File(binary)
-        };
-        self.session
-            .run(&self.script(&body), input)
-            .await
-            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
-        Ok(())
+        Ok(PreparedPayload {
+            body,
+            reuse,
+            packed,
+            binary: binary.to_path_buf(),
+        })
     }
 
     fn script(&self, body: &str) -> String {
