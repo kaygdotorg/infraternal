@@ -139,21 +139,6 @@ impl EnrollmentStore {
         self.issue_authorized(owner, host, mode, now, None).await
     }
 
-    /// Issue only while the exact authenticated browser session remains live at publication.
-    /// # Errors
-    /// Refuses revoked, pending, expired or switched browser authority and invalid hosts.
-    pub(crate) async fn issue_for_session(
-        &self,
-        owner: &str,
-        host: Uuid,
-        mode: Mode,
-        now: i64,
-        session_hash: &str,
-    ) -> Result<JoinToken, EnrollmentError> {
-        self.issue_authorized(owner, host, mode, now, Some(session_hash))
-            .await
-    }
-
     async fn issue_authorized(
         &self,
         owner: &str,

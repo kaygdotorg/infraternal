@@ -178,13 +178,15 @@ impl Backend for RemoteBackend {
             };
             let invitation = self
                 .issuer
-                .issue(
+                .issue_bootstrap(
                     cookie(authority)?,
                     InvitationRequest {
                         host_id: host,
                         mode,
                         execution_uid: uid,
                     },
+                    address,
+                    lookup.as_deref(),
                 )
                 .await;
             let Ok(mut invitation) = invitation else {
@@ -192,21 +194,6 @@ impl Backend for RemoteBackend {
                     "The host invitation was refused. Unlock your session and try again.",
                 ));
             };
-            let address = match &target.address {
-                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
-                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
-                    return Err(unavailable());
-                }
-            };
-            sqlx::query(
-                "INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,?)",
-            )
-            .bind(host.as_bytes().as_slice())
-            .bind(address)
-            .bind(lookup)
-            .execute(&self.issuer.store().0)
-            .await
-            .map_err(|_| unavailable())?;
             let stdin = serde_json::to_vec(&invitation);
             invitation.token.zeroize();
             let stdin = stdin.map_err(|_| unavailable())?;
@@ -706,7 +693,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "#169 breakit2: unpublished invitation survives address persistence failure"]
     async fn breakit2_unpublished_invitation_retires_durable_authority() {
         let f = fixture(true).await;
         // A deterministic SQLite failure after issue() commits tests the exact
