@@ -1,0 +1,14 @@
+Running as unit: run-p526194-i8913793.scope; invocation ID: 00b7e74bff9e474ab5bc6b0392933141
+
+running 1 test
+PROMPT_IMAGE bytes=1260800 preparation_ms=16.355
+
+running 1 test
+test prompt::tests::reply_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.03s
+
+test prompt::tests::helper_reply_requires_the_registered_parent_and_is_served_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.07s
+

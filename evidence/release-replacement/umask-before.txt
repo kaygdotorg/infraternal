@@ -1,0 +1,66 @@
+Running as unit: run-p1799396-i5993331.scope; invocation ID: b6aef4384ccc47e3b9e26887119dd1a1
+   Compiling smallvec v1.16.2
+   Compiling serde_core v1.0.229
+   Compiling futures-sink v0.3.34
+   Compiling displaydoc v0.2.7
+   Compiling syn v2.0.119
+   Compiling slab v0.4.12
+   Compiling tracing-core v0.1.36
+   Compiling log v0.4.34
+   Compiling num-traits v0.2.19
+   Compiling crypto-common v0.1.7
+   Compiling base64 v0.22.1
+   Compiling tinystr v0.8.4
+   Compiling zerotrie v0.2.5
+   Compiling icu_collections v2.3.0
+   Compiling futures-util v0.3.34
+   Compiling parking_lot_core v0.9.12
+   Compiling digest v0.10.7
+   Compiling flume v0.11.1
+   Compiling futures-channel v0.3.34
+   Compiling icu_locale_core v2.3.0
+   Compiling atoi v2.0.0
+   Compiling serde_json v1.0.151
+   Compiling sha2 v0.10.9
+   Compiling parking_lot v0.12.5
+   Compiling getrandom v0.4.3
+   Compiling nix v0.30.1
+   Compiling futures-intrusive v0.5.0
+   Compiling icu_provider v2.3.1
+   Compiling serde v1.0.229
+   Compiling uuid v1.27.0
+   Compiling tracing-attributes v0.1.31
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling tracing v0.1.44
+   Compiling either v1.18.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling futures-executor v0.3.34
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling sqlx-core v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/plugins/release)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 26s
+     Running tests/review_restart.rs (/home/kayg/.cache/codex-scratch/release-pipeline-r4/target/debug/deps/review_restart-ee62d7ab43a9b33d)
+
+running 1 test
+
+thread 'lookup_creates_private_staging_under_owner_restrictive_umask' (1821224) panicked at crates/plugins/release/tests/review_restart.rs:225:5:
+lookup refused private staging under umask 0177 (exit exit status: 101)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test lookup_creates_private_staging_under_owner_restrictive_umask ... FAILED
+
+failures:
+
+failures:
+    lookup_creates_private_staging_under_owner_restrictive_umask
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p infraternal-plugin-release --test review_restart`

@@ -1,0 +1,3 @@
+HEAD=b63b05f5599801fc4820d766a2511354e1c13c0c machine=infraternal-dev load_start=30.95 42.79 49.36 native_profile=evidence/release-integrate/gate-profile.toml
+latency proxy: configured 300 ms RTT did not arrive: p50=439.79 ms p99=488.91 ms
+FINAL_FAST_EXIT=1 load_end=30.95 42.79 49.36

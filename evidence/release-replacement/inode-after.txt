@@ -1,0 +1,9 @@
+Running as unit: run-p1941335-i6135270.scope; invocation ID: 2fe696463c594757bf7d0f2928571845
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/release-pipeline-r4/target/debug/deps/infraternal-f9b68484307f0a80)
+
+running 1 test
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.00s
+

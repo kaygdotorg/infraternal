@@ -1,0 +1,33 @@
+Running as unit: run-p1928393-i6122328.scope; invocation ID: f81848ce95b247d4b80498dc35ab8906
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.46s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/release-pipeline-r4/target/debug/deps/infraternal-f9b68484307f0a80)
+
+running 24 tests
+test cli::command_tree::backmerge_tests::restart_inherits_private_state_before_or_after_the_command ... ok
+test remote_server::tests::failed_restart_endpoint_does_not_prevent_http_serving ... ok
+test restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control ... ok
+test restart::tests::cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null ... ok
+test restart::tests::default_restart_opens_the_receiver_target_exactly_once ... ok
+test restart::tests::private_control_endpoint_cannot_be_stolen_or_created_by_a_client ... ok
+test restart::tests::private_path_prefix_cannot_authorize_a_parent_directory_escape ... ok
+test restart::tests::early_hangup_is_queued_until_control_installs_its_handler ... ok
+test restart::tests::reload_reopens_install_path_when_the_running_inode_was_replaced ... ok
+test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
+test restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome ... ok
+test restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin ... ok
+test restart::tests::reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer ... ok
+test restart::tests::root_owned_marked_target_requires_protected_root_parents ... ok
+test restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths ... ok
+test restart::tests::runtime_directory_symlinks_and_public_permissions_are_refused ... ok
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
+test restart_binary::audit_tests::admitted_inode_cannot_change_in_place_before_execution ... ignored, unresolved P2 UP-02: opened inode can be rewritten before exec; run explicitly
+test restart_binary::audit_tests::pathname_replacement_keeps_the_admitted_inode ... ok
+test restart_binary::audit_tests::symlink_parent_escape_and_writable_candidates_are_refused ... ok
+test restart_binary::audit_tests::unsigned_or_tampered_replacement_is_refused_before_exec ... ignored, unresolved P1 UP-01: signature hook accepts unsigned replacement; run explicitly
+test restart_binary::audit_tests::unusable_admitted_image_keeps_the_existing_service_running ... ignored, unresolved P1 UP-03: exec failure shuts down the running service; run explicitly
+test restart_image::tests::snapshot_refuses_every_mutation_and_preserves_source_offset ... ok
+test restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter ... ok
+
+test result: ok. 21 passed; 0 failed; 3 ignored; 0 measured; 47 filtered out; finished in 7.69s
+
