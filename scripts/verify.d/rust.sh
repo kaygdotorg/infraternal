@@ -49,6 +49,8 @@ rust_check_static_binary() {
         return 1
     fi
 
+    python3 scripts/release/check-production-trust.py "$binary" || return $?
+
     description="$(file -b "$binary")"
     printf '%s: %s\n' "$binary" "$description"
     if ! grep -Eqi 'statically linked|static-pie linked' <<< "$description"; then
@@ -142,6 +144,7 @@ rust_static_build_check() {
     done
 
     scripts/auth-toolchain || return $?
+    python3 scripts/release/production_trust_test.py || return $?
 
     for target in "${targets[@]}"; do
         cargo build --locked --release --package infraternal --target "$target" || return $?
