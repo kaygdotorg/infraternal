@@ -212,14 +212,14 @@ pub async fn connect_sequenced(path: PathBuf, id: [u8; 16]) -> io::Result<Sessio
     connect_with(path, id, SEQUENCED_INPUT | APPROXIMATE_SNAPSHOT).await
 }
 
-/// Select a stable leg-B writer in the surviving shim before querying cursors.
+/// Select a stable leg-B writer and advertised queue deferral before querying cursors.
 /// # Errors
 /// Refuses old shims without writer isolation instead of borrowing another device's Ack.
 pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Result<Session> {
     let mut session = connect_with(
         path,
         id,
-        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT,
+        SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT | SHARED_WRITER,
     )
     .await?;
     if session.caps & MULTI_WRITER == 0 || writer == 0 {
