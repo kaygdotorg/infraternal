@@ -427,7 +427,7 @@ test("leftovers: one Start fresh continues the same setup to done", async ({ pag
   await openWizard(page);
   await addTyped(page, "stale.lab");
   await expect(page.getByRole("heading", { name: "This host has leftovers from an earlier setup" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator(".ah-lede")).toHaveText("infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.");
+  await expect(page.locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.");
   expect(await heroTone(page)).toBeNull();
   // The old chores are gone.
   for (const chore of ["restore access", "Finish its cleanup", "lock or unfinished rollback"]) await expect(wizard(page).getByText(chore, { exact: false })).toHaveCount(0);
