@@ -343,6 +343,13 @@ fn render_with_aliases(
     }
     render_connection_checks(&mut script, connections, ipv6, &groups);
     for chain in &CHAINS[..2] {
+        // Retired original and reply indexes must not be recreated by loose
+        // tracking of a continuation packet. Preserve established permitted
+        // streams, but require an initiating SYN for fresh TCP state [242].
+        let _ = writeln!(
+            script,
+            "-A {chain} -p tcp -m conntrack --ctstate NEW ! --syn -j DROP"
+        );
         {
             // State with no current initiating permission must never fall
             // through to the ordinary destination-port rules [242].
@@ -573,7 +580,13 @@ mod tests {
             },
         );
         assert_eq!(rules.matches("ESTABLISHED,RELATED").count(), 4);
-        assert_eq!(rules.matches("-j DROP").count(), 7);
+        assert_eq!(rules.matches("-j DROP").count(), 9);
+        assert_eq!(
+            rules
+                .matches("-p tcp -m conntrack --ctstate NEW ! --syn -j DROP")
+                .count(),
+            2
+        );
         assert!(!rules.contains("-I INPUT"));
         assert!(!rules.contains("-m iprange"));
     }
