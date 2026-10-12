@@ -1753,3 +1753,7 @@ async fn stop_child(_pid: nix::unistd::Pid) {}
 #[cfg(test)]
 #[path = "embedded_regressions.rs"]
 mod regressions;
+
+#[cfg(test)]
+#[path = "session_exit_latency_tests.rs"]
+mod exit_latency_tests;
