@@ -10,7 +10,7 @@ use openssl::{
 use sha2::{Digest, Sha256, Sha512};
 use std::{fs::File, os::unix::fs::FileExt};
 
-const TRUST: &str = include_str!("../../../release/allowed_signers");
+pub(crate) const TRUST: &str = include_str!("../../../release/allowed_signers");
 const NAMESPACE: &[u8] = b"infraternal-release";
 const MAX_SUMS: usize = 65_536;
 const MAX_SIGNATURE: usize = 1024;
@@ -54,6 +54,14 @@ pub(crate) fn verify_with_trust(
 ) -> Result<(), ReleaseError> {
     let expected = checksum(name, sums)?;
     verify_signature(sums, sig, trust)?;
+    verify_digest_expected(fd, expected)
+}
+
+pub(crate) fn verify_digest(fd: &File, name: &str, sums: &[u8]) -> Result<(), ReleaseError> {
+    verify_digest_expected(fd, checksum(name, sums)?)
+}
+
+fn verify_digest_expected(fd: &File, expected: [u8; 32]) -> Result<(), ReleaseError> {
     let metadata = fd.metadata().map_err(|_| ReleaseError::Read)?;
     if !metadata.is_file() || metadata.len() > 128 * 1024 * 1024 {
         return Err(ReleaseError::Read);
@@ -129,7 +137,7 @@ fn hex(v: u8) -> Result<u8, ReleaseError> {
     }
 }
 
-fn verify_signature(sums: &[u8], armor: &[u8], trust: &str) -> Result<(), ReleaseError> {
+pub(crate) fn verify_signature(sums: &[u8], armor: &[u8], trust: &str) -> Result<(), ReleaseError> {
     if armor.len() > MAX_SIGNATURE {
         return Err(ReleaseError::Signature);
     }

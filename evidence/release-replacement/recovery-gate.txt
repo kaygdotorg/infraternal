@@ -1,0 +1,43 @@
+Running as unit: run-p2279489-i6473390.scope; invocation ID: dfef20e46d0a463982b0e3b0b999f866
+    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal)
+error: this could be rewritten as `let...else`
+   --> crates/infraternal/src/restart.rs:107:29
+    |
+107 | / ...                   let replacement = match Replacement::new(binary, source) {
+108 | | ...                       Ok(replacement) => replacement,
+109 | | ...                       Err(_) => { record_request("SIGHUP", None, Some(&target), "refused"); continue; }
+110 | | ...                   };
+    | |________________________^ help: consider writing: `let Ok(replacement) = Replacement::new(binary, source) else { record_request("SIGHUP", None, Some(&target), "refused"); continue; };`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_let_else
+    = note: `-D clippy::manual-let-else` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::manual_let_else)]`
+
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+   --> crates/infraternal/src/restart.rs:107:47
+    |
+107 |   ...                   let replacement = match Replacement::new(binary, source) {
+    |  _________________________________________^
+108 | | ...                       Ok(replacement) => replacement,
+109 | | ...                       Err(_) => { record_request("SIGHUP", None, Some(&target), "refused"); continue; }
+110 | | ...                   };
+    | |_______________________^ help: try: `if let Ok(replacement) = Replacement::new(binary, source) { replacement } else { record_request("SIGHUP", None, Some(&target), "refused"); continue; }`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#single_match_else
+    = note: `-D clippy::single-match-else` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::single_match_else)]`
+
+error: recursing into entrypoint `super::main`
+   --> crates/infraternal/src/restart.rs:404:5
+    |
+404 |     super::main()
+    |     ^^^^^^^^^^^
+    |
+    = help: consider using another function for this recursion
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#main_recursion
+    = note: `-D clippy::main-recursion` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::main_recursion)]`
+
+error: could not compile `infraternal` (bin "infraternal") due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `infraternal` (bin "infraternal" test) due to 2 previous errors

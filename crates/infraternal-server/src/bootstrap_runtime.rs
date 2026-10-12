@@ -114,7 +114,23 @@ pub(crate) fn default_runner(
     key: Arc<dyn SshKeySource>,
     remote: Option<RemoteBootstrap>,
 ) -> Result<Bootstrap, ServerError> {
-    let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
+    let running = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
+    // Anonymous replacement labels have no filesystem siblings. Preserve the
+    // original absolute invocation path only for adjacent development payloads;
+    // the prompt helper always copies the kernel running image, never this path.
+    let executable = if running
+        .as_os_str()
+        .as_encoded_bytes()
+        .ends_with(b" (deleted)")
+    {
+        std::env::args_os()
+            .next()
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or(running)
+    } else {
+        running
+    };
     let base = PendingRemoteRuntime {
         auth: Some(auth),
         key,
@@ -160,7 +176,7 @@ pub(crate) fn default_runner(
                 ssh_add: "ssh-add".into(),
                 ssh_keyscan: "ssh-keyscan".into(),
                 ssh_keygen: "ssh-keygen".into(),
-                askpass_binary: executable.clone(),
+                askpass_binary: "/proc/self/exe".into(),
                 scratch: infraternal_plugin_ssh::credentials::runtime_root(),
                 command_timeout: Duration::from_secs(30),
             },

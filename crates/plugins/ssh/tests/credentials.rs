@@ -135,3 +135,45 @@ async fn password_socket_refuses_an_unrelated_same_user_process() {
     std::fs::remove_dir(root).unwrap();
     assert!(reply.is_empty(), "unrelated peer received login material");
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn kernel_running_helper_is_materialized_in_its_private_scope() {
+    let root = common::scratch().join(format!(
+        "c-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    let config = CredentialConfig {
+        scratch: root.clone(),
+        ssh_agent: "unused".into(),
+        ssh_add: "unused".into(),
+        askpass_binary: "/proc/self/exe".into(),
+    };
+    let session = CredentialSession::prepare(
+        &config,
+        Credentials::Password(Secret::new(b"synthetic-reply".to_vec())),
+    )
+    .await
+    .unwrap();
+    let directory = std::fs::read_dir(&root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let image = directory.join("askpass-image");
+    assert!(
+        image.is_file(),
+        "external SSH must execute a scoped copy of the kernel running image"
+    );
+    assert_eq!(
+        std::fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+    let wrapper = std::fs::read_to_string(directory.join("askpass")).unwrap();
+    assert!(wrapper.contains(image.to_str().unwrap()));
+    assert!(!wrapper.contains("/proc/self/exe"));
+    drop(session);
+    assert!(!image.exists());
+    std::fs::remove_dir(root).unwrap();
+}

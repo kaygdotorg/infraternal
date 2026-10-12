@@ -25,6 +25,12 @@ pub fn prepare_child(command: &mut std::process::Command) {
     pty::prepare_child(command);
 }
 
+/// Apply child signal policy and close the trusted fd3 before direct exec.
+/// This avoids an intermediate shell changing `/proc/self/exe` for anonymous images.
+pub fn prepare_child_without_control(command: &mut std::process::Command) {
+    pty::prepare_child_without_control(command);
+}
+
 /// Apply the same default child signal policy to a POSIX spawn launcher.
 /// # Errors
 /// Returns errors while configuring the spawn attributes, before spawning.

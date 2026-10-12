@@ -436,16 +436,13 @@ impl SessionEvents {
     }
 }
 
-// std::process pre_exec would require unsafe code to mark an inherited raw fd
-// CLOEXEC. The POSIX shell closes the job's leg-B fd 3 before executing any init
-// helper or shim. The target user's shell must never inherit the trusted channel.
+// The audited shim policy closes leg-B fd3 before direct exec. Avoid a shell:
+// anonymous images need /proc/self/exe to resolve while the child is still
+// running the infraternal image, rather than the shell's image [217].
 fn isolated(program: &Path) -> Command {
-    let mut command = Command::new("/bin/sh");
-    infraternal_shim::prepare_child(command.as_std_mut());
+    let mut command = Command::new(program);
+    infraternal_shim::prepare_child_without_control(command.as_std_mut());
     command.stdin(Stdio::null());
-    command
-        .args(["-c", "exec 3<&-; exec \"$@\"", "infraternal-shim-launch"])
-        .arg(program);
     command
 }
 

@@ -397,8 +397,18 @@ async fn run_channel(
     let mut events = plugins.subscribe();
     let (plugin_replies, mut results) = mpsc::channel(8);
     let worker = crate::plugin_control::Worker::start(plugins.clone(), plugin_replies);
-    let manager = Manager::detect().await;
-    let exe = std::env::current_exe()?;
+    let running = std::env::current_exe()?;
+    // A sealed/deleted image has no install pathname for an indirect init
+    // launcher. Use the existing detached shim mode and direct kernel image.
+    let anonymous = running
+        .as_os_str()
+        .as_encoded_bytes()
+        .ends_with(b" (deleted)");
+    let (manager, exe) = if anonymous {
+        (Manager::Detached, PathBuf::from("/proc/self/exe"))
+    } else {
+        (Manager::detect().await, running)
+    };
     let retirements = sessions::SessionEvents::new(&state)?;
     let mut registry = crate::lifecycle::Registry::default();
     for session in sessions::discover(&state).await? {
