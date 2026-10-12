@@ -456,6 +456,59 @@ fn interruption_reason(registry: &crate::plugin_control::Registry) -> ServerLink
     }
 }
 
+/// Keep warm ownership live during proof and react to down before starting a cold dial.
+/// These futures leave scope before the caller retires the old authenticated link.
+async fn transition(
+    link: &Link,
+    identity: &RemoteIdentity,
+    state: &std::path::Path,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    registry: &crate::plugin_control::Registry,
+    cooling: bool,
+    warm: &mut Option<Link>,
+) -> Option<(Link, ServerLinkReason)> {
+    let active = session(
+        link,
+        identity,
+        state.to_path_buf(),
+        renewal,
+        registry.clone(),
+    );
+    let replacing = replacement(link, identity, renewal, registry, cooling);
+    let mut preparing = (link.kind == ServerLinkKind::Mesh)
+        .then(|| Box::pin(warming(link, identity, renewal, state)));
+    let mut intent = registry.server_paths();
+    tokio::pin!(active, replacing);
+    loop {
+        if link.kind == ServerLinkKind::Mesh
+            && warm.is_some()
+            && intent.borrow_and_update().is_none()
+        {
+            return warm
+                .take()
+                .map(|next| (next, ServerLinkReason::MeshDisabled));
+        }
+        tokio::select! {
+            biased;
+            changed = intent.changed(), if link.kind == ServerLinkKind::Mesh && warm.is_some() => {
+                if changed.is_err() { return None; }
+            }
+
+            result = &mut replacing => return result.ok(),
+            _ = &mut active => return None,
+            result = async { preparing.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.await },
+                if preparing.is_some() && warm.is_none() => {
+                *warm = result.ok();
+                if warm.is_none() { preparing = Some(Box::pin(warming(link, identity, renewal, state))); }
+            }
+            () = warm_closed(warm.as_ref()), if warm.is_some() => {
+                *warm = None;
+                preparing = Some(Box::pin(warming(link, identity, renewal, state)));
+            }
+        }
+    }
+}
+
 /// Keeps enrolled fallback available, moving only after authenticated path proof.
 /// Existing durable shim offsets make transport replacement independent of leg A.
 /// Retained applied intent can reconnect even when the enrollment port is unavailable.
@@ -553,28 +606,10 @@ pub(super) async fn run(
         report(&registry, Some(&link), reason);
         // Both futures leave scope before retiring the old transport. Aborting
         // a partial write is safe only because Link closes that entire channel.
-        let moved = {
-            let active = session(&link, identity, state.clone(), renewal, registry.clone());
-            let replacing = replacement(&link, identity, renewal, &registry, cooling);
-            let mut preparing = (link.kind == ServerLinkKind::Mesh)
-                .then(|| Box::pin(warming(&link, identity, renewal, &state)));
-            tokio::pin!(active, replacing);
-            loop {
-                tokio::select! {
-                    result = &mut replacing => break result.ok(),
-                    _ = &mut active => break None,
-                    result = async { preparing.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.await },
-                        if preparing.is_some() && warm.is_none() => {
-                        warm = result.ok();
-                        if warm.is_none() { preparing = Some(Box::pin(warming(&link, identity, renewal, &state))); }
-                    }
-                    () = warm_closed(warm.as_ref()), if warm.is_some() => {
-                        warm = None;
-                        preparing = Some(Box::pin(warming(&link, identity, renewal, &state)));
-                    }
-                }
-            }
-        };
+        let moved = transition(
+            &link, identity, &state, renewal, &registry, cooling, &mut warm,
+        )
+        .await;
         // A transport close can win the replacement race after component down.
         // The current applied preference owns the reason, rather than whichever
         // future happened to finish first.
