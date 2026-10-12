@@ -1199,10 +1199,16 @@ export class TerminalClient {
     }
 
     if (this.outputQueue.length > 0) {
-      const region = this.outputQueue.peek();
+      let region = this.outputQueue.peek();
       if (region.byteLength === 0) {
         this.protocolFailure("output queue has no contiguous data");
         return;
+      }
+      if (this.suppressReplayResponses && this.replayResponseFence !== undefined) {
+        // The ring can coalesce replay and live frames while a write awaits paint.
+        // Paint exactly to the fence before parsing live bytes with replies enabled.
+        const remaining = this.replayResponseFence - this.lastOutSeq;
+        if (remaining > 0n && remaining < BigInt(region.byteLength)) region = region.subarray(0, Number(remaining));
       }
       pulseActivity("output", 300);
       this.outputWriteInFlight = true;
