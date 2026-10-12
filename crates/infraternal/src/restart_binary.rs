@@ -24,10 +24,18 @@ impl Opened {
         #[cfg(target_os = "linux")]
         {
             let file = File::open("/proc/self/exe")?;
-            let path = std::env::args_os()
+            let invoked = std::env::args_os()
                 .next()
                 .map(PathBuf::from)
                 .ok_or(io::ErrorKind::NotFound)?;
+            // Preserve an absolute service path, including an installed alias.
+            // Resolve a PATH invocation before memfd exec erases the kernel's
+            // original path; later reloads must not rebind it to another cwd.
+            let path = if invoked.is_absolute() {
+                invoked
+            } else {
+                std::env::current_exe()?
+            };
             let image =
                 crate::restart_image::Image::copy_limit(&file, Path::new("/"), 512 * 1024 * 1024)?;
             let warm = nix::unistd::Uid::effective().is_root()
