@@ -16,6 +16,10 @@ pub(super) struct State {
     tasks: JoinSet<Completion>,
     active: HashMap<u32, ([u8; 16], AbortHandle)>,
     completed: VecDeque<Completion>,
+    // Production priming is native-only. Unix fixtures retain their existing
+    // framing while moving the same writer ownership outside the actor.
+    #[cfg(test)]
+    local: Option<std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>>,
 }
 impl State {
     pub(super) fn active(&self) -> bool {
@@ -56,6 +60,42 @@ impl State {
                             link.write_encoded_terminal(stream, &frame).await?;
                         }
                         Ok::<(), std::io::Error>(())
+                    })
+                    .await
+                    .is_ok_and(|result| result.is_ok());
+                    Completion {
+                        stream,
+                        session,
+                        success,
+                    }
+                })
+            }
+            #[cfg(test)]
+            Peer::Local { writer, .. } => {
+                use tokio::io::AsyncWriteExt;
+                let owned = if let Some(writer) = &self.local {
+                    writer.clone()
+                } else {
+                    let Ok((placeholder, _unused)) = tokio::net::UnixStream::pair() else {
+                        return false;
+                    };
+                    let (_, replacement) = placeholder.into_split();
+                    let writer = std::sync::Arc::new(tokio::sync::Mutex::new(std::mem::replace(
+                        writer,
+                        replacement,
+                    )));
+                    self.local = Some(writer.clone());
+                    writer
+                };
+                self.tasks.spawn(async move {
+                    let success = tokio::time::timeout(Duration::from_secs(1), async {
+                        {
+                            let mut writer = owned.lock().await;
+                            for frame in frames {
+                                writer.write_all(&frame).await?;
+                            }
+                            Ok::<(), std::io::Error>(())
+                        }
                     })
                     .await
                     .is_ok_and(|result| result.is_ok());
@@ -153,6 +193,117 @@ impl State {
             }
         }
         self.active.clear();
+        #[cfg(test)]
+        {
+            self.local = None;
+        }
         completions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Keeps a real-QUIC sibling failure owned while another blocked flight is joined.
+    use super::*;
+    use infraternal_agent::{remote_native::NativeChannel, transport::Receive};
+    use infraternal_plugin_remote::remote_quic;
+    use infraternal_protocol::Frame;
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_preserves_finished_success_and_identifies_unpolled_cancellation() {
+        use tokio::io::AsyncReadExt;
+        let (socket, mut peer) = tokio::net::UnixStream::pair().unwrap();
+        let mut connection = super::super::tests::shadow(socket).connection;
+        let mut state = State::default();
+        assert!(state.schedule(
+            &mut connection,
+            42,
+            [7; 16],
+            vec![Bytes::from_static(b"ok")]
+        ));
+        let mut received = [0; 2];
+        peer.read_exact(&mut received).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !state.active[&42].1.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(received, *b"ok");
+        assert!(state.schedule(
+            &mut connection,
+            43,
+            [8; 16],
+            vec![Bytes::from_static(b"no")]
+        ));
+        // This current-thread task cannot start before stop aborts it. The
+        // previous socket write has completed but has not been actor-reaped.
+        let completions = state.stop().await;
+        assert_eq!(completions.len(), 2);
+        assert!(completions.iter().any(|c| c.stream == 42 && c.success));
+        assert!(completions.iter().any(|c| c.stream == 43 && !c.success));
+        assert!(!state.owns(42));
+        assert!(!state.owns(43));
+    }
+    #[tokio::test]
+    async fn queued_sibling_failure_stays_owned_until_the_actor_observes_it() {
+        let (link, _control, _listener, _endpoint, peer) =
+            crate::remote_runtime::tests::native_link_pair().await;
+        let hello = Frame::Hello {
+            version: 1,
+            caps: remote_quic::REMOTE_WRITER_BINDING,
+            client_info: "shadow completion fixture",
+        };
+        let binding = remote_quic::negotiate_binding(&peer, &hello).unwrap();
+        let attach = Frame::AttachTerm {
+            session_id: &[7; 16],
+            last_out_seq: 0,
+            last_in_seq: 0,
+        };
+        let mut encoded = Vec::new();
+        infraternal_protocol::encode_muxed_frame_into(42, &attach, &mut encoded).unwrap();
+        link.write(42, &attach, &encoded).await.unwrap();
+        let parked =
+            NativeChannel::terminal(remote_quic::accept_bound(&binding).await.unwrap()).unwrap();
+        assert!(matches!(
+            Receive::default().next(&parked).await.unwrap().frame,
+            Frame::AttachTerm { .. }
+        ));
+        link.limit_send_window(256);
+        let (socket, _unused) = tokio::net::UnixStream::pair().unwrap();
+        let mut connection = super::super::tests::shadow(socket).connection;
+        connection.peer = Peer::Remote(link.clone());
+        let mut encoded = Vec::new();
+        infraternal_protocol::encode_frame_into(
+            &Frame::Input {
+                in_seq: 0,
+                bytes: &[b'x'; 16384],
+            },
+            &mut encoded,
+        )
+        .unwrap();
+        let mut state = State::default();
+        assert!(state.schedule(&mut connection, 42, [7; 16], vec![Bytes::from(encoded)]));
+        // Stream43 has no bound channel, so its task fails independently of the
+        // unread stream42. Wait for that completion before cancelling42.
+        assert!(state.schedule(&mut connection, 43, [7; 16], vec![Bytes::from_static(b"x")]));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !state.active[&43].1.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        state.retire(42).await;
+        let owned = state.owns(43);
+        let failed = state.next().await;
+        let _ = state.stop().await;
+        link.retire_writer(42).await;
+        assert_eq!(failed.stream, 43);
+        assert!(!failed.success);
+        assert!(
+            owned,
+            "a queued failure must keep its writer owned until actor delivery"
+        );
     }
 }

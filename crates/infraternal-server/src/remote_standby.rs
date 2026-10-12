@@ -151,7 +151,47 @@ impl Admission {
 
 #[cfg(test)]
 mod tests {
+    //! Checks strict parking admission and cancellation ownership before actor polling.
     use super::*;
+    #[test]
+    fn cancelled_queue_admission_releases_parking_before_actor_poll() {
+        let slots = Arc::new(Slots::default());
+        let host = Uuid::new_v4();
+        let (activation, receiver) = tokio::sync::oneshot::channel();
+        let state = Arc::new(Mutex::new(Some(Priming {
+            _parking: slots.reserve(host).unwrap(),
+            activation: Mutex::new(Some(activation)),
+        })));
+        let queued = state.clone();
+        drop(crate::remote_link::PrimingAdmission {
+            state,
+            connection: None,
+            admitted: false,
+        });
+        assert!(queued.lock().unwrap().is_none());
+        assert!(slots.reserve(host).is_ok());
+        assert!(receiver.blocking_recv().is_err());
+    }
+
+    #[test]
+    fn bounded_standby_options_reject_ambiguous_or_unrecognized_fields() {
+        assert!(!wants_prime(b"{}").unwrap());
+        assert!(!wants_prime(br#"{"prime":false}"#).unwrap());
+        assert!(wants_prime(br#"{"prime":true}"#).unwrap());
+        for malformed in [
+            br#"{"prime":true,"prime":false}"#.as_slice(),
+            br#"{"prime":true,"writer":2}"#,
+            br#"{"prime":1}"#,
+            br"[]",
+            br"{}{}",
+        ] {
+            assert!(wants_prime(malformed).is_err());
+        }
+        let mut oversized = br#"{"prime":true}"#.to_vec();
+        oversized.resize(65, b' ');
+        assert!(wants_prime(&oversized).is_err());
+    }
+
     #[test]
     fn parking_is_per_identity_bounded_and_released_on_drop() {
         let slots = Arc::new(Slots::default());

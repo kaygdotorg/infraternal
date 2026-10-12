@@ -19,7 +19,7 @@ use openssl::{
 };
 use std::time::Duration;
 
-fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
+pub(crate) fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
     identities_for_name("localhost")
 }
 
@@ -287,7 +287,7 @@ pub(crate) fn server_material() -> (Identity, crate::ca::CaMaterial) {
 }
 
 #[path = "remote_revocation_tests.rs"]
-mod revocation;
+pub(crate) mod revocation;
 
 #[path = "remote_review_tests.rs"]
 mod independent_review;

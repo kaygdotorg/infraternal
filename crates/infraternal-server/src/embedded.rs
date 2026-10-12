@@ -538,6 +538,8 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
         .await
         .map_err(|_| AgentError::Unavailable)??;
     let link = Arc::new(link);
+    #[cfg(test)]
+    RemoteLink::register_test_probe(&link);
     Ok(AgentConnection {
         peer: Peer::Remote(link),
         execution_uid: uid,
@@ -2156,4 +2158,9 @@ async fn next_writes(writes: &mut writes::State) -> (u32, bool) {
 #[cfg(not(feature = "remote"))]
 async fn next_writes(_state: &mut ()) -> (u32, bool) {
     std::future::pending().await
+}
+
+#[cfg(all(test, feature = "remote"))]
+pub(crate) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {
+    writes::test_control_queue_state(peer)
 }

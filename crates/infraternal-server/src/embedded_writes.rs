@@ -12,6 +12,8 @@ pub(super) const CONTROL_FLIGHT: usize = infraternal_plugin_api::channel::MAX_CO
 
 #[derive(Default)]
 pub(super) struct State {
+    #[cfg(test)]
+    test_peer: Option<std::net::SocketAddr>,
     enabled: bool,
     control: Option<mpsc::Receiver<Bytes>>,
     control_busy: bool,
@@ -48,9 +50,26 @@ impl State {
             let (sender, receiver) = mpsc::channel(1);
             connection.owned_control = Some(sender);
             self.control = Some(receiver);
+            #[cfg(test)]
+            if let Peer::Remote(link) = &connection.peer {
+                self.test_peer = link.test_native_peer_address();
+            }
         }
     }
     pub(super) fn can_admit(&self) -> bool {
+        #[cfg(test)]
+        if let Some(peer) = self.test_peer {
+            TEST_CONTROL_STATES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    peer,
+                    (
+                        self.control_busy,
+                        self.control.as_ref().map_or(1, mpsc::Receiver::capacity),
+                    ),
+                );
+        }
         self.control
             .as_ref()
             .is_none_or(|queue| queue.capacity() != 0)
@@ -327,6 +346,21 @@ impl State {
     }
 }
 
+// This observation is sampled at the actual actor admission check; it neither
+// reserves queue space nor holds a connection or frame alive.
+#[cfg(test)]
+static TEST_CONTROL_STATES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<std::net::SocketAddr, (bool, usize)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+#[cfg(test)]
+pub(super) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {
+    TEST_CONTROL_STATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&peer)
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
     //! Checks the encoded queue bound and joins owned flights before shutdown returns.
@@ -346,6 +380,37 @@ mod tests {
             replaying: false,
             output,
         }
+    }
+
+    #[test]
+    fn promotion_headers_preserve_attach_credit_ack_input_order() {
+        let mut state = State::default();
+        let mut writer = retained_writer();
+        writer.replaying = true;
+        writer.credit = 42;
+        assert!(state.promote_writer(&writer, None));
+        let (attach, _) = state.encode(&writer).unwrap();
+        assert!(attach.len() <= 128);
+        assert!(matches!(
+            infraternal_protocol::decode_frame(&attach).unwrap().frame,
+            Frame::AttachTerm { last_in_seq: 0, .. }
+        ));
+        let (credit, _) = state.encode(&writer).unwrap();
+        assert!(matches!(
+            infraternal_protocol::decode_frame(&credit).unwrap().frame,
+            Frame::Credit { bytes: 42 }
+        ));
+        assert!(
+            state.encode(&writer).is_none(),
+            "unprimed input must wait for first Ack"
+        );
+        writer.replaying = false;
+        let (input, end) = state.encode(&writer).unwrap();
+        assert!(matches!(
+            infraternal_protocol::decode_frame(&input).unwrap().frame,
+            Frame::Input { in_seq: 0, .. }
+        ));
+        assert_eq!(end, Some(FLIGHT as u64));
     }
 
     #[test]
@@ -382,6 +447,51 @@ mod tests {
             state.encode(&writer).is_some(),
             "a real Ack must resume the writer"
         );
+    }
+
+    #[tokio::test]
+    async fn cached_promotion_ack_never_replays_inside_the_actor() {
+        use super::super::{AgentConnection, BytesMut, Peer, apply_cached_ack};
+        let (socket, _unread) = tokio::net::UnixStream::pair().unwrap();
+        let (reader, writer) = socket.into_split();
+        let mut connection = AgentConnection {
+            peer: Peer::Local { reader, writer },
+            execution_uid: 0,
+            pid: None,
+            receive: BytesMut::new(),
+            scratch: vec![0; 4096],
+            encode: Vec::new(),
+            next_call_id: 1,
+            owned_control: None,
+        };
+        let mut retained = retained_writer();
+        let (output, mut observed) = mpsc::channel(16);
+        retained.output = output;
+        retained.awaiting_ack = true;
+        retained.replaying = true;
+        let mut attachments = HashMap::from([(1, retained)]);
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            apply_cached_ack(
+                2,
+                0,
+                &mut connection,
+                &mut attachments,
+                &mut HashMap::from([(2, 1)]),
+                &mut HashMap::new(),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok_and(|valid| valid),
+            "cached Ack waited for blocked replay socket"
+        );
+        assert!(matches!(
+            observed.recv().await,
+            Some(super::super::TerminalOutput::Ack { in_seq_acked: 0 })
+        ));
+        assert_eq!(attachments[&1].unacknowledged.len(), 4 * 1024 * 1024);
+        assert!(!attachments[&1].replaying);
     }
 
     #[tokio::test]
@@ -423,6 +533,11 @@ mod tests {
             2 * CONTROL_FLIGHT,
             2000 * CONTROL_FLIGHT,
             200 * FLIGHT
+        );
+        eprintln!(
+            "fixture-layout priming State={} B; parked1000 fixture empty-state type bytes={} (test fields included; heap/transport excluded)",
+            std::mem::size_of::<super::super::priming::State>(),
+            1000 * std::mem::size_of::<super::super::priming::State>()
         );
         assert_eq!(CONTROL_FLIGHT, 33024);
     }

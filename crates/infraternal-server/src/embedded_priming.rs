@@ -794,3 +794,482 @@ impl Drop for State {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Proves bounded shadow credit, replay, and cancellation without changing primary writer state.
+    use super::super::{
+        BytesMut, TerminalOutput, UnixStream, decode_muxed_frame, mpsc, process_incoming, watch,
+    };
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    pub(super) fn attachment() -> (AttachmentState, mpsc::Receiver<TerminalOutput>) {
+        let (output, receiver) = mpsc::channel(4);
+        let (input_credit, _) = watch::channel(0);
+        (
+            AttachmentState {
+                stream_id: 1,
+                session_id: [7; 16],
+                last_out_seq: 10,
+                last_in_seq: 0,
+                last_input_end: 3,
+                unacknowledged: BytesMut::from(&b"abc"[..]),
+                input_credit,
+                credit: 1024,
+                awaiting_ack: false,
+                replaying: false,
+                output,
+            },
+            receiver,
+        )
+    }
+    pub(super) fn shadow(socket: UnixStream) -> Shadow {
+        let (reader, writer) = socket.into_split();
+        Shadow {
+            connection: AgentConnection {
+                peer: Peer::Local { reader, writer },
+                execution_uid: 0,
+                pid: None,
+                receive: BytesMut::new(),
+                scratch: vec![0; 4096],
+                encode: Vec::new(),
+                next_call_id: 1,
+                owned_control: None,
+            },
+            slots: HashMap::from([(
+                1,
+                Slot {
+                    session: [7; 16],
+                    ack: 0,
+                    hedged: false,
+                    credit: 0,
+                    ready: true,
+                    sent: 0,
+                    born: Instant::now(),
+                },
+            )]),
+        }
+    }
+    async fn wire(peer: &mut UnixStream, buffered: &mut BytesMut) -> Bytes {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(frame) = decode_muxed_frame(buffered) {
+                    return buffered.split_to(frame.wire_len).freeze();
+                }
+                assert_ne!(peer.read_buf(buffered).await.unwrap(), 0);
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn flow_control_blocked_shadow_does_not_stop_actor_control_progress() {
+        use infraternal_agent::{
+            remote_native::NativeChannel,
+            transport::{Receive, Transmit},
+        };
+        use infraternal_plugin_remote::remote_quic;
+        let (link, control, _listener, _endpoint, peer) =
+            crate::remote_runtime::tests::native_link_pair().await;
+        let hello = Frame::Hello {
+            version: 1,
+            caps: remote_quic::REMOTE_WRITER_BINDING,
+            client_info: "fixture",
+        };
+        let binding = remote_quic::negotiate_binding(&peer, &hello).unwrap();
+        let attach = Frame::AttachTerm {
+            session_id: &[7; 16],
+            last_out_seq: 0,
+            last_in_seq: 0,
+        };
+        let mut wire = Vec::new();
+        infraternal_protocol::encode_muxed_frame_into(42, &attach, &mut wire).unwrap();
+        link.write(42, &attach, &wire).await.unwrap();
+        let parked =
+            NativeChannel::terminal(remote_quic::accept_bound(&binding).await.unwrap()).unwrap();
+        assert!(matches!(
+            Receive::default().next(&parked).await.unwrap().frame,
+            Frame::AttachTerm { .. }
+        ));
+        // The peer stops reading this4KiB window. A256B server send window
+        // makes a16KiB Input flight block after QUIC has exhausted receive credit.
+        link.limit_send_window(256);
+        let (socket, _unused) = UnixStream::pair().unwrap();
+        let mut ready_shadow = shadow(socket);
+        ready_shadow.connection.peer = Peer::Remote(link.clone());
+        let slot = ready_shadow.slots.remove(&1).unwrap();
+        ready_shadow.slots.insert(42, slot);
+        let mut state = State::default();
+        state.shadow = Some(ready_shadow);
+        state.waiting.insert(
+            1,
+            Waiting {
+                ack: 0,
+                since: Instant::now() - HEDGE_AFTER,
+            },
+        );
+        let (mut attachment, _output) = attachment();
+        attachment.stream_id = 42;
+        attachment.unacknowledged.resize(16384, b'x');
+        attachment.last_input_end = 16384;
+        let attachments = HashMap::from([(1, attachment)]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), state.hedge(&attachments))
+                .await
+                .expect("shadow I/O must be owned, not awaited by the actor")
+        );
+        Transmit::default()
+            .send(
+                &control,
+                0,
+                &Frame::Result {
+                    call_id: 92,
+                    ok: true,
+                    json: b"{}",
+                },
+            )
+            .await
+            .unwrap();
+        let mut received = BytesMut::new();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            link.read(&mut received, &mut [0; 4096]),
+        )
+        .await
+        .expect("healthy control progresses while shadow is blocked")
+        .unwrap();
+        assert!(matches!(
+            decode_muxed_frame(&received).unwrap().frame,
+            Frame::Result { call_id: 92, .. }
+        ));
+        state.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn stream_reuse_waits_for_the_retired_flight_to_join() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let mut state = State::default();
+        state.shadow = Some(shadow(socket));
+        state.waiting.insert(
+            1,
+            Waiting {
+                ack: 0,
+                since: Instant::now() - HEDGE_AFTER,
+            },
+        );
+        let (a, _output) = attachment();
+        let attachments = HashMap::from([(1, a)]);
+        assert!(state.hedge(&attachments).await);
+        assert!(state.flights.owns(1));
+        // No yield occurs between detach and reattach. The cancelled task has
+        // not joined yet, even if its stream/session identifiers are reused.
+        state.observe(&HashMap::new());
+        state.observe(&attachments);
+        let rebound = state.shadow.as_ref().unwrap().slots.contains_key(&1);
+        state.cancel().await;
+        assert!(
+            !rebound,
+            "a retired flight still owns the reused shadow stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_preparation_cancels_even_before_the_owned_task_first_polls() {
+        struct Lifetime(Option<oneshot::Sender<()>>);
+        impl Drop for Lifetime {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let (done, cancelled) = oneshot::channel();
+        let lifetime = Lifetime(Some(done));
+        let task = tokio::spawn(async move {
+            let _lifetime = lifetime;
+            std::future::pending::<Result<Shadow, AgentError>>().await
+        });
+        let (reply, receiver) = oneshot::channel();
+        let mut preparing = Preparing {
+            task,
+            reply: Some(reply),
+        };
+        drop(receiver);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), preparing.finish())
+                .await
+                .unwrap()
+                .is_err()
+        );
+        drop(preparing);
+        tokio::time::timeout(Duration::from_secs(1), cancelled)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn later_input_is_hedged_without_resending_the_first_suffix() {
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut state = State::default();
+        state.shadow = Some(shadow(socket));
+        state.waiting.insert(
+            1,
+            Waiting {
+                ack: 0,
+                since: Instant::now() - HEDGE_AFTER,
+            },
+        );
+        let (a, _output) = attachment();
+        let mut attachments = HashMap::from([(1, a)]);
+        assert!(state.hedge(&attachments).await);
+        let mut buffered = BytesMut::new();
+        let cursor = wire(&mut peer, &mut buffered).await;
+        assert!(matches!(
+            decode_muxed_frame(&cursor).unwrap().frame,
+            Frame::Call {
+                action_id: "transport.cursor",
+                ..
+            }
+        ));
+        let credit = wire(&mut peer, &mut buffered).await;
+        assert!(matches!(
+            decode_muxed_frame(&credit).unwrap().frame,
+            Frame::Credit { bytes: 1024 }
+        ));
+        let first = wire(&mut peer, &mut buffered).await;
+        assert_eq!(
+            decode_muxed_frame(&first).unwrap().frame,
+            Frame::Input {
+                in_seq: 0,
+                bytes: b"abc"
+            }
+        );
+        let _ = state.flights.next().await;
+        let a = attachments.get_mut(&1).unwrap();
+        a.unacknowledged.extend_from_slice(b"def");
+        a.last_input_end = 6;
+        assert!(state.hedge(&attachments).await);
+        let second = wire(&mut peer, &mut buffered).await;
+        assert_eq!(
+            decode_muxed_frame(&second).unwrap().frame,
+            Frame::Input {
+                in_seq: 3,
+                bytes: b"def"
+            }
+        );
+        let _ = state.flights.next().await;
+        assert!(state.hedge(&attachments).await);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wire(&mut peer, &mut buffered))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn shadow_input_and_snapshot_credit_have_independent_bounded_windows() {
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut state = State::default();
+        state.shadow = Some(shadow(socket));
+        state.waiting.insert(
+            1,
+            Waiting {
+                ack: 0,
+                since: Instant::now() - HEDGE_AFTER,
+            },
+        );
+        let (mut a, _output) = attachment();
+        a.unacknowledged
+            .resize(usize::try_from(SHADOW_CREDIT * 2).unwrap(), b'x');
+        a.last_input_end = SHADOW_CREDIT * 2;
+        a.credit = MAX_FRAME_LEN as u64 + 1024;
+        let attachments = HashMap::from([(1, a)]);
+        let mut buffered = BytesMut::new();
+        assert!(state.hedge(&attachments).await);
+        let _ = wire(&mut peer, &mut buffered).await;
+        let initial_grant = wire(&mut peer, &mut buffered).await;
+        assert!(matches!(
+            decode_muxed_frame(&initial_grant).unwrap().frame,
+            Frame::Credit { bytes: 16384 }
+        ));
+        let initial_payload = wire(&mut peer, &mut buffered).await;
+        assert!(
+            matches!(decode_muxed_frame(&initial_payload).unwrap().frame, Frame::Input { in_seq: 0, bytes } if bytes.len() == usize::try_from(SHADOW_CREDIT).unwrap())
+        );
+        let _ = state.flights.next().await;
+        assert!(state.hedge(&attachments).await);
+        let followup = wire(&mut peer, &mut buffered).await;
+        assert!(
+            matches!(decode_muxed_frame(&followup).unwrap().frame, Frame::Credit { bytes } if u64::from(bytes) == MAX_FRAME_LEN as u64 - SHADOW_CREDIT)
+        );
+        let _ = state.flights.next().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wire(&mut peer, &mut buffered))
+                .await
+                .is_err()
+        );
+        assert!(state.accept(
+            &mut Incoming::Ack {
+                stream_id: 1,
+                in_seq_acked: SHADOW_CREDIT
+            },
+            &attachments
+        ));
+        assert!(state.hedge(&attachments).await);
+        let next_input = wire(&mut peer, &mut buffered).await;
+        assert!(
+            matches!(decode_muxed_frame(&next_input).unwrap().frame, Frame::Input { in_seq: 16384, bytes } if bytes.len() == usize::try_from(SHADOW_CREDIT).unwrap())
+        );
+        assert_eq!(attachments[&1].credit, MAX_FRAME_LEN as u64 + 1024);
+    }
+
+    #[tokio::test]
+    async fn snapshot_notice_precedes_repaint_and_duplicates_spend_no_browser_credit() {
+        let (socket, _) = UnixStream::pair().unwrap();
+        let mut state = State::default();
+        state.shadow = Some(shadow(socket));
+        let slot = state.shadow.as_mut().unwrap().slots.get_mut(&1).unwrap();
+        slot.hedged = true;
+        slot.credit = 1024;
+        let (a, mut output) = attachment();
+        let mut attachments = HashMap::from([(1, a)]);
+        let json = serde_json::to_vec(&serde_json::json!({"type":"terminal.snapshot", "session_id": uuid::Uuid::from_bytes([7;16]).simple().to_string(), "seq":20, "approximate":false})).unwrap();
+        let mut notice = Incoming::Event {
+            stream_id: 1,
+            event_json: Bytes::from(json.clone()),
+        };
+        assert!(
+            state.accept(&mut notice, &attachments),
+            "valid shadow snapshot notice must precede its repaint"
+        );
+        let mut primary = shadow(UnixStream::pair().unwrap().0).connection;
+        let mut routes = HashMap::from([(1, 1)]);
+        let mut pending = HashMap::new();
+        assert!(
+            process_incoming(
+                notice,
+                &mut primary,
+                &mut attachments,
+                &mut routes,
+                &mut pending
+            )
+            .await
+        );
+        let mut snapshot = Incoming::Snapshot {
+            stream_id: 1,
+            out_seq: 20,
+            bytes: Bytes::from_static(b"repaint"),
+        };
+        assert!(state.accept(&mut snapshot, &attachments));
+        assert!(
+            process_incoming(
+                snapshot,
+                &mut primary,
+                &mut attachments,
+                &mut routes,
+                &mut pending
+            )
+            .await
+        );
+        assert!(matches!(
+            output.try_recv().unwrap(),
+            TerminalOutput::Event { .. }
+        ));
+        assert!(matches!(
+            output.try_recv().unwrap(),
+            TerminalOutput::Snapshot { out_seq: 20, .. }
+        ));
+        let credit = attachments[&1].credit;
+        let mut duplicate = Incoming::Event {
+            stream_id: 1,
+            event_json: Bytes::from(json),
+        };
+        assert!(state.accept(&mut duplicate, &attachments));
+        assert!(
+            process_incoming(
+                duplicate,
+                &mut primary,
+                &mut attachments,
+                &mut routes,
+                &mut pending
+            )
+            .await
+        );
+        let mut duplicate = Incoming::Snapshot {
+            stream_id: 1,
+            out_seq: 20,
+            bytes: Bytes::from_static(b"repaint"),
+        };
+        assert!(state.accept(&mut duplicate, &attachments));
+        assert!(
+            process_incoming(
+                duplicate,
+                &mut primary,
+                &mut attachments,
+                &mut routes,
+                &mut pending
+            )
+            .await
+        );
+        assert!(output.try_recv().is_err());
+        assert_eq!(attachments[&1].credit, credit);
+    }
+
+    #[tokio::test]
+    async fn overlap_and_stale_snapshot_do_not_spend_browser_credit() {
+        let (socket, _) = UnixStream::pair().unwrap();
+        let mut state = State::default();
+        state.shadow = Some(shadow(socket));
+        let slot = state.shadow.as_mut().unwrap().slots.get_mut(&1).unwrap();
+        slot.hedged = true;
+        slot.credit = 1024;
+        let (a, _output) = attachment();
+        let attachments = HashMap::from([(1, a)]);
+        let mut output = Incoming::Output {
+            stream_id: 1,
+            out_seq: 8,
+            bytes: Bytes::from_static(b"abcd"),
+        };
+        assert!(state.accept(&mut output, &attachments));
+        assert!(
+            matches!(output, Incoming::Output { out_seq: 10, ref bytes, .. } if bytes.as_ref() == b"cd")
+        );
+        let mut old_snapshot = Incoming::Snapshot {
+            stream_id: 1,
+            out_seq: 9,
+            bytes: Bytes::from_static(b"old"),
+        };
+        assert!(state.accept(&mut old_snapshot, &attachments));
+        assert!(
+            matches!(old_snapshot, Incoming::Output { out_seq: 10, ref bytes, .. } if bytes.is_empty())
+        );
+        let mut newer = Incoming::Snapshot {
+            stream_id: 1,
+            out_seq: 20,
+            bytes: Bytes::from_static(b"new"),
+        };
+        assert!(state.accept(&mut newer, &attachments));
+        assert!(matches!(newer, Incoming::Snapshot { out_seq: 20, .. }));
+        let mut duplicate = Incoming::Snapshot {
+            stream_id: 1,
+            out_seq: 20,
+            bytes: Bytes::from_static(b"new"),
+        };
+        assert!(state.accept(&mut duplicate, &attachments));
+        assert!(matches!(duplicate, Incoming::Output { ref bytes, .. } if bytes.is_empty()));
+        let mut gap = Incoming::Output {
+            stream_id: 1,
+            out_seq: 30,
+            bytes: Bytes::from_static(b"gap"),
+        };
+        assert!(!state.accept(&mut gap, &attachments));
+        assert_eq!(attachments[&1].credit, 1024);
+    }
+}
+
+#[cfg(test)]
+#[path = "embedded_priming_header_tests.rs"]
+mod header_tests;

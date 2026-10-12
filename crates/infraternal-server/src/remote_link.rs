@@ -15,6 +15,12 @@ use tokio::{
     task::JoinSet,
 };
 
+// Tests observe existing ownership without extending a transport's lifetime.
+#[cfg(test)]
+static TEST_LINKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<std::net::SocketAddr, std::sync::Weak<RemoteLink>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// Remote TCP keeps the existing mux; native QUIC fans raw streams into bounded actor delivery.
 enum LinkTransport {
     Tcp {
@@ -344,7 +350,92 @@ impl RemoteLink {
         }
     }
 
-    /// Owns parking cancellation until the actor accepts its queued preparation.
+    #[cfg(test)]
+    pub(crate) async fn hold_writer_map(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        if let LinkTransport::Quic(link) = &self.transport {
+            let _guard = link.streams.lock().await;
+            let _ = ready.send(());
+            let _ = release.await;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) async fn control_packet_ready(&self) -> bool {
+        match &self.transport {
+            LinkTransport::Quic(link) => !link.incoming.lock().await.control.is_empty(),
+            LinkTransport::Tcp { .. } => false,
+        }
+    }
+    /// Observe bounded native ownership without waiting on an actor-held lock.
+    /// Counts are streams, reader tasks, control queue, bulk queue and pending frame.
+    #[cfg(test)]
+    pub(crate) fn native_delivery_counts(&self) -> Option<[Option<usize>; 5]> {
+        let LinkTransport::Quic(link) = &self.transport else {
+            return None;
+        };
+        let incoming = link.incoming.try_lock().ok();
+        Some([
+            link.streams.try_lock().ok().map(|streams| streams.len()),
+            link.pumps.try_lock().ok().map(|pumps| pumps.len()),
+            incoming.as_ref().map(|incoming| incoming.control.len()),
+            incoming.as_ref().map(|incoming| incoming.bulk.len()),
+            incoming.as_ref().map(|incoming| {
+                usize::from(incoming.pending.is_some())
+                    + usize::from(incoming.held_control.is_some())
+            }),
+        ])
+    }
+    #[cfg(test)]
+    pub(crate) fn register_test_probe(link: &Arc<Self>) {
+        if let LinkTransport::Quic(native) = &link.transport {
+            let mut probes = TEST_LINKS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            probes.retain(|_, link| link.strong_count() != 0);
+            probes.insert(native.connection.remote_address(), Arc::downgrade(link));
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn native_counts_for_peer(peer: std::net::SocketAddr) -> Option<[Option<usize>; 5]> {
+        let link = TEST_LINKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&peer)
+            .and_then(std::sync::Weak::upgrade)?;
+        link.native_delivery_counts()
+    }
+    /// Fixture-only control backpressure; weak lookup adds no transport owner.
+    #[cfg(test)]
+    pub(crate) fn test_limit_send_window_for_peer(peer: std::net::SocketAddr, bytes: u64) -> bool {
+        let link = TEST_LINKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&peer)
+            .and_then(std::sync::Weak::upgrade);
+        let Some(link) = link else {
+            return false;
+        };
+        link.limit_send_window(bytes);
+        true
+    }
+    #[cfg(test)]
+    pub(crate) fn test_native_peer_address(&self) -> Option<std::net::SocketAddr> {
+        match &self.transport {
+            LinkTransport::Quic(link) => Some(link.connection.remote_address()),
+            LinkTransport::Tcp { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn limit_send_window(&self, bytes: u64) {
+        if let LinkTransport::Quic(link) = &self.transport {
+            link.connection.set_send_window(bytes);
+        }
+    }
+
     pub(crate) fn priming_admission(&self) -> PrimingAdmission {
         PrimingAdmission {
             state: self.priming.clone(),
@@ -454,26 +545,6 @@ impl RemoteLink {
                 }
                 keep
             });
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn hold_writer_map(
-        &self,
-        ready: tokio::sync::oneshot::Sender<()>,
-        release: tokio::sync::oneshot::Receiver<()>,
-    ) {
-        if let LinkTransport::Quic(link) = &self.transport {
-            let _guard = link.streams.lock().await;
-            let _ = ready.send(());
-            let _ = release.await;
-        }
-    }
-    #[cfg(test)]
-    pub(crate) async fn control_packet_ready(&self) -> bool {
-        match &self.transport {
-            LinkTransport::Quic(link) => !link.incoming.lock().await.control.is_empty(),
-            LinkTransport::Tcp { .. } => false,
         }
     }
 
