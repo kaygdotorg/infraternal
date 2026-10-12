@@ -28,6 +28,11 @@ export interface SessionUi {
   dispose(): void;
 }
 
+/** Match the frame's existing manager eligibility independently of its touch header. */
+function canManage(rec: WinRec): boolean {
+  return isTerminal(rec) && !rec.model.noAccess && !rec.owner.view.team;
+}
+
 export function createSessionHooks(cx: Ctx): SessionUi {
   const inventory = cx.adapters.inventory!;
   let part: SessionUiPart | undefined;
@@ -66,10 +71,11 @@ export function createSessionHooks(cx: Ctx): SessionUi {
   return {
     paint,
     toggleManager(rec, anchor, source) {
+      if (!canManage(rec)) return;
       // Keep all manager entry points usable when the touch header has only Close.
       const resolvedAnchor = anchor ?? rec.card.pill;
       if (part) { part.toggleManager(rec, resolvedAnchor, source); return; }
-      void load().then((p) => { if (p && resolvedAnchor.isConnected) p.toggleManager(rec, resolvedAnchor, source); });
+      void load().then((p) => { if (p && resolvedAnchor.isConnected && canManage(rec)) p.toggleManager(rec, resolvedAnchor, source); });
     },
     closeManager() { part?.closeManager(); },
     arrived(rec) { part?.arrived(rec); },
