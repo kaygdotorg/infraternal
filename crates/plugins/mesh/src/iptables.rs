@@ -37,6 +37,13 @@ impl Ownership {
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
+    apply_with_aliases(config, installed, &[])
+}
+pub(crate) fn apply_with_aliases(
+    config: &Config,
+    installed: bool,
+    aliases: &[crate::policy::model::Addresses],
+) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
     let installed = if installed {
@@ -51,10 +58,16 @@ pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
     // Preflight both families before mutating either. Restore batches are atomic
     // per table; an interrupted table/family is fenced or rolled back by the caller.
     for (index, tool) in TOOLS.iter().enumerate() {
-        test(tool, &render(config, index == 1, installed[index]))?;
+        test(
+            tool,
+            &render_with_aliases(config, index == 1, installed[index], aliases),
+        )?;
     }
     for (index, tool) in TOOLS.iter().enumerate() {
-        run(tool, &render(config, index == 1, installed[index]))?;
+        run(
+            tool,
+            &render_with_aliases(config, index == 1, installed[index], aliases),
+        )?;
     }
     Ok(())
 }
@@ -207,23 +220,41 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
     }
 }
 // Keep the complete per-family atomic restore batch visible together.
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
+    render_with_aliases(config, ipv6, installed, &[])
+}
+// A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
+#[allow(clippy::too_many_lines)]
+fn render_with_aliases(
+    config: &Config,
+    ipv6: bool,
+    installed: Ownership,
+    aliases: &[crate::policy::model::Addresses],
+) -> String {
     let mut script = String::from("*raw\n");
     if installed.guard {
         let _ = writeln!(script, "-F {GUARD}");
     } else {
         let _ = writeln!(script, ":{GUARD} - [0:0]");
     }
-    let address = if ipv6 {
-        config.addresses.ipv6.to_string()
-    } else {
-        config.addresses.ipv4.to_string()
-    };
+    let addresses: Vec<_> = std::iter::once(&config.addresses)
+        .chain(aliases)
+        .map(|addresses| {
+            if ipv6 {
+                addresses.ipv6.to_string()
+            } else {
+                addresses.ipv4.to_string()
+            }
+        })
+        .collect();
     let _ = writeln!(
         script,
-        "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN\n-A {GUARD} -d {address} -j DROP"
+        "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN"
     );
+    for address in &addresses {
+        let _ = writeln!(script, "-A {GUARD} -d {address} -j DROP");
+    }
     if !installed.guard {
         let _ = writeln!(script, "-I PREROUTING 1 -j {GUARD}");
     }
@@ -238,8 +269,11 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
     // Translation preserves the incoming interface; lo remains node-local [231].
     let _ = writeln!(
         script,
-        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN\n-A {DELIVERY} -d {address} -j DROP"
+        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
     );
+    for address in &addresses {
+        let _ = writeln!(script, "-A {DELIVERY} -d {address} -j DROP");
+    }
     if !installed.delivery {
         // Older owned filter chains remain valid; add this fence atomically
         // when adopting them rather than duplicating their interface hooks.
