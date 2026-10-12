@@ -8,7 +8,7 @@ if (previous) globalThis.matchMedia = previous;
 else Reflect.deleteProperty(globalThis, "matchMedia");
 const red = process.env.ADDHOST_BREAKIT2_RED === "1" ? test : test.skip;
 
-red("breakit2 an explicit port on a listed host survives chip resolution", () => {
+test("breakit2 an explicit port on a listed host survives chip resolution", () => {
   type Entry = { id: string; user?: string; address: string; port?: number };
   const known: Entry = { id: "lab", user: "target", address: "lab" };
   const wizard = Object.assign(Object.create(Wizard.prototype) as {

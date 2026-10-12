@@ -342,7 +342,8 @@ export class Wizard {
     const { host, prefixed } = this.matchOf(target);
     if (host) {
       if (prefixed && !delimited) return undefined;
-      if (target.user && target.user !== host.user) return this.typedChip(target, host);
+      // An explicit port is part of the typed destination even when its host is listed.
+      if ((target.user && target.user !== host.user) || target.port !== undefined) return this.typedChip(target, host);
       return this.chipFor(host);
     }
     return delimited ? this.typedChip(target) : undefined;
