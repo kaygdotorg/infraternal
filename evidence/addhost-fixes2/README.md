@@ -1,11 +1,14 @@
 <!-- Records reviewed continuation evidence for host provisioning #169. -->
 # Host provisioning continuation
 
-R1: 10/10 fresh supported-target runs reached Done after the drain repair.
-The ordinary baseline and frozen pre-fix samples also reached Done 10/10 in
-this load window; these samples do not estimate a production failure rate.
-The delayed-credit live regression fails before the repair and passes after it.
-The real socket regression reproduces the mechanism on b4ae9e22.
+The initial R1 fresh-target batch on the breakit2 test branch reached Done on
+7/10 targets; the three readiness failures occurred after upload, join and
+start at 4,144, 4,490 and 4,754 ms. Later, ordinary `b4ae9e22` and frozen
+pre-fix controls both reached Done 10/10 in the same measurement window, so
+those samples do not establish a production failure rate. After the drain
+repair, 10/10 fresh supported targets reached Done. The delayed-credit live
+regression fails before the repair and passes after it; the socket regression
+also reproduces on `b4ae9e22`.
 
 Per-step timings (milliseconds, range of ten samples; detailed load and machine
 records in each log). Network discovery refusal is expected before key sign-in.
@@ -25,24 +28,49 @@ records in each log). Network discovery refusal is expected before key sign-in.
 
 ## Repair coverage
 
-All cases below existed on `b4ae9e22`: the baseline logs retain the same
-contract tests and assertion failures. The added review regressions apply to
-this lane's intermediate code; they are not attributed to that baseline.
+The original breakit2 behavior findings below were present on `b4ae9e22`.
+For R1, the delayed-credit ordering reproducer failed on that baseline even
+though ordinary fresh-target controls were 10/10 in one measurement window;
+neither sample is a production failure-rate estimate. Later review-only
+regressions and the primary-retirement race are identified as follow-ups, not
+as baseline defects.
 
-| Case | Baseline evidence | Repair evidence / remaining boundary |
-| --- | --- | --- |
-| R1 | `baseline-ordering-red.log`; normal fresh samples 10/10 | Daemon drain, decoder readiness option, and primary retirement tracking; final live samples below |
-| T1 | `baseline-install-red.log`: both foreign suffix tests fail | Owned stage replacement and journal; foreign launcher and unit suffixes preserved |
-| S1 | `baseline-authority-red.log`: two live records instead of one | Address, invitation and host record share a SQLite transaction; cancellation ownership registered before commit |
-| S2 | `baseline-authority-red.log`: eight admissions instead of one | Destination reserved before awaits and checked within the writer transaction; one record, seven “already being added” results |
-| T2 | `baseline-install-red.log`: unsafe parent admitted | Same private-parent check before mutation and rollback; existing permissions unchanged |
-| T3 | `baseline-install-red.log`: empty interrupted lock unrecoverable | Exact acquisition journal; interrupted receipt recovery retires only that journal |
-| T4 | `baseline-tiny-disk.log`: rollback fails | Staged payload removed before cleanup receipt allocation; real full-home refusal cleans owned files |
-| H1 | `baseline-startup-red.log`, `baseline-startup-red-fresh.log`: seven startup profiles fail | Actionable refusal added. Startup that exits, replaces or waits before the requested command remains target-side; no client-only repair proven |
-| A1 | `baseline-address-red.log`: explicit port discarded | Typed port retained; listed account retained in serialized destination |
-| A2 | `baseline-address-red.log`: malformed IPv6 accepted | Browser-native address validation; chip remains editable |
-| H2 | `baseline-init-red.log`: missing init guidance | Canonical unsupported-init record gives systemd requirement and SSH-only next step |
-| Retry | `baseline-retry.log`: payload sent twice | One private, marked, hash-verified cache; reuse rehashes staged hardlink, changed bytes resend, foreign cache refused |
+| Finding | Fix commit(s) | Existing regression test(s) | On `b4ae9e22`? | Before → after evidence |
+| --- | --- | --- | --- | --- |
+| R1 | `677ca2f9`, `4955b966`, `61edf2d4` | `ownership_eof_does_not_discard_private_terminal_output`; live `breakit2_live_ssh_install_join_and_terminal` | Yes: delayed-credit output was lost before readiness; ordinary fresh controls were 10/10 in a later window | Before: first fresh batch 7/10 Done, with three readiness failures at 4,144–4,754 ms; b4 socket test 0/1 in 0.00 s; frozen live ordering run failed Done at 4,449 ms. After: socket test 1/1 in 0.07 s and fresh readiness 10/10 in 3.08–4.36 s. Per-setup-step ranges are below. |
+| T1 | `e4827f10` | `breakit2_rollback_preserves_foreign_launcher_new`; `breakit2_rollback_preserves_foreign_unit_new` | Yes: rollback removed both foreign `.new` paths | Before 0/2 in 0.26 s; after 32 passed, 0 failed, 2 ignored in 1.16 s. |
+| S1 | `554fe436`, `66ed0d63`, `de1d74a2` | `breakit2_unpublished_invitation_retires_durable_authority`; `cancelled_invitation_after_commit_retires_its_host_record` | Yes: refused address persistence left an extra live host record. The cancellation follow-up covers a later publication boundary. | Before 0/1 in 0.13 s; after S1 bootstrap suite 30 passed, 0 failed, 3 ignored in 22.46 s. The later cancellation case was red 0/1 in 0.09 s and its suite passed 32/0/3 ignored in 14.87 s. |
+| S2 | `11a673e6` | `breakit2_concurrent_same_destination_issues_only_one_invitation` | Yes: eight concurrent requests received eight identities | Before 0/1 in 0.12 s; after one host-bound attempt and seven “already being added” results; bootstrap suite 31 passed, 0 failed, 2 ignored in 18.43 s. |
+| T2 | `72672e9b` | `breakit2_stage_refuses_parent_that_cannot_be_rolled_back` | Yes: staging admitted a parent rollback later refused | Before 0/1 in 0.12 s; after 33 passed, 0 failed, 1 ignored in 2.12 s. |
+| T3 | `d2661eb5`, `a17ccb21` | `breakit2_interrupted_lock_creation_allows_cleanup_and_retry`; `interrupted_acquisition_cleanup_receipt_can_resume` | Yes: an interrupted lock creation could not be authenticated for cleanup | Before 0/1 in 0.04 s; recovery follow-up red 0/1 in 0.24 s; after install suites 34 passed in 3.89 s and 39 passed in 2.28 s. |
+| T4 | `eb047f72` | `full_stage_frees_payload_before_allocating_a_cleanup_receipt` | Yes: the tiny-disk rollback case failed | Before 0/1 in 0.12 s (`baseline-tiny-disk.log`); after 35 install tests passed in 1.92 s; the final full-home cleanup assertion passed. |
+| H1 | `e5fd4c6d` | `shell_startup_refusal_names_an_interactive_only_remedy`; existing real-SSH startup-profile probe | Yes: seven startup profiles prevented the requested check script from running | Before guidance test 0/1 in 0.00 s and 7 profiles failed before `CHECK_SCRIPT`; after guidance suite 2 passed, 0 failed, 1 ignored in 0.05 s. Exit, shell replacement and non-returning startup remain target-side boundaries and have no successful setup-step duration. |
+| A1 | `06fef9d9`, `865b6c82` | `breakit2 an explicit port on a listed host survives chip resolution`; `listed host plus port retains its saved user in the serialized destination` | Yes: the explicit port was discarded | Before address assertions 0/2; after source suites 47/0 and 51/0. This local input step emits no provisioning event timing. |
+| A2 | `1d13d872` | `breakit2 malformed bracketed IPv6 waits for correction` | Yes: malformed bracketed IPv6 was accepted as a chip | Before address assertions 0/2; after source suite 48/0. This local input step emits no provisioning event timing. |
+| H2 | `b11368e9` | `breakit2_no_systemd_names_the_required_manager` | Yes: the unsupported-init refusal omitted the required init manager | Before guidance test 0/1 in 0.00 s; after probe suite 3/3 in 0.17 s and model suite 5/5. |
+| Payload reuse | `af5fa4e2` | `retry_reuses_verified_payload_after_owned_rollback`; `retry_resends_payload_when_cache_content_changes`; `payload_reuse_never_adopts_a_foreign_cache_directory` | Yes: a retry sent two complete payloads | Before cache regressions 0/2 in 0.45 s and 40,129,888 bytes in two uploads (691.076 + 656.308 ms); after cache suite 38/0 in 1.70 s and one accepted file input, with 130.617 ms local / 600.886 ms delayed reuse and 178.824 / 624.644 ms lookup in the final proof. |
+
+The before/after test durations above come from the saved breakit2 red and
+green runs. End-to-end setup-step measurements are separate: the tables below
+show `b4ae9e22` against the final repaired flow and do not attribute a latency
+change to one individual fix. A1 and A2 run before provisioning starts, so
+there is no backend setup-step event to time.
+
+### Setup-step timing cross-reference
+
+Milliseconds, ten-run ranges (phase rows also include p50). These are the
+workflow-level measurements in the final fresh proof; they provide the
+before/after setup-step context for each finding.
+
+| Finding | Relevant setup step | `b4ae9e22` | Final repaired flow |
+| --- | --- | --- | --- |
+| R1 | readiness and commit phase | 101–217 (p50 133.5) | 97–539 (p50 164.0) |
+| T1, T2, T3 | install | 80.001–116.852 | 87.026–201.050 |
+| S1, S2 | commit | 23.078–66.415 | 26.292–161.596 |
+| T4 | install; rollback has a separate pass/fail assertion | 80.001–116.852 | 87.026–201.050 |
+| H1, H2 | check for supported profiles | 119.194–164.251 | 113.388–1066.597 |
+| A1, A2 | typed-target validation before provisioning | n/a | n/a |
+| Payload reuse | payload lookup / upload | absent / 307.621–1778.055 | 19.898–128.368 / 729.131–6822.204 |
 
 Review regressions: `s1-cancel-before.log` proves a committed but unacknowledged
 host record needed early cleanup ownership; `t3-recovery-before.log` proves an
@@ -174,3 +202,20 @@ corrected, the job directory made private, and the gate rerun with umask022
 and the shorter owned state root. These are environment corrections, not
 source changes or waived test rows. `milestone-fast.log` and
 `retirement-fast.log` preserve both attempts.
+
+
+## Completion replay
+
+The final requested browser replay used `TRACER_TEST_PORT=4272` on source head
+`2a57316e`: the 27 tests in `apps/tracer/test/addhost-wizard.spec.ts` passed.
+Its full transcript is `browser-27.log`.
+
+Focused current-source regressions also passed: R1 socket drain 1/1 in 0.07 s,
+S1/S2 durable authority 2/2 in 1.21 s, SSH install and payload reuse 39/39 in
+13.69 s, H1/H2 probe 3/3 in 0.23 s, and address selection 3/3. Their
+transcripts are `r1-native-final.log`,
+`authority-native-final.log`, `ssh-install-native.log`, `ssh-probe-native.log`
+and `address-source.log`. Baseline red replays against `b4ae9e22` are in
+`baseline-r1.log`, `baseline-s1.log`, `baseline-s2.log`,
+`baseline-install.log` and `baseline-h2.log`; the H1 startup-profile result and
+T4 tiny-disk result remain documented from their original live fixture runs.

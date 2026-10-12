@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/infraternal_server-aaf76c8bf1e2d913)
+
+running 1 test
+test bootstrap_runtime::remote_backend::tests::breakit2_unpublished_invitation_retires_durable_authority ... FAILED
+
+failures:
+
+---- bootstrap_runtime::remote_backend::tests::breakit2_unpublished_invitation_retires_durable_authority stdout ----
+
+thread 'bootstrap_runtime::remote_backend::tests::breakit2_unpublished_invitation_retires_durable_authority' (734978) panicked at crates/infraternal-server/src/bootstrap_remote.rs:618:9:
+assertion `left == right` failed: unpublished cleanup removed memory ownership but leaked durable host authority
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bootstrap_runtime::remote_backend::tests::breakit2_unpublished_invitation_retires_durable_authority
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 325 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`
