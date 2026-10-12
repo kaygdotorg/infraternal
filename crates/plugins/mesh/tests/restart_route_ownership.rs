@@ -20,6 +20,7 @@ fn orphan_route_retirement_preserves_foreign_routes() {
     let mut node = Node::restore(&directory).unwrap();
     node.up().unwrap();
     node.chunk(Chunk {
+        local_key: None,
         node: NodeId(1),
         from_version: None,
         version: 1,

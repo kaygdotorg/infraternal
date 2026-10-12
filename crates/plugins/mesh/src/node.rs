@@ -300,6 +300,7 @@ impl Node {
                 self.config.clone().ok_or(io::ErrorKind::InvalidData)?
             } else {
                 Config {
+                    local_key: chunk.local_key,
                     node: chunk.node,
                     version: chunk.version,
                     addresses: chunk.addresses,
@@ -618,6 +619,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
         };
         let config = Config {
+            local_key: None,
             node: NodeId(1),
             version: 1,
             addresses: addresses(1),

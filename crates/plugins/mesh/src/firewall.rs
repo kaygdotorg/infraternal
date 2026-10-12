@@ -302,6 +302,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
         };
         Config {
+            local_key: None,
             node: NodeId(1),
             version: 1,
             addresses: address(1),

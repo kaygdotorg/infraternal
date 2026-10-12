@@ -49,6 +49,10 @@ pub struct PeerPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Authenticated coordinator binding to the enabled local kernel key.
+    /// Legacy snapshots lack it and cannot replace an accepted node identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_key: Option<PublicKey>,
     pub node: NodeId,
     pub version: u64,
     pub addresses: Addresses,
@@ -66,6 +70,9 @@ pub struct ServerPath {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chunk {
+    /// Repeated in every part so a split snapshot cannot change its binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_key: Option<PublicKey>,
     pub node: NodeId,
     pub from_version: Option<u64>,
     pub version: u64,

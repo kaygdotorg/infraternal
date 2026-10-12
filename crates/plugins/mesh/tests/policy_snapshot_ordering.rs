@@ -30,6 +30,7 @@ fn install(fallback: bool) -> (Node, Config) {
     });
     node.up().unwrap();
     let config = Config {
+        local_key: None,
         node: NodeId(1),
         version: 10,
         addresses: Addresses {
