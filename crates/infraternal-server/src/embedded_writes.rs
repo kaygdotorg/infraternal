@@ -252,3 +252,184 @@ impl State {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Checks the encoded queue bound and joins owned flights before shutdown returns.
+    use super::*;
+    fn retained_writer() -> AttachmentState {
+        let (output, _) = mpsc::channel(16);
+        AttachmentState {
+            session_id: [7; 16],
+            stream_id: 2,
+            last_out_seq: 0,
+            last_in_seq: 0,
+            last_input_end: 4 * 1024 * 1024,
+            unacknowledged: super::super::BytesMut::from(vec![b'x'; 4 * 1024 * 1024].as_slice()),
+            input_credit: tokio::sync::watch::channel(0).0,
+            credit: 0,
+            awaiting_ack: false,
+            replaying: false,
+            output,
+        }
+    }
+
+    #[test]
+    fn enabling_owned_writes_preserves_unsent_replacement_input() {
+        let mut state = State::default();
+        let mut writer = retained_writer();
+        writer.replaying = true;
+        let mut attachments = HashMap::from([(1, writer)]);
+        state.enable(&attachments);
+        let writer = attachments.get_mut(&1).unwrap();
+        writer.replaying = false;
+        let (_, end) = state
+            .encode(writer)
+            .expect("replacement input was retained, not sent");
+        assert_eq!(end, Some(FLIGHT as u64));
+    }
+
+    #[test]
+    fn socket_completion_cannot_spend_unacknowledged_writer_credit() {
+        let mut state = State::default();
+        let mut writer = retained_writer();
+        let (_, end) = state.encode(&writer).expect("first bounded flight");
+        assert_eq!(end, Some(FLIGHT as u64));
+        state
+            .sent
+            .insert(writer.stream_id, (writer.session_id, end.unwrap()));
+        assert!(
+            state.encode(&writer).is_none(),
+            "socket completion is not a durable PTY Ack"
+        );
+        writer.last_in_seq = FLIGHT as u64;
+        let _ = writer.unacknowledged.split_to(FLIGHT);
+        assert!(
+            state.encode(&writer).is_some(),
+            "a real Ack must resume the writer"
+        );
+    }
+
+    #[tokio::test]
+    async fn saturated_control_queue_preserves_fifo_and_shutdown_owns_flights() {
+        let (sender, receiver) = mpsc::channel(1);
+        let mut state = State {
+            enabled: true,
+            control: Some(receiver),
+            ..State::default()
+        };
+        sender.try_send(Bytes::from_static(b"first")).unwrap();
+        assert!(!state.can_admit());
+        assert!(matches!(
+            sender.try_send(Bytes::from_static(b"second")),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert_eq!(
+            state.control.as_mut().unwrap().try_recv().unwrap(),
+            b"first"[..]
+        );
+        assert!(state.can_admit());
+        sender.try_send(Bytes::from_static(b"second")).unwrap();
+        let (finished, mut observed) = mpsc::channel::<()>(1);
+        state.tasks.spawn(async move {
+            let _guard = finished;
+            std::future::pending().await
+        });
+        state.stop().await;
+        assert!(sender.is_closed());
+        assert!(observed.recv().await.is_none());
+        assert!(state.tasks.is_empty());
+    }
+    #[test]
+    fn bounded_lane_metadata_and_flight_sizes() {
+        eprintln!(
+            "fixture-layout owned write State={} B (test observers included, not shipping layout); input flight <={} B plus frame header; control queued+active <={} B/host, <={} B/1000hosts; 200 input flights <={} B plus headers/maps/transport",
+            std::mem::size_of::<State>(),
+            FLIGHT,
+            2 * CONTROL_FLIGHT,
+            2000 * CONTROL_FLIGHT,
+            200 * FLIGHT
+        );
+        assert_eq!(CONTROL_FLIGHT, 33024);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_control_lane_keeps_all_terminal_owner_slots_available() {
+        use super::super::BytesMut;
+        let (link, _control, _listener, _endpoint, _peer) =
+            crate::remote_runtime::tests::native_link_pair().await;
+        let mut connection = AgentConnection {
+            peer: Peer::Remote(link),
+            execution_uid: 0,
+            pid: None,
+            receive: BytesMut::new(),
+            scratch: vec![0; 4096],
+            encode: Vec::new(),
+            next_call_id: 1,
+            owned_control: None,
+        };
+        let mut state = State::default();
+        state.enable(&HashMap::new());
+        state.install(&mut connection);
+        let mut encoded = Vec::new();
+        encode_frame_into(
+            &Frame::Ping {
+                nonce: 1,
+                sent_us: 0,
+            },
+            &mut encoded,
+        )
+        .unwrap();
+        let control = connection.owned_control.as_ref().unwrap();
+        control.try_send(Bytes::copy_from_slice(&encoded)).unwrap();
+        state.schedule(&connection, &HashMap::new());
+        control.try_send(Bytes::from(encoded)).unwrap();
+        assert!(state.control_busy);
+        assert!(!state.can_admit());
+        assert_eq!(state.tasks.len(), 1);
+        let limit = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
+        let mut attachments: HashMap<_, _> = (0..limit)
+            .map(|index| {
+                let (output, _) = mpsc::channel(1);
+                (
+                    u64::try_from(index).unwrap(),
+                    AttachmentState {
+                        session_id: [u8::try_from(index).unwrap(); 16],
+                        stream_id: 2 + 2 * u32::try_from(index).unwrap(),
+                        last_out_seq: 0,
+                        last_in_seq: 0,
+                        last_input_end: 1,
+                        unacknowledged: BytesMut::from(&b"x"[..]),
+                        input_credit: tokio::sync::watch::channel(0).0,
+                        credit: 0,
+                        awaiting_ack: false,
+                        replaying: false,
+                        output,
+                    },
+                )
+            })
+            .collect();
+        // No spawn can poll inline on this current-thread runtime. The control
+        // owner occupies its own lane while this single scheduling pass admits
+        // every terminal; no completed write can conceal a missing owner slot.
+        state.schedule(&connection, &attachments);
+        let admitted = state.busy.len();
+        let total_tasks = state.tasks.len();
+        // Detached routing entries do not release a still-owned task slot.
+        // Replace every identity before any owner can run or be joined.
+        for writer in attachments.values_mut() {
+            writer.stream_id += 2 * u32::try_from(limit).unwrap();
+        }
+        state.schedule(&connection, &attachments);
+        let replacement_owners = state.busy.len();
+        let retained_tasks = state.tasks.len();
+        state.stop().await;
+        assert_eq!(
+            admitted, limit,
+            "an active/full control lane must not consume a terminal owner slot"
+        );
+        assert_eq!(total_tasks, limit + 1);
+        assert_eq!(replacement_owners, 0);
+        assert_eq!(retained_tasks, total_tasks);
+    }
+}
