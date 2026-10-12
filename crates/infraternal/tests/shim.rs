@@ -837,3 +837,152 @@ fn parked_shared_writer_does_not_stop_detached_pty_progress() {
     assert!(screen.contains("DETACHED_DONE"));
     assert_eq!(writer_state(&mut parked).1, setup.len() as u64 + 1);
 }
+
+#[test]
+fn shared_input_waits_for_global_queue_space_without_losing_the_suffix() {
+    assert_shared_queue_pressure(7, 0, QueueProbe::None);
+}
+
+#[test]
+fn independent_shared_writers_wait_for_the_same_global_queue() {
+    assert_shared_queue_pressure(8, 0, QueueProbe::None);
+}
+
+#[test]
+fn dropped_deferred_peers_release_slots_before_the_pty_drains() {
+    assert_shared_queue_pressure(7, 40, QueueProbe::None);
+}
+
+#[test]
+fn legacy_output_subscription_unblocks_deferred_shared_input() {
+    assert_shared_queue_pressure(7, 0, QueueProbe::LegacyOutput);
+}
+
+#[test]
+fn fresh_shared_peer_negotiates_while_another_shared_input_is_deferred() {
+    assert_shared_queue_pressure(7, 0, QueueProbe::FreshShared);
+}
+
+#[derive(Clone, Copy)]
+enum QueueProbe {
+    None,
+    LegacyOutput,
+    FreshShared,
+}
+
+#[allow(clippy::too_many_lines)]
+fn assert_shared_queue_pressure(writer: u32, replacements: usize, probe: QueueProbe) {
+    let legacy_output = matches!(probe, QueueProbe::LegacyOutput);
+    let session = Session::new(8192, false);
+    let root = std::env::current_dir().unwrap().join(&session.state);
+    let release = root.join("input-release");
+    let result = root.join("input-result");
+    let mut active = writer_peer(&session, 7, false);
+    send(&mut active, Frame::ReadFrom(0));
+    let flood = if legacy_output {
+        "os.write(1,b\"x\"*1048576+bytes.fromhex(\"4c45474143595f50524f47524553537c\")); "
+    } else {
+        ""
+    };
+    let setup = format!(
+        "stty raw -echo; exec python3 -u -c 'import os,time; os.write(1,bytes.fromhex(\"52454144597c\")); exec(\"while not os.path.exists(\\\"{}\\\"):\\n time.sleep(.001)\"); {flood}data=bytearray(); exec(\"while len(data)<1100000:\\n data.extend(os.read(0,1100000-len(data)))\"); open(\"{}\",\"w\").write(str(data.count(65))+\",\"+str(data.count(66)))'\r",
+        release.display(),
+        result.display()
+    );
+    send(
+        &mut active,
+        Frame::SequencedInput(0, setup.as_bytes().to_vec()),
+    );
+    let mut cursor = 0;
+    writer_output(&mut active, &mut cursor, b"READY|");
+    let mut legacy = legacy_output.then(|| writer_peer(&session, 9, false));
+    if let Some(peer) = &mut legacy {
+        assert_eq!(writer_state(peer), (0, 0));
+    }
+    if matches!(probe, QueueProbe::FreshShared) {
+        let mut seed = writer_peer(&session, 10, false);
+        assert_eq!(writer_state(&mut seed), (0, 0));
+    }
+    if writer != 7 {
+        let mut seed = writer_peer(&session, writer, false);
+        assert_eq!(writer_state(&mut seed), (0, 0));
+    }
+    let mut shared = writer_peer(&session, writer, true);
+    assert_eq!(
+        writer_state(&mut shared).1,
+        if writer == 7 { setup.len() as u64 } else { 0 }
+    );
+    send(
+        &mut active,
+        Frame::SequencedInput(setup.len() as u64, vec![b'A'; 900_000]),
+    );
+    assert_eq!(writer_state(&mut active).1, setup.len() as u64 + 900_000);
+    // The PTY kernel buffer cannot absorb the remaining 200KiB while Python waits.
+    let sequence = if writer == 7 {
+        setup.len() as u64 + 900_000
+    } else {
+        0
+    };
+    send(
+        &mut shared,
+        Frame::SequencedInput(sequence, vec![b'B'; 200_000]),
+    );
+    for _ in 0..replacements {
+        drop(shared);
+        shared = writer_peer(&session, writer, true);
+        assert_eq!(writer_state(&mut shared).1, sequence);
+        send(
+            &mut shared,
+            Frame::SequencedInput(sequence, vec![b'B'; 200_000]),
+        );
+    }
+    // A duplicate suffix and the state request remain ordered behind deferral.
+    send(
+        &mut shared,
+        Frame::SequencedInput(sequence + 199_997, b"BBB".to_vec()),
+    );
+    if matches!(probe, QueueProbe::FreshShared) {
+        // The oldest shared peer stays alive, and the backend still cannot read.
+        thread::sleep(Duration::from_millis(100));
+        let mut fresh = writer_peer(&session, 10, true);
+        assert_eq!(writer_state(&mut fresh), (0, 0));
+    }
+    if let Some(peer) = &mut legacy {
+        // Let the shim reach capacity deferral before issuing the ordinary
+        // subscription. The backend remains blocked on its external release.
+        thread::sleep(Duration::from_millis(100));
+        send(
+            peer,
+            Frame::Resize {
+                cols: 91,
+                rows: 31,
+                px_w: 0,
+                px_h: 0,
+            },
+        );
+        send(peer, Frame::ReadFrom(cursor));
+    }
+    let release_task = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        fs::write(release, b"go").unwrap();
+    });
+    if let Some(peer) = &mut legacy {
+        assert_eq!(writer_state(peer), (0, 0));
+        // Only this reader drains the flood; the original reader stays stalled.
+        writer_output(peer, &mut cursor, b"LEGACY_PROGRESS|");
+    }
+    assert_eq!(writer_state(&mut shared).1, sequence + 200_000);
+    release_task.join().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&result)
+        .ok()
+        .is_none_or(|text| text.is_empty())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "deferred input never reached the real PTY"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(fs::read_to_string(result).unwrap(), "900000,200000");
+}
