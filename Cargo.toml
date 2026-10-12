@@ -79,6 +79,14 @@ pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 
+# Keep SSH prompt image hashing inside its fixed reply deadline in test and
+# development builds; optimized release builds already use this code path.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = true
