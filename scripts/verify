@@ -91,6 +91,8 @@ fi
 
 case "$1" in
     fast)
+        printf '\n==> Release deployment functional checks\n'
+        python3 "${script_dir}/release/deploy_test.py"
         python3 "${script_dir}/latency_proxy.py" self-test --samples 3
         rust_verify_fast
         ts_verify_fast
