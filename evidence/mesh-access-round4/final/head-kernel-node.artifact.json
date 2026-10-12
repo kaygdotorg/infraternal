@@ -1,0 +1,7 @@
+{
+  "source": "/home/kayg/.cache/codex-scratch/mesh-access-round4/target/release/examples/kernel_node",
+  "executable_segments_sha256": "8c486fe80a0761df79dc291a507c68453764c633323f1582b59e28ab950a4025",
+  "source_sha256": "93abf0d55a7cc19d07232c82c2c47a9566962aa5690543c4c09e232dde05f8da",
+  "adapted_sha256": "612a82911c642db646399fba3aacbb06c9be93723622d29f91d5fb95ce29c47c",
+  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
+}

@@ -14,10 +14,7 @@ impl PluginRuntime {
     /// Attach only an admitted host capability; replacing a channel joins its previous workers.
     /// # Errors
     /// Refuses poisoned worker ownership and retires the partially attached channel.
-    pub(crate) async fn attach_node(
-        &self,
-        channel: Arc<dyn NodeChannel>,
-    ) -> Result<(), PluginError> {
+    pub async fn attach_node(&self, channel: Arc<dyn NodeChannel>) -> Result<(), PluginError> {
         let _switch = self.inner.switches.lock().await;
         let mut nodes = self.inner.nodes.lock().await;
         let id = channel.id().to_owned();

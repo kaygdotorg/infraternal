@@ -1,0 +1,23 @@
+{
+  "source_head": "75a70d3aed10c35abe0a9c972aaf46d5b9ded5a9",
+  "artifacts": [
+    {
+      "target": "x86_64-unknown-linux-musl",
+      "size_bytes": 22530608,
+      "ceiling_bytes": 16404816,
+      "sha256": "96ab529139620e39c5f5327f79d05bbacdcaecc5522471bc3c98338718b75ff2",
+      "pt_interp": "absent",
+      "production_trust": "PASS",
+      "key_memory": "locked and dump-excluded"
+    },
+    {
+      "target": "aarch64-unknown-linux-musl",
+      "size_bytes": 19943688,
+      "ceiling_bytes": 13817816,
+      "sha256": "328da9e2af224f663d27e0d4081095cf480954fbe66c3d9952428be478977a15",
+      "pt_interp": "absent",
+      "production_trust": "PASS",
+      "key_memory": "not run; native ARM required"
+    }
+  ]
+}

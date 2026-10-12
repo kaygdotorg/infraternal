@@ -56,6 +56,8 @@ mod remote_guard;
 pub mod remote_http;
 #[cfg(feature = "remote")]
 mod remote_link;
+#[cfg(all(test, feature = "mesh", feature = "remote"))]
+mod remote_mesh_revocation_tests;
 #[cfg(feature = "remote")]
 mod remote_renewal;
 #[cfg(feature = "remote")]

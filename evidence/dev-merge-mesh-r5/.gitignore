@@ -1,0 +1,6 @@
+# Keep final named-head receipts local after the evidence seal; the full output is durable on #173.
+/final-head-fast.log
+/final-head-fast.exit
+/final-receipt.json
+/finish-issue.txt
+/cleanup-issue.txt

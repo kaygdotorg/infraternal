@@ -19,6 +19,7 @@ fn fixture() -> (PathBuf, Node) {
     let mut node = Node::restore(&directory).unwrap();
     node.up().unwrap();
     node.chunk(Chunk {
+        local_key: None,
         server: None,
         node: NodeId(1),
         from_version: None,

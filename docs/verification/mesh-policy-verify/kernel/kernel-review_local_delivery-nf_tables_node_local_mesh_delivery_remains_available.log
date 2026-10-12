@@ -1,0 +1,7 @@
+Running as unit: run-p4101629-i4101929.scope; invocation ID: 131160f1d6ac413bb6088389a5718276
+
+running 1 test
+test nf_tables_node_local_mesh_delivery_remains_available ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.28s
+

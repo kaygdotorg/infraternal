@@ -174,7 +174,7 @@ def main():
         held.settimeout(2)
         held.sendall(b"before")
         assert held.recv(6) == b"before"
-        # The established flow must survive while new flows lose reach.
+        # D242 retires the open stream when its initiating service is no longer permitted.
         compiled = coordinator.configuration("deny") if coordinator else None
         for index, proc in enumerate((left, right)):
             chunk = chunks[index]
@@ -193,9 +193,12 @@ def main():
         assert denied
         if coordinator:
             assert subprocess.run(["nsenter", "-t", str(child.pid), "-n", "ping", "-n", "-c", "1", "-W", "2", addresses[0]["ipv4"]], capture_output=True).returncode == 0
-        held.sendall(b"after")
-        established_survives = held.recv(5) == b"after"
-        assert established_survives
+        try:
+            held.sendall(b"after")
+            retired_stream_refused = held.recv(5) != b"after"
+        except (TimeoutError, ConnectionError, PermissionError):
+            retired_stream_refused = True
+        assert retired_stream_refused
         denied_tcp = new_tcp_denied("10.254.0.2", 5203)
         assert denied_tcp
         compiled = coordinator.configuration("port") if coordinator else None
@@ -212,10 +215,10 @@ def main():
             else:
                 request(proc, chunk)
         allowed = socket.create_connection(("10.254.0.2", 5211), 2)
-        allowed.sendall(b"grant")
-        port_grant = allowed.recv(5) == b"grant"
+        allowed.sendall(b"access")
+        permitted_port = allowed.recv(6) == b"access"
         allowed.close()
-        assert port_grant and new_tcp_denied("10.254.0.2", 5203)
+        assert permitted_port and new_tcp_denied("10.254.0.2", 5203)
         # Count process CPU ticks and RSS without starting a workload generator.
         def ticks(proc):
             return sum(int(field) for field in open(f"/proc/{proc.pid}/stat").read().split()[13:15])
@@ -224,7 +227,7 @@ def main():
         time.sleep(idle_seconds)
         idle_ticks = [ticks(proc) - count for proc, count in zip((left, right), before)]
         rss = [int(open(f"/proc/{proc.pid}/statm").read().split()[1]) * os.sysconf("SC_PAGE_SIZE") for proc in (left, right)]
-        report = {"machine": "infraternal-dev", "load": open("/proc/loadavg").read().strip(), "rootless_userns": True, "real_kernel": True, "pairs": 1, "direct_pairs": 1, "needs_later_paths": 0, "underlay_ping": underlay_ping, "mesh_ping": mesh_ping, "mesh_ipv6_ping": mesh_ipv6_ping, "deny_new_tcp": denied_tcp, "established_survives_switch": established_survives, "port_grant_and_other_port_denial": port_grant, "underlay_mbps": underlay_mbps, "mesh_mbps": mesh_mbps, "join_to_first_packet_us": join_us, "apply": applies, "deny_new_ping": denied, "fixture_idle_ticks_2s": idle_ticks, "fixture_rss_bytes": rss, "fixture_rss_at_1000_nodes_bytes": sum(rss) * 500}
+        report = {"machine": socket.gethostname(), "load": open("/proc/loadavg").read().strip(), "rootless_userns": True, "real_kernel": True, "pairs": 1, "direct_pairs": 1, "needs_later_paths": 0, "underlay_ping": underlay_ping, "mesh_ping": mesh_ping, "mesh_ipv6_ping": mesh_ipv6_ping, "deny_new_tcp": denied_tcp, "retired_stream_refused": retired_stream_refused, "permitted_port_and_other_port_refusal": permitted_port, "underlay_mbps": underlay_mbps, "mesh_mbps": mesh_mbps, "join_to_first_packet_us": join_us, "apply": applies, "deny_new_ping": denied, "fixture_idle_ticks_2s": idle_ticks, "fixture_rss_bytes": rss, "fixture_rss_at_1000_nodes_bytes": sum(rss) * 500}
         if args.binary:
             report["peer_count_per_node"] = args.extra_members + 1
             report["additional_public_members"] = args.extra_members

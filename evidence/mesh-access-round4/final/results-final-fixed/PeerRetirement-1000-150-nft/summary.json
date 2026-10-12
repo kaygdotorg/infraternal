@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    7524352,
+    8126464,
+    8048640
+  ],
+  "projected_1000_nodes_rss_bytes": 8126464000,
+  "coordinator_three_live_workers_rss_bytes": 27185152,
+  "result": "PASS",
+  "change": "PeerRetirement",
+  "backend": "nft",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "0.72 1.10 1.15 1/12353 389598",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.165,
+    150.16
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    999,
+    999
+  ],
+  "revocation_to_last_peer_refusing_us": 261838.411,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 106,
+      "last_packet_us": 195394.175,
+      "retired_us": 241312.152
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 184529.326,
+      "retired_us": 241312.152
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 106,
+      "last_packet_us": 195396.478,
+      "retired_us": 241312.152
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 184335.73,
+      "retired_us": 241312.152
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 109,
+      "last_packet_us": 212004.308,
+      "retired_us": 261838.411
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 184506.662,
+      "retired_us": 261838.411
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 109,
+      "last_packet_us": 212040.676,
+      "retired_us": 261838.411
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 103,
+      "last_packet_us": 184546.507,
+      "retired_us": 261838.411
+    }
+  ]
+}

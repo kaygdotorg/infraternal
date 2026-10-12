@@ -1,0 +1,6 @@
+
+running 1 test
+test auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 458 filtered out; finished in 1.02s
+

@@ -1,0 +1,476 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling libc v0.2.190
+   Compiling cfg-if v1.0.5
+   Compiling pin-project-lite v0.2.17
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling autocfg v1.5.1
+   Compiling futures-core v0.3.34
+   Compiling memchr v2.8.3
+   Compiling syn v3.0.6
+   Compiling syn v2.0.119
+   Compiling getrandom v0.2.17
+   Compiling stable_deref_trait v1.2.1
+   Compiling bytes v1.12.1
+   Compiling serde v1.0.229
+   Compiling rand_core v0.6.4
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling serde_core v1.0.229
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling cc v1.6.0
+   Compiling crypto-common v0.1.7
+   Compiling pkg-config v0.3.34
+   Compiling synstructure v0.14.0
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling zerovec-derive v0.11.6
+   Compiling zerofrom v0.1.8
+   Compiling writeable v0.6.4
+   Compiling yoke v0.8.3
+   Compiling vcpkg v0.2.15
+   Compiling litemap v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling utf8_iter v1.0.4
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling block-buffer v0.10.4
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling cpufeatures v0.2.17
+   Compiling log v0.4.34
+   Compiling smallvec v1.16.2
+   Compiling subtle v2.6.1
+   Compiling tracing-core v0.1.36
+   Compiling errno v0.3.14
+   Compiling percent-encoding v2.3.2
+   Compiling icu_properties v2.3.0
+   Compiling tokio-macros v2.7.2
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling futures-sink v0.3.34
+   Compiling form_urlencoded v1.2.2
+   Compiling equivalent v1.0.2
+   Compiling scopeguard v1.2.0
+   Compiling futures-io v0.3.34
+   Compiling tokio v1.53.2
+   Compiling futures-task v0.3.34
+   Compiling lock_api v0.4.14
+   Compiling tracing v0.1.44
+   Compiling parking_lot_core v0.9.12
+   Compiling num-traits v0.2.19
+   Compiling hashbrown v0.17.1
+   Compiling slab v0.4.12
+   Compiling indexmap v2.14.2
+   Compiling digest v0.10.7
+   Compiling zmij v1.0.23
+   Compiling thiserror v2.0.21
+   Compiling thiserror-impl v2.0.21
+   Compiling crossbeam-utils v0.8.23
+   Compiling icu_normalizer v2.3.0
+   Compiling futures-macro v0.3.34
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.1.5
+   Compiling zerocopy v0.8.60
+   Compiling hashbrown v0.15.5
+   Compiling idna_adapter v1.2.2
+   Compiling futures-util v0.3.34
+   Compiling zerocopy-derive v0.8.60
+   Compiling parking v2.2.1
+   Compiling ryu v1.0.23
+   Compiling crc-catalog v2.5.0
+   Compiling crc v3.4.0
+   Compiling event-listener v5.4.2
+   Compiling crossbeam-queue v0.3.14
+   Compiling idna v1.1.0
+   Compiling hashlink v0.10.0
+   Compiling spin v0.9.9
+   Compiling libsqlite3-sys v0.30.1
+   Compiling openssl-src v300.6.1+3.6.3
+   Compiling serde_json v1.0.151
+   Compiling openssl-sys v0.9.117
+   Compiling parking_lot v0.12.5
+   Compiling url v2.5.8
+   Compiling futures-channel v0.3.34
+   Compiling bitflags v2.13.2
+   Compiling futures-intrusive v0.5.0
+   Compiling sha2 v0.10.9
+   Compiling either v1.18.0
+   Compiling http v1.5.0
+   Compiling tokio-stream v0.1.19
+   Compiling hex v0.4.3
+   Compiling base64 v0.22.1
+   Compiling sqlx-core v0.8.6
+   Compiling atoi v2.0.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling futures-executor v0.3.34
+   Compiling flume v0.11.1
+   Compiling serde_urlencoded v0.7.1
+   Compiling getrandom v0.4.3
+   Compiling getrandom v0.3.4
+   Compiling sqlx-sqlite v0.8.6
+   Compiling heck v0.5.0
+   Compiling dotenvy v0.15.7
+   Compiling sqlx-macros-core v0.8.6
+   Compiling time-core v0.1.9
+   Compiling num-conv v0.2.2
+   Compiling httparse v1.10.1
+   Compiling minimal-lexical v0.2.1
+   Compiling thiserror v1.0.69
+   Compiling nom v7.1.3
+   Compiling sqlx-macros v0.8.6
+   Compiling time-macros v0.2.32
+   Compiling uuid v1.27.0
+   Compiling rand_core v0.9.5
+   Compiling http-body v1.1.0
+   Compiling thiserror-impl v1.0.69
+   Compiling synstructure v0.13.2
+   Compiling memoffset v0.9.1
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-plugin-api)
+   Compiling arrayvec v0.7.8
+   Compiling foreign-types-shared v0.1.1
+   Compiling openssl v0.10.81
+   Compiling cfg_aliases v0.2.2
+   Compiling deranged v0.5.8
+   Compiling powerfmt v0.2.1
+   Compiling nix v0.30.1
+   Compiling foreign-types v0.3.2
+   Compiling sqlx v0.8.6
+   Compiling asn1-rs-derive v0.5.1
+   Compiling rand_chacha v0.9.0
+   Compiling time v0.3.55
+   Compiling rusticata-macros v4.1.0
+   Compiling tokio-util v0.7.19
+   Compiling openssl-macros v0.1.1
+   Compiling asn1-rs-impl v0.2.0
+   Compiling tower-service v0.3.3
+   Compiling data-encoding v2.11.1
+   Compiling rand v0.9.5
+   Compiling asn1-rs v0.6.2
+   Compiling num-integer v0.1.47
+   Compiling atomic-waker v1.1.2
+   Compiling base64 v0.21.7
+   Compiling lazy_static v1.5.1
+   Compiling oid-registry v0.7.1
+   Compiling pastey v0.1.1
+   Compiling httpdate v1.0.3
+   Compiling fnv v1.0.7
+   Compiling try-lock v0.2.5
+   Compiling base64urlsafedata v0.5.5
+   Compiling h2 v0.4.19
+   Compiling want v0.3.2
+   Compiling num-bigint v0.4.8
+   Compiling inout v0.1.4
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-shim)
+   Compiling unicase v2.10.0
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling mime v0.3.17
+   Compiling rustversion v1.0.23
+   Compiling tower-layer v0.3.3
+   Compiling mime_guess v2.0.5
+   Compiling cipher v0.4.4
+   Compiling der-parser v9.0.0
+   Compiling hyper v1.11.1
+   Compiling vte v0.15.0
+   Compiling http-body-util v0.1.5
+   Compiling half v2.7.1
+   Compiling sha1 v0.10.7
+   Compiling universal-hash v0.5.1
+   Compiling fs-err v3.3.2
+   Compiling sync_wrapper v1.0.2
+   Compiling tokio-openssl v0.6.5
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-protocol)
+   Compiling opaque-debug v0.3.1
+   Compiling webauthn-rs-core v0.5.5
+   Compiling regex-syntax v0.8.11
+   Compiling polyval v0.6.2
+   Compiling tungstenite v0.29.0
+   Compiling hyper-util v0.1.21
+   Compiling regex-automata v0.4.18
+   Compiling serde_cbor_2 v0.13.0
+   Compiling x509-parser v0.16.0
+   Compiling webauthn-rs-proto v0.5.5
+   Compiling hex-conservative v0.2.3
+   Compiling rand_chacha v0.3.1
+   Compiling base64ct v1.8.3
+   Compiling tinyvec v1.13.3
+   Compiling password-hash v0.5.0
+   Compiling unicode-normalization v0.1.25
+   Compiling rand v0.8.8
+   Compiling bitcoin_hashes v0.14.101
+   Compiling arc-swap v1.9.2
+   Compiling matchers v0.2.0
+   Compiling tokio-tungstenite v0.29.0
+   Compiling ghash v0.5.1
+   Compiling tower v0.5.3
+   Compiling axum-core v0.5.6
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling sharded-slab v0.1.7
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-mesh)
+   Compiling blake2 v0.10.6
+   Compiling hmac v0.12.1
+   Compiling tracing-serde v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling zeroize v1.9.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling aead v0.5.2
+   Compiling thread_local v1.1.10
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-server)
+   Compiling matchit v0.8.4
+   Compiling http-range-header v0.4.2
+   Compiling nu-ansi-term v0.50.3
+   Compiling tracing-subscriber v0.3.23
+   Compiling tower-http v0.6.11
+   Compiling axum v0.8.9
+   Compiling aes-gcm v0.10.3
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/mesh)
+   Compiling hkdf v0.12.4
+   Compiling argon2 v0.5.3
+   Compiling bip39 v2.2.2
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/release)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-agent)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/ssh)
+   Compiling axum-server v0.8.0
+   Compiling webauthn-rs v0.5.5
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 17s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-merge-mesh-r5/target/debug/deps/infraternal_server-0524e703d268085e)
+
+running 35 tests
+test auth::tests::socket_tests::authenticated_idle_socket_survives_the_former_read_timeout ... FAILED
+test auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit ... FAILED
+test auth::tests::socket_tests::clean_control_close_is_not_an_internal_error ... FAILED
+test auth::tests::socket_tests::expired_handshake_releases_user_permits ... FAILED
+test auth::tests::socket_tests::fragmented_wire_frame_has_a_completion_deadline ... FAILED
+test auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap ... FAILED
+test auth::tests::socket_tests::half_open_sockets_obey_user_limit ... FAILED
+test auth::tests::socket_tests::incomplete_rfc_message_still_loses_authority_on_revocation ... FAILED
+test auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory ... FAILED
+test auth::tests::socket_tests::mesh_latency::mesh_snapshot_keystroke_latency_at_10000_nodes ... ignored, weighted real-binary 300 ms Mesh/PTY measurement
+test auth::tests::socket_tests::non_owner_without_host_configure_permission_is_refused_before_leg_b ... FAILED
+test auth::tests::socket_tests::plugin_lifecycle::disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches ... FAILED
+test auth::tests::socket_tests::plugin_lifecycle::mesh_coordinator_requires_an_existing_server_role ... FAILED
+test auth::tests::socket_tests::plugin_lifecycle::mesh_destructive_metadata_matches_frozen_confirmation_requirements ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement ... FAILED
+test auth::tests::socket_tests::plugin_lifecycle::mesh_plugin_discovery_disable_and_restart_preserve_control_socket ... FAILED
+test auth::tests::socket_tests::recovery_subscription_updates_every_signed_in_socket ... FAILED
+test auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity ... FAILED
+test auth::tests::socket_tests::review_control::review_pending_mesh_write_keeps_control_dispatch_available ... FAILED
+test auth::tests::socket_tests::review_fresh_wait::review_mesh_delete_refused_when_freshness_expires_during_writer_wait ... FAILED
+test auth::tests::socket_tests::review_input_credit::browser_input_overload_retires_only_the_terminal_stream ... FAILED
+test auth::tests::socket_tests::review_input_credit::pending_browser_input_counts_against_slots_and_cancels_on_drop ... ok
+test auth::tests::socket_tests::review_input_credit::pending_browser_input_has_a_wire_byte_bound ... ok
+test auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress ... FAILED
+test auth::tests::socket_tests::review_liveness::review_mesh_watch_reports_liveness_expiry_without_another_edit ... FAILED
+test auth::tests::socket_tests::review_subscription_refusal::oversized_refusal_cannot_reinstall_a_queued_mesh_subscription ... FAILED
+test auth::tests::socket_tests::review_subscription_refusal::review_oversized_replacement_ends_the_previous_mesh_subscription ... FAILED
+test auth::tests::socket_tests::review_subscription_refusal::saturated_refusal_cannot_reinstall_a_queued_mesh_subscription ... FAILED
+test auth::tests::socket_tests::revoked_idle_socket_loses_all_authority ... FAILED
+test auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket ... FAILED
+test auth::tests::socket_tests::session_gone::an_ended_or_unknown_session_gets_the_final_close_without_losing_the_socket ... FAILED
+test auth::tests::socket_tests::session_gone::the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close ... FAILED
+test auth::tests::socket_tests::socket_authority_latency_at_user_capacity ... ignored, release-only measurement without concurrent compilation
+test auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery ... FAILED
+test auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session ... FAILED
+
+failures:
+
+---- auth::tests::socket_tests::authenticated_idle_socket_survives_the_former_read_timeout stdout ----
+
+thread 'auth::tests::socket_tests::authenticated_idle_socket_survives_the_former_read_timeout' (2890765) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit stdout ----
+
+thread 'auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit' (2890795) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::clean_control_close_is_not_an_internal_error stdout ----
+
+thread 'auth::tests::socket_tests::clean_control_close_is_not_an_internal_error' (2890809) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::expired_handshake_releases_user_permits stdout ----
+
+thread 'auth::tests::socket_tests::expired_handshake_releases_user_permits' (2890815) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::fragmented_wire_frame_has_a_completion_deadline stdout ----
+
+thread 'auth::tests::socket_tests::fragmented_wire_frame_has_a_completion_deadline' (2890831) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap stdout ----
+
+thread 'auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap' (2890834) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::half_open_sockets_obey_user_limit stdout ----
+
+thread 'auth::tests::socket_tests::half_open_sockets_obey_user_limit' (2890843) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::incomplete_rfc_message_still_loses_authority_on_revocation stdout ----
+
+thread 'auth::tests::socket_tests::incomplete_rfc_message_still_loses_authority_on_revocation' (2890866) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory stdout ----
+
+thread 'auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory' (2890887) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::non_owner_without_host_configure_permission_is_refused_before_leg_b stdout ----
+
+thread 'auth::tests::socket_tests::non_owner_without_host_configure_permission_is_refused_before_leg_b' (2890901) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::plugin_lifecycle::disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches stdout ----
+
+thread 'auth::tests::socket_tests::plugin_lifecycle::disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches' (2890918) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::plugin_lifecycle::mesh_coordinator_requires_an_existing_server_role stdout ----
+
+thread 'auth::tests::socket_tests::plugin_lifecycle::mesh_coordinator_requires_an_existing_server_role' (2890987) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::plugin_lifecycle::mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement stdout ----
+
+thread 'auth::tests::socket_tests::plugin_lifecycle::mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement' (2890991) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::plugin_lifecycle::mesh_plugin_discovery_disable_and_restart_preserve_control_socket stdout ----
+
+thread 'auth::tests::socket_tests::plugin_lifecycle::mesh_plugin_discovery_disable_and_restart_preserve_control_socket' (2890997) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::recovery_subscription_updates_every_signed_in_socket stdout ----
+
+thread 'auth::tests::socket_tests::recovery_subscription_updates_every_signed_in_socket' (2891003) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity stdout ----
+
+thread 'auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity' (2891014) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_control::review_pending_mesh_write_keeps_control_dispatch_available stdout ----
+
+thread 'auth::tests::socket_tests::review_control::review_pending_mesh_write_keeps_control_dispatch_available' (2891025) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_fresh_wait::review_mesh_delete_refused_when_freshness_expires_during_writer_wait stdout ----
+
+thread 'auth::tests::socket_tests::review_fresh_wait::review_mesh_delete_refused_when_freshness_expires_during_writer_wait' (2891052) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_input_credit::browser_input_overload_retires_only_the_terminal_stream stdout ----
+
+thread 'auth::tests::socket_tests::review_input_credit::browser_input_overload_retires_only_the_terminal_stream' (2891074) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress stdout ----
+
+thread 'auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress' (2891097) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_liveness::review_mesh_watch_reports_liveness_expiry_without_another_edit stdout ----
+
+thread 'auth::tests::socket_tests::review_liveness::review_mesh_watch_reports_liveness_expiry_without_another_edit' (2891104) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_subscription_refusal::oversized_refusal_cannot_reinstall_a_queued_mesh_subscription stdout ----
+
+thread 'auth::tests::socket_tests::review_subscription_refusal::oversized_refusal_cannot_reinstall_a_queued_mesh_subscription' (2891106) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_subscription_refusal::review_oversized_replacement_ends_the_previous_mesh_subscription stdout ----
+
+thread 'auth::tests::socket_tests::review_subscription_refusal::review_oversized_replacement_ends_the_previous_mesh_subscription' (2891155) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::review_subscription_refusal::saturated_refusal_cannot_reinstall_a_queued_mesh_subscription stdout ----
+
+thread 'auth::tests::socket_tests::review_subscription_refusal::saturated_refusal_cannot_reinstall_a_queued_mesh_subscription' (2891182) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::revoked_idle_socket_loses_all_authority stdout ----
+
+thread 'auth::tests::socket_tests::revoked_idle_socket_loses_all_authority' (2891221) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket stdout ----
+
+thread 'auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket' (2891230) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::session_gone::an_ended_or_unknown_session_gets_the_final_close_without_losing_the_socket stdout ----
+
+thread 'auth::tests::socket_tests::session_gone::an_ended_or_unknown_session_gets_the_final_close_without_losing_the_socket' (2891295) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::session_gone::the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close stdout ----
+
+thread 'auth::tests::socket_tests::session_gone::the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close' (2891307) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery stdout ----
+
+thread 'auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery' (2891313) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+---- auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session stdout ----
+
+thread 'auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session' (2891316) panicked at crates/infraternal-server/src/auth/tests.rs:232:67:
+called `Result::unwrap()` on an `Err` value: Migration(Execute(Database(SqliteError { code: 1555, message: "UNIQUE constraint failed: _sqlx_migrations.version" })))
+
+
+failures:
+    auth::tests::socket_tests::authenticated_idle_socket_survives_the_former_read_timeout
+    auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit
+    auth::tests::socket_tests::clean_control_close_is_not_an_internal_error
+    auth::tests::socket_tests::expired_handshake_releases_user_permits
+    auth::tests::socket_tests::fragmented_wire_frame_has_a_completion_deadline
+    auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap
+    auth::tests::socket_tests::half_open_sockets_obey_user_limit
+    auth::tests::socket_tests::incomplete_rfc_message_still_loses_authority_on_revocation
+    auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory
+    auth::tests::socket_tests::non_owner_without_host_configure_permission_is_refused_before_leg_b
+    auth::tests::socket_tests::plugin_lifecycle::disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches
+    auth::tests::socket_tests::plugin_lifecycle::mesh_coordinator_requires_an_existing_server_role
+    auth::tests::socket_tests::plugin_lifecycle::mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement
+    auth::tests::socket_tests::plugin_lifecycle::mesh_plugin_discovery_disable_and_restart_preserve_control_socket
+    auth::tests::socket_tests::recovery_subscription_updates_every_signed_in_socket
+    auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity
+    auth::tests::socket_tests::review_control::review_pending_mesh_write_keeps_control_dispatch_available
+    auth::tests::socket_tests::review_fresh_wait::review_mesh_delete_refused_when_freshness_expires_during_writer_wait
+    auth::tests::socket_tests::review_input_credit::browser_input_overload_retires_only_the_terminal_stream
+    auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress
+    auth::tests::socket_tests::review_liveness::review_mesh_watch_reports_liveness_expiry_without_another_edit
+    auth::tests::socket_tests::review_subscription_refusal::oversized_refusal_cannot_reinstall_a_queued_mesh_subscription
+    auth::tests::socket_tests::review_subscription_refusal::review_oversized_replacement_ends_the_previous_mesh_subscription
+    auth::tests::socket_tests::review_subscription_refusal::saturated_refusal_cannot_reinstall_a_queued_mesh_subscription
+    auth::tests::socket_tests::revoked_idle_socket_loses_all_authority
+    auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket
+    auth::tests::socket_tests::session_gone::an_ended_or_unknown_session_gets_the_final_close_without_losing_the_socket
+    auth::tests::socket_tests::session_gone::the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close
+    auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery
+    auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session
+
+test result: FAILED. 3 passed; 30 failed; 2 ignored; 0 measured; 224 filtered out; finished in 4.92s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

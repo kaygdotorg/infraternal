@@ -1,0 +1,199 @@
+{
+  "change_to_last_refusing_ms": [
+    {
+      "backend": "nft",
+      "change": "RuleRemoval",
+      "10_peers_0_rtt_ms": 113.488356,
+      "10_peers_150_rtt_ms": 163.054365,
+      "1000_peers_0_rtt_ms": 205.922087,
+      "1000_peers_150_rtt_ms": 291.77986599999997
+    },
+    {
+      "backend": "nft",
+      "change": "PeerRetirement",
+      "10_peers_0_rtt_ms": 85.602029,
+      "10_peers_150_rtt_ms": 137.606067,
+      "1000_peers_0_rtt_ms": 169.826425,
+      "1000_peers_150_rtt_ms": 261.838411
+    },
+    {
+      "backend": "nft",
+      "change": "DefaultTightening",
+      "10_peers_0_rtt_ms": 94.799521,
+      "10_peers_150_rtt_ms": 125.173897,
+      "1000_peers_0_rtt_ms": 1363.544731,
+      "1000_peers_150_rtt_ms": 6369.687016
+    },
+    {
+      "backend": "nf_tables",
+      "change": "RuleRemoval",
+      "10_peers_0_rtt_ms": 285.429188,
+      "10_peers_150_rtt_ms": 329.453403,
+      "1000_peers_0_rtt_ms": 394.029694,
+      "1000_peers_150_rtt_ms": 446.087094
+    },
+    {
+      "backend": "nf_tables",
+      "change": "PeerRetirement",
+      "10_peers_0_rtt_ms": 422.492419,
+      "10_peers_150_rtt_ms": 462.186004,
+      "1000_peers_0_rtt_ms": 460.461703,
+      "1000_peers_150_rtt_ms": 523.267104
+    },
+    {
+      "backend": "nf_tables",
+      "change": "DefaultTightening",
+      "10_peers_0_rtt_ms": 313.742588,
+      "10_peers_150_rtt_ms": 351.339172,
+      "1000_peers_0_rtt_ms": 1257.019748,
+      "1000_peers_150_rtt_ms": 6399.339940000001
+    }
+  ],
+  "apply": [
+    {
+      "backend": "nft",
+      "peers": 10,
+      "base": {
+        "samples": 96,
+        "median_us": 61466.5,
+        "p95_us": 88417.25,
+        "narrow_median_us": 63423.0,
+        "widen_median_us": 59455.0
+      },
+      "head": {
+        "samples": 96,
+        "median_us": 31248.5,
+        "p95_us": 44945.25,
+        "narrow_median_us": 32067.0,
+        "widen_median_us": 27686.0
+      },
+      "median_change_pct": -49.161738507967755
+    },
+    {
+      "backend": "nft",
+      "peers": 1000,
+      "base": {
+        "samples": 96,
+        "median_us": 94627.0,
+        "p95_us": 121294.25,
+        "narrow_median_us": 95898.5,
+        "widen_median_us": 93646.5
+      },
+      "head": {
+        "samples": 96,
+        "median_us": 62208.0,
+        "p95_us": 77917.5,
+        "narrow_median_us": 62396.5,
+        "widen_median_us": 60229.5
+      },
+      "median_change_pct": -34.25977786466865
+    },
+    {
+      "backend": "compat",
+      "peers": 10,
+      "base": {
+        "samples": 96,
+        "median_us": 381571.0,
+        "p95_us": 440646.0,
+        "narrow_median_us": 395522.0,
+        "widen_median_us": 375093.0
+      },
+      "head": {
+        "samples": 96,
+        "median_us": 203462.5,
+        "p95_us": 248372.25,
+        "narrow_median_us": 203969.0,
+        "widen_median_us": 200829.0
+      },
+      "median_change_pct": -46.67768252828438
+    },
+    {
+      "backend": "compat",
+      "peers": 1000,
+      "base": {
+        "samples": 96,
+        "median_us": 393387.0,
+        "p95_us": 458830.0,
+        "narrow_median_us": 391191.0,
+        "widen_median_us": 394171.5
+      },
+      "head": {
+        "samples": 96,
+        "median_us": 203953.0,
+        "p95_us": 239422.0,
+        "narrow_median_us": 205918.5,
+        "widen_median_us": 199312.0
+      },
+      "median_change_pct": -48.15461619219751
+    }
+  ],
+  "memory": [
+    {
+      "peers_per_node": 10,
+      "max_node_fixture_rss_bytes": 6447104,
+      "projected_1000_node_fixtures_bytes": 6447104000,
+      "max_three_worker_coordinator_rss_bytes": 12939264
+    },
+    {
+      "peers_per_node": 1000,
+      "max_node_fixture_rss_bytes": 8437760,
+      "projected_1000_node_fixtures_bytes": 8437760000,
+      "max_three_worker_coordinator_rss_bytes": 27275264
+    }
+  ],
+  "machine": "infraternal-perf-test",
+  "load_1m_range": [
+    0.46,
+    1.8
+  ],
+  "calibrated_150_rtt_ms": [
+    [
+      150.174,
+      150.161
+    ],
+    [
+      150.138,
+      150.157
+    ],
+    [
+      150.162,
+      150.121
+    ],
+    [
+      150.182,
+      150.149
+    ],
+    [
+      150.125,
+      150.12
+    ],
+    [
+      150.153,
+      150.228
+    ],
+    [
+      150.125,
+      150.152
+    ],
+    [
+      150.165,
+      150.16
+    ],
+    [
+      150.145,
+      150.153
+    ],
+    [
+      150.127,
+      150.128
+    ],
+    [
+      150.19,
+      150.16
+    ],
+    [
+      150.124,
+      150.142
+    ]
+  ]
+}

@@ -42,6 +42,9 @@ impl MeshPlugin {
     }
 }
 impl Plugin for MeshPlugin {
+    fn authority_changed(&self) -> Option<Operation<'_, ()>> {
+        Some(Box::pin(self.mesh.invalidate_dataplane()))
+    }
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }

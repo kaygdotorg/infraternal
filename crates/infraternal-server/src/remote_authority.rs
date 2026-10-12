@@ -171,7 +171,19 @@ impl EnrollmentStore {
             }
             #[cfg(test)]
             store.1.after_commit().await;
-            committed.map_err(EnrollmentError::Storage)
+            committed.map_err(EnrollmentError::Storage)?;
+            // The same transaction has retired plugin-owned membership. Notify
+            // after COMMIT so a worker can only compile the durable new revision.
+            let plugins = store
+                .1
+                .plugins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .upgrade();
+            if let Some(plugins) = plugins {
+                plugins.authority_changed().await;
+            }
+            Ok(())
         })
         .await
         .map_err(|_| {

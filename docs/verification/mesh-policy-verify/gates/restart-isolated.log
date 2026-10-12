@@ -1,0 +1,15 @@
+
+running 1 test
+
+thread 'restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode' (365417) panicked at crates/infraternal/src/restart_tests.rs:140:70:
+called `Result::unwrap()` on an `Err` value: Kind(PermissionDenied)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... FAILED
+
+failures:
+
+failures:
+    restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 63 filtered out; finished in 1.49s
+

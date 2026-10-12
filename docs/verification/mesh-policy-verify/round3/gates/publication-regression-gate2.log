@@ -1,0 +1,22 @@
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 19s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/mpv3-173/target/debug/deps/infraternal_server-2e62c9c74d26d8da)
+
+running 1 test
+test remote_mesh_revocation_tests::committed_host_revocation_pushes_peer_withdrawal_without_polling ... FAILED
+
+failures:
+
+---- remote_mesh_revocation_tests::committed_host_revocation_pushes_peer_withdrawal_without_polling stdout ----
+
+thread 'remote_mesh_revocation_tests::committed_host_revocation_pushes_peer_withdrawal_without_polling' (330096) panicked at crates/infraternal-server/src/remote_mesh_revocation_tests.rs:85:10:
+called `Result::unwrap()` on an `Err` value: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    remote_mesh_revocation_tests::committed_host_revocation_pushes_peer_withdrawal_without_polling
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 347 filtered out; finished in 5.09s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

@@ -31,6 +31,8 @@ pub struct Node {
     routes: BTreeSet<IpAddr>,
     firewall: Firewall,
     owned: bool,
+    // A committed revision remains restrictive until exact retirement succeeds.
+    connection_cleanup_pending: bool,
     client: Option<Client>,
 }
 impl Default for Node {
@@ -44,6 +46,7 @@ impl Default for Node {
             routes: BTreeSet::new(),
             firewall: Firewall::default(),
             owned: false,
+            connection_cleanup_pending: false,
             client: None,
         }
     }
@@ -262,6 +265,7 @@ impl Node {
         self.client = None;
         self.identity = None;
         self.config = None;
+        self.connection_cleanup_pending = false;
         self.pending = None;
         Ok(())
     }
@@ -274,16 +278,37 @@ impl Node {
     /// # Errors
     /// Refuses stale/out-of-order/wrong-node chunks before changing installed state.
     pub fn chunk(&mut self, chunk: Chunk) -> io::Result<bool> {
+        self.finish_connection_cleanup()?;
         let result = self.stage(chunk);
         if result.is_err() {
             self.pending = None;
         }
         result
     }
-    fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
+    // Keep enabled-key authority separate from contiguous snapshot staging.
+    fn validate_binding(&self, chunk: &Chunk) -> io::Result<()> {
         if self.identity.is_none() {
             return Err(io::ErrorKind::NotConnected.into());
         }
+        if chunk.local_key.is_some_and(|key| {
+            self.identity
+                .as_ref()
+                .is_none_or(|identity| identity.public_key != key)
+        }) || self.config.as_ref().is_some_and(|old| {
+            old.node != chunk.node
+                && (chunk.local_key.is_none()
+                    || chunk.from_version.is_some()
+                    || chunk.version <= old.version)
+        }) {
+            // Only an authenticated full coordinator snapshot, bound to our
+            // enabled kernel key at a newer revision, can authorize replacement.
+            // Unbound snapshots and deltas retain the accepted identity fence.
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(())
+    }
+    fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
+        self.validate_binding(&chunk)?;
         if chunk.index == 0 {
             let current = self.config.as_ref().map(|config| config.version);
             if chunk.from_version.is_some() && chunk.from_version != current
@@ -297,6 +322,7 @@ impl Node {
                 self.config.clone().ok_or(io::ErrorKind::InvalidData)?
             } else {
                 Config {
+                    local_key: chunk.local_key,
                     server: chunk.server,
                     node: chunk.node,
                     version: chunk.version,
@@ -317,6 +343,7 @@ impl Node {
         let pending = self.pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
         if pending.server != chunk.server
             || pending.next != chunk.index
+            || pending.config.local_key != chunk.local_key
             || pending.config.node != chunk.node
             || pending.config.addresses != chunk.addresses
             || pending.version != chunk.version
@@ -364,8 +391,62 @@ impl Node {
         if self.config.as_ref() == Some(&config) {
             return Ok(true);
         }
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|old| old.version == config.version)
+        {
+            return self.upgrade_legacy_binding(config);
+        }
         self.apply(config)?;
         Ok(true)
+    }
+    fn upgrade_legacy_binding(&mut self, config: Config) -> io::Result<bool> {
+        // The staging fence has already matched a present binding to the enabled
+        // kernel key. Only this previously absent metadata may change at an
+        // accepted revision; compare every prior field after the final chunk.
+        let old = self.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+        if old.local_key.is_some() || config.local_key.is_none() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mut bound = old.clone();
+        bound.local_key = config.local_key;
+        if bound != config {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.save(Some(&config), true)?;
+        self.config = Some(config);
+        Ok(true)
+    }
+    // Keep transition ingress protection available before any address mutation.
+    fn apply_fence(&mut self, fence: &Config, recovery: &Config) -> io::Result<()> {
+        let mut aliases: Vec<_> = self
+            .config
+            .as_ref()
+            .filter(|old| old.addresses != fence.addresses)
+            .map(|old| old.addresses)
+            .into_iter()
+            .collect();
+        if self.config.is_none() {
+            // During restart the kernel can retain aliases from an interrupted
+            // replacement that the accepted snapshot never recorded. Fence them
+            // before reconciliation can remove addresses or restore policy.
+            aliases.extend(Device::host_addresses()?.into_iter().filter_map(|address| {
+                let mut alias = fence.addresses;
+                match address {
+                    IpAddr::V4(address) if address != alias.ipv4 => alias.ipv4 = address,
+                    IpAddr::V6(address) if address != alias.ipv6 => alias.ipv6 = address,
+                    _ => return None,
+                }
+                Some(alias)
+            }));
+        }
+        // Normal replacement preserves the accepted view. Recovery uses saved
+        // intent even when connection cleanup was interrupted after persistence.
+        let connections = self.config.as_ref().unwrap_or(recovery);
+        self.firewall
+            .apply_with_aliases(fence, &aliases, connections)?;
+        Ok(())
     }
     // Keep the apply/fence/rollback transaction and its failure ordering visible together.
     #[allow(clippy::too_many_lines)]
@@ -373,7 +454,7 @@ impl Node {
         if self
             .config
             .as_ref()
-            .is_some_and(|old| old.addresses != config.addresses)
+            .is_some_and(|old| old.addresses != config.addresses && old.node == config.node)
         {
             // Address transitions require the later overlap barrier, never remove live addresses here [199].
             return Err(io::ErrorKind::Unsupported.into());
@@ -397,7 +478,9 @@ impl Node {
             }
         }
         if let Some(old) = &self.config {
-            let endpoints_only = old.peers.len() == config.peers.len()
+            let endpoints_only = old.node == config.node
+                && old.addresses == config.addresses
+                && old.peers.len() == config.peers.len()
                 && old.default_policy == config.default_policy
                 && config.peers.iter().all(|(id, peer)| {
                     old.peers.get(id).is_some_and(|old| {
@@ -468,6 +551,27 @@ impl Node {
             .filter(|key| !desired.contains(key))
             .copied()
             .collect();
+        if changed.is_empty()
+            && retired_keys.is_empty()
+            && self.config.as_ref().is_some_and(|old| {
+                old.node == config.node
+                    && old.addresses == config.addresses
+                    && old.peers.len() == config.peers.len()
+            })
+        {
+            // Route validation and the actual key inventory above still run.
+            // Only access changes remain: one final firewall transaction is
+            // sufficient, without an intermediate table or peer/route writes.
+            self.firewall.install_pending(&config)?;
+            if let Err(error) = self.save(Some(&config), true) {
+                self.firewall
+                    .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+                return Err(error);
+            }
+            self.config = Some(config);
+            self.connection_cleanup_pending = true;
+            return self.finish_connection_cleanup();
+        }
         let desired_routes: BTreeSet<IpAddr> = config
             .peers
             .values()
@@ -496,9 +600,13 @@ impl Node {
             peer.inbound = crate::policy::rules::TrafficPolicy::None;
             peer.outbound = crate::policy::rules::TrafficPolicy::None;
         }
-        self.firewall.apply(&fence)?;
+        self.apply_fence(&fence, &config)?;
         let result = (|| {
-            if self.config.is_none() {
+            if self
+                .config
+                .as_ref()
+                .is_none_or(|old| old.addresses != config.addresses)
+            {
                 Device::addresses(config.addresses)?;
             }
             self.client
@@ -514,7 +622,7 @@ impl Node {
             {
                 Device::retain_recorded_routes(&self.routes, &proposed)?;
             }
-            self.firewall.apply(&config)?;
+            self.firewall.install_pending(&config)?;
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
@@ -527,8 +635,11 @@ impl Node {
         if let Err(error) = result {
             // Saving can fail after the permissive policy transaction. Reinstall
             // the fence before rollback so any later error still denies NEW traffic.
-            self.firewall.apply(&fence)?;
+            self.apply_fence(&fence, &config)?;
             if let Some(old) = &self.config {
+                if old.addresses != config.addresses {
+                    Device::addresses(old.addresses)?;
+                }
                 let restore: Vec<_> = old.peers.values().map(|peer| peer.peer.clone()).collect();
                 // If rollback itself fails the restrictive fence remains. Never report an applied version.
                 self.client
@@ -561,6 +672,18 @@ impl Node {
             return Err(error);
         }
         self.config = Some(config);
+        self.connection_cleanup_pending = true;
+        self.finish_connection_cleanup()
+    }
+    fn finish_connection_cleanup(&mut self) -> io::Result<()> {
+        if self.connection_cleanup_pending {
+            // Public intent and the final rules have committed. Never roll
+            // back access after irreversible retirement begins. A failed
+            // cleanup is retried before replay can acknowledge this revision.
+            self.firewall
+                .complete(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+            self.connection_cleanup_pending = false;
+        }
         Ok(())
     }
 }
@@ -582,6 +705,7 @@ mod tests {
         };
         let config = Config {
             server: Some(NodeId(1)),
+            local_key: None,
             node: NodeId(2),
             version: 1,
             addresses: Addresses {
@@ -642,6 +766,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
         };
         let config = Config {
+            local_key: None,
             server: None,
             node: NodeId(1),
             version: 1,
@@ -707,3 +832,7 @@ mod tests {
         assert!(!Device::owned().expect("absent owned interface"));
     }
 }
+
+#[cfg(test)]
+#[path = "node_rotation_tests.rs"]
+mod rotation_tests;

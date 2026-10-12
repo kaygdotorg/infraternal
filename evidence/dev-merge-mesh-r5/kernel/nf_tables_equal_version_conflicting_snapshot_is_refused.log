@@ -1,0 +1,4 @@
+error: process didn't exit successfully: `/home/kayg/.nix-profile/bin/sccache /home/kayg/.rustup/toolchains/1.99.0-x86_64-unknown-linux-gnu/bin/rustc -vV` (exit status: 2)
+--- stderr
+sccache: error: Network is unreachable (os error 101)
+

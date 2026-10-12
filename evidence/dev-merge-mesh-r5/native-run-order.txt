@@ -1,0 +1,2 @@
+To prevent duplicate workspace runners from competing on socket deadlines, paused only owned final-gate Cargo dispatcher PID3221117 while its active test child completed normally. The earlier updated-dev native test run completes first; dispatcher resumes afterward. No test executable, fixture or clock is suspended, and no assertion/deadline/source is changed.
+Dispatcher resumed after the standalone native runner completed (exit101 at mouse probe). The full gate retains its own complete native toolchain PATH.

@@ -1,0 +1,15 @@
+Merge advanced dev so mesh integration remains a fast-forward (#173)
+
+Include reviewed dev 21b37bca on top of mesh merge 8ab06700 instead of handing
+back a branch based on obsolete efac27a5. Preserve its deployment admission,
+rollback, recovery and production-trust safeguards alongside D242 mesh access
+retirement. Reject cherry-picking or rebasing reviewed history; both parents
+remain ancestors. The merge is clean apart from Cargo's additive feature list.
+
+The combined-source full gate passes fmt, VT fmt, CLI compile-out, workspace
+Clippy, workspace tests and cargo-deny. Both original D28/#108 socket regressions
+and their unchanged writer-wait companion pass in the complete run. Shipping
+static builds continue against the unchanged D243 ceilings; final named-head
+verification and evidence follow. No deployment or development-ref update.
+
+Refs: #173

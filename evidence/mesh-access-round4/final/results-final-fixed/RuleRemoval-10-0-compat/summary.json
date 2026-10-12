@@ -1,0 +1,96 @@
+{
+  "node_fixture_rss_bytes": [
+    6332416,
+    6230016,
+    6221824
+  ],
+  "projected_1000_nodes_rss_bytes": 6332416000,
+  "coordinator_three_live_workers_rss_bytes": 12939264,
+  "result": "PASS",
+  "change": "RuleRemoval",
+  "backend": "nf_tables",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 0,
+  "load": "1.30 1.17 1.16 1/18953 404603",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    0.056,
+    0.052
+  ],
+  "installed_peers_before": [
+    10,
+    10,
+    10
+  ],
+  "installed_peers_after": [
+    10,
+    10
+  ],
+  "revocation_to_last_peer_refusing_us": 285429.188,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 74,
+      "last_packet_us": 105044.774,
+      "retired_us": 285395.318
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 74,
+      "last_packet_us": 105203.878,
+      "retired_us": 285395.318
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 81,
+      "last_packet_us": 144466.25,
+      "retired_us": 285395.318
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 81,
+      "last_packet_us": 144564.502,
+      "retired_us": 285395.318
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 73,
+      "last_packet_us": 99458.85,
+      "retired_us": 285429.188
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 73,
+      "last_packet_us": 99462.934,
+      "retired_us": 285429.188
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 81,
+      "last_packet_us": 144458.627,
+      "retired_us": 285429.188
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 81,
+      "last_packet_us": 144542.698,
+      "retired_us": 285429.188
+    }
+  ]
+}

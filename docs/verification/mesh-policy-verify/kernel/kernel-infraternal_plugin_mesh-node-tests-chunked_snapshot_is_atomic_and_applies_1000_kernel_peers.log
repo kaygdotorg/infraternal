@@ -1,0 +1,8 @@
+Running as unit: run-p4111773-i4112073.scope; invocation ID: dde780a75fbb42f18addef89a8f1a406
+
+running 1 test
+test node::tests::chunked_snapshot_is_atomic_and_applies_1000_kernel_peers ... METRIC mesh_node machine=infraternal-dev peers=1000 chunks=33 apply_us=276351 single_endpoint_us=8890 load=62.05 56.85 46.47 70/1684 4111965
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 1.63s
+

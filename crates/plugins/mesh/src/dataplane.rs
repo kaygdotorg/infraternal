@@ -37,7 +37,7 @@ pub struct Peer {
     pub addresses: Addresses,
     pub endpoint: Option<SocketAddr>,
 }
-/// New connection policies. Established authenticated replies pass independently.
+/// Directional network access for initiating tuples and their authenticated replies [242].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerPolicy {
@@ -49,6 +49,10 @@ pub struct PeerPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Authenticated coordinator binding to the enabled local kernel key.
+    /// Legacy snapshots lack it and cannot replace an accepted node identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_key: Option<PublicKey>,
     /// Explicit server identity; older persisted snapshots cannot propose a route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
@@ -69,6 +73,9 @@ pub struct ServerPath {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chunk {
+    /// Repeated in every part so a split snapshot cannot change its binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_key: Option<PublicKey>,
     /// Repeated on every chunk and checked before applying the complete policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,

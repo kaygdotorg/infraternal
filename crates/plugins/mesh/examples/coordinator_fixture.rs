@@ -53,6 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut applied: Option<[Config; 2]> = None;
     for line in io::stdin().lock().lines() {
         let request: Request = serde_json::from_str(&line?)?;
+        if request.mode == "unbound-identity" {
+            return enrollment_policy(&service, request.identities.ok_or("identities required")?)
+                .await;
+        }
         if let Some(identities) = request.identities {
             if members.is_some() {
                 return Err("already enrolled".into());
@@ -128,5 +132,127 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         io::stdout().flush()?;
         applied = Some(next);
     }
+    Ok(())
+}
+
+/// Feed actual kernel identities through migrated inventory and grant compilation.
+/// A refused public-key claim must remain separate from the granted inventory;
+/// explicit permission afterwards proves the same service and tunnel were live.
+async fn enrollment_policy(
+    service: &MeshService,
+    identities: [Identity; 2],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use infraternal_plugin_mesh::policy::model::PublicKey;
+    let store = service.dataplane();
+    store
+        .attach("server", PublicKey([1; 32]), None, true)
+        .await?;
+    let (target, _) = store
+        .attach(
+            "target",
+            identities[1].public_key,
+            Some(format!("10.220.0.2:{}", identities[1].port).parse()?),
+            false,
+        )
+        .await?;
+    let now = 1_800_000_000;
+    let victim = service
+        .execute(
+            "owner",
+            "mesh.node.enroll",
+            &serde_json::to_vec(&json!({"name":"intended-host","public_key":PublicKey([3;32])}))?,
+            now,
+        )
+        .await
+        .map_err(|_| "enrollment refused")?["node_id"]
+        .as_u64()
+        .ok_or("invalid state")?;
+    enrollment_grant(service, "intended-service", victim, target.0, now).await?;
+    let preview = service
+        .execute(
+            "owner",
+            "mesh.default.preview",
+            &serde_json::to_vec(&json!({"default_policy":"Deny"}))?,
+            now,
+        )
+        .await
+        .map_err(|_| "preview refused")?;
+    service
+        .execute(
+            "owner",
+            "mesh.default.set",
+            &serde_json::to_vec(&json!({
+                "default_policy":"Deny","expected_revision":preview["revision"]
+            }))?,
+            now,
+        )
+        .await
+        .map_err(|_| "default refused")?;
+    let refused = store
+        .attach(
+            "different-authenticated-host",
+            PublicKey([3; 32]),
+            None,
+            false,
+        )
+        .await
+        .is_err();
+    let (source, _) = store
+        .attach(
+            "different-authenticated-host",
+            identities[0].public_key,
+            Some(format!("10.220.0.1:{}", identities[0].port).parse()?),
+            false,
+        )
+        .await?;
+    let denied = [
+        store
+            .config(source)
+            .await
+            .map_err(|_| "configuration refused")?,
+        store
+            .config(target)
+            .await
+            .map_err(|_| "configuration refused")?,
+    ];
+    enrollment_grant(service, "explicit-service", source.0, target.0, now).await?;
+    let allowed = [
+        store
+            .config(source)
+            .await
+            .map_err(|_| "configuration refused")?,
+        store
+            .config(target)
+            .await
+            .map_err(|_| "configuration refused")?,
+    ];
+    let proof = json!({"refused":refused,"addresses":[denied[0].addresses,denied[1].addresses],
+        "denied":[configuration::chunks(None,&denied[0])?,configuration::chunks(None,&denied[1])?],
+        "allowed":[configuration::chunks(None,&allowed[0])?,configuration::chunks(None,&allowed[1])?]});
+    println!("{proof}");
+    io::stdout().flush()?;
+    Ok(())
+}
+
+/// Use the same narrow grant for intended and explicitly permitted identities.
+async fn enrollment_grant(
+    service: &MeshService,
+    name: &str,
+    source: u64,
+    target: u64,
+    now: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    service
+        .execute(
+            "owner",
+            "mesh.grant.create",
+            &serde_json::to_vec(&json!({
+                "name":name,"from":{"Node":source},"to":{"Node":target},
+                "both_ways":false,"ports":{"Ports":[{"protocol":"Udp","number":5540}]}
+            }))?,
+            now,
+        )
+        .await
+        .map_err(|_| "grant refused")?;
     Ok(())
 }

@@ -94,6 +94,88 @@ pub fn host_address(bytes: &[u8]) -> io::Result<Option<IpAddr>> {
         _ => invalid(),
     }
 }
+/// Initiating endpoint and service from a checked connection-state tuple.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionTuple {
+    pub source: IpAddr,
+    pub destination: IpAddr,
+    pub protocol: u8,
+    pub destination_port: Option<u16>,
+}
+/// Decode nested connection-state tuple attributes without assuming a protocol layout.
+/// # Errors
+/// Refuses duplicate selectors, mixed address families and invalid scalar widths.
+pub fn connection_tuple(bytes: &[u8]) -> io::Result<ConnectionTuple> {
+    let mut ip = None;
+    let mut protocol = None;
+    for field in attributes(bytes)? {
+        match field.kind {
+            1 if ip.is_none() => ip = Some(field.payload),
+            2 if protocol.is_none() => protocol = Some(field.payload),
+            1 | 2 => return invalid(),
+            _ => {}
+        }
+    }
+    let mut source = None;
+    let mut destination = None;
+    for field in attributes(ip.ok_or(io::ErrorKind::InvalidData)?)? {
+        let (slot, address) = match field.kind {
+            1 | 2 => (
+                if field.kind == 1 {
+                    &mut source
+                } else {
+                    &mut destination
+                },
+                IpAddr::V4(Ipv4Addr::from(
+                    <[u8; 4]>::try_from(field.payload).map_err(io::Error::other)?,
+                )),
+            ),
+            3 | 4 => (
+                if field.kind == 3 {
+                    &mut source
+                } else {
+                    &mut destination
+                },
+                IpAddr::V6(Ipv6Addr::from(
+                    <[u8; 16]>::try_from(field.payload).map_err(io::Error::other)?,
+                )),
+            ),
+            _ => continue,
+        };
+        if slot.replace(address).is_some() {
+            return invalid();
+        }
+    }
+    let mut number = None;
+    let mut port = None;
+    for field in attributes(protocol.ok_or(io::ErrorKind::InvalidData)?)? {
+        match field.kind {
+            1 if number.is_none() => {
+                number = Some(<[u8; 1]>::try_from(field.payload).map_err(io::Error::other)?[0]);
+            }
+            3 if port.is_none() => {
+                port = Some(u16::from_be_bytes(
+                    field.payload.try_into().map_err(io::Error::other)?,
+                ));
+            }
+            1 | 3 => return invalid(),
+            _ => {}
+        }
+    }
+    let source = source.ok_or(io::ErrorKind::InvalidData)?;
+    let destination = destination.ok_or(io::ErrorKind::InvalidData)?;
+    let protocol = number.ok_or(io::ErrorKind::InvalidData)?;
+    if source.is_ipv4() != destination.is_ipv4() || (matches!(protocol, 6 | 17) && port.is_none()) {
+        return invalid();
+    }
+    Ok(ConnectionTuple {
+        source,
+        destination,
+        protocol,
+        destination_port: port,
+    })
+}
+
 /// Parsed kernel message. Unknown types remain available for generic families.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message<'a> {
@@ -200,6 +282,23 @@ impl Socket {
         flags: u16,
         payload: &[u8],
     ) -> io::Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {
+        let mut replies = Vec::new();
+        self.visit(kind, flags, payload, |reply| {
+            replies.push(zeroize::Zeroizing::new(reply.to_vec()));
+            Ok(())
+        })?;
+        Ok(replies)
+    }
+    /// Stream matching replies through a bounded buffer, without retaining a host-wide dump.
+    /// # Errors
+    /// Reports the same framing/kernel failures as request, or a visitor failure.
+    pub fn visit(
+        &mut self,
+        kind: u16,
+        flags: u16,
+        payload: &[u8],
+        mut visitor: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
         if payload.len().saturating_add(HEADER) > DATAGRAM_BYTES {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -223,7 +322,6 @@ impl Socket {
             MsgFlags::empty(),
         )?;
         let buffer = &mut self.buffer;
-        let mut replies = Vec::new();
         loop {
             let (length, sender) = recvfrom::<NetlinkAddr>(self.fd.as_raw_fd(), buffer)?;
             if sender.is_none_or(|addr| addr.pid() != 0) || length == buffer.len() {
@@ -241,16 +339,16 @@ impl Socket {
                                 error.checked_neg().ok_or(io::ErrorKind::InvalidData)?,
                             ));
                         }
-                        return Ok(replies);
+                        return Ok(());
                     }
                     3 => {
                         if !message.payload.is_empty() && u32_at(message.payload, 0)? != 0 {
                             return invalid();
                         }
-                        return Ok(replies);
+                        return Ok(());
                     }
                     1 => {}
-                    _ => replies.push(zeroize::Zeroizing::new(message.payload.to_vec())),
+                    _ => visitor(message.payload)?,
                 }
             }
         }
@@ -306,6 +404,69 @@ mod tests {
         let attr = attributes(&outer).unwrap();
         assert!(attr[0].nested);
         assert_eq!(attributes(attr[0].payload).unwrap()[0].payload, &[1, 2, 3]);
+    }
+    fn connection(protocol: u8, ip: &[(u16, &[u8])], port: Option<&[u8]>) -> Vec<u8> {
+        let mut addresses = Vec::new();
+        for (kind, bytes) in ip {
+            attribute(&mut addresses, *kind, bytes).unwrap();
+        }
+        let mut service = Vec::new();
+        attribute(&mut service, 1, &[protocol]).unwrap();
+        if let Some(port) = port {
+            attribute(&mut service, 3, port).unwrap();
+        }
+        let mut tuple = Vec::new();
+        attribute(&mut tuple, 1 | NESTED, &addresses).unwrap();
+        attribute(&mut tuple, 2 | NESTED, &service).unwrap();
+        tuple
+    }
+    #[test]
+    fn connection_tuple_uses_initiating_service_and_refuses_ambiguous_selectors() {
+        let source = [10, 254, 0, 1];
+        let destination = [10, 254, 0, 2];
+        let ip = [(1, source.as_slice()), (2, destination.as_slice())];
+        for protocol in [6, 17] {
+            assert_eq!(
+                connection_tuple(&connection(protocol, &ip, Some(&[0x15, 0xa4]))).unwrap(),
+                ConnectionTuple {
+                    source: "10.254.0.1".parse().unwrap(),
+                    destination: "10.254.0.2".parse().unwrap(),
+                    protocol,
+                    destination_port: Some(5540),
+                }
+            );
+        }
+        assert!(connection_tuple(&connection(6, &ip, None)).is_err());
+        assert!(connection_tuple(&connection(17, &ip, Some(&[0]))).is_err());
+        assert!(
+            connection_tuple(&connection(
+                6,
+                &[(1, &source), (1, &destination), (2, &destination)],
+                Some(&[0, 1])
+            ))
+            .is_err()
+        );
+        assert!(
+            connection_tuple(&connection(
+                6,
+                &[(1, &source), (4, &[0; 16])],
+                Some(&[0, 1])
+            ))
+            .is_err()
+        );
+        assert!(
+            connection_tuple(&connection(1, &ip, None))
+                .unwrap()
+                .destination_port
+                .is_none()
+        );
+        let v6 = [(3, [0_u8; 16].as_slice()), (4, [1_u8; 16].as_slice())];
+        assert!(
+            connection_tuple(&connection(17, &v6, Some(&[0xff, 0xff])))
+                .unwrap()
+                .source
+                .is_ipv6()
+        );
     }
     fn allowed_ip(family: u16, address: &[u8], prefix: u8) -> Vec<u8> {
         let mut bytes = Vec::new();

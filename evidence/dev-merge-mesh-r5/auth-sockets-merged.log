@@ -1,0 +1,89 @@
+    Blocking waiting for file lock on build directory
+   Compiling rand_core v0.10.1
+   Compiling getrandom v0.4.3
+   Compiling ring v0.17.14
+   Compiling untrusted v0.9.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling rustls v0.23.45
+   Compiling uuid v1.27.0
+   Compiling cpufeatures v0.3.1
+   Compiling quinn-udp v0.5.16
+   Compiling chacha20 v0.10.2
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-shim)
+   Compiling rand_pcg v0.10.2
+   Compiling rand v0.10.3
+   Compiling quinn v0.11.12
+   Compiling rustc-hash v2.1.3
+   Compiling lru-slab v0.1.3
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-server)
+   Compiling webauthn-rs-core v0.5.5
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/ssh)
+   Compiling rustls-webpki v0.103.15
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/mesh)
+   Compiling webauthn-rs v0.5.5
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/release)
+   Compiling quinn-proto v0.11.19
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 42s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/dev-merge-mesh-r5/target/debug/deps/infraternal_server-9ef578629ac4fb0e)
+
+running 35 tests
+test auth::tests::socket_tests::authenticated_idle_socket_survives_the_former_read_timeout ... ok
+test auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit ... ok
+test auth::tests::socket_tests::clean_control_close_is_not_an_internal_error ... ok
+test auth::tests::socket_tests::expired_handshake_releases_user_permits ... ok
+test auth::tests::socket_tests::fragmented_wire_frame_has_a_completion_deadline ... ok
+test auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap ... ok
+test auth::tests::socket_tests::half_open_sockets_obey_user_limit ... ok
+test auth::tests::socket_tests::incomplete_rfc_message_still_loses_authority_on_revocation ... ok
+test auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory ... FAILED
+test auth::tests::socket_tests::mesh_latency::mesh_snapshot_keystroke_latency_at_10000_nodes ... ignored, weighted real-binary 300 ms Mesh/PTY measurement
+test auth::tests::socket_tests::non_owner_without_host_configure_permission_is_refused_before_leg_b ... ok
+test auth::tests::socket_tests::plugin_lifecycle::disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_coordinator_requires_an_existing_server_role ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_destructive_metadata_matches_frozen_confirmation_requirements ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_plugin_discovery_disable_and_restart_preserve_control_socket ... ok
+test auth::tests::socket_tests::recovery_subscription_updates_every_signed_in_socket ... ok
+test auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity ... ok
+test auth::tests::socket_tests::review_control::review_pending_mesh_write_keeps_control_dispatch_available ... ok
+test auth::tests::socket_tests::review_fresh_wait::review_mesh_delete_refused_when_freshness_expires_during_writer_wait ... ok
+test auth::tests::socket_tests::review_input_credit::browser_input_overload_retires_only_the_terminal_stream ... ok
+test auth::tests::socket_tests::review_input_credit::pending_browser_input_counts_against_slots_and_cancels_on_drop ... ok
+test auth::tests::socket_tests::review_input_credit::pending_browser_input_has_a_wire_byte_bound ... ok
+test auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress ... FAILED
+test auth::tests::socket_tests::review_liveness::review_mesh_watch_reports_liveness_expiry_without_another_edit ... ok
+test auth::tests::socket_tests::review_subscription_refusal::oversized_refusal_cannot_reinstall_a_queued_mesh_subscription ... ok
+test auth::tests::socket_tests::review_subscription_refusal::review_oversized_replacement_ends_the_previous_mesh_subscription ... ok
+test auth::tests::socket_tests::review_subscription_refusal::saturated_refusal_cannot_reinstall_a_queued_mesh_subscription ... ok
+test auth::tests::socket_tests::revoked_idle_socket_loses_all_authority ... ok
+test auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket ... ok
+test auth::tests::socket_tests::session_gone::an_ended_or_unknown_session_gets_the_final_close_without_losing_the_socket ... ok
+test auth::tests::socket_tests::session_gone::the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close ... ok
+test auth::tests::socket_tests::socket_authority_latency_at_user_capacity ... ignored, release-only measurement without concurrent compilation
+test auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery ... ok
+test auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session ... ok
+
+failures:
+
+---- auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory stdout ----
+
+thread 'auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory' (3033426) panicked at crates/infraternal-server/src/auth/socket_tests.rs:716:9:
+mesh.list did not return a successful Result
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress stdout ----
+
+thread 'auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress' (3045819) panicked at crates/infraternal-server/src/auth/tests.rs:1731:17:
+server closed websocket unexpectedly: None
+
+
+failures:
+    auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory
+    auth::tests::socket_tests::review_input_credit::review_full_input_writer_preserves_browser_control_progress
+
+test result: FAILED. 31 passed; 2 failed; 2 ignored; 0 measured; 424 filtered out; finished in 237.97s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

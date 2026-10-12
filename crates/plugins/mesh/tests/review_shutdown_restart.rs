@@ -67,6 +67,8 @@ fn configure(node: &mut Node) {
     let chunk_count = peers.len().div_ceil(16);
     for (index, peers) in peers.chunks(16).enumerate() {
         let chunk = Chunk {
+            local_key: None,
+            server: None,
             node: NodeId(1),
             from_version: None,
             version: 1,
@@ -74,7 +76,6 @@ fn configure(node: &mut Node) {
             last: index + 1 == chunk_count,
             addresses: addresses(1),
             default_policy: DefaultPolicy::Deny,
-            server: None,
             upserted: peers.iter().cloned().collect::<BTreeMap<_, _>>(),
             merged: BTreeMap::new(),
             removed: Vec::new(),

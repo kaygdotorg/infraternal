@@ -1,0 +1,114 @@
+[
+  {
+    "name": "latency-0-0-base",
+    "exit": 0,
+    "elapsed_s": 1.016877977992408,
+    "load_before": "1.03 0.46 0.22 1/731 109864",
+    "load_after": "1.03 0.46 0.22 2/693 109903",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-0-1-head",
+    "exit": 0,
+    "elapsed_s": 0.8661469009966822,
+    "load_before": "1.03 0.46 0.22 2/693 109903",
+    "load_after": "1.03 0.46 0.22 1/656 109944",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-0-2-head",
+    "exit": 0,
+    "elapsed_s": 0.7659028089983622,
+    "load_before": "1.03 0.46 0.22 1/656 109944",
+    "load_after": "1.03 0.46 0.22 1/621 109983",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-0-3-base",
+    "exit": 0,
+    "elapsed_s": 0.7656648609990953,
+    "load_before": "1.03 0.46 0.22 3/621 109983",
+    "load_after": "1.03 0.46 0.22 1/585 110022",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-150-4-base",
+    "exit": 1,
+    "elapsed_s": 43.18919315299718,
+    "load_before": "1.03 0.46 0.22 4/585 110022",
+    "load_after": "0.89 0.51 0.25 1/225 110078",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-150-5-head",
+    "exit": 1,
+    "elapsed_s": 44.39341670399881,
+    "load_before": "0.89 0.51 0.25 1/225 110078",
+    "load_after": "0.65 0.50 0.26 1/225 110117",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-150-6-head",
+    "exit": 1,
+    "elapsed_s": 44.70844152099744,
+    "load_before": "0.65 0.50 0.26 1/225 110117",
+    "load_after": "0.76 0.54 0.29 1/225 110172",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-150-7-base",
+    "exit": 1,
+    "elapsed_s": 42.52896952400624,
+    "load_before": "0.76 0.54 0.29 1/225 110172",
+    "load_after": "0.67 0.54 0.29 1/225 110211",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-300-8-base",
+    "exit": 1,
+    "elapsed_s": 92.34503342100652,
+    "load_before": "0.67 0.54 0.29 1/225 110211",
+    "load_after": "0.66 0.53 0.31 1/224 110258",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-300-9-head",
+    "exit": 1,
+    "elapsed_s": 94.93552159999672,
+    "load_before": "0.66 0.53 0.31 3/224 110258",
+    "load_after": "0.31 0.44 0.29 1/226 110324",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-300-10-head",
+    "exit": 1,
+    "elapsed_s": 92.4910017120128,
+    "load_before": "0.31 0.44 0.29 1/226 110324",
+    "load_after": "0.34 0.40 0.29 1/226 110371",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "latency-300-11-base",
+    "exit": 1,
+    "elapsed_s": 95.81196059098875,
+    "load_before": "0.34 0.40 0.29 1/226 110371",
+    "load_after": "0.41 0.39 0.29 1/226 110439",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "retirement-150-nft",
+    "exit": 0,
+    "elapsed_s": 21.7706914540031,
+    "load_before": "0.41 0.39 0.29 2/226 110439",
+    "load_after": "0.46 0.41 0.30 1/3227 113511",
+    "machine": "infraternal-perf-test"
+  },
+  {
+    "name": "retirement-150-nf_tables",
+    "exit": 0,
+    "elapsed_s": 22.463674511993304,
+    "load_before": "0.46 0.41 0.30 1/3227 113511",
+    "load_after": "1.29 0.61 0.37 1/4718 116693",
+    "machine": "infraternal-perf-test"
+  }
+]

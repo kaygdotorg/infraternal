@@ -1,0 +1,16 @@
+Running as unit: run-p110023-i110323.scope; invocation ID: 262c1244fa4f45a6bba716ee910df651
+METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=100 p50_ms=135.66 p99_ms=135.92 budget_ms=184.00 result=PASS
+METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=100 p50_ms=135.69 p99_ms=135.98 budget_ms=184.00 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=100 p50_ms=135.59 p99_ms=142.12 budget_ms=184.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=100 p50_ms=135.68 p99_ms=142.25 budget_ms=184.00 result=PASS
+METRIC name=flood_isolation_other_session source=real-agent-pty n=100 baseline_p99_ms=135.98 flood_p99_ms=142.25 growth_ms=6.27 budget_ms=16.67 result=PASS
+METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=100 p50_ms=142.85 p99_ms=164.55 budget_ms=184.00 result=PASS
+METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=100 p50_ms=143.37 p99_ms=167.32 budget_ms=184.00 result=PASS
+METRIC name=flood_isolation_same_session source=real-agent-pty n=100 baseline_p99_ms=135.98 flood_p99_ms=167.32 growth_ms=31.34 budget_ms=16.67 result=FAIL
+Traceback (most recent call last):
+  File "/root/infraternal-bench/mesh-policy/round3-173/scripts/verify-latency.py", line 245, in <module>
+    run(args.binary, args.state, args.samples)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/infraternal-bench/mesh-policy/round3-173/scripts/verify-latency.py", line 226, in run
+    raise AssertionError("latency budget failures: " + ", ".join(failed_metrics))
+AssertionError: latency budget failures: flood_isolation_same_session

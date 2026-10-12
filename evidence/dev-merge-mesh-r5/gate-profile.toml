@@ -1,0 +1,7 @@
+# Native gate optimization follows the documented base qualification; dependency/release profiles stay unchanged.
+[profile.dev.package.infraternal-agent]
+opt-level = 1
+[profile.dev.package.infraternal-server]
+opt-level = 1
+[profile.dev.package.infraternal-shim]
+opt-level = 1

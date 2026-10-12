@@ -1,0 +1,7 @@
+{
+  "source": "/home/kayg/.cache/codex-scratch/mesh-policy-verify-r5/head-target/release/examples/kernel_node",
+  "executable_segments_sha256": "1524b496483ca9d3b2209a6af9617e8949c17829d98c97e52040d5adbad4296b",
+  "source_sha256": "754a7b829215cdfcb8637abd24959522eb7db9017d0964fb5b65456a7752a343",
+  "adapted_sha256": "1ebf4756d383c0c0ff3706d789c0bdfc16c21660bb5c2ebcba06160deb4e5165",
+  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
+}
