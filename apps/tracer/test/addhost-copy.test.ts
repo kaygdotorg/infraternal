@@ -16,3 +16,25 @@ test("a failure before installation does not claim that cleanup is needed", () =
   expect(guide.happened).not.toContain("cleanup");
   expect(guide.next).not.toContain("cleanup");
 });
+
+test("leftovers offer one way forward in plain words, with a neutral tone", () => {
+  const guide = guideFor("host", { kind: "stale_previous_attempt", message: "x", log_tail: [] });
+  expect(guide.fix).toBe("start-fresh");
+  expect(guide.tone).toBe("info");
+  expect(guide.title).toBe("This host has leftovers from an earlier setup");
+  expect(guide.happened).toBe("infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.");
+  expect(`${guide.happened} ${guide.next}`).not.toMatch(/cleanup|rollback|restore access|~\//i);
+});
+
+test("a setup already running says to wait", () => {
+  const guide = guideFor("host", { kind: "setup_running", message: "x", log_tail: [] });
+  expect(guide).toMatchObject({ title: "Setup is already running on this host", fix: "retry", tone: "info" });
+});
+
+test("install advice follows the step that stopped, and never tells people to restore access", () => {
+  const steps = ["connect", "upload", "install", "join", "start", "readiness"] as const;
+  const advice = steps.map((failed_step) => guideFor("host", { kind: "install", message: "m", log_tail: [], failed_step }).next);
+  expect(new Set(advice).size).toBe(steps.length);
+  for (const line of advice) expect(line).not.toMatch(/restore access/i);
+  expect(guideFor("host", { kind: "install", message: "m", log_tail: [] }).next).toBe("Try again, or open the details to see where it stopped.");
+});

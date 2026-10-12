@@ -256,7 +256,9 @@ test("an unsupported host cannot be retried; an install failure can", async ({ p
   await page.locator(".ui-chip-remove").click({ force: true });
   await addTyped(page, "broken.lab");
   await expect(page.getByRole("heading", { name: "Setting up broken.lab didn't finish" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("Open the details, restore access to the host if needed, then try again.", { exact: false })).toBeVisible();
+  // The failure names its step, so the advice does too (not a chore like "restore access").
+  await expect(page.getByText("The infraternal agent was installed but didn't start.", { exact: false })).toBeVisible();
+  await expect(page.getByText("restore access", { exact: false })).toHaveCount(0);
   await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toHaveCount(0);
   await page.locator(".ah-details summary").click();
   await expect(page.locator(".ah-details pre")).toContainText("Failed step: Start the host service");
@@ -413,4 +415,57 @@ test("a typed root login requires consent and cannot pretend to install as a use
   await page.locator(".ah-consent").click();
   await inWizard(page, "Install as root").click();
   await expect.poll(() => mode).toBe("root");
+});
+
+// ── Leftovers from an earlier setup (#169): one button forward, never a chore ───────────────────────────────
+
+/** The hero icon's tone: leftovers and a running setup are neutral news, not red errors. */
+const heroTone = (page: Page) => page.locator(".ah-page .ah-hero").first().getAttribute("data-tone");
+
+test("leftovers: one Start fresh continues the same setup to done", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "stale.lab");
+  await expect(page.getByRole("heading", { name: "This host has leftovers from an earlier setup" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.")).toBeVisible();
+  expect(await heroTone(page)).toBeNull();
+  // The old chores are gone.
+  for (const chore of ["restore access", "Finish its cleanup", "lock or unfinished rollback"]) await expect(wizard(page).getByText(chore, { exact: false })).toHaveCount(0);
+  // Details lists the findings; they are short sentences, not paths.
+  await page.locator(".ah-details summary").click();
+  await expect(page.locator(".ah-details pre")).toContainText("An unfinished setup lock");
+  await expect(inWizard(page, "Retry")).toHaveCount(0);
+  await inWizard(page, "Start fresh").click();
+  // No confirmation: straight into the normal progress, then done.
+  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => consoleWindows(page)).toContain("w-stale.lab");
+});
+
+test("leftovers: Back returns to the host list and Start fresh needs the server's challenge", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "stale.lab");
+  await expect(page.getByRole("heading", { name: "This host has leftovers from an earlier setup" })).toBeVisible({ timeout: 15_000 });
+  await inWizard(page, "Back").click();
+  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  // The row offers the same one tap instead of a retry that would only find the leftovers again.
+  await expect(page.locator(".ah-job-retry")).toBeHidden();
+  await expect(page.locator(".ah-job-fix")).toHaveText("Start fresh");
+  await page.locator(".ah-job-fix").click();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+});
+
+test("a setup that is still running: wait, then try again", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "running.lab");
+  await expect(page.getByRole("heading", { name: "Setup is already running on this host" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Another setup for this host hasn't finished. Wait for it, or try again in a moment.")).toBeVisible();
+  expect(await heroTone(page)).toBeNull();
+  await expect(inWizard(page, "Start fresh")).toHaveCount(0);
+  await inWizard(page, "Back").click();
+  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  await page.locator(".ah-job-retry").click();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
