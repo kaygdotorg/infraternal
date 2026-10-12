@@ -140,15 +140,21 @@ else
     printf '%s\n' "$host" > "$base/.bootstrap-owner"
 fi
 [ ! -L "$base/bin" ] && [ ! -L "$base/state" ] || exit 71
-mkdir "$base/.bootstrap-lock" || exit 72
 stage="$base/.bootstrap-lock"
-printf '%s\n' "$transaction" > "$stage/transaction"
+[ ! -e "$stage" ] && [ ! -L "$stage" ] || exit 72
 if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
     [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
-    printf 'upgrade\n' > "$stage/kind"
+    kind=upgrade
 else
-    printf 'fresh\n' > "$stage/kind"
+    kind=fresh
 fi
+# The private acquisition journal precedes mkdir. It proves this attempt's
+# empty lock if the command stops before the lock's ordinary receipts exist.
+printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
+mkdir "$stage" || exit 72
+printf '%s\n' "$transaction" > "$stage/transaction"
+printf '%s\n' "$kind" > "$stage/kind"
+rm -f "$base/.bootstrap-acquiring"
 cat > "$stage/payload"
 printf '%s  %s\n' {} "$stage/payload" | sha256sum -c - >/dev/null
 chmod 700 "$stage/payload"
@@ -359,7 +365,19 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
     pub async fn rollback(&self) -> Result<(), Failure> {
-        self.session.run(&self.script(&format!("{FRESH_CLEANUP}\n{}", r#"
+        self.session
+            .run(
+                &self.script(&format!("{FRESH_CLEANUP}\n{ROLLBACK_TRANSACTION}")),
+                Input::Empty,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+// The rollback journal is a fixed shell program. Keeping it outside the Rust
+// adapter makes its ownership and interruption invariants reviewable together.
+const ROLLBACK_TRANSACTION: &str = r#"
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
     if [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
@@ -370,11 +388,40 @@ fi
 if [ ! -e "$base" ] && [ ! -L "$base" ]; then exit 0; fi
 [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
 stage="$base/.bootstrap-lock"
-if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then exit 0; fi
+acquiring="$base/.bootstrap-acquiring"
+acquired=no
+if [ -e "$acquiring" ] || [ -L "$acquiring" ]; then
+    [ -f "$acquiring" ] && [ ! -L "$acquiring" ] && [ -O "$acquiring" ] && [ "$(stat -c '%a' "$acquiring")" = 600 ] || exit 71
+    size=$(stat -c '%s' "$acquiring")
+    [ "$size" = 39 ] || [ "$size" = 41 ] || exit 71
+    case "$(cat "$acquiring")" in
+        "$transaction fresh") kind=fresh;;
+        "$transaction upgrade") kind=upgrade;;
+        *) exit 72;;
+    esac
+    acquired=yes
+fi
+if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then
+    [ "$acquired" = yes ] || exit 0
+    if [ "$kind" = fresh ]; then
+        printf '%s %s fresh %s\n' "$host" "$transaction" "$(stat -c '%d:%i' "$base")" > "$receipt"
+        rm -f "$acquiring"
+        finish_fresh
+    else
+        rm -f "$acquiring"
+    fi
+    exit 0
+fi
 [ -d "$stage" ] && [ ! -L "$stage" ] || exit 71
-[ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+if [ -e "$stage/transaction" ] || [ -L "$stage/transaction" ]; then
+    [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+else
+    # Only the pre-mkdir journal authorizes an empty, uninitialized lock.
+    [ "$acquired" = yes ] || exit 72
+    rmdir "$stage" || exit 72
+fi
 # Refused stop retains both installation and policy receipts for cleanup retry.
-kind=$(cat "$stage/kind")
+if [ -f "$stage/kind" ] && [ ! -L "$stage/kind" ]; then kind=$(cat "$stage/kind"); else [ "$acquired" = yes ] || exit 72; fi
 case "$kind" in
     fresh) validate_parent;;
     upgrade) :;;
@@ -429,13 +476,11 @@ if [ "$kind" = fresh ]; then
     validate_receipt
 fi
 rm -rf "$stage"
+[ "$acquired" = no ] || rm -f "$acquiring"
 if [ "$kind" = fresh ]; then
     finish_fresh
 fi
-"#)), Input::Empty).await?;
-        Ok(())
-    }
-}
+"#;
 
 // This public ownership receipt survives removal of the transaction directory,
 // owner marker and base. Noclobber creation, bounded reads, uid/mode and directory

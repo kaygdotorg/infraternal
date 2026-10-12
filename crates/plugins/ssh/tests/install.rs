@@ -202,7 +202,6 @@ async fn breakit2_stage_refuses_parent_that_cannot_be_rolled_back() {
 }
 
 #[tokio::test]
-#[ignore = "#169 breakit2: interrupted lock acquisition cannot be rolled back"]
 async fn breakit2_interrupted_lock_creation_allows_cleanup_and_retry() {
     let fixture = Fixture::new();
     // A real mkdir succeeds, then the command fails before the transaction and
