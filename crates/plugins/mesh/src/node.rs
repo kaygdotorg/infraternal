@@ -537,6 +537,27 @@ impl Node {
             .filter(|key| !desired.contains(key))
             .copied()
             .collect();
+        if changed.is_empty()
+            && retired_keys.is_empty()
+            && self.config.as_ref().is_some_and(|old| {
+                old.node == config.node
+                    && old.addresses == config.addresses
+                    && old.peers.len() == config.peers.len()
+            })
+        {
+            // Route validation and the actual key inventory above still run.
+            // Only access changes remain: one final firewall transaction is
+            // sufficient, without an intermediate table or peer/route writes.
+            self.firewall.install_pending(&config)?;
+            if let Err(error) = self.save(Some(&config), true) {
+                self.firewall
+                    .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+                return Err(error);
+            }
+            self.config = Some(config);
+            self.connection_cleanup_pending = true;
+            return self.finish_connection_cleanup();
+        }
         let desired_routes: BTreeSet<IpAddr> = config
             .peers
             .values()
