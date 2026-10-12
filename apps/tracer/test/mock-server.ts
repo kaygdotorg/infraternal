@@ -583,7 +583,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if (request.method !== "GET" && request.method !== "HEAD") {
     return sendJson(response, 404, { error: "not found" });
   }
-  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost", "clusters"].includes(url.searchParams.get("proto") ?? "") && (!previewSignedOut || url.searchParams.has("fresh"))) {
+  if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost", "clusters", "product"].includes(url.searchParams.get("proto") ?? "") && (!previewSignedOut || url.searchParams.has("fresh"))) {
     previewSignedOut = false;
     if (!owner) owner = makeMockOwner();
     activeAuthCookie = newToken();
@@ -778,6 +778,10 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       // Like the server, an action it does not know is refused (the Mesh asks `mesh.list` and must be told no).
       if (connection.welcomed && connection.session && frame.actionId.startsWith("mesh.")) {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
+        return;
+      }
+      if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read") {
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"os":"Linux"}') });
         return;
       }
       if (!connection.welcomed || frame.callId < 1 || frame.actionId !== "ssh.session.open") {

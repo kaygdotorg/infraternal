@@ -70,6 +70,14 @@ declare global {
       }> | undefined;
       trace: () => ProbeTraceSample[];
     };
+    /** The product-canvas mock exposes the first PTY for replay regression assertions. */
+    __tracerProductTestDouble?: {
+      isConnected: () => boolean;
+      dropConnection: () => void;
+      screenText: () => string;
+      rendererMetrics: () => { outputSequence: string } | undefined;
+      currentView: () => string;
+    };
   }
 }
 
@@ -338,6 +346,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
   const proto = query.get("proto");
+  // Browser regressions can exercise the real product canvas over the test-double PTY.
+  const productTestMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "product";
   const canvasMode = __CLUSTERS_PREVIEW__ && mockMode && (proto === "windows" || proto === "addhost");
   // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
@@ -345,7 +355,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   const predictiveEcho = query.get("predict") === "1";
   // The canvas is the product screen. The test double's plain page and the latency probe keep the single
   // terminal screen: the terminal specs and the probe drive that one terminal.
-  const useCanvas = !mockMode && !probeMode;
+  const useCanvas = (!mockMode || productTestMode) && !probeMode;
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
@@ -408,6 +418,16 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
         host: { name: hostName, ...(identity?.username ? { user: identity.username } : {}) },
         accountId: activeUserId ?? "account",
         predictiveEcho,
+        ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
+          window.__tracerProductTestDouble = {
+            isConnected: () => client.isConnected,
+            dropConnection: () => client.forceDrop(),
+            screenText: () => client.readScreenText(),
+            rendererMetrics: () => client.rendererMetrics,
+            currentView: () => (productCanvas as unknown as { canvas?: { cx?: { state?: { currentView?: string } } } } | undefined)
+              ?.canvas?.cx?.state?.currentView ?? "",
+          };
+        } } : {}),
         onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
       });
     } catch (error: unknown) {
