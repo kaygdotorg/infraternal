@@ -63,8 +63,13 @@ def verify_signed(directory, trust, image, complete=False):
         required.add("infraternal-aarch64-musl")
     if not required <= entries.keys():
         raise ValueError("incomplete signed bundle")
+    # The executable alias and the distributed x86 payload are separate files.
+    # Authenticate both on admission; retained rollback needs only its executable.
+    with image.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != entries["infraternal-x86_64-musl"]:
+            raise ValueError("signed server image mismatch")
     for name in required:
-        artifact = image if name == "infraternal-x86_64-musl" else directory / name
+        artifact = image if name == "infraternal-x86_64-musl" and not complete else directory / name
         with artifact.open("rb") as stream:
             if hashlib.file_digest(stream, "sha256").hexdigest() != entries[name]:
                 raise ValueError("signed artifact mismatch")
