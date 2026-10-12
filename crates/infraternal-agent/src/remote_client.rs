@@ -11,7 +11,7 @@ use crate::{
 use infraternal_protocol::encode_frame_into;
 use openssl::x509::X509;
 use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::sync::Mutex;
 
 /// Local enrolled host credentials; no private material leaves the host.
 pub struct RemoteIdentity {
@@ -232,7 +232,7 @@ async fn quic_session_on(
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
-        let greeting = infraternal_protocol::Frame::Hello { version:1, caps:remote_quic::REMOTE_WRITER_BINDING | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS | if renewal.is_some() { crate::remote_renewal::LIVE_RENEWAL } else { 0 }, client_info:"infraternal agent" };
+        let greeting = infraternal_protocol::Frame::Hello { version:1, caps:remote_quic::REMOTE_WRITER_BINDING | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS | if renewal.is_some() { crate::remote_renewal::LIVE_RENEWAL } else { 0 }, client_info:"infraternal agent" };
         tx.send(&control, 0, &greeting).await?;
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
@@ -245,29 +245,16 @@ async fn quic_session_on(
         let hello = infraternal_protocol::decode_frame(&prefix).map_err(io::Error::other)?;
         let binding = remote_quic::negotiate_binding(&connection, &hello.frame)?;
         standby.send_replace(matches!(hello.frame, infraternal_protocol::Frame::Hello { caps, .. } if caps & infraternal_plugin_api::channel::REMOTE_STANDBY != 0));
+        let allow_priming = matches!(hello.frame, infraternal_protocol::Frame::Hello { caps, .. } if caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0);
         let control = PrefixedControl { channel:ControlChannel::Quic(control), prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
-        let mut terminals = JoinSet::new();
-        let dispatch = daemon::run_authenticated_with_plugins(&control, state.clone(), identity.execution_uid, renewal,plugins);
-        tokio::pin!(dispatch);
-        loop {
-            // Keep partial binding progress across completed terminal jobs.
-            // Cancelling this accept on each completion would lose consumed bytes.
-            let next = remote_quic::accept_bound(&binding);
-            tokio::pin!(next);
-            loop {
-            tokio::select! {
-                result = &mut dispatch => return result,
-                _ = connection.closed() => return Err(io::ErrorKind::BrokenPipe.into()),
-                terminal = &mut next => {
-                    let channel = NativeChannel::terminal(terminal?)?;
-                    if terminals.len() >= crate::sessions::MAX_SESSIONS { channel.retire(); break; }
-                    let state = state.clone();
-                    terminals.spawn(async move { let _ = daemon::run_bound_terminal(&channel,Some(state)).await; });
-                    break;
-                }
-                _ = terminals.join_next(), if !terminals.is_empty() => {}
-            }
-            }
+        let dispatch = daemon::run_authenticated_with_plugins(
+            &control, state.clone(), identity.execution_uid, renewal, plugins,
+        );
+        let native = primed_native::serve(&binding, state, allow_priming);
+        tokio::select! {
+            result = dispatch => result,
+            result = native => result,
+            _ = connection.closed() => Err(io::ErrorKind::BrokenPipe.into()),
         }
     }.await;
     connection.close(0u32.into(), b"");
@@ -283,3 +270,6 @@ mod dial_runtime;
 
 #[path = "remote_server_path.rs"]
 mod server_path;
+
+#[path = "remote_primed_native.rs"]
+mod primed_native;
