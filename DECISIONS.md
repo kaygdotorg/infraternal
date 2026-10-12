@@ -2351,3 +2351,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Timing on the perf VM:** every timing, CPU, memory and frame
        number, native or browser, is measured on the perf VM; build-host
        timings are not evidence.
+251. **Production follows edge and updates itself (owner, 2026-10-12;
+     extends D186, D250):**
+     - **Edge is "reasonably stable":** a `dev` commit is published to the
+       edge channel only after its gates pass AND its break-it review has no
+       P0/P1. Gates alone do not publish.
+     - **infraternal.kayg.org follows edge.** Every published edge build
+       reaches it without an orchestrator deploy.
+     - **When it applies:** automatically in a quiet window (the server is
+       idle for a few minutes: no typing, no attach in progress), through
+       the in-process handoff, so the CA stays unlocked (D250). An update
+       never interrupts typing.
+     - **Manual control:** a ready update first appears as a toast, then
+       stays as an Inbox item ("Update ready · <version>") with **Update
+       now**. The same controls live in **Settings → Server → Updates**:
+       current version and channel, the quiet-window setting, Update now,
+       Roll back to the previous version, and the update history. Hosts'
+       infraternal agents follow their server's version.
