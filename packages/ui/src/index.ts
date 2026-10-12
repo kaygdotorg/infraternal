@@ -27,6 +27,7 @@ export * from "./pane-stepper";
 export * from "./chip-input";
 export * from "./icons";
 export * from "./status-line";
+export * from "./terminal-cursor-layer";
 export * from "./terminal-text-overlay";
 export * from "./sidebar-foot";
 export * from "./platform";
