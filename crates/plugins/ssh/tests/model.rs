@@ -119,7 +119,7 @@ fn start_fresh_is_declared_as_an_owned_host_provisioning_action() {
         .iter()
         .find(|action| action.id == "ssh.start-fresh")
         .unwrap();
-    assert_eq!(action.summary, "Start fresh on a host");
+    assert_eq!(action.summary, "Start fresh");
     assert!(matches!(
         action.permission,
         infraternal_plugin_api::Permission::One("ssh.manage")
