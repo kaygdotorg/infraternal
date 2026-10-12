@@ -6,6 +6,7 @@ use infraternal_shim::frame::Frame;
 use std::{
     fs,
     io::Write,
+    os::unix::ffi::OsStrExt,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -66,7 +67,19 @@ async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset() {
-    let directory = PathBuf::from(format!("../../target/ar{}", std::process::id()));
+    // Cargo may put build artifacts outside the worktree; runtime socket state
+    // belongs in a private per-process fixture directory, not under target/.
+    let root = PathBuf::from(std::env::var_os("HOME").expect("HOME is required for test state"))
+        .join(".cache/codex-scratch/infraternal");
+    fs::create_dir_all(&root).unwrap();
+    let directory = root.join(format!("ar{}", std::process::id()));
+    let socket = directory
+        .join("sessions")
+        .join(format!("{}.sock", "a".repeat(32)));
+    assert!(
+        socket.as_os_str().as_bytes().len() < 108,
+        "test session socket path exceeds the Unix socket path limit"
+    );
     let directory = state(Some(directory)).unwrap();
     // Reuse the shim lane's isolated login profile. User startup scripts can
     // consume terminal queries/input before the prompt, making early typing an
