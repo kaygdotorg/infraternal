@@ -2481,3 +2481,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      passes the strictest review; if the replacements look poorly
      maintained, ring stays. Measure first; the orchestrator applies these
      rules to the numbers and reports the outcome before anything ships.
+258. **`/install` and `/download` on the person's own server (owner,
+     2026-10-12, Q28):** `/install` is the one-line host install that
+     add-host offers when the server cannot reach a host over SSH:
+     `curl -fsSL https://<server>/install | sh` returns the script; a browser
+     gets a short page showing the command and what it does. `/download` is
+     the page for people with the apps (macOS, iOS, later Windows) and the
+     CLI, added when apps ship. Both are served by the infraternal server
+     itself, never by a third party.
