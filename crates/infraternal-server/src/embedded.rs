@@ -34,7 +34,7 @@ const COMMAND_CAPACITY: usize = 64;
 // Credits bound payload bytes; frame slots separately bound small outputs and notices.
 const OUTPUT_CAPACITY: usize = 256;
 const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
-// Full input queues stop the WebSocket reader and propagate backpressure to the peer.
+// Bounded actor input queues backpressure each attachment forwarding worker.
 const INPUT_CAPACITY: usize = 4;
 const READ_CHUNK: usize = 16 * 1024;
 const MAX_BUFFERED_WIRE: usize = MAX_FRAME_LEN + READ_CHUNK + 10;
