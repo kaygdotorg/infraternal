@@ -5,12 +5,10 @@ use crate::{
     probe::Architecture,
     transport::{Input, Secret, SshSession, shell_quote},
 };
-use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::io::AsyncReadExt;
 
 /// Paths are trusted server settings; no target may select an executable to upload.
 #[derive(Clone)]
@@ -128,7 +126,7 @@ impl Installation {
     /// # Errors
     /// Reports binary, ownership, concurrent install or upload failure.
     pub async fn stage(&self, binary: &Path) -> Result<(), Failure> {
-        let digest = binary_digest(binary)
+        let digest = crate::payload::digest(binary)
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         let query = format!(
@@ -658,25 +656,6 @@ finish_fresh() {
     rm -f "$receipt"
 }
 "#;
-
-async fn binary_digest(path: &Path) -> Result<String, Failure> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| Failure::install("The matching static infraternal binary is unavailable."))?;
-    let mut digest = Sha256::new();
-    let mut bytes = vec![0; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut bytes)
-            .await
-            .map_err(|_| Failure::install("The static infraternal binary could not be read."))?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&bytes[..count]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
 
 /// Decode only the fixed public policy receipt; remote diagnostics never become logs.
 /// # Errors

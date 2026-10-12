@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod master;
 pub mod model;
 pub mod openssh;
+mod payload;
 pub mod previous_attempt;
 pub mod probe;
 pub mod process;
