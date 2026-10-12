@@ -15,6 +15,7 @@
  * The full snapshot is replayed after every socket welcome, so missed changes during a disconnect cannot revive a
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
+import { inventoryKey } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
 interface Stored { host?: string; id: string; name: string; pinned: boolean; frecency: number }
@@ -31,7 +32,8 @@ export interface LiveInventory extends SessionInventory {
 }
 
 export function createLiveInventory(options: { accountId: string; host: string }): LiveInventory {
-  const key = `tracer.sessions.${options.accountId}`;
+  const key = inventoryKey(options.accountId);
+  let disposed = false;
   const records = new Map<string, SessionRecord>();
   const listeners = new Set<() => void>();
   const owners = new Map<string, string>();
@@ -43,6 +45,8 @@ export function createLiveInventory(options: { accountId: string; host: string }
   let top = 0;
   const emit = (): void => { for (const l of listeners) l(); };
   const save = (): void => {
+    // After sign-out a late socket message must not write the account's data back (D245).
+    if (disposed) return;
     const rows: Stored[] = [...records.values()].filter((s) => !s.gone).map((s) => ({ host: owners.get(s.id) ?? options.host, id: s.id, name: s.name, pinned: s.pinned, frecency: s.frecency }));
     try { window.localStorage.setItem(key, JSON.stringify(rows)); } catch { /* private mode: the inventory then lasts for this page */ }
   };
@@ -161,6 +165,6 @@ export function createLiveInventory(options: { accountId: string; host: string }
     sizedFor: (): DeviceInfo | undefined => undefined,
     takeOver() { /* every window of this account is this device until #99 */ },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { listeners.clear(); },
+    dispose() { disposed = true; listeners.clear(); },
   };
 }

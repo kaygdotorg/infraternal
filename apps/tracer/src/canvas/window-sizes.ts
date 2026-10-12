@@ -1,9 +1,10 @@
 /**
  * Window sizes (D191, Settings -> Window Sizes): how wide a terminal window is by default, per kind of device.
  *
- * - Phones: "Full width" (the default: 99% of the space between the screen margins, so a window keeps the gutter), "Edge
- *   to edge" (99% of the screen; the window touches both edges, only when the person chose it) or "Comfortable" (the
- *   earlier phone width: the screen less the canvas margins).
+ * - Phones: "Edge to edge" (the default: a lone window is the screen width; in a strip it is narrower by the gap between
+ *   columns and a slice of the neighbour on each side, so a thin slice of each neighbour shows), "Full width"
+ *   (exactly the screen width between the safe areas; no neighbour shows) or "Comfortable" (the earlier phone width: the
+ *   screen less the canvas margins).
  * - Desktop: "Comfortable" (one third of the canvas, the earlier width, the default), "Wide" (half) or "Full width"
  *   (99% of the canvas).
  *
@@ -16,7 +17,9 @@ export type PhoneSize = "full" | "edge" | "comfortable";
 export type DesktopSize = "comfortable" | "wide" | "full";
 export interface WindowSizes { phone: PhoneSize; desktop: DesktopSize }
 
-export const DEFAULT_SIZES: WindowSizes = { phone: "full", desktop: "comfortable" };
+export const DEFAULT_SIZES: WindowSizes = { phone: "edge", desktop: "comfortable" };
+/** The gap between two columns (px). A neighbour's slice starts this far past the window's edge. */
+export const COLUMN_GAP = 12;
 export const SIZE_EVENT = "tracer:window-size";
 
 const KEYS = { phone: "tracer.window-size.phone", desktop: "tracer.window-size.desktop" } as const;
@@ -38,21 +41,27 @@ export function writeSize<K extends keyof WindowSizes>(kind: K, value: WindowSiz
 
 /**
  * The default column (window) width for a canvas area `width` px wide: the canvas viewport's client width, which is the
- * space between the screen margins on a phone (the panes keep the gutter) and the whole screen when the phone is set to
- * "Edge to edge" (see `edgeToEdge`). Pure, so it can be tested alone.
+ * space between the screen margins on a phone set to "Comfortable" and the screen between the safe areas otherwise (see
+ * `edgeToEdge`). Pure, so it can be tested alone.
  */
 export function columnWidth(width: number, narrow: boolean, sizes: WindowSizes): number {
-  if (narrow) return sizes.phone === "comfortable" ? Math.max(260, Math.min(520, Math.round(width - 28))) : Math.round(width * 0.99);
+  if (narrow) {
+    if (sizes.phone === "comfortable") return Math.max(260, Math.min(520, Math.round(width - 28)));
+    // A lone window is the whole area between the safe areas in both settings (TASTE: a lone window keeps the full
+    // phone width). In a strip, edge to edge narrows it by `peekWidth`, so it is never wider than full width.
+    return Math.round(width);
+  }
   if (sizes.desktop === "full") return Math.max(480, Math.round(width * 0.99));
   if (sizes.desktop === "wide") return Math.max(480, Math.min(960, Math.round((width - 24) / 2)));
   return Math.max(400, Math.min(640, Math.round((width - 24) / 3)));
 }
 
 /**
- * Whether the canvas area runs edge to edge: only a phone whose person chose "Edge to edge". Every other phone size keeps
- * the top bar's gutter, so a resting window never touches the screen edge (TASTE: windows keep the gutter on phones).
+ * Whether the canvas area spans the screen between the safe areas: a phone set to "Full width" or "Edge to edge". Both
+ * compute their window from the same area, so the two settings can be compared directly. "Comfortable" keeps the top
+ * bar's gutters.
  */
-export const edgeToEdge = (narrow: boolean, sizes: WindowSizes): boolean => narrow && sizes.phone === "edge";
+export const edgeToEdge = (narrow: boolean, sizes: WindowSizes): boolean => narrow && sizes.phone !== "comfortable";
 
 /**
  * How much of a neighbouring window shows at the screen edge on a phone (px). Ten pixels is enough to see that there is
@@ -62,10 +71,11 @@ export const edgeToEdge = (narrow: boolean, sizes: WindowSizes): boolean => narr
 export const PEEK = 10;
 
 /**
- * The width of a column in a strip of several, on a phone: the screen less, on each side, the gap between columns and a
+ * The width of a column in a strip of several, on a phone (except at full width): the screen less, on each side, the gap between columns and a
  * slice of the neighbour (`PEEK`). It never exceeds the lone-window width. Desktop strips need none (columns already fit
  * with neighbours beside them), so they keep `columnWidth`.
  */
-export function peekWidth(width: number, narrow: boolean, alone: number, gap: number): number {
-  return narrow ? Math.min(alone, Math.round(width - 2 * (gap + PEEK))) : alone;
+export function peekWidth(width: number, narrow: boolean, alone: number, gap: number, sizes: WindowSizes = DEFAULT_SIZES): number {
+  // Full width never peeks: its window is the same with neighbours as alone.
+  return narrow && sizes.phone !== "full" ? Math.min(alone, Math.round(width - 2 * (gap + PEEK))) : alone;
 }
