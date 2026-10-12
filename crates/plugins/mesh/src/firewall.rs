@@ -86,13 +86,24 @@ impl Firewall {
             self.installed = false;
             if exists {
                 let output = Command::new(NFT)
-                    .args(["list", "table", "inet", TABLE])
+                    .args(["-j", "list", "table", "inet", TABLE])
                     .stderr(Stdio::null())
                     .output()?;
                 if !output.status.success() {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
-                if !String::from_utf8_lossy(&output.stdout).contains("infraternal.mesh.v1") {
+                let state: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+                // Only the table's own complete comment establishes ownership.
+                // A rule/set comment or an operator's longer comment cannot do so.
+                if !state["nftables"].as_array().is_some_and(|items| {
+                    items.iter().any(|item| {
+                        let table = &item["table"];
+                        table["family"] == "inet"
+                            && table["name"] == TABLE
+                            && table["comment"] == "infraternal.mesh.v1"
+                    })
+                }) {
                     return Err(io::ErrorKind::AlreadyExists.into());
                 }
                 self.installed = true;

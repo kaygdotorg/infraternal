@@ -148,8 +148,27 @@ fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
         .args(["-t", table, "-S", chain])
         .stderr(Stdio::null())
         .output()?;
+    // -S emits one canonical rule per line. Match the complete marker rule,
+    // including its table-selected chain, interface/state selector and verdict.
+    // Neither a containing comment nor a marker on another rule is authority.
+    let marker = match (table, chain) {
+        ("raw", GUARD) | ("filter", DELIVERY) => format!(
+            "-A {chain} -i {INTERFACE} -m comment --comment \"infraternal.mesh.v1\" -j RETURN"
+        ),
+        ("filter", "IFM_IN" | "IFM_OUT") => format!(
+            "-A {chain} -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment \"infraternal.mesh.v1\" -j ACCEPT"
+        ),
+        ("filter", "IFM_FWD") => {
+            format!("-A {chain} -m comment --comment \"infraternal.mesh.v1\" -j DROP")
+        }
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
     match output.status.code() {
-        Some(0) if String::from_utf8_lossy(&output.stdout).contains("infraternal.mesh.v1") => {
+        Some(0)
+            if String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == marker) =>
+        {
             Ok(true)
         }
         Some(0) => Err(io::ErrorKind::AlreadyExists.into()),
