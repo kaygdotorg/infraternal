@@ -46,7 +46,7 @@ fn check(backend: Backend) {
     // Restore invokes this same boundary with no in-memory accepted config.
     // The kernel can still carry a proposed address from an interrupted apply.
     assert!(node.config.is_none());
-    node.apply_fence(&accepted).unwrap();
+    node.apply_fence(&accepted, &accepted).unwrap();
     let mut child = Command::new("unshare")
         .args(["-n", "sleep", "30"])
         .spawn()

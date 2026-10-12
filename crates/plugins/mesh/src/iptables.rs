@@ -37,13 +37,14 @@ impl Ownership {
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
-    apply_with_aliases(config, installed, &[], false)
+    apply_with_aliases(config, installed, &[], false, config)
 }
 pub(crate) fn apply_with_aliases(
     config: &Config,
     installed: bool,
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
+    connections: &Config,
 ) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
@@ -61,13 +62,27 @@ pub(crate) fn apply_with_aliases(
     for (index, tool) in TOOLS.iter().enumerate() {
         test(
             tool,
-            &render_with_aliases(config, index == 1, installed[index], aliases, fence),
+            &render_with_aliases(
+                config,
+                index == 1,
+                installed[index],
+                aliases,
+                fence,
+                connections,
+            ),
         )?;
     }
     for (index, tool) in TOOLS.iter().enumerate() {
         run(
             tool,
-            &render_with_aliases(config, index == 1, installed[index], aliases, fence),
+            &render_with_aliases(
+                config,
+                index == 1,
+                installed[index],
+                aliases,
+                fence,
+                connections,
+            ),
         )?;
     }
     Ok(())
@@ -223,7 +238,7 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
 // Keep the complete per-family atomic restore batch visible together.
 #[cfg(test)]
 fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
-    render_with_aliases(config, ipv6, installed, &[], false)
+    render_with_aliases(config, ipv6, installed, &[], false, config)
 }
 // A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
 #[allow(clippy::too_many_lines)]
@@ -233,7 +248,9 @@ fn render_with_aliases(
     installed: Ownership,
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
+    connections: &Config,
 ) -> String {
+    let connections = if fence { connections } else { config };
     let mut script = String::from("*raw\n");
     if installed.guard {
         let _ = writeln!(script, "-F {GUARD}");
@@ -301,7 +318,7 @@ fn render_with_aliases(
     // Compact contiguous equal grants. An open 1,000-node allocation becomes
     // one range match per direction/family, without granting a gap in membership.
     let mut groups = Groups::new();
-    for peer in config.peers.values() {
+    for peer in connections.peers.values() {
         let address = if ipv6 {
             u128::from(peer.peer.addresses.ipv6)
         } else {
@@ -324,11 +341,9 @@ fn render_with_aliases(
             }
         }
     }
-    if !fence {
-        render_connection_checks(&mut script, config, ipv6, &groups);
-    }
+    render_connection_checks(&mut script, connections, ipv6, &groups);
     for chain in &CHAINS[..2] {
-        if !fence {
+        {
             // State with no current initiating permission must never fall
             // through to the ordinary destination-port rules [242].
             let _ = writeln!(
@@ -343,38 +358,40 @@ fn render_with_aliases(
             "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment infraternal.mesh.v1 -j ACCEPT"
         );
     }
-    for ((direction, port), addresses) in groups {
-        let chain = CHAINS[direction];
-        let flag = if direction == 0 { "-s" } else { "-d" };
-        let range_flag = if direction == 0 {
-            "--src-range"
-        } else {
-            "--dst-range"
-        };
-        let ranges = address_ranges(addresses);
-        for (start, end) in ranges {
-            let display = |address| display_address(address, ipv6);
-            let selector = if start == end {
-                format!("{flag} {}", display(start))
+    if !fence {
+        for ((direction, port), addresses) in groups {
+            let chain = CHAINS[direction];
+            let flag = if direction == 0 { "-s" } else { "-d" };
+            let range_flag = if direction == 0 {
+                "--src-range"
             } else {
-                format!(
-                    "-m iprange {range_flag} {}-{}",
-                    display(start),
-                    display(end)
-                )
+                "--dst-range"
             };
-            let service = port.map_or_else(String::new, |port| {
-                format!(
-                    " -p {} --dport {}",
-                    if port.protocol == Protocol::Tcp {
-                        "tcp"
-                    } else {
-                        "udp"
-                    },
-                    port.number
-                )
-            });
-            let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
+            let ranges = address_ranges(addresses);
+            for (start, end) in ranges {
+                let display = |address| display_address(address, ipv6);
+                let selector = if start == end {
+                    format!("{flag} {}", display(start))
+                } else {
+                    format!(
+                        "-m iprange {range_flag} {}-{}",
+                        display(start),
+                        display(end)
+                    )
+                };
+                let service = port.map_or_else(String::new, |port| {
+                    format!(
+                        " -p {} --dport {}",
+                        if port.protocol == Protocol::Tcp {
+                            "tcp"
+                        } else {
+                            "udp"
+                        },
+                        port.number
+                    )
+                });
+                let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
+            }
         }
     }
     for chain in &CHAINS[..2] {

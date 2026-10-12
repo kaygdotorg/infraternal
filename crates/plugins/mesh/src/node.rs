@@ -409,7 +409,7 @@ impl Node {
         Ok(true)
     }
     // Keep transition ingress protection available before any address mutation.
-    fn apply_fence(&mut self, fence: &Config) -> io::Result<()> {
+    fn apply_fence(&mut self, fence: &Config, recovery: &Config) -> io::Result<()> {
         let mut aliases: Vec<_> = self
             .config
             .as_ref()
@@ -431,7 +431,11 @@ impl Node {
                 Some(alias)
             }));
         }
-        self.firewall.apply_with_aliases(fence, &aliases)?;
+        // Normal replacement preserves the accepted view. Recovery uses saved
+        // intent even when connection cleanup was interrupted after persistence.
+        let connections = self.config.as_ref().unwrap_or(recovery);
+        self.firewall
+            .apply_with_aliases(fence, &aliases, connections)?;
         Ok(())
     }
     // Keep the apply/fence/rollback transaction and its failure ordering visible together.
@@ -586,7 +590,7 @@ impl Node {
             peer.inbound = crate::policy::rules::TrafficPolicy::None;
             peer.outbound = crate::policy::rules::TrafficPolicy::None;
         }
-        self.apply_fence(&fence)?;
+        self.apply_fence(&fence, &config)?;
         let result = (|| {
             if self
                 .config
@@ -621,7 +625,7 @@ impl Node {
         if let Err(error) = result {
             // Saving can fail after the permissive policy transaction. Reinstall
             // the fence before rollback so any later error still denies NEW traffic.
-            self.apply_fence(&fence)?;
+            self.apply_fence(&fence, &config)?;
             if let Some(old) = &self.config {
                 if old.addresses != config.addresses {
                     Device::addresses(old.addresses)?;
