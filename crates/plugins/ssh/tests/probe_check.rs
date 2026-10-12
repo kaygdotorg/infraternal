@@ -42,3 +42,15 @@ fn breakit2_no_systemd_names_the_required_manager() {
         refusal.message
     );
 }
+
+/// Startup output and a shell that exits before the command must remain refused,
+/// with a useful next step instead of silently accepting banner text.
+#[test]
+#[ignore = "#169 H1: startup refusals need actionable shell guidance"]
+fn shell_startup_refusal_names_an_interactive_only_remedy() {
+    for record in [b"".as_slice(), b"public startup greeting\nINFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1101\nno\nyes\nyes\nno\n".as_slice()] {
+        let refused = Check::parse(record).unwrap_err();
+        assert!(refused.message.contains("interactive"));
+        assert!(!refused.message.contains("public startup greeting"));
+    }
+}
