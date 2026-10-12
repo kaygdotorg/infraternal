@@ -2263,3 +2263,22 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      push starts now: measure where the bytes come from, cut, and ratchet the
      gate down to each new measured size so growth needs a justified,
      measured exception.
+244. **CA key memory on static builds (owner, 2026-10-12, #154):** the static
+     musl release builds get OpenSSL's locked, dump-excluded key heap by
+     removing the `OPENSSL_NO_SECURE_MEMORY` define that the OpenSSL build
+     crate adds for musl targets, in our pinned compiler wrapper (D213). The
+     OpenSSL version and sources stay unchanged. The gate starts the real
+     static release binary under an 8 MiB memlock limit and fails unless the
+     key heap is locked and excluded from dumps. Root servers keep failing
+     closed. Rejected: a maintained patch of the build crate, protecting only
+     our own key copies, and warning instead of refusing.
+245. **Sign-out removes everything on the device (owner, 2026-10-12, #171):**
+     signing out deletes all of the account's data stored in that browser,
+     including canvas layout. The canvas layout lives on the server (the
+     control plane holds layout) and the browser keeps only what is needed
+     to draw quickly, so signing back in restores it from the server. Device
+     storage stays lean.
+246. **Browser sessions stay server-trusted for now (owner, 2026-10-12; keeps
+     D8):** end-to-end encryption between browser and host is not added now.
+     Native apps are mesh nodes and get it over WireGuard. A per-session
+     private mode in the browser is measured before it is offered.
