@@ -390,13 +390,27 @@ impl Node {
     }
     // Keep transition ingress protection available before any address mutation.
     fn apply_fence(&mut self, fence: &Config) -> io::Result<()> {
-        let aliases: Vec<_> = self
+        let mut aliases: Vec<_> = self
             .config
             .as_ref()
             .filter(|old| old.addresses != fence.addresses)
             .map(|old| old.addresses)
             .into_iter()
             .collect();
+        if self.config.is_none() {
+            // During restart the kernel can retain aliases from an interrupted
+            // replacement that the accepted snapshot never recorded. Fence them
+            // before reconciliation can remove addresses or restore policy.
+            aliases.extend(Device::host_addresses()?.into_iter().filter_map(|address| {
+                let mut alias = fence.addresses;
+                match address {
+                    IpAddr::V4(address) if address != alias.ipv4 => alias.ipv4 = address,
+                    IpAddr::V6(address) if address != alias.ipv6 => alias.ipv6 = address,
+                    _ => return None,
+                }
+                Some(alias)
+            }));
+        }
         self.firewall.apply_with_aliases(fence, &aliases)?;
         Ok(())
     }
