@@ -3,6 +3,7 @@ import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { plainCloseReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { pulseActivity } from "./perf-activity";
@@ -265,7 +266,9 @@ export class TerminalClient {
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
   private renderIdleTimer = 0;
-  private rendererCursorBlinking = false;
+  /** D249: the live cursor, a layer of its own that the compositor blinks; the renderer never draws it while this shows. */
+  private cursorLayer: TerminalCursorLayer | undefined;
+  private rendererCursorHidden = false;
   /**
    * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
    * phone the keyboard needs a tap: until the terminal's input has focus the cursor waits (steady, an underline) and
@@ -281,6 +284,8 @@ export class TerminalClient {
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
+  private readonly onBlinkInput = (): void => this.restartCursorBlink();
+  private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
   private readonly disposeTouch: () => void;
 
   private constructor(private readonly config: TerminalConfig, terminal: Terminal, font: MonoFont) {
@@ -308,7 +313,12 @@ export class TerminalClient {
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
       })
       : undefined;
+    this.cursorLayer = mountTerminalCursorLayer(config.host);
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
+    config.host.addEventListener("pointerdown", this.onBlinkInput, { passive: true });
+    document.addEventListener("visibilitychange", this.onBlinkEnvironment);
+    window.addEventListener("blur", this.onBlinkEnvironment);
+    window.addEventListener("focus", this.onBlinkEnvironment);
     config.host.addEventListener("pointermove", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("wheel", this.onTerminalActivity, { passive: true });
     this.resizeObserver = new ResizeObserver(() => {
@@ -327,7 +337,7 @@ export class TerminalClient {
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
       if (this.attached) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     });
-    this.terminal.onData((data) => { this.wakeTerminal(); this.handleInput(data); });
+    this.terminal.onData((data) => { this.wakeTerminal(); this.restartCursorBlink(); this.handleInput(data); });
     this.terminal.onScroll((offset) => {
       this.wakeTerminal();
       if (offset !== 0) this.prediction?.unsafeScreen();
@@ -356,8 +366,9 @@ export class TerminalClient {
     });
     this.streamId = this.conn.openStream(this.streamHandler());
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
-    config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); });
+    config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); this.restartCursorBlink(); });
     config.host.addEventListener("focusout", (event) => {
+      if (!config.host.contains(event.relatedTarget as Node | null)) this.cursorLayer?.stopBlink();
       // Focus moving between the host's own elements (its input and the host) keeps the terminal ready.
       if (!this.openingFocus && !config.host.contains(event.relatedTarget as Node | null) && matchMedia("(pointer: coarse)").matches) this.setTypingReady(false);
     });
@@ -392,6 +403,7 @@ export class TerminalClient {
     client.installFontWeights();
     client.remeasureFont();
     client.keepLigaturesOff();
+    client.installCursorLayerHook();
     client.loadStyledFaces();
     return client;
   }
@@ -593,6 +605,7 @@ export class TerminalClient {
       window.clearTimeout(this.renderIdleTimer);
       this.pauseTerminal();
       this.releaseSurface();
+      this.cursorLayer?.hide();
       return;
     }
     this.restoreSurface();
@@ -634,7 +647,8 @@ export class TerminalClient {
   private paintTypingState(): void {
     this.config.host.dataset.typing = this.typingReady ? "ready" : "waiting";
     this.terminal.options.cursorStyle = this.typingReady ? "bar" : "underline";
-    if (!this.typingReady) this.ghostty.renderer?.setCursorBlink(false);
+    this.syncCursorLayer();
+    this.restartCursorBlink();
   }
 
   /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
@@ -694,6 +708,12 @@ export class TerminalClient {
     this.disposeTouch();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
+    this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
+    document.removeEventListener("visibilitychange", this.onBlinkEnvironment);
+    window.removeEventListener("blur", this.onBlinkEnvironment);
+    window.removeEventListener("focus", this.onBlinkEnvironment);
+    this.cursorLayer?.dispose();
+    this.cursorLayer = undefined;
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     if (this.attached) this.conn.streamAttached(false);
@@ -1502,6 +1522,8 @@ export class TerminalClient {
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
     if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for cursor pixel test");
+    this.cursorLayerOffForTest = true;
+    this.syncCursorLayer();
     renderer.setCursorBlink(false);
     renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
   }
@@ -1596,13 +1618,81 @@ export class TerminalClient {
    *
    * There must be exactly one visible cursor: the predicted one. Repainting the
    * row once is not enough, because Ghostty redraws its cursor on every render
-   * pass, so the renderer's renderCursor is wrapped once (installCursorGuard)
+   * pass, so the renderer's renderCursor is wrapped once (installCursorLayerHook)
    * and skips drawing while hidden. Toggling only repaints the single cursor row.
    */
   private setPredictionCursorHidden(hidden: boolean): void {
     if (hidden === this.predictionCursorHidden) return;
-    this.installCursorGuard();
     this.predictionCursorHidden = hidden;
+    this.syncCursorLayer();
+    // A prediction without the layer (the host cursor was drawn by the renderer) still needs the one-row repaint.
+    this.setRendererCursorHidden(this.predictionCursorHidden || this.cursorLayerShown);
+  }
+
+  /**
+   * Whether the live cursor layer owns the cursor now (D249): typing can reach the terminal, the program shows its
+   * cursor, the view is at the live screen, and no prediction draws the cursor instead.
+   */
+  private cursorLayerWanted(): boolean {
+    const buffer = this.terminal.wasmTerm;
+    return !this.closed && !this.suspended && !this.surfaceReleased && !this.cursorLayerOffForTest && this.typingReady && !this.predictionCursorHidden
+      && this.terminal.viewportY === 0 && Boolean(buffer?.getCursor().visible);
+  }
+
+  private cursorLayerShown = false;
+  /** Pixel tests read the renderer's own cursor; they switch the layer off so the canvas draws it. */
+  private cursorLayerOffForTest = false;
+  private renderPasses = 0;
+
+  /** The cursor layer and the renderer's passes, for the browser specs (D249). */
+  get cursorLayerState(): { layer: ReturnType<TerminalCursorLayer["snapshot"]> | undefined; renderPasses: number; rendererCursorHidden: boolean; typing: string | undefined } {
+    return { layer: this.cursorLayer?.snapshot(), renderPasses: this.renderPasses, rendererCursorHidden: this.rendererCursorHidden, typing: this.config.host.dataset.typing };
+  }
+
+  /**
+   * Puts the cursor layer on the cursor cell (or hides it) and keeps exactly one visible cursor: while the layer shows,
+   * the renderer's own cursor draw is skipped and its row repainted once. Called after every renderer pass, so the
+   * layer follows cursor moves, scrolling, resizes and font changes with no frame of its own.
+   */
+  private syncCursorLayer(): void {
+    const layer = this.cursorLayer;
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    const canvas = this.terminal.renderer?.getCanvas();
+    if (!layer || !renderer || !buffer || !canvas) return;
+    const shown = this.cursorLayerWanted();
+    if (shown) {
+      const cursor = buffer.getCursor();
+      const metrics = this.cellMetrics();
+      layer.place({
+        canvas,
+        column: cursor.x,
+        row: cursor.y,
+        cellWidth: metrics.width,
+        cellHeight: metrics.height,
+        style: this.terminal.options.cursorStyle ?? "bar",
+        color: renderer.theme?.cursor ?? (this.terminal.options.theme as ITheme | undefined)?.cursor ?? "#c8ceff",
+      });
+      if (!this.cursorLayerShown) this.restartCursorBlink();
+    } else {
+      layer.hide();
+    }
+    this.cursorLayerShown = shown;
+    this.setRendererCursorHidden(this.predictionCursorHidden || shown);
+  }
+
+  /** Any input, focus or visibility change: blinks again from the visible phase, only while the page is live and focused. */
+  private restartCursorBlink(): void {
+    const layer = this.cursorLayer;
+    if (!layer) return;
+    const focused = document.visibilityState === "visible" && document.hasFocus() && this.config.host.contains(document.activeElement);
+    if (focused) layer.restart(); else layer.stopBlink();
+  }
+
+  /** Skips the renderer's cursor draw, and repaints the cursor row once so the cursor it drew is gone (or back). */
+  private setRendererCursorHidden(hidden: boolean): void {
+    if (hidden === this.rendererCursorHidden) return;
+    this.rendererCursorHidden = hidden;
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
     if (!renderer || !buffer) return;
@@ -1613,17 +1703,20 @@ export class TerminalClient {
     if (!hidden && cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
   }
 
-  private cursorGuardInstalled = false;
-
-  /** Wraps the pinned renderer's cursor draw once so a pending prediction suppresses it on every pass. */
-  private installCursorGuard(): void {
+  /** Wraps the renderer once: the cursor draw honours the hidden flag, and the cursor layer follows every pass. */
+  private installCursorLayerHook(): void {
     const renderer = this.ghostty.renderer;
-    if (this.cursorGuardInstalled || !renderer) return;
+    if (!renderer) return;
     const draw = renderer.renderCursor.bind(renderer);
     renderer.renderCursor = (x, y, line) => {
-      if (!this.predictionCursorHidden) draw(x, y, line);
+      if (!this.rendererCursorHidden) draw(x, y, line);
     };
-    this.cursorGuardInstalled = true;
+    const render = renderer.render.bind(renderer);
+    renderer.render = (...args) => {
+      render(...args);
+      this.renderPasses += 1;
+      this.syncCursorLayer();
+    };
   }
 
   /** Uses the same viewport slice the renderer uses for its cursor row. */
@@ -1701,8 +1794,6 @@ export class TerminalClient {
     if (this.closed || this.suspended || this.frozen) return;
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
-    this.rendererCursorBlinking = true;
-    this.ghostty.renderer?.setCursorBlink(this.typingReady);
     this.ghostty.startRenderLoop();
   }
 
@@ -1711,8 +1802,8 @@ export class TerminalClient {
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = 0;
     this.ghostty.cancelRenderLoop();
-    this.rendererCursorBlinking = false;
     this.ghostty.renderer?.setCursorBlink(false);
+    this.syncCursorLayer();
   }
 }
 
