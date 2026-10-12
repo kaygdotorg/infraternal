@@ -26,7 +26,7 @@ impl PromptParent {
         Ok(PromptLease(self.clone()))
     }
 
-    fn permits(&self, stream: &UnixStream, binary: &std::path::Path) -> bool {
+    fn permits(&self, stream: &UnixStream, binary: &crate::prompt_image::PromptImage) -> bool {
         let Ok(peer) = stream.peer_cred() else {
             return false;
         };
@@ -44,16 +44,14 @@ impl PromptParent {
         // the exact helper executable and direct parent, not arbitrary members
         // of the login process group (which includes public lookup commands).
         let proc = PathBuf::from(format!("/proc/{pid}"));
-        if std::fs::read_link(proc.join("exe")).is_ok_and(|exe| exe == binary) {
-            return std::fs::read_to_string(proc.join("status")).is_ok_and(|status| {
-                status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("PPid:"))
-                    .and_then(|value| value.trim().parse::<u32>().ok())
-                    == Some(parent)
-            });
-        }
-        false
+        let direct_parent = std::fs::read_to_string(proc.join("status")).is_ok_and(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                == Some(parent)
+        });
+        direct_parent && binary.matches(&proc.join("exe"))
     }
 }
 
@@ -68,7 +66,7 @@ pub(crate) async fn serve(
     listener: UnixListener,
     secret: Secret,
     parent: PromptParent,
-    binary: PathBuf,
+    binary: crate::prompt_image::PromptImage,
 ) {
     // An unrelated connection cannot consume the single authorized reply.
     // The session owns the deadline and aborts this task on cancellation.
@@ -103,12 +101,47 @@ mod tests {
             &uuid::Uuid::new_v4().simple().to_string()[..8]
         ));
         let listener = UnixListener::bind(&socket).unwrap();
+        let image_directory = root.join(format!("image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&image_directory).unwrap();
+        let (helper, image) = if std::env::var_os("INFRATERNAL_ANONYMOUS_PROMPT_ORACLE").is_some() {
+            let started = std::time::Instant::now();
+            let result = crate::prompt_image::materialize(
+                std::path::Path::new("/proc/self/exe"),
+                &image_directory,
+            )
+            .unwrap();
+            println!(
+                "PROMPT_IMAGE bytes={} preparation_ms={:.3}",
+                std::fs::metadata(&result.0).unwrap().len(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+            result
+        } else {
+            // The normal oracle needs a real executable, not tens of megabytes
+            // of unrelated Rust debug sections. The explicit optimized anonymous
+            // oracle separately exercises a copy of the entire running image.
+            let helper = image_directory.join("reply");
+            assert!(
+                std::process::Command::new("cc")
+                    .args(["-O2", "-o"])
+                    .arg(&helper)
+                    .arg(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/fixtures/prompt-reply.c")
+                    )
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let image = crate::prompt_image::PromptImage::open(&helper).unwrap();
+            (helper, image)
+        };
         let parent = PromptParent::default();
         let task = tokio::spawn(serve(
             listener,
             Secret::new(b"synthetic-reply".to_vec()),
             parent.clone(),
-            std::env::current_exe().unwrap(),
+            image,
         ));
         // A live registered login parent does not authorize another process
         // with the same executable and uid but a different direct parent.
@@ -130,7 +163,7 @@ mod tests {
                 r#""$1" --exact prompt::tests::reply_fixture --ignored; result=$?; exit "$result""#,
             )
             .arg("prompt-fixture")
-            .arg(std::env::current_exe().unwrap())
+            .arg(helper)
             .env("INFRATERNAL_PROMPT_FIXTURE", &socket)
             .spawn()
             .unwrap();
@@ -139,6 +172,7 @@ mod tests {
         task.await.unwrap();
         drop(lease);
         std::fs::remove_file(socket).unwrap();
+        std::fs::remove_dir_all(image_directory).unwrap();
     }
 
     #[test]

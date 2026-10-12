@@ -161,10 +161,22 @@ impl CredentialSession {
         } else {
             None
         };
-        let binary = adapter
-            .askpass_binary
-            .to_str()
-            .ok_or_else(|| Failure::install("The SSH prompt helper path is invalid."))?;
+        // Without a secret the private helper always refuses. Avoid copying and
+        // hashing a release image merely to refuse a missing passphrase.
+        let (command, image) = if prompt.is_some() {
+            let (binary_path, image) =
+                crate::prompt_image::materialize(&adapter.askpass_binary, directory)
+                    .map_err(|_| Failure::install("The SSH prompt image is unavailable."))?;
+            let binary = binary_path
+                .to_str()
+                .ok_or_else(|| Failure::install("The SSH prompt helper path is invalid."))?;
+            (
+                format!("exec {} __ssh-askpass", shell_quote(binary)),
+                Some(image),
+            )
+        } else {
+            ("exit 1".to_owned(), None)
+        };
         let mut helper = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -173,18 +185,18 @@ impl CredentialSession {
             .map_err(|_| Failure::install("The SSH prompt helper could not be created."))?;
         writeln!(
             helper,
-            "#!/bin/sh\n# Private credential reply; never approve a trust or permission prompt.\ncase \"${{1-}}\" in\n\"Enter passphrase for \"*\": \"|*\"'s password: \") ;;\n*) exit 1;;\nesac\nexec {} __ssh-askpass",
-            shell_quote(binary)
+            "#!/bin/sh\n# Private credential reply; never approve a trust or permission prompt.\ncase \"${{1-}}\" in\n\"Enter passphrase for \"*\": \"|*\"'s password: \") ;;\n*) exit 1;;\nesac\n{command}"
         )
         .map_err(|_| Failure::install("The SSH prompt helper could not be written."))?;
         self.prompt_helper = true;
         if let Some((listener, secret)) = prompt {
+            let image =
+                image.ok_or_else(|| Failure::install("The SSH prompt image is unavailable."))?;
             self.askpass = Some(tokio::spawn(serve(
                 listener,
                 secret,
                 self.prompt_parent.clone(),
-                std::fs::canonicalize(&adapter.askpass_binary)
-                    .map_err(|_| Failure::install("The SSH prompt helper is unavailable."))?,
+                image,
             )));
         }
         Ok(())
@@ -266,7 +278,7 @@ impl CredentialSession {
             helper.retire().await?;
         }
         if let Some(directory) = &self.directory {
-            for name in ["agent.sock", "askpass.sock", "askpass"] {
+            for name in ["agent.sock", "askpass.sock", "askpass", "askpass-image"] {
                 let _ = std::fs::remove_file(directory.join(name));
             }
         }
