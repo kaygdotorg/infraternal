@@ -355,3 +355,17 @@ The existing dialog Details disclosure shows the trusted failed-step label.
 The optional trusted `failed_step` also admits `readiness` for private terminal
 open, attach, output and cleanup failures. It uses the same server log and
 Details disclosure, without adding a progress stage or exposing remote output.
+
+### Verified payload reuse (#169)
+
+An SSH installation may retain one public executable in a private marked
+`infraternal.bootstrap-cache` sibling of its selected installation directory.
+It contains no identity or login material. Its parent, marker, directory and
+payload must satisfy the same execution-uid ownership and no-link checks as
+setup data. Each retry checks the requested executable hash before reusing a
+hard link, then checks the staged payload again before enrollment. Changed
+content is uploaded again; a foreign cache path is refused. Publication starts
+inside the owned transaction. Rollback retains this declared retry cache while
+removing that attempt's installation artifacts; subsequent uploads replace its
+single payload, bounding retained storage to one executable per execution mode.
+The cache creates no background task and grants no host admission authority.
