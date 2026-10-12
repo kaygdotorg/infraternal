@@ -9,14 +9,17 @@ use crate::{
 use infraternal_protocol::{Frame, decode_frame, encode_frame_into};
 use std::{io, time::Duration};
 
-struct Pair {
+#[path = "remote_primed_tests.rs"]
+mod primed;
+
+pub(super) struct Pair {
     server_endpoint: quinn::Endpoint,
     client_endpoint: quinn::Endpoint,
     server: quinn::Connection,
-    client: quinn::Connection,
+    pub(super) client: quinn::Connection,
 }
 impl Pair {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let ca = root();
         let server = quinn::Endpoint::server(
             remote_quic::server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate))
@@ -41,7 +44,7 @@ impl Pair {
             client: local.unwrap(),
         }
     }
-    fn binding(&self, server: bool) -> remote_quic::BindingConnection {
+    pub(super) fn binding(&self, server: bool) -> remote_quic::BindingConnection {
         remote_quic::negotiate_binding(
             if server { &self.server } else { &self.client },
             &Frame::Hello {

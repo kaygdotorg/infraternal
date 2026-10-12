@@ -74,3 +74,21 @@ pub(super) async fn serve(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Cancellation of the parked supervisor retires its owned real QUIC transport.
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_parked_service_retires_transport() {
+        let pair = crate::remote_native_tests::Pair::new().await;
+        let service = Service::start(pair.client.clone(), pair.binding(false), PathBuf::new());
+        // The task may be cancelled before its first poll; ownership must still
+        // retire the connection rather than rely on executing the async body.
+        drop(service);
+        tokio::time::timeout(std::time::Duration::from_secs(2), pair.client.closed())
+            .await
+            .unwrap();
+    }
+}
