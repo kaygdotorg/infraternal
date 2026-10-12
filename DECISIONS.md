@@ -2318,3 +2318,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Browsers:** Chrome asks once for local network access; the handoff
        works in Chrome, Firefox and WebKit (measured, #167). A node-served
        canvas answered in 1.2 ms against 151.6 ms across a long link.
+249. **The cursor blinks while you can type (owner, 2026-10-12; amends D112):**
+     when typing will reach the terminal (focused, and on phones the keyboard
+     is up), the cursor blinks. It is drawn as its own small layer above the
+     terminal and blinked by a compositor-only CSS animation, so the terminal
+     renderer stays asleep (D81, D112). The blink stops, leaving a steady
+     cursor, when the tab is hidden, the keyboard goes away, focus leaves, or
+     after about 30 seconds without input; any input restarts it. Its CPU and
+     battery cost is measured on an iPhone and on the idle canary before it
+     ships. When typing cannot reach the terminal, the cursor stays a steady
+     underline (TASTE "A blinking cursor means you can type").
