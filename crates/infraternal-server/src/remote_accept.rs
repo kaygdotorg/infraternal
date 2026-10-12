@@ -22,6 +22,7 @@ pub(crate) struct Limits {
     sources: Arc<SourceSlots>,
     reserved_sources: Arc<SourceSlots>,
     known: Arc<Mutex<HashSet<IpAddr>>>,
+    standby: Arc<crate::remote_standby::Slots>,
 }
 impl Limits {
     pub(crate) fn new() -> Arc<Self> {
@@ -31,6 +32,7 @@ impl Limits {
             sources: Arc::new(SourceSlots::new(4)),
             reserved_sources: Arc::new(SourceSlots::new(4)),
             known: Arc::default(),
+            standby: Arc::default(),
         })
     }
     fn handshake(&self, address: IpAddr) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
@@ -71,31 +73,44 @@ pub(crate) async fn quic(
     let mut handshakes = JoinSet::new();
     while let Some(incoming) = quic.accept().await {
         while handshakes.try_join_next().is_some() {}
-        let address = incoming.remote_address().ip();
+        let address = incoming.remote_address().ip().to_canonical();
         let Some((source_permit, permit)) = limits.handshake(address) else {
             incoming.refuse();
             continue;
         };
-        let hosts = hosts.clone();
+        let hosts = hosts.for_local(incoming.local_ip());
         let store = store.clone();
         let known = limits.known.clone();
+        let standby = limits.standby.clone();
         handshakes.spawn(async move {
-            let _permit = permit;
-            let _source_permit = source_permit;
             let Ok(Ok(connection)) = tokio::time::timeout(Duration::from_secs(5), incoming).await
             else {
                 return;
             };
-            let admitted = tokio::time::timeout(Duration::from_secs(5), async {
-                let fingerprint = remote_quic::peer_fingerprint(&connection)?;
-                let authority = AuthorityGuard::admit(store, fingerprint).await?;
-                let link = RemoteLink::quic(connection.clone()).await?;
-                hosts.admit_observed(authority, link, address).await?;
+            let Ok(fingerprint) = remote_quic::peer_fingerprint(&connection) else {
+                return;
+            };
+            let Ok(Ok(authority)) = tokio::time::timeout(
+                Duration::from_secs(5),
+                AuthorityGuard::admit(store, fingerprint),
+            )
+            .await
+            else {
+                return;
+            };
+            let mut admission =
+                crate::remote_standby::Admission::new(authority, (source_permit, permit), standby);
+            let admitted = async {
+                let link =
+                    RemoteLink::quic_admitted(connection.clone(), Some(&mut admission)).await?;
+                hosts
+                    .admit_observed(admission.authority, link, address)
+                    .await?;
                 remember(&known, address);
                 Ok::<(), io::Error>(())
-            })
+            }
             .await;
-            if !matches!(admitted, Ok(Ok(()))) {
+            if admitted.is_err() {
                 connection.close(0u32.into(), b"");
             }
         });
@@ -116,7 +131,7 @@ pub(crate) async fn tcp(
     let mut handshakes = JoinSet::new();
     while let Ok((socket, address)) = tcp.accept().await {
         while handshakes.try_join_next().is_some() {}
-        let address = address.ip();
+        let address = address.ip().to_canonical();
         let known_source = limits
             .known
             .lock()
@@ -149,7 +164,7 @@ pub(crate) async fn tcp(
             ((source, permit), Duration::from_millis(100))
         };
         let limits = limits.clone();
-        let hosts = hosts.clone();
+        let hosts = hosts.for_local(socket.local_addr().ok().map(|address| address.ip()));
         let store = store.clone();
         let tls = tls.clone();
         handshakes.spawn(async move {
@@ -168,7 +183,7 @@ pub(crate) async fn tcp(
                 drop(first_byte);
                 limits.handshake(address)
             };
-            let Some((_source, _permit)) = permits else {
+            let Some(permits) = permits else {
                 return;
             };
             let Ok(connection) = remote_tls::accept(socket, &tls).await else {
@@ -182,10 +197,17 @@ pub(crate) async fn tcp(
             else {
                 return;
             };
-            let Ok(link) = RemoteLink::tcp(connection.channel).await else {
+            let mut admission =
+                crate::remote_standby::Admission::new(authority, permits, limits.standby.clone());
+            let Ok(link) = RemoteLink::tcp_admitted(connection.channel, Some(&mut admission)).await
+            else {
                 return;
             };
-            if hosts.admit_observed(authority, link, address).await.is_ok() {
+            if hosts
+                .admit_observed(admission.authority, link, address)
+                .await
+                .is_ok()
+            {
                 remember(&limits.known, address);
             }
         });

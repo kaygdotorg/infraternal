@@ -1395,6 +1395,11 @@ where
             attachments.insert(
                 stream_id,
                 ClientAttachment {
+                    input: crate::websocket_input::InputQueue::new(
+                        handle.clone(),
+                        stream_id,
+                        output_tx.clone(),
+                    ),
                     handle,
                     session_id: session,
                     last_out_seq,
@@ -1448,11 +1453,10 @@ where
                 return Ok(());
             }
             attachment.input_sent_end = attachment.input_sent_end.max(end);
-            attachment
-                .handle
-                .send_frame(passthrough)
-                .await
-                .map_err(|_| ())
+            if attachment.input.enqueue(passthrough).is_ok() {
+                return Ok(());
+            }
+            retire_input_stream(stream_id, attachments, ended, sink, encode).await
         }
         Frame::Resize {
             cols,
@@ -1465,11 +1469,10 @@ where
             {
                 return Err(());
             }
-            attachment
-                .handle
-                .send_frame(passthrough)
-                .await
-                .map_err(|_| ())
+            if attachment.input.enqueue(passthrough).is_ok() {
+                return Ok(());
+            }
+            retire_input_stream(stream_id, attachments, ended, sink, encode).await
         }
         Frame::Credit { bytes } if stream_id != 0 && stream_id % 2 == 1 => {
             let attachment = attachments.get_mut(&stream_id).ok_or(())?;
@@ -1486,6 +1489,32 @@ where
         }
         _ => Err(()),
     }
+}
+
+/// FIFO overload retires only its stream; trailing Input/Resize/Credit are
+/// absorbed until explicit reattach, preserving control and sibling dispatch.
+async fn retire_input_stream<K>(
+    stream: u32,
+    attachments: &mut HashMap<u32, ClientAttachment>,
+    ended: &mut EndedStreams,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    attachments.remove(&stream);
+    ended.insert(stream)?;
+    send_frame(
+        sink,
+        stream,
+        &Frame::Close {
+            code: 1013,
+            reason: "input queue full",
+        },
+        encode,
+    )
+    .await
 }
 
 /// Deadline and revocation checks are event-driven; idle sockets do no repeated database work.
@@ -1542,6 +1571,7 @@ async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> 
 
 struct ClientAttachment {
     handle: AttachmentHandle,
+    input: crate::websocket_input::InputQueue,
     session_id: [u8; 16],
     last_out_seq: u64,
     last_in_acked: u64,
@@ -1670,7 +1700,7 @@ async fn session_gone(pool: &SqlitePool, user: &str, session: &[u8; 16]) -> Resu
     Ok(closed.unwrap_or(true))
 }
 
-/// Browser streams this socket ended with the final session-gone Close (wire §4).
+/// Browser streams retired by final session-gone or bounded input overload Close (wire §4/§6).
 ///
 /// The browser sends Credit and Resize right behind its `AttachTerm`, and may type
 /// before the Close reaches it. Those frames are dropped rather than treated as a

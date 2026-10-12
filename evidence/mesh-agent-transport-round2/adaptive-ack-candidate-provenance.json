@@ -1,0 +1,20 @@
+{
+  "role": "scratch-only ACK1ms candidate; guard and cohort unchanged",
+  "head": "cb4b957babb849ffcd0cc30b587269db2599eaf6",
+  "hashes": {
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness-ack-1ms": "1e9438467c0c6a535667650bebf644487e006259bbab805a327cc937f77c16be",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/src/lib.rs": "99c82b0bf718b31eed573ddb5533fdab410a16593f8c5ca1de03f6d550ec101d",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/src/remote_quic_ack_candidate.rs": "0e22e1d377f0783d7c4bed6ac9557806a4c8eab9e58a34bc26abde238cc903dc",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/Cargo.toml": "ea473ccdef024fc928161dc39bcfd27d6793bf278288c985d5f23046852d6dac",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/adaptive-harness/Cargo.lock": "97f266a87860cc6d0fa5468d65208d04d2eca5775045ba17e37e98282b66c68c",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/remote/src/remote_quic.rs": "665584ffdd052384a2530fea5f57d872a049d9bfd01b2f354f5cf6edd6f20e6e",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-agent/src/remote_dial_runtime.rs": "da792cc70ba69a66961d353f5c42c92dfbabdf152069408aab52cabac5f68ded",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-agent/src/remote_mesh_idle_tests.rs": "4bad7780c05c08768f1a4395e848414bfaa47c08a65a6cc311c9f4f41dc4108e"
+  },
+  "registry_artifacts": 216,
+  "registry_mismatches": 0,
+  "profile": "GNU opt3 fullLTO1CGU strip unwind",
+  "patch": "adaptive-ack-candidate.patch",
+  "load_before": "46.42 41.78 38.54 50/1555 1884148",
+  "measurement_load_before": "50.65 45.92 40.52 49/1536 1919469"
+}

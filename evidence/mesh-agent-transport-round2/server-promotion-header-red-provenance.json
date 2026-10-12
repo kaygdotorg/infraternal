@@ -1,0 +1,14 @@
+{
+  "role": "fail-first realQUIC blocked promotion header; control progressed",
+  "head": "cf64f1d2cef3eee2070c70566a8ec9a57b6e9e49",
+  "hashes": {
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/promotion-header-red-tests": "bd8d0daf12fc7f34bb2939434943bef4f05e84fc63a7c5d9d6040c2e5b3953ca",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-server/src/embedded_priming.rs": "7148082be8ec1cbcad676ae86cddc1afb50f57a15894403ef6317d0619ddfb17",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-server/src/embedded_priming_header_tests.rs": "f92cb2c18c4f8062891cab07df9b47dd8a8ff9c3f82cd83952bdf903a9417b21",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-server/src/embedded.rs": "c738681d67e8e4846575d608f60d31c7ca6b52642b003b8bd59e1bd7b05199f7",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-server/src/embedded_writes.rs": "ae65a04bc0d53358befaab0c840d61ad9756a11a09b6bd01de3e2e75e7833a98",
+    "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-server/src/remote_link.rs": "7848b05a5016042ed3357aa793312f4c7c1eb573937d25400384e00287789991"
+  },
+  "result": "0 PASS 1 FAIL 0.24s",
+  "exit": 101
+}

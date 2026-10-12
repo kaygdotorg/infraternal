@@ -1,0 +1,42 @@
+{
+  "crates/infraternal-server/src/embedded.rs": {
+    "wip_sha256": "a1d951c1642194d6003e2558f33d1853641e17ae2d2152f1e6845e82f15ce8ea",
+    "head_sha256": "a1d951c1642194d6003e2558f33d1853641e17ae2d2152f1e6845e82f15ce8ea",
+    "byte_identical": true
+  },
+  "crates/infraternal-server/src/embedded_priming.rs": {
+    "wip_sha256": "d4ca82e2a9e45ef1104d30ae1efee5090e1376152078d7464abf723087bceb08",
+    "head_sha256": "d4ca82e2a9e45ef1104d30ae1efee5090e1376152078d7464abf723087bceb08",
+    "byte_identical": true
+  },
+  "crates/infraternal-server/src/embedded_shadow_flights.rs": {
+    "wip_sha256": "688f29dfd8198f4a968c11b2ae190009cf581913a24070abf040e0160c095c18",
+    "head_sha256": "688f29dfd8198f4a968c11b2ae190009cf581913a24070abf040e0160c095c18",
+    "byte_identical": true
+  },
+  "crates/infraternal-server/src/embedded_writes.rs": {
+    "wip_sha256": "5ec5f1fcc1abee3c455aa19e94068e6dc06517f67ab6e4fa071594d123bd862a",
+    "head_sha256": "5ec5f1fcc1abee3c455aa19e94068e6dc06517f67ab6e4fa071594d123bd862a",
+    "byte_identical": true
+  },
+  "crates/infraternal-server/src/remote_link.rs": {
+    "wip_sha256": "d2fb92aa1f86e531fdad1e2cf223b4aae6cf6953ace660ea9b21f170846dd18b",
+    "head_sha256": "d2fb92aa1f86e531fdad1e2cf223b4aae6cf6953ace660ea9b21f170846dd18b",
+    "byte_identical": true
+  },
+  "crates/infraternal-server/src/remote_runtime.rs": {
+    "wip_sha256": "e5432a07d9f3741d809653580bb7b111dfc45a2b5524e9c787baae63b41e8277",
+    "head_sha256": "e5432a07d9f3741d809653580bb7b111dfc45a2b5524e9c787baae63b41e8277",
+    "byte_identical": true
+  },
+  "crates/infraternal-server/src/remote_standby.rs": {
+    "wip_sha256": "69347abc924c008b611df28fed9815ffbbff8987940407c27a4c450359d4d4fb",
+    "head_sha256": "69347abc924c008b611df28fed9815ffbbff8987940407c27a4c450359d4d4fb",
+    "byte_identical": true
+  },
+  "crates/infraternal-server/src/embedded_regressions.rs": {
+    "wip_sha256": "d6af65cf479c5ada3987f9769b118097047d2ee7431982e46bc6a3be3dcb3041",
+    "head_sha256": "d6af65cf479c5ada3987f9769b118097047d2ee7431982e46bc6a3be3dcb3041",
+    "byte_identical": true
+  }
+}

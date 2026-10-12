@@ -69,6 +69,7 @@ pub fn compile(
         );
     }
     Ok(Config {
+        server: Some(checkpoint.server),
         node,
         version: checkpoint.generation,
         addresses: local,
@@ -118,6 +119,7 @@ pub fn chunks(
     }
     let mut builder = Chunks {
         part: crate::dataplane::Chunk {
+            server: new.server,
             node: new.node,
             from_version: old.map(|old| old.version),
             version: new.version,

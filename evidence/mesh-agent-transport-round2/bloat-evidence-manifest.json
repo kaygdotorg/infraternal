@@ -1,0 +1,25 @@
+{
+  "role": "Immutable original D215 cargo-bloat evidence compressed without altering tool output",
+  "revisions": [
+    "a5f744fbc1d5e8966de46982b995d816e91baff5",
+    "515d371249d2809114133f9245a7947a3278d13c"
+  ],
+  "files": [
+    {
+      "raw_file": "bloat-a5f744fb.json",
+      "raw_bytes": 3088088,
+      "raw_sha256": "4f4c1a39615c6c0c31807890012fa35c7e34243c49cbd1ef7f6f2c9f292ea9fd",
+      "compressed_file": "bloat-a5f744fb.json.gz",
+      "compressed_bytes": 447179,
+      "compressed_sha256": "24bd31c5a87f8c3e7235213027439376309939fef88341eee124f13d47c050dd"
+    },
+    {
+      "raw_file": "bloat-515d3712.json",
+      "raw_bytes": 3107506,
+      "raw_sha256": "5f854baff44bcf8bb60bb2c0267bd4d9a14adc36cd52f260c59c85dcc10a48c5",
+      "compressed_file": "bloat-515d3712.json.gz",
+      "compressed_bytes": 449868,
+      "compressed_sha256": "ff8de004f990de2eeb5447dc1431368a1fdfb68f90d1afaf64f256f52d4a4c9b"
+    }
+  ]
+}

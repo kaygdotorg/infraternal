@@ -19,6 +19,7 @@ fn restart_preserves_operator_gateway_host_route() {
     let mut node = Node::restore(&directory).unwrap();
     node.up().unwrap();
     node.chunk(Chunk {
+        server: None,
         node: NodeId(1),
         from_version: None,
         version: 1,

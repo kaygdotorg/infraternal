@@ -1,0 +1,18 @@
+Expose authenticated QUIC liveness using the current RTT (#129)
+
+Add an owned interruption future that observes the existing authenticated
+frame counters every50ms and allows the current RTT plus200ms silence.
+ACK, keepalive replies and one-way authenticated output count; replayed or
+unauthenticated UDP does not. It owns no detached worker and cancellation
+stops observation. The transport idle deadline stays separate.
+
+A fixed2s application deadline was rejected because the reviewed local
+silent-cut recovery took2054726us. A frozen dial-time RTT was rejected
+because a live path can change delay. The legacy diagnostic interface stays
+available for comparable baseline measurements; no new transport engine.
+Decisions128,198,215.
+
+Validation: fmt/touched all-target clippy; remote plugin11 tests passed;
+client silent-cut review passed223034us against300000us budget. Namespace
+terminal and1000-path adaptive acceptance remain separate pending gates.
+Refs: #129

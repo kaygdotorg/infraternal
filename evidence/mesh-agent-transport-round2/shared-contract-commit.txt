@@ -1,0 +1,15 @@
+Document additive shared shim writer selection and parked viewer semantics
+
+Record negotiated capability bit 3 and fixed-length tag 0x1D, requiring the
+existing durable nonzero writer and sequencing capabilities. Explain mode-local
+replacement, unchanged ordinary peers and input-only detached behavior so a
+parked path cannot impersonate a writer or impose output backpressure. A new
+shim frame layout or caller-selected identity is unnecessary and rejected.
+This additive contract implements the approved D128/D215 warm-fallback brief;
+the issue records its proposal before the documentation edit.
+
+Validation: diff whitespace check passes; matched against production selection
+and replacement invariants and 13 real-PTY component tests, including the
+parked-only producer regression. Final branch-head fast gate follows integration.
+
+Refs: #129

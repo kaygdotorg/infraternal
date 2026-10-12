@@ -1,0 +1,1 @@
+Perf VM temporarily blocked by shared /var/lock/perf-bench.lock: three nonblocking flock attempts returned1; owned /root/infraternal-bench/mat129-cont was not created. No measurement or host change occurred. Need the current lock holder/orchestrator to release the benchmark slot; continuing local frozen-build/check work and will retry.

@@ -1,0 +1,18 @@
+Cover mesh probe ownership and component-down closure races
+
+Add real-mTLS regressions for a healthy mesh's keepalive/freshness and
+transport closure during explicit component down. Share the existing
+component-down fixture so the only variant is the concurrent close;
+assert the applied MeshDisabled status rather than relax the reason.
+
+Before the production fixes, previous RTT5s delayed the first probe and
+failed the healthy path; closing mesh during down reportedInterrupted.
+The fixes remove cross-path RTT inheritance and preserve applied intent.
+Decisions128,198,201,215 require proven replacement and component state
+that does not depend on completion ordering. Mock timers would miss the
+native QUIC behavior, so the tests use the selected engine and real TLS.
+
+Validation: fmt, strict all-target mesh,remote Clippy, serial agent
+67PASS0FAIL11ignored23.22s and transport2PASS0FAIL0.01s.
+
+Refs: #129

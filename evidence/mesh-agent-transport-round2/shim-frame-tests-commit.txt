@@ -1,0 +1,18 @@
+test(shim): preserve deferred frame storage and trailing order (#129)
+
+Exercise a complete borrowed sequenced frame held across empty retries,
+then its coalesced trailing control frame. Exercise the maximum legal
+frame and prove retries preserve storage capacity rather than allocating
+another payload (D128, D215).
+
+Reject owned-payload queue assertions alone: actual decoder prefix and
+empty-slice retries establish FIFO ownership and bounded storage. Record
+the pathological maximum allocation separately from ordinary RSS.
+
+Validation: isolated cf64f1d2 frame slice fmt and strict all-target shim
+clippy passed; 9 frame tests passed, 0 failed, 1 ignored in0.04s. The exact
+module/test source hashes match the current checkout; unrelated newer
+agent/docs changes were excluded from the isolated baseline. Raw outputs
+are saved with verified byte-identical gzip decompression and hashes.
+
+Refs: #129

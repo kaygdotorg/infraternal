@@ -1,0 +1,55 @@
+{
+  "qualification": "Actual current production shim via hidden argumentrunner; not shipping CLI gate",
+  "libraries": {
+    "infraternal_shim": {
+      "path": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libinfraternal_shim-6327b2e65fd6f063.rlib",
+      "sha256": "245e135328f8087c74447e9e4cc24ebf5c334bd58413d55d332ef2db64239627"
+    },
+    "nix": {
+      "path": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libnix-0d419c7c541953e6.rlib",
+      "sha256": "f5f80c3cad2a4d823b0a32f5b3e87655a8bf5aac429d9fa221a08cbb1a79a86e"
+    },
+    "vt100": {
+      "path": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libvt100-61dd29ea5f5a269c.rlib",
+      "sha256": "30711a476652e433b0631717565b5a63bc2514232d94d698a9dda2738577b337"
+    }
+  },
+  "commands": [
+    [
+      "rustc",
+      "--edition=2024",
+      "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shared-writer-component-runner.rs",
+      "-L",
+      "dependency=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps",
+      "--extern",
+      "infraternal_shim=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libinfraternal_shim-6327b2e65fd6f063.rlib",
+      "--extern",
+      "nix=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libnix-0d419c7c541953e6.rlib",
+      "--extern",
+      "vt100=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libvt100-61dd29ea5f5a269c.rlib",
+      "-o",
+      "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shim-deferral/new-production-shim"
+    ],
+    [
+      "rustc",
+      "--edition=2024",
+      "--test",
+      "crates/infraternal/tests/shim.rs",
+      "-L",
+      "dependency=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps",
+      "--extern",
+      "infraternal_shim=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libinfraternal_shim-6327b2e65fd6f063.rlib",
+      "--extern",
+      "nix=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libnix-0d419c7c541953e6.rlib",
+      "--extern",
+      "vt100=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libvt100-61dd29ea5f5a269c.rlib",
+      "-o",
+      "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shim-deferral/green-tests"
+    ]
+  ],
+  "source_sha256": {
+    "crates/infraternal-shim/src/frame.rs": "bc7e0edcd45567158c9dcea3fbb0b68883ca3816026ed3fc7b6f4092072093c2",
+    "crates/infraternal-shim/src/session.rs": "15e598266a9219f10a8e735702d105910aa01b94552a52a5ea2a77d12ce5fc05",
+    "crates/infraternal/tests/shim.rs": "ca0be74ef1e051915e5904572bb9eb6309c97c0026d1b94c2a648f626ca00dd6"
+  }
+}

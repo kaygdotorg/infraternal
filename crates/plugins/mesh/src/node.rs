@@ -12,6 +12,7 @@ use std::{
 
 pub use crate::dataplane::Chunk;
 struct Pending {
+    server: Option<crate::policy::model::NodeId>,
     next: u32,
     version: u64,
     from_version: Option<u64>,
@@ -105,9 +106,14 @@ impl Node {
                 }
                 return Ok(node);
             }
-            let (public_key, port) = identity?;
+            let (public_key, mut port) = identity?;
             if public_key.0 == [0; 32] || port == 0 {
                 return Err(io::ErrorKind::NotConnected.into());
+            }
+            // A retained interface from an older daemon may have selected the
+            // reserved port. Rebind its socket while preserving its private key.
+            if port == 51820 {
+                port = Device::allocate_port()?;
             }
             node.identity = Some(Identity { public_key, port });
             node.client = Some(Client::new()?);
@@ -291,6 +297,7 @@ impl Node {
                 self.config.clone().ok_or(io::ErrorKind::InvalidData)?
             } else {
                 Config {
+                    server: chunk.server,
                     node: chunk.node,
                     version: chunk.version,
                     addresses: chunk.addresses,
@@ -299,6 +306,7 @@ impl Node {
                 }
             };
             self.pending = Some(Pending {
+                server: chunk.server,
                 next: 0,
                 version: chunk.version,
                 from_version: chunk.from_version,
@@ -307,7 +315,8 @@ impl Node {
             });
         }
         let pending = self.pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
-        if pending.next != chunk.index
+        if pending.server != chunk.server
+            || pending.next != chunk.index
             || pending.config.node != chunk.node
             || pending.config.addresses != chunk.addresses
             || pending.version != chunk.version
@@ -322,6 +331,7 @@ impl Node {
             .ok_or(io::ErrorKind::InvalidData)?;
         pending.config.version = chunk.version;
         pending.config.default_policy = chunk.default_policy;
+        pending.config.server = chunk.server;
         for node in chunk.removed {
             pending.config.peers.remove(&node);
         }
@@ -561,6 +571,38 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     #[test]
+    fn server_identity_cannot_change_inside_a_staged_snapshot() {
+        use crate::policy::model::{Addresses, NodeId, PublicKey};
+        let mut node = Node {
+            identity: Some(Identity {
+                public_key: PublicKey([1; 32]),
+                port: 44000,
+            }),
+            ..Node::default()
+        };
+        let config = Config {
+            server: Some(NodeId(1)),
+            node: NodeId(2),
+            version: 1,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("IPv4"),
+                ipv6: "fd01::2".parse().expect("IPv6"),
+            },
+            default_policy: crate::dataplane::DefaultPolicy::default(),
+            peers: BTreeMap::new(),
+        };
+        let mut chunk = crate::configuration::chunks(None, &config)
+            .expect("snapshot")
+            .remove(0);
+        chunk.last = false;
+        assert!(!node.chunk(chunk.clone()).expect("staged header"));
+        chunk.index = 1;
+        chunk.server = Some(NodeId(3));
+        assert!(node.chunk(chunk).is_err());
+        assert!(node.config().is_none());
+    }
+
+    #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn explicit_up_recovers_disabled_intent_before_reusing_identity() {
         let mut node = Node::default();
@@ -600,6 +642,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
         };
         let config = Config {
+            server: None,
             node: NodeId(1),
             version: 1,
             addresses: addresses(1),
@@ -613,7 +656,7 @@ mod tests {
                             peer: Peer {
                                 key,
                                 addresses: addresses(id),
-                                endpoint: Some("192.0.2.1:51820".parse().expect("public endpoint")),
+                                endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
@@ -646,7 +689,7 @@ mod tests {
             .get_mut(&NodeId(500))
             .expect("member")
             .peer
-            .endpoint = Some("192.0.2.2:51820".parse().expect("public endpoint"));
+            .endpoint = Some("192.0.2.2:44000".parse().expect("public endpoint"));
         let delta = crate::configuration::chunks(Some(&config), &next).expect("delta");
         assert_eq!(delta.len(), 1);
         assert_eq!(delta[0].upserted.len(), 1);

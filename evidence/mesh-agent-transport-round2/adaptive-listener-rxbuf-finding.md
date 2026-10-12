@@ -1,0 +1,14 @@
+Scratch-only existing-Quinn listener receive-buffer diagnostic completed (#129/D215). No production transport, keepalive, ACK policy, node socket or kernel settings changed. Two serial immutable GNU release cohorts ran under `systemd-run --user --scope -p CPUWeight=10000`, default 100ms keepalive/default ACK/pinned guard, guarded 1000 pairs, idle60000ms/samples320/join8, with a 150s subprocess deadline and the same 1-second read-only owned-UDP observer. Both produced fresh JSON and neither reached the deadline.
+
+| Frozen cohort | False cuts / live pairs | Fixture load before → sample | Owned UDP drops | Test result |
+|---|---:|---|---:|---|
+| Default listener |1000 /1000|49.85 →61.82|42562|0 passed;1 failed;27.19s|
+| Listener request 212992B |604 /1000|67.26 →67.18|16376|0 passed;1 failed;30.78s|
+
+Acceptance remains zero false cuts; both FAIL, so healthy-scale transport acceptance is still unresolved. Different host loads and a single sequential comparison prevent a precise causal attribution or tuning decision. Maximum authenticated silence was1392042us(default) vs343423us(candidate). Observed process resident deltas129699840B vs187428864B are noisy process measurements and are not the socket's kernel buffer allocation.
+
+Candidate startup getsockopt confirmed central listener 127.0.0.1:6122, inode 15714193, effective SO_RCVBUF212992→425984B; configured incremental ceiling 212992B total for one listener shared by 1000 nodes (not multiplied by nodecount). All node endpoints retained default buffers. The candidate's 16376 drops were on that proven central listener; retained post-drop rows observed its RxQ up to384000B. Immutable default binary has no listener role marker, so its 42562 drops are proven owned aggregate only. The test harness prefixes startup output with the test name; the live role matcher missed that prefix. Exact startup role was recovered from the preserved log, and central queue figures cover retained post-drop samples rather than every sample. Observer CPU overhead was 0.624s/27.435s wall(default),0.636s/31.314s(candidate).
+
+Evidence: `evidence/mesh-agent-transport-round2/adaptive-listener-rxbuf-{default,candidate}.{log,json,exit}`, `*-udp.json`, `*-scope.log`, `adaptive-listener-rxbuf-comparison.json`, and build/configuration/provenance files. Immutable candidate SHA256 ff9f252ecb2df4e13393342751405a29f38debde1fb8dd69f822e46cd1b7eea9; baseline SHA256 e9aef615cc550b86fde5bffb404ce2772a7e2d9a47d8cefbf7ff8c231e5d6164. Existing locked registry versions/sources/checksums match repository lock; frozen plugin/driver source hashes match pinned baseline. Default GNU release full LTO/1CGU/unwind; candidate changes only central socket construction plus diagnostic configuration/startup metadata.
+
+Both scopes exited; all lane CPU jobs stopped and the compile window was handed back. No adoption or waiver asserted.

@@ -1,0 +1,2 @@
+Step: review31213cb5 silent-blackhole test carried unchanged and pushed (head below). Red2054726us, green223034us vs300000us; encrypted UDP drops without close/path removal, legacy mock server so this tests adaptive detection plus cold local fallback selection. Warm fallback correctness established separately by real mTLS standby tests; full terminal and netem target not yet established. Logs: silent-review-red.log, silent-review-green.log, standby-client-complete-tests.log.
+19882c1ade6f5b735659b8fb3b46f5051574c41c

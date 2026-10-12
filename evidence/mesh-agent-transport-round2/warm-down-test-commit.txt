@@ -1,0 +1,19 @@
+Prove mesh down uses the parked fallback when new proofs are refused
+
+Add controlled proof validity and accepted-connection count to the
+existing real-mTLS fixture. Keep the parked connection healthy, refuse
+only future proofs, apply component down and require cached control to
+become usable on fallback with MeshDisabled and unchanged connection
+count. This detects cold proof before warm substitution rather than
+assuming a completed socket demonstrates handshake-free switching.
+
+The unchanged regression initially timed out3.11s; after30c044bf it
+passes0.16s. Closing the listener or endpoint was rejected because that
+would also destroy the warm connection and test a different condition.
+Decisions64,128,198,201,215 require proven retained transport and applied
+component intent independent of admission availability.
+
+Validation: fmt, strict all-target mesh,remote agent Clippy pass; real
+regression1PASS0FAIL. Independent reviewer rechecked the fix and test.
+
+Refs: #129

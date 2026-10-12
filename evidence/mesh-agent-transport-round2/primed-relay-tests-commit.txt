@@ -1,0 +1,20 @@
+Test primed native writer intent, cursor credit and owner cancellation
+
+Reuse the existing real-mTLS QUIC pair with a private controlled Unix shim.
+Verify first durable Ack, no output reads while parked, ordered cursor and
+credit, subsequent input/output, and ordinary writer selection after
+promotion. Refuse malformed markers, reserved call ids and unnegotiated
+intent; one refused stream leaves its QUIC siblings live.
+
+Also cancel a parked owner before its first poll and require its transport
+to retire, covering the captured-guard fix after its original failing
+regression. Timer-only mocks or connection-global mode checks would miss
+stream ordering and cancellation ownership. Decisions64,198,215 preserve
+native authority, shared durable state and bounded independent writers.
+
+Validation: fmt and strict all-target agent mesh,remote Clippy pass;
+serial agent67PASS0FAIL11ignored23.22s and transport2PASS. This controlled
+shim fixture complements the real PTY shared-writer tests; namespace
+terminal latency remains a separate required acceptance measurement.
+
+Refs: #129

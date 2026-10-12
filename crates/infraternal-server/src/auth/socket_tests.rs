@@ -891,3 +891,6 @@ mod terminal_exit;
 
 #[path = "socket_tests/session_gone.rs"]
 mod session_gone;
+
+#[path = "socket_tests/review_input_credit.rs"]
+mod review_input_credit;

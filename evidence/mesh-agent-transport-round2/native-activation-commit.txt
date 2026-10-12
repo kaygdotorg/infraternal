@@ -1,0 +1,20 @@
+Activate primed control without repeating its authenticated greeting
+
+Represent whether a proven native control already sent Hello while
+parking, and retain negotiated capability bits instead of one boolean.
+A primed proof sends the canonical transport.activate call and consumes
+its cached greeting through the existing decoder; ordinary proof still
+sends Hello once. An externally owned native supervisor can keep serving
+writers while control activation joins common plugin dispatch.
+
+Keep greeting construction shared and adapt server-path proof defaults
+and capability observation to the additive state. Repeating Hello or
+starting another native accept loop would lose activation semantics or
+race the parked owner. Decisions64,198,215 preserve proof-before-dispatch,
+capability negotiation, TCP v1 and cancellation-scoped transport lifetime.
+
+Validation: fmt and strict agent all-target mesh,remote Clippy pass;
+serial agent67PASS0FAIL11ignored23.22s and transport2PASS. Warm writer
+ownership and lifecycle tests land separately.
+
+Refs: #129

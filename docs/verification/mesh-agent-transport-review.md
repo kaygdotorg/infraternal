@@ -1,0 +1,14 @@
+<!-- Author review checklist for mesh transport slice 2, #129. -->
+# Author review
+
+- Contract is additive: optional server role/path fields, legacy status remains readable, capability opt-in separates older infraternal agents.
+- Foundational libraries unchanged: existing kernel WireGuard, Quinn/rustls, TCP/OpenSSL, SQLx and nft/iptables.
+- Candidate identity uses the enrolled roots and TLS server name, current seven-day certificate, ordinary authority ledger and admitted fingerprint. No mesh address is authority. Exact nonce Pong precedes Hello and actor replacement.
+- Losing/cancelled candidates own and retire endpoints/drivers; mesh coordinator owns additional listener leases. Component down clears proposal and proves fallback before retiring a live mesh session.
+- Existing shim IDs, writer sequence and durable output offsets survive transport replacement; bounded retained input replays suffixes in legal frame sizes. The attachment sender waits for authoritative Ack credit at 4 MiB; a full writer leaves sibling senders and the shared actor runnable. Internal invalid-command refusal remains attachment-scoped.
+- Retained TCP receive preserves coalesced stream IDs; native proof reuses its existing stream/decoder. Regression tests failed before decoder and advertisement fixes.
+- Port allocation uses kernel port zero and validates the actual bound port, bounded retries and explicit 51820 refusal; public discovery receives the actual port. Every peer receives 25-second keepalive.
+- Freshness uses authenticated, deduplicated QUIC frame counters; raw UDP cannot reset it. Watchers cancel with sessions. New fields reuse existing bounded protocol/JSON and netlink decoders and their fuzz targets; no new wire parser or foundational engine.
+- Root proof refuses host network/mount namespaces, supplies a public fixture login in a private mount namespace, transfers private identity only by inherited zeroizing pipe and cleans node state on failure. Translated-address review checks cover both declared firewall backends; final input/forward checks run before conntrack acceptance.
+- Measurements distinguish 2 live nodes/1 PTY/1000 inventory from 1000 mutually authenticated transport pairs and 200 retained-input states. Historical build-host measurements are diagnostics only. New acceptance measurements run on the named perf VM under the shared benchmark lock, with source/artifact hashes and load recorded. No deployment.
+- Performance acceptance remains subject to measured D41/PROCESS budgets and the RTT + 250 ms recovery / local direct + 2 ms echo targets. Reports must distinguish real PTYs, retained-input states, public inventory and authenticated transport pairs. Final acceptance and the fast gate are recorded on #129; this checklist alone does not assert that they pass.

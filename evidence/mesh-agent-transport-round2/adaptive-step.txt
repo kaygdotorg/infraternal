@@ -1,0 +1,2 @@
+Step: remote plugin exposes current-RTT authenticated liveness, no fixed2s deadline in the new guard; head below. Same24 authenticated counters,50ms owned observation, RTT+200ms silence budget; raw UDP and duplicates do not prove liveness. fmt/all-target touched clippy PASS, remote plugin11 passed7.60s; integration review223034us vs300000us.1000 adaptive guard/real terminal0,150,300ms acceptance still pending. Current shipping and optimized fixtures are compiling; no benchmark overlap.
+ecbe93e54325be8853d133f391b5405521ee5602

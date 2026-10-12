@@ -1,0 +1,18 @@
+Exercise shared writer replay and detached PTY progress against the real shim
+
+Cover ordinary/shared coexistence, durable duplicate trimming and geometry,
+negative selection without ordinary-peer eviction, bounded peer admission, and
+a parked-only writer while a real producer drains more than the PTY buffer.
+The last regression asserts producer completion before opening an observer;
+only its later long-line repaint requests the existing approximate capability.
+An observer that creates progress or a fake cursor cannot prove detached
+semantics, so those alternatives are rejected. D128/D215 retain shim-owned
+input cursors and independent output subscriptions across transport replacement.
+
+Validation: targeted fmt and strict CLI shim-test clippy with plugins disabled
+pass (9.07 s). The unchanged tests compiled against the actual production shim
+entrypoint pass all 13 real-PTY tests in 4.43 s; shim unit gate passes 62 tests.
+The parked-only regression failed before its production fix in 5.06 s. Default
+shipping CLI validation follows the server freeze; no stub proves that gate.
+
+Refs: #129

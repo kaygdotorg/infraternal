@@ -89,6 +89,7 @@ the PTY output stream since the session started.
 | 0x1A | shim → agent | `InputState` | u64 exclusive written offset, u64 exclusive accepted offset (cap bit 0) |
 | 0x1B | agent → shim | `SelectWriter` | u32 nonzero writer identity (cap bit 1; see additive section) |
 | 0x1C | shim → agent | `SnapshotWithFlags` | u64 seq, u8 flags, bytes VT (cap bit 2; see additive section) |
+| 0x1D | agent → shim | `SelectSharedWriter` | u32 existing nonzero writer identity (cap bit 4; see additive section) |
 | 0x20 | shim → agent  | `Exited`   | i32 status or −signal, u64 final_seq |
 | 0x21 | agent → shim  | `ExitAck`  | (empty). Optional acknowledgement after `Exited`; closes this peer. |
 | 0x7F | both          | `Error`    | u16 code, utf-8 message |
@@ -255,3 +256,57 @@ Old shims retain their negotiated behavior. The maximum 32 peer sockets includes
 ownership links. Only exited shims use the one-shot 600-second retention timer;
 running idle shims have no timer. The hidden shim startup option may shorten
 this bound for deterministic real-PTY tests, but cannot increase it.
+
+### Capability bit 4: SHARED_WRITER (#129, D215)
+
+Bit 4 requires bits 0 and 1. A supporting shim advertises all three; Attach
+selects them before the fixed-length `SelectSharedWriter` (0x1D, little-endian
+u32). Select exactly once before state, input or resize. Zero, an unknown
+writer, an unselected capability and malformed payloads are refused without
+changing another peer or allocating a new writer identity.
+
+An ordinary peer and a shared peer may coexist for the same durable writer.
+Their accepted/written cursors, input queue and duplicate trimming are shared;
+output cursors and socket backpressure are independent. Replacement disconnects the
+previous peer only within the same ordinary/shared mode. Ordinary `SelectWriter`
+semantics, caps-zero behavior and the 32-peer/512-writer bounds remain unchanged.
+Shared selection cannot change remembered geometry. Only newly accepted input
+selects its remembered geometry; replayed input cannot steal it.
+
+A parked shared peer queries the authoritative input state but does not request
+output until `ReadFrom` or `SnapshotRequest`. If only parked shared peers remain,
+the shim continues draining the PTY into its bounded terminal state and ring as
+when detached. Such peers are input/Ack subscribers, and cannot alone impose
+viewer backpressure. Ordinary peers retain the existing flow-control behavior.
+
+The authenticated infraternal agent chooses the identity from the existing
+server-assigned native writer binding. This capability grants no browser-selected
+identity, new session authority or guarantee across a shim/host crash.
+
+SHARED_WRITER also negotiates queue deferral for an ordinary native writer
+selected with SelectWriter; it does not change ordinary replacement semantics.
+A valid sequenced frame whose unseen suffix
+cannot fit the shared input queue waits without changing accepted/written
+cursors, geometry or ownership segments. Acceptance remains atomic. Each live
+peer retains at most one complete bounded frame and at most one 16-KiB socket
+read suffix; later frames remain ordered behind the deferred frame. The shim
+stops reading that peer, continues PTY writes and other peer requests, and gives
+the oldest deferred request priority over fresh input requiring queue space.
+Duplicate input requires no space. Overlap is recalculated against the durable
+writer cursor before acceptance.
+
+Dropped deferred peers release their live-peer storage immediately. Only their
+unaccepted data is discarded: accepted bytes remain in the surviving queue,
+and the server retains input until a durable written Ack permits replay to
+advance. Malformed ranges and invalid ordering remain refusals. Peers without
+SHARED_WRITER retain their existing capacity-refusal behavior. The accepted
+queue stays at most 1 MiB; deferred payload belongs to at most 32 live peers,
+never to the 512 retained writer identities. Decoder allocation capacity and
+per-peer read storage are additional to that accepted-byte bound.
+
+Reserved queue space remains unavailable to fresh input from any peer. Ordinary
+ReadFrom, InputStateRequest, Resize and duplicate input continue while another
+peer waits. A legacy peer requesting new input against reserved capacity keeps
+its existing refusal behavior. Completing a deferred request releases its FIFO
+ticket; a trailing request that must wait receives a new ticket behind existing
+waiters.

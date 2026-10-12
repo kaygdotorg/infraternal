@@ -1,0 +1,14 @@
+test(fuzz): preserve shim decoder parity through deferred admission
+
+Compare ordinary streamed decoding with repeated pause/retry admission across
+fragmented and coalesced input. Assert exactly one owned pending frame, bounded
+byte progress and malformed-prefix parity before resuming the socket suffix.
+Reject testing only successful complete frames because deferred ownership is
+where byte loss/order errors occur. Decisions D12, D40, D128, D215.
+
+Validation: fmt/strict target Clippy pass with shipping server SSH feature;
+exact production decoder ASAN seed smoke passes, including maximum/coalesced
+frame seeds. Existing shim frame/session and18 shipping real-PTY cases pass.
+Full ASAN campaign waits for perf VM lock. Raw fuzz-shim/seed logs preserved.
+
+Refs: #129
