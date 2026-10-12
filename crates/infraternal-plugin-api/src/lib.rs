@@ -179,6 +179,11 @@ impl ReplySender {
 #[cfg(feature = "socket-host")]
 pub trait Plugin: Send + Sync {
     fn descriptor(&self) -> &'static PluginDescriptor;
+    /// Publish committed host authority changes through existing plugin workers.
+    /// The host calls this only after durable commit; it creates no idle work.
+    fn authority_changed(&self) -> Option<Operation<'_, ()>> {
+        None
+    }
     /// Optional event-driven work for an admitted node. The runtime owns cancellation.
     fn node_connected(
         &self,
