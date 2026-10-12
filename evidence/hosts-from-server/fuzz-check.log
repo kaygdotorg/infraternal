@@ -1,0 +1,103 @@
+    Blocking waiting for file lock on build directory
+    Checking tokio v1.53.2
+    Checking crypto-common v0.1.7
+   Compiling sqlx-sqlite v0.8.6
+   Compiling nix v0.30.1
+    Checking infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/infraternal-protocol)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/infraternal-server)
+    Checking digest v0.10.7
+    Checking sha2 v0.10.9
+    Checking sha1 v0.10.7
+    Checking blake2 v0.10.6
+    Checking tungstenite v0.29.0
+    Checking argon2 v0.5.3
+   Compiling sqlx-macros-core v0.8.6
+    Checking infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/infraternal-shim)
+   Compiling sqlx-macros v0.8.6
+    Checking tokio-stream v0.1.19
+    Checking tokio-util v0.7.19
+    Checking tokio-openssl v0.6.5
+    Checking quinn v0.11.12
+    Checking fs-err v3.3.2
+    Checking tower v0.5.3
+    Checking tokio-tungstenite v0.29.0
+    Checking sqlx-core v0.8.6
+    Checking h2 v0.4.19
+    Checking tower-http v0.6.11
+    Checking sqlx v0.8.6
+    Checking infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/infraternal-plugin-api)
+    Checking hyper v1.11.1
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/plugins/remote)
+    Checking infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/infraternal-mesh)
+    Checking infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/plugins/release)
+    Checking infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/plugins/host-facts)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/plugins/ssh)
+    Checking hyper-util v0.1.21
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/infraternal-agent)
+    Checking infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/crates/plugins/mesh)
+    Checking axum v0.8.9
+    Checking axum-server v0.8.0
+warning: method `open_readiness` is never used
+   --> crates/infraternal-server/src/embedded.rs:305:25
+    |
+181 | impl EmbeddedAgent {
+    | ------------------ method in this implementation
+...
+305 |     pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+    |                         ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `retire_bootstrap`, `retire_bootstrap_once`, and `complete_bootstrap` are never used
+  --> crates/infraternal-server/src/bootstrap_retirement.rs:12:25
+   |
+ 6 | impl EnrollmentStore {
+   | -------------------- methods in this implementation
+...
+12 |     pub(crate) async fn retire_bootstrap(
+   |                         ^^^^^^^^^^^^^^^^
+...
+31 |     async fn retire_bootstrap_once(
+   |              ^^^^^^^^^^^^^^^^^^^^^
+...
+79 |     pub(crate) async fn complete_bootstrap(
+   |                         ^^^^^^^^^^^^^^^^^^
+
+warning: function `writer_contention` is never used
+  --> crates/infraternal-server/src/bootstrap_retirement.rs:94:4
+   |
+94 | fn writer_contention(error: &sqlx::Error) -> bool {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+  --> crates/infraternal-server/src/remote_http.rs:95:36
+   |
+95 | pub(crate) struct InvitationIssuer(Api);
+   |                   ---------------- ^^^
+   |                   |
+   |                   field in this struct
+   |
+   = help: consider removing this field
+   = note: `InvitationIssuer` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `issue_bootstrap`, `ready`, `origin`, and `store` are never used
+   --> crates/infraternal-server/src/remote_http.rs:115:25
+    |
+ 96 | impl InvitationIssuer {
+    | --------------------- methods in this implementation
+...
+115 |     pub(crate) async fn issue_bootstrap(
+    |                         ^^^^^^^^^^^^^^^
+...
+124 |     pub(crate) fn ready(&self) -> bool {
+    |                   ^^^^^
+...
+127 |     pub(crate) fn origin(&self) -> &str {
+    |                   ^^^^^^
+...
+130 |     pub(crate) fn store(&self) -> &EnrollmentStore {
+    |                   ^^^^^
+
+warning: `infraternal-server` (lib) generated 5 warnings
+    Checking infraternal-fuzz v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/fuzz)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 06s
