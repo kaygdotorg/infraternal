@@ -793,18 +793,21 @@
 
 /* Settings windows (settings-panels.ts): choice rows with a tick, device rows, headings; every colour, size and radius is a token. */
 .ui-sp { display: grid; gap: 14px; }
-.ui-sp-list { display: grid; gap: 2px; }
+.ui-sp-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .ui-sp-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: var(--ui-row-h, 32px); padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
 .ui-sp-swatch { position: relative; flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--overlay-line); }
 .ui-sp-swatch::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--dot); }
-/* Name and hint share a wrapping flex line: the name is one unbreakable line, and when the hint does not fit beside it the hint
-   wraps under the name, left-aligned (it may itself wrap to two lines at 375 px). The tick stays centred on the row. */
-.ui-sp-text { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; column-gap: 10px; row-gap: 1px; min-width: 0; padding: 5px 0; }
+/* Name and hint share a line: the name is one unbreakable line and the hint sits right-aligned beside it. When the list's
+   widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every hint sits under its name,
+   left-aligned, balanced and allowed two lines. The tick stays centred on the row. */
+.ui-sp-text { display: flex; flex: 1; align-items: baseline; column-gap: 10px; min-width: 0; padding: 5px 0; }
 .ui-sp-text .ui-sp-label { flex: none; max-width: 100%; margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ui-sp-text .ui-sp-hint { text-wrap: balance; flex: 0 1 auto; min-width: 0; max-width: 100%; color: var(--ui-text-secondary); }
+.ui-sp-text .ui-sp-hint { flex: none; white-space: nowrap; color: var(--ui-text-secondary); }
 .ui-sp-text .ui-sp-hint:empty { display: none; }
+[data-stacked] > .ui-sp-row .ui-sp-text { flex-direction: column; align-items: flex-start; row-gap: 1px; }
+[data-stacked] > .ui-sp-row .ui-sp-hint { white-space: normal; text-wrap: balance; max-width: 100%; }
 .ui-sp-hint { color: var(--ui-text-secondary); }
 .ui-sp-tick { width: var(--ui-icon, 16px); height: var(--ui-icon, 16px); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
 .ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
