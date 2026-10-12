@@ -19,8 +19,7 @@ test("already-added and missing-payload diagnostics reach the wizard through the
   } finally { globalThis.WebSocket = original; }
 });
 
-const readinessTest = process.env.ADDHOST_BREAKIT2_RED === "1" ? test : test.skip;
-readinessTest("readiness failure retains its trusted step through the socket", () => {
+test("readiness failure retains its trusted step through the socket", () => {
   const original = globalThis.WebSocket;
   let socket: EventTarget;
   class Socket extends EventTarget {
