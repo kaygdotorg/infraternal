@@ -29,6 +29,7 @@ import { createOverlayFlowHost } from "../addhost/flow-host";
 import { createWindowFlowHost } from "../addhost/window-host";
 import type { EnrolledHost } from "../addhost/service";
 import { createMockProvisioning } from "./addhost-service";
+import { createSetupDemo, failStageFrom, runAutopilot } from "./addhost-setup-demo";
 import { createMockMesh } from "./mesh";
 import { createMockSessions } from "./sessions";
 import { onDemand } from "../../on-demand";
@@ -57,7 +58,14 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
 
   // The add-host wizard runs on the real adapter against the test double. A host that finishes enrolling gets a
   // shell window in Console, which is also how the sidebar inventory learns of it (the tree lists windows).
-  const provisioning = createMockProvisioning({ savedKey: new URLSearchParams(location.search).get("savedkey") === "1", authority: new URLSearchParams(location.search).get("ca") ?? "ready" });
+  const query = new URLSearchParams(location.search);
+  // `addhost-demo=pill` (#189, D255): every host added in this tab follows a script that opens its shell at once and
+  // finishes setting up in the machine pill; `fail=install|join|start|ready` makes that stage fail the first time.
+  const setupDemo = query.get("addhost-demo") === "pill" ? createSetupDemo(failStageFrom(query.get("fail")), Math.max(1, Number(query.get("slow")) || 1)) : undefined;
+  const base = createMockProvisioning({ savedKey: query.get("savedkey") === "1", authority: query.get("ca") ?? "ready" });
+  const provisioning = setupDemo ? setupDemo.wrap(base) : base;
+  // The pill's code loads on first use, like the wizard's; the demo asks early so the first host does not wait for it.
+  const pillCode = setupDemo ? onDemand(() => import("../addhost/setup-pill.on-demand")) : undefined;
   // The lock on host connections: administrators (the operator role) can unlock it, anyone else only sees the state.
   const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator" });
   // `?inbox=3` adds two more kinds of waiting item, to see the card with several lines (test double only).
@@ -65,15 +73,19 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: provisioning,
-    sink: { enrolled: (hosts) => enrol(hosts) },
+    sink: { enrolled: (hosts, status) => enrol(hosts, status), setupInPill: Boolean(setupDemo) },
   });
-  function enrol(hosts: EnrolledHost[]): void {
+  function enrol(hosts: EnrolledHost[], status?: Element): void {
     for (const host of hosts) {
       if (!world.screens.has(host.name)) world.screens.set(host.name, { os: host.os, user: host.user ?? "kayg", screen: [`${host.user ?? "kayg"}@${host.name}:~$ `] });
       // Production lists sessions from inventory, including newly enrolled hosts.
       sessions.enroll(host.name);
       if (!inventory.list(host.name).length) inventory.create?.(host.name);
-      canvas.cx.win.open(host.name);
+      const rec = canvas.cx.win.open(host.name);
+      // The wizard's glyph is read now (its box is the flight's start); the pill's code is already loaded.
+      if (rec && setupDemo && pillCode && host.hostId) {
+        void pillCode.then((m) => { rec.setup = m.bindSetupPill({ card: rec.card, host: host.name, hostId: host.hostId!, source: setupDemo.source, ...(query.get("tickhold") ? { tickHold: Number(query.get("tickhold")) } : {}), ...(status ? { from: status } : {}) }); });
+      }
     }
   }
 
@@ -226,8 +238,10 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   }, 100);
 
   // ---- start ----------------------------------------------------------------------------------------
-  const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? 1) | 0) - 1));
+  // The pill demo starts where a terminal window is on screen (scene 3: Console), so the new window opens beside it.
+  const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? (setupDemo ? 3 : 1)) | 0) - 1));
   goScene(startScene);
+  if (setupDemo && query.get("autopilot") !== "0") window.setTimeout(() => { void runAutopilot(() => addHost.open()); }, 500);
   const sessionsScene = Number(new URLSearchParams(location.search).get("sessions")) || 0;
   if (sessionsScene) window.setTimeout(() => { void sessionScenes.run(sessionsScene); }, 400);
 
@@ -281,6 +295,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   return {
     dispose() {
       authority.dispose();
+      setupDemo?.dispose();
       events.abort();
       window.clearInterval(streamTimer);
       window.clearInterval(seedTimer);
