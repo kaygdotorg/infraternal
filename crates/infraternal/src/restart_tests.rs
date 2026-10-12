@@ -1,6 +1,7 @@
 //! Tests private control endpoints and replacement-path trust before any key is exported [217], #154.
 
 use super::*;
+use crate::restart_binary::fixture::Signed;
 
 struct Directory(PathBuf);
 impl Directory {
@@ -70,9 +71,9 @@ async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(executable(&binary).is_err());
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(executable(&binary).is_ok());
+    assert!(executable(&binary).is_err());
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
-    assert!(executable(&binary).is_ok());
+    assert!(executable(&binary).is_err());
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(executable(&binary).is_err());
 }
@@ -118,10 +119,7 @@ fn replacement_never_exports_to_a_general_purpose_binary() {
         }
     }
     let source = Probe(std::sync::atomic::AtomicUsize::new(0));
-    let _replacement = Replacement::new(
-        crate::restart_binary::Opened::open(PathBuf::from("/usr/bin/bash")).unwrap(),
-        Some(&source),
-    );
+    assert!(crate::restart_binary::Opened::open(PathBuf::from("/usr/bin/bash")).is_err());
     assert_eq!(
         source.0.load(std::sync::atomic::Ordering::Relaxed),
         0,
@@ -145,7 +143,7 @@ fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
             .unwrap()
             .success()
     );
-    let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+    let opened = Signed::image(binary.clone()).open().unwrap();
     assert!(infraternal_server::ca_handoff_binary::capable(&opened.file).unwrap());
     assert!(!opened.warm);
     let original = opened.file.metadata().unwrap().ino();
@@ -172,17 +170,13 @@ fn root_owned_marked_target_requires_protected_root_parents() {
             .unwrap()
             .success()
     );
-    let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+    let opened = Signed::image(binary.clone()).open().unwrap();
     assert!(opened.warm);
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
-    assert!(
-        !crate::restart_binary::Opened::open(binary.clone())
-            .unwrap()
-            .warm
-    );
+    assert!(!Signed::existing(binary.clone()).open().unwrap().warm);
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::copy("/usr/bin/bash", &binary).unwrap();
-    assert!(!crate::restart_binary::Opened::open(binary).unwrap().warm);
+    assert!(Signed::existing(binary).open().is_err());
 }
 
 #[test]
@@ -213,7 +207,7 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
                 .unwrap()
                 .success()
         );
-        let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
+        let opened = Signed::image(binary.clone()).open().unwrap();
         std::fs::rename(&binary, directory.join("retained")).unwrap();
         std::fs::copy("/usr/bin/bash", &binary).unwrap();
         // Keep cleanup with the outer process: successful exec replaces Rust destructors.
@@ -408,10 +402,8 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let mut control = Control::start(&directory.0).unwrap();
-            let (received, sent) = tokio::join!(
-                control.requested(None),
-                request(&directory.0, Some(Path::new("/usr/bin/bash")))
-            );
+            let (received, sent) =
+                tokio::join!(control.requested(None), request(&directory.0, None));
             assert!(received.is_ok());
             assert!(!sent.unwrap());
         });
@@ -442,7 +434,7 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         "request_uid=Some({})",
         nix::unistd::Uid::effective().as_raw()
     )));
-    assert!(logs.contains("/usr/bin/bash"));
+    assert!(logs.contains("server_restart_request"));
     assert!(logs.contains("cold"));
     assert!(!logs.contains("seed") && !logs.contains("key_bytes") && !logs.contains("key_length"));
 }
@@ -454,14 +446,14 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
     if let Ok(stage) = std::env::var("INFRATERNAL_CLOSED_STDIN_TEST") {
         let path = PathBuf::from(std::env::var_os("INFRATERNAL_CLOSED_STDIN_BINARY").unwrap());
         let mut opened = if stage == "before" {
-            Some(crate::restart_binary::Opened::open(path.clone()).unwrap())
+            Some(Signed::existing(path.clone()).open().unwrap())
         } else {
             None
         };
         nix::unistd::close(0).unwrap();
         let opened = opened
             .take()
-            .unwrap_or_else(|| crate::restart_binary::Opened::open(path).unwrap());
+            .unwrap_or_else(|| Signed::existing(path).open().unwrap());
         let error = Replacement::new(opened, None).exec();
         panic!(
             "closed stdin must not overwrite the checked executable fd: {}",
@@ -496,6 +488,7 @@ int main(void) {
             "native stdin probe compile failed: {}",
             String::from_utf8_lossy(&compiled.stderr)
         );
+        let _signed = Signed::new(target.clone(), &std::fs::read(&target).unwrap());
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--nocapture"])
             .env("INFRATERNAL_CLOSED_STDIN_TEST", stage)

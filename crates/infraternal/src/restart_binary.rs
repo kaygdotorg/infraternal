@@ -1,10 +1,11 @@
-//! Pins replacement code to one opened inode and separates root-only CA transfer from cold compatibility [217], #154.
+//! Admits signed immutable replacement bytes and separates root-only CA transfer from self reload [217,224,226], #157.
 
 use std::os::fd::AsRawFd;
 use std::{
     fs::{File, OpenOptions},
     io,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
     path::{Component, PathBuf},
 };
 
@@ -15,6 +16,24 @@ pub(crate) struct Opened {
 }
 impl Opened {
     pub(crate) fn open(path: PathBuf) -> io::Result<Self> {
+        Self::open_with(path, verify_release_fd)
+    }
+
+    /// Reload may reuse the exact running bytes; a changed install image still needs a signature.
+    pub(crate) fn open_reload(path: PathBuf) -> io::Result<Self> {
+        Self::open_with(path, |file, path| {
+            if same_running_bytes(file)? {
+                Ok(())
+            } else {
+                verify_release_fd(file, path)
+            }
+        })
+    }
+
+    pub(crate) fn open_with(
+        path: PathBuf,
+        verify: impl FnOnce(&File, &Path) -> io::Result<()>,
+    ) -> io::Result<Self> {
         #[cfg(test)]
         TEST_OPENS.with(|count| count.set(count.get() + 1));
         if !path.is_absolute()
@@ -96,7 +115,7 @@ impl Opened {
             path.parent().ok_or(io::ErrorKind::InvalidInput)?,
             limit,
         )?;
-        verify_release_fd(&image.file)?;
+        verify(&image.file, &path)?;
         let warm = owner == 0
             && root_protected
             && infraternal_server::ca_handoff_binary::capable(&image.file).unwrap_or(false);
@@ -111,14 +130,112 @@ impl std::ops::Deref for Opened {
     }
 }
 
-/// D184/D224 integration hook: verify SSHSIG namespace `infraternal-release`
-/// against `release/allowed_signers` on this already-opened fd. No pathname reopen
-/// is permitted here. This round checks compatibility/ownership, not signatures.
-#[allow(clippy::unnecessary_wraps)] // Preserve the fallible signature for release verification.
-fn verify_release_fd(_file: &File) -> io::Result<()> {
-    // Release-signature enforcement belongs to the signed-update lane.
+/// Authenticate metadata and the sealed execution descriptor, never reopen the candidate.
+fn verify_release_fd(file: &File, path: &Path) -> io::Result<()> {
+    verify_metadata(
+        file,
+        path,
+        infraternal_server::release_manifest::verify_release_manifest,
+    )
+}
+
+pub(crate) fn artifact_name() -> &'static str {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86_64", "linux") => "infraternal-x86_64-musl",
+        ("aarch64", "linux") => "infraternal-aarch64-musl",
+        ("x86_64", "macos") => "infraternal-x86_64-macos",
+        ("aarch64", "macos") => "infraternal-aarch64-macos",
+        _ => "unsupported-target",
+    }
+}
+
+fn public_file(path: &Path, limit: u64) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(file)
+}
+fn public_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = public_file(path, limit)?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| io::ErrorKind::InvalidData)? > limit {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(bytes)
+}
+fn verify_metadata(
+    file: &File,
+    path: &Path,
+    verify: impl Fn(
+        &File,
+        &str,
+        &[u8],
+        &[u8],
+    ) -> Result<String, infraternal_server::release_verify::ReleaseError>,
+) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let manifest = public_bytes(&parent.join("MANIFEST"), 65536)?;
+    let signature = public_bytes(&parent.join("MANIFEST.sig"), 1024)?;
+    let version = public_file(&parent.join("VERSION"), 128)?;
+    let version = crate::restart_image::Image::copy_limit(&version, parent, 128)?;
+    let identity = verify(&version.file, "VERSION", &manifest, &signature)
+        .map_err(|_| io::ErrorKind::PermissionDenied)?;
+    let mut declared = vec![
+        0;
+        usize::try_from(version.file.metadata()?.len())
+            .map_err(|_| io::ErrorKind::InvalidData)?
+    ];
+    version.file.read_exact_at(&mut declared, 0)?;
+    if declared != format!("{identity}\n").as_bytes() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let image_identity = verify(file, artifact_name(), &manifest, &signature)
+        .map_err(|_| io::ErrorKind::PermissionDenied)?;
+    if image_identity != identity {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
     Ok(())
 }
+
+/// The self-reload exception is an exact-byte comparison with the kernel-pinned
+/// running image, after the candidate has been sealed. It cannot admit changed code.
+fn same_running_bytes(candidate: &File) -> io::Result<bool> {
+    use std::os::unix::fs::FileExt;
+    #[cfg(target_os = "linux")]
+    let running = File::open("/proc/self/exe")?;
+    #[cfg(not(target_os = "linux"))]
+    let running = File::open(std::env::current_exe()?)?;
+    let size = candidate.metadata()?.len();
+    if size != running.metadata()?.len() {
+        return Ok(false);
+    }
+    let mut first = vec![0; 65536];
+    let mut second = vec![0; 65536];
+    let mut offset = 0;
+    while offset < size {
+        let count =
+            usize::try_from((size - offset).min(65536)).map_err(|_| io::ErrorKind::InvalidData)?;
+        candidate.read_exact_at(&mut first[..count], offset)?;
+        running.read_exact_at(&mut second[..count], offset)?;
+        if first[..count] != second[..count] {
+            return Ok(false);
+        }
+        offset += u64::try_from(count).map_err(|_| io::ErrorKind::InvalidData)?;
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "restart_fixture.rs"]
+pub(crate) mod fixture;
 
 #[cfg(test)]
 std::thread_local! { static TEST_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

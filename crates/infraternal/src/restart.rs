@@ -102,7 +102,7 @@ impl Control {
                             continue;
                         }
                     };
-                    match crate::restart_binary::Opened::open(target.clone()) {
+                    match crate::restart_binary::Opened::open_reload(target.clone()) {
                         Ok(binary) => {
                             let replacement = Replacement::new(binary, source);
                             record_request("SIGHUP", None, Some(&replacement.binary.path), replacement.outcome());
@@ -127,11 +127,16 @@ impl Control {
             }
             let request =
                 tokio::time::timeout(Duration::from_secs(2), read_request(&mut socket)).await;
-            let Ok(Ok(binary)) = request else {
+            let Ok(Ok((binary, reload))) = request else {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
             };
-            let Ok(opened) = crate::restart_binary::Opened::open(binary.clone()) else {
+            let opened = if reload {
+                crate::restart_binary::Opened::open_reload(binary.clone())
+            } else {
+                crate::restart_binary::Opened::open(binary.clone())
+            };
+            let Ok(opened) = opened else {
                 record_request("socket", peer.as_ref(), Some(&binary), "refused");
                 let _ = socket.write_all(b"REFUSED\n").await;
                 continue;
@@ -168,7 +173,7 @@ impl Drop for Control {
     }
 }
 
-async fn read_request(socket: &mut UnixStream) -> io::Result<PathBuf> {
+async fn read_request(socket: &mut UnixStream) -> io::Result<(PathBuf, bool)> {
     let length = usize::from(socket.read_u16().await?);
     if length == 0 || length > MAX_PATH {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -177,12 +182,12 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<PathBuf> {
     socket.read_exact(&mut bytes).await?;
     let path = PathBuf::from(String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidInput)?);
     if path == Path::new(".") {
-        return current_binary();
+        return current_binary().map(|path| (path, true));
     }
     if !path.is_absolute() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    Ok(path)
+    Ok((path, false))
 }
 
 fn current_binary() -> io::Result<PathBuf> {
@@ -206,6 +211,7 @@ fn current_binary() -> io::Result<PathBuf> {
     Ok(running)
 }
 
+#[cfg(test)]
 fn executable(binary: &Path) -> io::Result<()> {
     crate::restart_binary::Opened::open(binary.to_owned()).map(|_| ())
 }
@@ -220,8 +226,9 @@ pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<bo
             } else {
                 std::env::current_dir()?.join(path)
             };
-            executable(&original)?;
-            std::fs::canonicalize(original)
+            // The receiver owns signature admission and the image probe. Sending
+            // the original path preserves symlink refusal and avoids doing the expensive work twice.
+            Ok::<_, io::Error>(original)
         })
         .transpose()?;
     let mut socket = UnixStream::connect(data.join("restart/control.sock")).await?;

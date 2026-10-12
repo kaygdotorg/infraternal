@@ -1,5 +1,6 @@
 //! Exercises the real replacement admission hook without running crafted candidates, #154 [224][226].
 
+use super::fixture::Signed;
 use super::*;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -30,7 +31,6 @@ impl Drop for Directory {
 }
 
 #[test]
-#[ignore = "unresolved P1 UP-01: signature hook accepts unsigned replacement; run explicitly"]
 fn unsigned_or_tampered_replacement_is_refused_before_exec() {
     let directory = Directory::new();
     let mut accepted = 0;
@@ -63,12 +63,12 @@ fn unsigned_or_tampered_replacement_is_refused_before_exec() {
 }
 
 #[test]
-#[ignore = "unresolved P2 UP-02: opened inode can be rewritten before exec; run explicitly"]
 fn admitted_inode_cannot_change_in_place_before_execution() {
     use std::os::unix::fs::FileExt;
     let directory = Directory::new();
     let path = directory.candidate("candidate", b"original");
-    let opened = Opened::open(path.clone()).unwrap();
+    let signed = Signed::new(path.clone(), b"original");
+    let opened = signed.open().unwrap();
     std::fs::write(&path, b"modified").unwrap();
     let mut bytes = [0; 8];
     opened.file.read_exact_at(&mut bytes, 0).unwrap();
@@ -95,7 +95,8 @@ fn pathname_replacement_keeps_the_admitted_inode() {
     use std::os::unix::fs::FileExt;
     let directory = Directory::new();
     let path = directory.candidate("candidate", b"original");
-    let opened = Opened::open(path.clone()).unwrap();
+    let signed = Signed::new(path.clone(), b"original");
+    let opened = signed.open().unwrap();
     std::fs::rename(&path, directory.0.join("retained")).unwrap();
     directory.candidate("candidate", b"modified");
     let mut bytes = [0; 8];
