@@ -191,6 +191,7 @@ pub enum InstallStep {
     Install,
     Join,
     Start,
+    Readiness,
 }
 
 /// Architecture and expected public path selected by the server's release bundle.
@@ -270,6 +271,9 @@ impl Failure {
                 }
                 InstallStep::Join => {
                     "Joining the host to this server failed. Check the host can reach the server and resolve its address, then try again."
+                }
+                InstallStep::Readiness => {
+                    "Checking terminal readiness failed. Check the infraternal agent service and its terminal session, then try again."
                 }
                 InstallStep::Start => {
                     "Starting the infraternal agent service failed. Check the host service status and its configuration, then try again."

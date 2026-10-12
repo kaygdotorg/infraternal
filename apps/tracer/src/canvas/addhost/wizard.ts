@@ -41,7 +41,7 @@ import type { AddHostSink, DiscoveredHost, EnrolledHost, InstallCommand, Provisi
 /** Trusted bootstrap boundaries use plain labels in the existing details disclosure. */
 const FAILED_STEP_LABELS: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
   connect: "Connect to the host", upload: "Upload the binary", install: "Install the infraternal agent",
-  join: "Join the host to this server", start: "Start the host service",
+  join: "Join the host to this server", start: "Start the host service", readiness: "Check terminal readiness",
 };
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = { netbird: "NetBird", tailscale: "Tailscale", "known-hosts": "Known hosts", "ssh-config": "SSH config", "already-added": "Added" };

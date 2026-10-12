@@ -55,7 +55,7 @@ export interface FailureDetail {
   host_key_challenge?: string;
   already_added?: boolean;
   missing_binary?: { architecture: string; path: string };
-  failed_step?: "connect" | "upload" | "install" | "join" | "start";
+  failed_step?: "connect" | "upload" | "install" | "join" | "start" | "readiness";
   host_key_type?: string;
   host_key_changed?: boolean;
   /** Every automatic sign-in method was refused: the person must choose one (D183). Only on `auth`. */
