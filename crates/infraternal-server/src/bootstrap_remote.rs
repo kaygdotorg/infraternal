@@ -570,9 +570,12 @@ mod tests {
         }
     }
     fn start(f: &Fixture, owner: &str) -> Batch {
+        start_backend(f, owner, f.backend.clone())
+    }
+    fn start_backend(f: &Fixture, owner: &str, backend: Arc<dyn Backend>) -> Batch {
         let runner = Bootstrap::new(
             Arc::new(Sniff(f.opens.clone())),
-            f.backend.clone(),
+            backend,
             BinaryPaths {
                 x86_64: "must-not-read-payload".into(),
                 aarch64: "must-not-read-payload".into(),
@@ -713,6 +716,122 @@ mod tests {
                 .await
                 .unwrap();
         assert!(prior);
+    }
+
+    /// Holds the committed invitation before its caller receives the result.
+    /// No production hook is needed: the real backend and SQLite commit run
+    /// unchanged, while this adapter models a delayed commit acknowledgement.
+    struct PausedInvitation {
+        inner: Arc<RemoteBackend>,
+        committed: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl PausedInvitation {
+        async fn pause(&self, join: JoinMaterial) -> Result<JoinMaterial, Failure> {
+            self.committed.notify_one();
+            self.release.notified().await;
+            Ok(join)
+        }
+    }
+    impl Backend for PausedInvitation {
+        fn resolve<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: Option<&'a str>,
+        ) -> Operation<'a, Resolved> {
+            self.inner.resolve(a, t, c)
+        }
+        fn invitation<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+        ) -> Operation<'a, JoinMaterial> {
+            self.invitation_with_trust(a, t, c, None)
+        }
+        fn invitation_with_trust<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+            lookup: Option<String>,
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.pause(self.inner.invitation_with_trust(a, t, c, lookup).await?)
+                    .await
+            })
+        }
+        fn invitation_registered<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+            lookup: Option<String>,
+            register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.pause(
+                    self.inner
+                        .invitation_registered(a, t, c, lookup, register)
+                        .await?,
+                )
+                .await
+            })
+        }
+        fn connected_facts<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.connected_facts(a, h)
+        }
+        fn terminal_canary<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.terminal_canary(a, h)
+        }
+        fn cleanup_sessions<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.cleanup_sessions(a, h)
+        }
+        fn failed<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.failed(a, h)
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "#169 review: cancellation after commit needs pre-registered cleanup"]
+    async fn cancelled_invitation_after_commit_retires_its_host_record() {
+        let f = fixture(true).await;
+        let paused = Arc::new(PausedInvitation {
+            inner: f.backend.clone(),
+            committed: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let batch = start_backend(&f, "owner", paused.clone());
+        tokio::time::timeout(Duration::from_secs(5), paused.committed.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL"
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            2
+        );
+        let mut changed = batch.subscribe();
+        drop(batch);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while changed.changed().await.is_ok() {}
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL"
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            1
+        );
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
     }
 
     /// Measures real admission with the declared maximum attempt journal held.
