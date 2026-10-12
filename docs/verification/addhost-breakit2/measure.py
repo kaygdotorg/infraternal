@@ -2,6 +2,7 @@
 """Time add-host against this lane's disposable Docker target; capabilities stay in pipes (#169)."""
 import argparse
 import base64
+import ipaddress
 import os
 from pathlib import Path
 import struct
@@ -30,6 +31,8 @@ def main():
     global TARGET
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--container", choices=["addhost-breakit2-target", "addhost-breakit2-alpine"], default=TARGET)
+    parser.add_argument("--container-name", help="unique owned Docker fixture name")
+    parser.add_argument("--controller-ip", type=ipaddress.IPv4Address, default=ipaddress.IPv4Address("10.69.69.125"), help="local controller address reachable from the disposable target")
     parser.add_argument("--ssh-server", choices=["openssh", "netbird"], default="openssh")
     parser.add_argument("--netbird-binary", type=Path, help="owned standalone real server fixture")
     parser.add_argument("--expect-failure", action="store_true", help="assert refusal, retired authority and empty owned host state")
@@ -42,15 +45,19 @@ def main():
     parser.add_argument("--case", choices=["clean", "tiny-disk", "readonly-home", "noexec-tmp", "foreign-base", "linger-off", "no-manager", "password-sudo", "no-sudo"], default="clean")
     parser.add_argument("--shell", choices=["bash", "zsh", "fish", "sh"], default="bash")
     args = parser.parse_args()
-    TARGET = args.container
-    if args.fresh and TARGET != "addhost-breakit2-target":
+    TARGET = args.container_name or args.container
+    if not TARGET or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for char in TARGET):
+        parser.error("--container-name must be a Docker fixture identifier")
+    if args.fresh and args.container != "addhost-breakit2-target":
         parser.error("--fresh recreates only the Debian systemd target")
     scratch = SCRATCH / "live"
     scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
     scratch.chmod(0o700)
     if args.fresh:
         subprocess.run(DOCKER + ["rm", "-f", TARGET], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        docker("run", "-d", "--name", TARGET, "--privileged", "--cgroupns=private", "--tmpfs", "/run", "--tmpfs", "/run/lock", "--tmpfs", "/tmp", "--mount", "type=bind,src=/nix/store,dst=/nix/store,readonly", "infraternal-addhost-breakit2:debian", stdout=subprocess.DEVNULL)
+        # Static payloads need no build-host store on the performance machine.
+        store_mount = ["--mount", "type=bind,src=/nix/store,dst=/nix/store,readonly"] if Path("/nix/store").is_dir() else []
+        docker("run", "-d", "--name", TARGET, "--privileged", "--cgroupns=private", "--tmpfs", "/run", "--tmpfs", "/run/lock", "--tmpfs", "/tmp", *store_mount, "infraternal-addhost-breakit2:debian", stdout=subprocess.DEVNULL)
         for _ in range(100):
             ready = subprocess.run(DOCKER + ["exec", TARGET, "loginctl", "enable-linger", "target"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if ready.returncode == 0:
@@ -58,15 +65,15 @@ def main():
             time.sleep(0.1)
         else:
             raise RuntimeError("Disposable target system bus did not start")
-    if TARGET == "addhost-breakit2-target":
+    if args.container == "addhost-breakit2-target":
         # The target image's service manager must never race the fixture sshd
         # for its listen port while systemd finishes initial activation.
         docker("exec", TARGET, "systemctl", "mask", "--now", "ssh.service", "ssh.socket", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     private, public = generated_key()
     ip = subprocess.check_output(DOCKER + ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", TARGET], text=True).strip()
-    if TARGET == "addhost-breakit2-target":
+    if args.container == "addhost-breakit2-target":
         docker("exec", TARGET, "usermod", "-s", f"/bin/{args.shell}", "target")
-    docker("exec", TARGET, "sh", "-c", "grep -q 'addhost-breakit2.test' /etc/hosts || printf '10.69.69.125 addhost-breakit2.test\\n' >> /etc/hosts")
+    docker("exec", TARGET, "sh", "-c", f"grep -q 'addhost-breakit2.test' /etc/hosts || printf '{args.controller_ip} addhost-breakit2.test\\n' >> /etc/hosts")
     # Cases mutate only the fresh disposable target. Recreate it between cases;
     # this intentionally does not pretend that a later case is a clean install.
     cases = {
@@ -122,7 +129,7 @@ def main():
             for device in ["eth0", "ifb0"]:
                 docker("exec", TARGET, "tc", "qdisc", "add", "dev", device, "root", "netem", "delay", "75ms")
         print(f"ENVIRONMENT machine={os.uname().nodename} cores={os.cpu_count()} load={Path('/proc/loadavg').read_text().strip()} ssh_server={args.ssh_server} case={args.case} user={args.user} rtt_ms={args.rtt} mode={args.mode} shell={args.shell} payload_bytes={args.payload.stat().st_size}", flush=True)
-        environment = dict(os.environ, INFRATERNAL_TEST_STATE_ROOT=str(scratch), INFRATERNAL_REMOTE_TEST_BINARY=str(args.payload.resolve()), BREAKIT2_TARGET=f"{args.user}@{ip}:22", BREAKIT2_MODE=args.mode)
+        environment = dict(os.environ, INFRATERNAL_TEST_STATE_ROOT=str(scratch), INFRATERNAL_REMOTE_TEST_BINARY=str(args.payload.resolve()), BREAKIT2_TARGET=f"{args.user}@{ip}:22", BREAKIT2_MODE=args.mode, BREAKIT2_CONTROLLER_IP=str(args.controller_ip))
         if args.expect_failure:
             environment["BREAKIT2_EXPECT_FAILURE"] = "1"
         time.sleep(0.3)

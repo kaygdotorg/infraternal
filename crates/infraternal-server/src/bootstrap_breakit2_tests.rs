@@ -7,6 +7,14 @@ use std::{io::Read, path::PathBuf, time::Instant};
 static FIRST_INSTALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static UPLOAD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Time only the delegated production operation; emit no arguments or payload.
+async fn measured<T>(step: &'static str, operation: Operation<'_, T>) -> Result<T, Failure> {
+    let started = Instant::now();
+    let result = operation.await;
+    println!("METRIC breakit2 step={step} elapsed_ms={:.3} ok={}", started.elapsed().as_secs_f64() * 1000.0, result.is_ok());
+    result
+}
+
 struct TimedSession {
     inner: Arc<dyn SshSession>,
 }
@@ -155,7 +163,7 @@ impl Backend for ObservedBackend {
         &'a self, a: &'a Authority, t: &'a Target, c: &'a Check,
         lookup: Option<String>, register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
     ) -> Operation<'a, JoinMaterial> {
-        self.0.invitation_registered(a, t, c, lookup, register)
+        Box::pin(measured("invitation", self.0.invitation_registered(a, t, c, lookup, register)))
     }
     fn resolve<'a>(
         &'a self,
@@ -174,12 +182,12 @@ impl Backend for ObservedBackend {
         self.0.invitation(a, t, c)
     }
     fn connected_facts<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
-        self.0.connected_facts(a, h)
+        Box::pin(measured("facts", self.0.connected_facts(a, h)))
     }
     fn terminal_canary<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
             if std::env::var_os("BREAKIT2_DIAG").is_none() {
-                return self.0.terminal_canary(a, h).await;
+                return measured("readiness", self.0.terminal_canary(a, h)).await;
             }
             let actor = self.0.actor(a, h).await?;
             let result = actor
@@ -218,11 +226,14 @@ impl Backend for ObservedBackend {
     fn cleanup_sessions<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
         self.0.cleanup_sessions(a, h)
     }
+    fn retire_failed(&self, a: &Authority, h: Uuid) -> Result<(), Failure> {
+        self.0.retire_failed(a, h)
+    }
     fn failed<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
-        self.0.failed(a, h)
+        Box::pin(measured("authority_retirement", self.0.failed(a, h)))
     }
     fn completed<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
-        self.0.completed(a, h)
+        Box::pin(measured("authority_commit", self.0.completed(a, h)))
     }
 }
 
@@ -308,6 +319,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let scratch = PathBuf::from(std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").unwrap());
     let binary = PathBuf::from(std::env::var_os("INFRATERNAL_REMOTE_TEST_BINARY").unwrap());
     let address = std::env::var("BREAKIT2_TARGET").unwrap();
+    let controller_ip = std::env::var("BREAKIT2_CONTROLLER_IP")
+        .unwrap_or_else(|_| "10.69.69.125".into())
+        .parse::<std::net::IpAddr>().unwrap();
     let mode = if std::env::var("BREAKIT2_MODE").unwrap_or_default() == "root" {
         InstallMode::Root
     } else {
@@ -326,7 +340,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let hosts = RemoteHosts::from_source(Some(source.clone()));
     let store = f.backend.issuer.store().clone();
     let listeners = crate::remote_runtime::RemoteListeners::start(
-        "10.69.69.125:4930".parse().unwrap(),
+        std::net::SocketAddr::new(controller_ip, 4930),
         &identity,
         &[material.issuer().clone()],
         store.clone(),
@@ -364,7 +378,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     .unwrap();
     let server = tokio::spawn(
         axum_server::bind_openssl(
-            "10.69.69.125:4929".parse::<std::net::SocketAddr>().unwrap(),
+            std::net::SocketAddr::new(controller_ip, 4929),
             http_tls,
         )
         .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),

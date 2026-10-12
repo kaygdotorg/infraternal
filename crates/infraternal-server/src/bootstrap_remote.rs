@@ -1009,13 +1009,16 @@ mod tests {
             1
         );
         println!(
-            "METRIC destination_admission pending=1600 active_per_sample=8 samples=100 admissions=800 map_capacity={capacity} attempt_size={} string_capacity_bytes={string_bytes} rss_before_kib={before} rss_held_kib={held} p50_ms={:.3} p99_ms={:.3}",
+            "METRIC destination_admission pending=1600 active_per_sample=8 samples=100 requests=800 refused=800 map_capacity={capacity} attempt_size={} string_capacity_bytes={string_bytes} rss_before_kib={before} rss_held_kib={held} p50_ms={:.3} p99_ms={:.3}",
             std::mem::size_of::<Attempt>(),
             samples[50],
             samples[99]
         );
         println!(
-            "ENVIRONMENT machine=infraternal-dev cores={} load={}",
+            "ENVIRONMENT machine={} cores={} load={}",
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .unwrap()
+                .trim(),
             std::thread::available_parallelism().unwrap().get(),
             std::fs::read_to_string("/proc/loadavg").unwrap().trim()
         );
