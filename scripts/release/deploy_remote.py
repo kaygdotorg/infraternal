@@ -13,7 +13,24 @@ import sqlite3
 import struct
 import subprocess
 import time
+import urllib.error
 import urllib.request
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the administrator session on the requested local endpoint only."""
+    def redirect_request(self, request, file, code, message, headers, url):
+        return None
+
+
+def local_http(request):
+    # Ambient proxy settings must never carry a local administrator cookie.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        return opener.open(request, timeout=2)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise
 
 
 def verify_signed(directory, trust, image, complete=False):
@@ -78,14 +95,14 @@ def unlocked(config):
     request = urllib.request.Request(config["health"] + "/remote/ca/status", data=b"", headers={
         "Origin": config["origin"], "Cookie": "__Host-infraternal=" + config["session"],
         "User-Agent": "infraternal-deploy"})
-    with urllib.request.urlopen(request, timeout=2) as response:
+    with local_http(request) as response:
         status = json.loads(response.read(4096))
     return status.get("locked") is False and status.get("initialized") is True
 
 
 def healthy(config):
     try:
-        with urllib.request.urlopen(config["health"] + "/healthz", timeout=2) as response:
+        with local_http(config["health"] + "/healthz") as response:
             return response.status == 200 and unlocked(config)
     except (OSError, ValueError):
         return False

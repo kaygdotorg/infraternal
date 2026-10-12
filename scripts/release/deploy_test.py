@@ -2,6 +2,7 @@
 """Exercise deployment refusal/rollback, real WAL backup and private control framing [250], #188."""
 import hashlib
 from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.machinery
 import importlib.util
 import json
@@ -77,6 +78,34 @@ class DeploymentTests(unittest.TestCase):
             with closing(sqlite3.connect(self.root / "backup/infraternal.sqlite")) as saved:
                 self.assertEqual(saved.execute("SELECT value FROM state").fetchall(), [("retained",)])
             self.assertEqual(live.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+
+    def test_ca_status_refuses_redirect_without_forwarding_session(self):
+        seen = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(302)
+                self.send_header("Location", "/redirected")
+                self.end_headers()
+            def do_GET(self):
+                seen.append(self.headers.get("Cookie"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"locked":false,"initialized":true}')
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+        try:
+            config = {"health": f"http://127.0.0.1:{server.server_port}",
+                      "origin": "https://localhost", "session": "synthetic-in-memory-fixture"}
+            with self.assertRaises(OSError):
+                remote.unlocked(config)
+            self.assertEqual(seen, [])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
 
     def test_control_refuses_cold_reply_and_accepts_fragmented_warm_reply(self):
         # Linux socket names have a strict bound; use the fixture root directly.
