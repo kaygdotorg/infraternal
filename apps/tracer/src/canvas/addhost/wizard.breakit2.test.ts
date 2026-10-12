@@ -1,4 +1,4 @@
-/** Opt-in red target-address regressions for #169; no product behavior is changed. */
+/** Guards destination selection and malformed IPv6 correction during host provisioning (#169). */
 import { expect, test } from "bun:test";
 import { parseTarget } from "./model";
 const previous = globalThis.matchMedia;
@@ -6,7 +6,6 @@ globalThis.matchMedia = (() => ({ matches: false })) as unknown as typeof matchM
 const { Wizard } = await import("./wizard");
 if (previous) globalThis.matchMedia = previous;
 else Reflect.deleteProperty(globalThis, "matchMedia");
-const red = process.env.ADDHOST_BREAKIT2_RED === "1" ? test : test.skip;
 
 test("breakit2 an explicit port on a listed host survives chip resolution", () => {
   type Entry = { id: string; user?: string; address: string; port?: number };
@@ -21,7 +20,7 @@ test("breakit2 an explicit port on a listed host survives chip resolution", () =
   expect(chip.port).toBe(2222);
 });
 
-red("breakit2 malformed bracketed IPv6 waits for correction", () => {
+test("breakit2 malformed bracketed IPv6 waits for correction", () => {
   for (const input of ["target@[:::]", "target@[abcd]", "target@[1:2:3]"]) {
     expect(parseTarget(input)).toBeUndefined();
   }
