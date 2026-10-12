@@ -142,7 +142,11 @@ async fn failed_attachment_finishes_the_private_command() {
     let (cleaned, done) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(terminal_peer(peer, false, true, Some(cleaned)));
     let actor = EmbeddedAgent::from_test_socket(socket);
-    assert!(canary(&actor).await.is_err());
+    let failure = canary(&actor).await.unwrap_err();
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap()["failed_step"],
+        "readiness"
+    );
     tokio::time::timeout(Duration::from_secs(1), done)
         .await
         .expect("failed canary left its private session open")

@@ -9,7 +9,7 @@ use crate::{
 use infraternal_plugin_ssh::{
     bootstrap::{Authority, Backend, Resolved},
     install::JoinMaterial,
-    model::{Failure, InstallMode, Target},
+    model::{Failure, InstallMode, InstallStep, Target},
     probe::Check,
     transport::{Operation, Secret},
 };
@@ -245,7 +245,10 @@ impl Backend for RemoteBackend {
     }
     fn terminal_canary<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
-            let actor = self.actor(authority, host).await?;
+            let actor = self
+                .actor(authority, host)
+                .await
+                .map_err(|error| error.at(InstallStep::Readiness))?;
             canary_registered(&actor, |session| {
                 self.uid(authority, host)?;
                 let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
@@ -254,7 +257,9 @@ impl Backend for RemoteBackend {
                 Ok(())
             })
             .await?;
-            self.authorize(authority).await
+            self.authorize(authority)
+                .await
+                .map_err(|error| error.at(InstallStep::Readiness))
         })
     }
     fn record_failure(
@@ -324,16 +329,18 @@ async fn canary_registered(
             px_h: 0,
         })
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|_| unavailable().at(InstallStep::Readiness))?;
     // Publish ownership before the next await: cancellation cannot lose this id.
     if let Err(error) = opened(session) {
         let _ = finish_canary(actor, session).await;
-        return Err(error);
+        return Err(error.at(InstallStep::Readiness));
     }
     let result = tokio::time::timeout(Duration::from_secs(10), canary_output(actor, session)).await
         .unwrap_or_else(|_| Err(Failure::install("The host connected, but its terminal did not answer. Check its service and try again.")));
     let cleanup = finish_canary(actor, session).await;
-    result.and(cleanup)
+    result
+        .and(cleanup)
+        .map_err(|error| error.at(InstallStep::Readiness))
 }
 
 async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
