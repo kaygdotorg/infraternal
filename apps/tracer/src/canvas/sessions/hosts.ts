@@ -5,6 +5,7 @@ import { isCanonicalUuid } from "../../identifiers";
 import type { HostEntry } from "./adapter";
 
 interface Transport {
+  readonly isWelcomed?: boolean;
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   onWelcome(listener: () => void): () => void;
   subscribe(filter: { topic: string }, listener: (event: Record<string, unknown>) => void, onOpen?: () => void): () => void;
@@ -30,13 +31,16 @@ export function syncAdmittedHosts(connection: Transport, sink: { replaceHosts(ho
     version++;
     if (!running) void load();
   };
+  const connected = (): boolean => connection.isWelcomed !== false;
   const load = async (): Promise<void> => {
+    if (disposed || !connected()) return;
     running = true;
     const started = version;
     try {
       const hosts: AdmittedHost[] = [], ids = new Set<string>();
       let after: string | null = null;
       do {
+        if (!connected()) throw new Error("Not connected");
         const result = page(await connection.call("remote.host.list", after ? { after } : {}));
         if (disposed || started !== version) return;
         if (!result) throw new Error("Invalid host inventory");

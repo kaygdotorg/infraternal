@@ -48,3 +48,24 @@ test("a socket-authority refusal withdraws previously admitted hosts", async () 
   await settle(); expect(entries).toHaveLength(1);
   denied = true; welcome(); await settle(); expect(entries).toHaveLength(0); stop();
 });
+
+test("an invalidated read cannot enqueue an unsent call while the socket is down", async () => {
+  let connected = true, calls = 0, event = (_value: Record<string, unknown>) => {}, welcome = () => {};
+  let rejectRead: ((reason: Error) => void) | undefined;
+  let entries: HostEntry[] = [];
+  const stop = syncAdmittedHosts({
+    get isWelcomed() { return connected; },
+    call: async () => {
+      calls++;
+      if (calls === 2) return await new Promise<Record<string, unknown>>((_resolve, reject) => { rejectRead = reject; });
+      if (!connected) return await new Promise<Record<string, unknown>>(() => {});
+      return { hosts: calls === 1 ? [row] : [], next: null };
+    },
+    onWelcome: (listener) => { welcome = listener; listener(); return () => {}; },
+    subscribe: (_filter, listener) => { event = listener; return () => {}; },
+  }, { replaceHosts: (hosts) => { entries = hosts; } });
+  await settle(); event({ type: "changed" }); await settle(); event({ type: "changed" });
+  connected = false; rejectRead?.(new Error("drop")); await settle();
+  expect(calls).toBe(2);
+  connected = true; welcome(); await settle(); expect(entries).toHaveLength(0); stop();
+});
