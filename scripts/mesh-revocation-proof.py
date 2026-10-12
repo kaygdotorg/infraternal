@@ -118,6 +118,10 @@ async def campaign(args):
             remote('tc','qdisc','add','dev','underlay3','root','netem','delay',f'{args.rtt_ms/2}ms')
         measured_rtt=[]
         for index,address in ((1,'10.220.0.2'),(2,'10.221.0.3')):
+            # Neighbor discovery adds its own round trip to the first sample.
+            # Retain it separately, then calibrate the established test link.
+            warmup = await asyncio.wait_for(asyncio.to_thread(proof.run,'ping','-n','-c','1','-W','3',address), 6)
+            (args.evidence/f'peer-{index}-neighbor-warmup.log').write_text(warmup)
             ping=await asyncio.wait_for(asyncio.to_thread(proof.run,'ping','-n','-c','3','-i','.2','-W','3',address), 12)
             (args.evidence/f'peer-{index}-underlay-rtt.log').write_text(ping)
             match=re.search(r'= ([0-9.]+)/([0-9.]+)/([0-9.]+)/',ping)
