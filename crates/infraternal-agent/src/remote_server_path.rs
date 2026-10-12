@@ -422,6 +422,15 @@ async fn replacement(
     }
 }
 
+/// A component down retains its meaning when transport closure wins its race.
+fn interruption_reason(registry: &crate::plugin_control::Registry) -> ServerLinkReason {
+    if registry.server_paths().borrow().is_none() {
+        ServerLinkReason::MeshDisabled
+    } else {
+        ServerLinkReason::MeshInterrupted
+    }
+}
+
 /// Keeps enrolled fallback available, moving only after authenticated path proof.
 /// Existing durable shim offsets make transport replacement independent of leg A.
 /// Retained applied intent can reconnect even when the enrollment port is unavailable.
@@ -541,13 +550,17 @@ pub(super) async fn run(
                 }
             }
         };
+        // A transport close can win the replacement race after component down.
+        // The current applied preference owns the reason, rather than whichever
+        // future happened to finish first.
+        let interrupted_reason = interruption_reason(&registry);
         let moved = match moved {
             Some((next, why)) if next.kind == ServerLinkKind::Fallback && warm.is_some() => {
                 Some((warm.take().ok_or(io::ErrorKind::BrokenPipe)?, why))
             }
             None if link.kind == ServerLinkKind::Mesh && warm.is_some() => Some((
                 warm.take().ok_or(io::ErrorKind::BrokenPipe)?,
-                ServerLinkReason::MeshInterrupted,
+                interrupted_reason,
             )),
             other => other,
         };
@@ -557,11 +570,11 @@ pub(super) async fn run(
             cooling = why == ServerLinkReason::MeshInterrupted;
         } else {
             reason = if link.kind == ServerLinkKind::Mesh {
-                ServerLinkReason::MeshInterrupted
+                interrupted_reason
             } else {
                 ServerLinkReason::Connecting
             };
-            cooling = link.kind == ServerLinkKind::Mesh;
+            cooling = reason == ServerLinkReason::MeshInterrupted;
             force_fallback = cooling;
             report(&registry, None, reason);
             if link.kind == ServerLinkKind::Fallback {
