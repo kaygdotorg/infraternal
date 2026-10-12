@@ -45,7 +45,7 @@ fn usage() -> (u64, u64) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "Release-only local CPUWeight=10000 timer measurement; run without concurrent builds."]
+#[ignore = "Release-only perf VM measurement under the shared benchmark lock."]
 // Keep setup, sampling and teardown together so driver lifetimes match the measured cohort.
 #[allow(clippy::too_many_lines)]
 async fn mesh_idle_timer_cost_at_one_thousand_connections() {
@@ -240,7 +240,7 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
         .filter(|connection| connection.close_reason().is_none())
         .count();
     let elapsed_us = start.elapsed().as_micros();
-    let mut report = serde_json::json!({"machine":"infraternal-dev","profile":"transport_only","connections":1000,"freshness_watcher_tasks":if guarded { 1000 } else { 0 },"freshness_state_bytes":std::mem::size_of::<remote_quic::PeerFreshness>(),"timer_udp_payload_bytes":after_wire_bytes-before_wire_bytes,"client_endpoints":1000,"join_concurrency":join_concurrency,"live":alive,"window_us":elapsed_us,"max_authenticated_silence_us":max_silence.as_micros(),"cpu_ticks":after_ticks-before_ticks,"clock_ticks_per_second":clock_ticks,"setup_cpu_ticks":before_ticks-baseline_ticks,"resident_delta_bytes":resident_pages.saturating_sub(baseline_pages)*page_size,"timer_datagrams":after_packets-before_packets,"keepalive_ms":keepalive_ms,"idle_ms":idle_ms,"load_before":load_before.trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim()});
+    let mut report = serde_json::json!({"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"profile":"transport_only","connections":1000,"freshness_watcher_tasks":if guarded { 1000 } else { 0 },"freshness_state_bytes":std::mem::size_of::<remote_quic::PeerFreshness>(),"timer_udp_payload_bytes":after_wire_bytes-before_wire_bytes,"client_endpoints":1000,"join_concurrency":join_concurrency,"live":alive,"window_us":elapsed_us,"max_authenticated_silence_us":max_silence.as_micros(),"cpu_ticks":after_ticks-before_ticks,"clock_ticks_per_second":clock_ticks,"setup_cpu_ticks":before_ticks-baseline_ticks,"resident_delta_bytes":resident_pages.saturating_sub(baseline_pages)*page_size,"timer_datagrams":after_packets-before_packets,"keepalive_ms":keepalive_ms,"idle_ms":idle_ms,"load_before":load_before.trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim()});
     let healthy = false_interruptions == 0 && alive == 1000;
     report["freshness_profile"] = if guarded {
         "adaptive_current_rtt_plus_200ms"
@@ -260,8 +260,13 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
     report["watcher_join_errors"] = serde_json::json!(watcher_join_errors);
     report["unexpected_watcher_completions"] = serde_json::json!(unexpected_completions);
     report["result"] = if healthy { "PASS" } else { "FAIL" }.into();
-    let scratch = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(".cache/codex-scratch/mesh-agent-transport-round2");
+    let scratch = std::env::var_os("INFRATERNAL_MESH_PROOF_SCRATCH").map_or_else(
+        || {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".cache/codex-scratch/mesh-agent-transport-round2")
+        },
+        PathBuf::from,
+    );
     std::fs::create_dir_all(&scratch).unwrap();
     std::fs::write(
         scratch.join(format!(

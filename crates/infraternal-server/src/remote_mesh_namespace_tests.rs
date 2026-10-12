@@ -12,6 +12,17 @@ use std::{
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use zeroize::Zeroize as _;
 
+const PROOF_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2";
+// The longer evidence directory would make a session socket 108 bytes. This
+// owned sibling keeps kernel sun_path below 107 bytes without changing sessions.
+const STATE_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mat-r2-ns";
+
+/// All public reports share the caller-selected benchmark artifact directory.
+fn proof_scratch() -> PathBuf {
+    std::env::var_os("INFRATERNAL_MESH_PROOF_SCRATCH")
+        .map_or_else(|| PathBuf::from(PROOF_SCRATCH), PathBuf::from)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ClientBundle {
     certificate: String,
@@ -215,9 +226,7 @@ async fn wait_link(actor: &EmbeddedAgent, kind: ServerLinkKind) -> ServerLink {
         let public =
             status.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         std::fs::write(
-            format!(
-                "/home/kayg/.cache/codex-scratch/mesh-agent-transport/path-timeout-{kind:?}.json"
-            ),
+            proof_scratch().join(format!("path-timeout-{kind:?}.json")),
             serde_json::to_vec_pretty(&public).unwrap(),
         )
         .unwrap();
@@ -587,7 +596,9 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         std::fs::read_link("/proc/1/ns/mnt").unwrap(),
         "stop: host mount namespace"
     );
-    let scratch = PathBuf::from("/home/kayg/.cache/codex-scratch/mesh-agent-transport");
+    let scratch = proof_scratch();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let load_start = std::fs::read_to_string("/proc/loadavg").unwrap();
     root_fixture_home(&scratch);
     let binary = PathBuf::from(std::env::var_os("INFRATERNAL_MESH_BINARY").unwrap());
     let mut processes = Processes {
@@ -595,6 +606,15 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         shim: None,
         states: Vec::new(),
     };
+    let state_scratch = std::env::var_os("INFRATERNAL_MESH_PROOF_STATE")
+        .map_or_else(|| PathBuf::from(STATE_SCRATCH), PathBuf::from);
+    assert!(
+        !state_scratch.exists(),
+        "stop: fixture state already exists"
+    );
+    // Own cleanup before creating the short parent or any private child state.
+    processes.states.push(state_scratch.clone());
+    std::fs::create_dir(&state_scratch).unwrap();
     processes.children.push(
         Command::new("unshare")
             .args(["-n", "sleep", "600"])
@@ -664,8 +684,12 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     .unwrap();
     let runtime = crate::plugins::compiled(&pool).await.unwrap();
     runtime.set_enabled("mesh", false).await.unwrap();
-    let server_state = scratch.join("s");
-    let node_state = scratch.join("n");
+    let server_state = state_scratch.join("s");
+    let node_state = state_scratch.join("n");
+    let session_path = node_state
+        .join("sessions")
+        .join(format!("{}.sock", Uuid::nil().simple()));
+    assert!(session_path.as_os_str().len() < 107);
     assert!(
         !server_state.exists() && !node_state.exists(),
         "stop: fixture state already exists"
@@ -839,7 +863,6 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     let node_peers = peer_evidence(&remote).await;
     assert_eq!((server_peers.0, node_peers.0), (999, 999));
     assert!(server_peers.1 > 0 && server_peers.2 > 0 && node_peers.1 > 0 && node_peers.2 > 0);
-    let interrupted = tokio::time::Instant::now();
     // Refuse packets while retaining the owned interface and routes. An
     // administrative interface down also removes Linux host routes and would
     // test operator configuration recovery rather than transport interruption.
@@ -871,14 +894,42 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
             ],
         );
     }
-    // Send before waiting for reconnection: the browser's attachment remains continuously open.
+    // Start after both cut rules are installed. Observe the restored terminal
+    // directly: status RPCs add their own network round trip and scheduling.
+    let interrupted = tokio::time::Instant::now();
     echo.send(b"cut-survives|").await;
     expected.extend_from_slice(b"cut-survives|");
-    wait_link(&remote, ServerLinkKind::Fallback).await;
     echo.wait(&expected).await;
     let fallback_us = interrupted.elapsed().as_micros();
+    wait_link(&remote, ServerLinkKind::Fallback).await;
+    let fallback_status_us = interrupted.elapsed().as_micros();
     let fallback = echo.samples(&mut expected, b'f').await;
     println!("CHECK fallback_retains_bytes result=PASS");
+    // Persist latency before later lifecycle assertions: a failed mesh reprobe
+    // must not discard the already measured terminal recovery evidence.
+    let partial = serde_json::json!({
+        "machine": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(), "head_profile": "primed-writer",
+        "configured_rtt_ms": rtt_ms, "configured_rtt_jitter_ms": 2 * (rtt_ms / 20),
+        "real_kernel": true, "real_pty": true, "live_nodes": 2,
+        "live_terminals": 1, "public_inventory": 1000,
+        "silent_cut_to_echo_us": fallback_us,
+        "silent_cut_to_fallback_status_us": fallback_status_us,
+        "direct": {"n": 31, "p50_us": direct[15], "p99_us": direct[30]},
+        "mesh": {"n": 31, "p50_us": mesh[15], "p99_us": mesh[30]},
+        "fallback": {"n": 31, "p50_us": fallback[15], "p99_us": fallback[30]},
+        "load_start": load_start.trim(),
+        "load": std::fs::read_to_string("/proc/loadavg").unwrap().trim(),
+        "lifecycle_complete": false
+    });
+    std::fs::write(
+        scratch.join(format!("namespace-transport-{rtt_ms}.json")),
+        serde_json::to_vec_pretty(&partial).unwrap(),
+    )
+    .unwrap();
+    println!(
+        "METRIC cut_to_echo_us={fallback_us} configured_rtt_ms={rtt_ms} mesh_p99_us={} direct_p99_us={}",
+        mesh[30], direct[30]
+    );
     command("nft", &["delete", "table", "inet", "mesh_link_cut"]);
     wait_link(&remote, ServerLinkKind::Mesh).await;
     // Refuse only the underlay listener. A retained mesh path must join without
@@ -944,18 +995,37 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     echo.send(b"disabled-survives|").await;
     expected.extend_from_slice(b"disabled-survives|");
     echo.wait(&expected).await;
-    let report = serde_json::json!({"machine":"infraternal-dev","real_kernel":true,"real_pty":true,"stateful_input_firewall":true,"wireguard_port_grants":0,"namespaces":2,"live_nodes":2,"public_inventory":1000,"live_terminals":1,"server_wireguard_port":server_mesh.port,"node_wireguard_port":node_mesh.port,"server_peer_counters":server_peers,"node_peer_counters":node_peers,"moving_input_bytes":moving.len(),"expected_bytes":expected.len(),"received_bytes":echo.bytes.lock().await.len(),"bootstrap_and_move_us":move_us,"move_from_observed_working_mesh_us":move_from_working_mesh_us,"working_mesh_observation_interval_ms":200,"fallback_us":fallback_us,"restart_us":restart_us,"direct":{"n":31,"p50_us":direct[15],"p99_us":direct[30]},"mesh":{"n":31,"p50_us":mesh[15],"p99_us":mesh[30]},"fallback":{"n":31,"p50_us":fallback[15],"p99_us":fallback[30]},"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim()});
+    let report = serde_json::json!({"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"real_kernel":true,"real_pty":true,"stateful_input_firewall":true,"wireguard_port_grants":0,"namespaces":2,"live_nodes":2,"public_inventory":1000,"live_terminals":1,"server_wireguard_port":server_mesh.port,"node_wireguard_port":node_mesh.port,"server_peer_counters":server_peers,"node_peer_counters":node_peers,"moving_input_bytes":moving.len(),"expected_bytes":expected.len(),"received_bytes":echo.bytes.lock().await.len(),"bootstrap_and_move_us":move_us,"move_from_observed_working_mesh_us":move_from_working_mesh_us,"working_mesh_observation_interval_ms":200,"fallback_us":fallback_us,"restart_us":restart_us,"direct":{"n":31,"p50_us":direct[15],"p99_us":direct[30]},"mesh":{"n":31,"p50_us":mesh[15],"p99_us":mesh[30]},"fallback":{"n":31,"p50_us":fallback[15],"p99_us":fallback[30]},"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim()});
     let mut report = report;
     report["configured_rtt_ms"] = rtt_ms.into();
-    report["configured_rtt_jitter_ms"] = (rtt_ms / 10).into();
+    report["configured_rtt_jitter_ms"] = (2 * (rtt_ms / 20)).into();
+    report["silent_cut_to_echo_us"] = serde_json::json!(fallback_us);
+    report["silent_cut_to_fallback_status_us"] = serde_json::json!(fallback_status_us);
+    report["load_start"] = load_start.trim().into();
+    report["head_profile"] = "primed-writer".into();
+    report["lifecycle_complete"] = true.into();
     std::fs::write(
         scratch.join(format!("namespace-transport-{rtt_ms}.json")),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
     println!(
-        "METRIC mesh_transport namespaces=2 terminals=1 bytes={} move_us={move_us} fallback_us={fallback_us} result=PASS",
+        "METRIC mesh_transport namespaces=2 terminals=1 bytes={} configured_rtt_ms={rtt_ms} move_us={move_us} silent_cut_to_echo_us={fallback_us} silent_cut_to_fallback_status_us={fallback_status_us} lifecycle=PASS",
         expected.len()
+    );
+    let recovery_budget_us = u128::from(rtt_ms) * 1000 + 250_000;
+    let recovery_pass = fallback_us <= recovery_budget_us;
+    let local_echo_pass = rtt_ms != 0 || mesh[30] <= direct[30] + 2000;
+    println!(
+        "BUDGET silent_cut_to_echo_us={fallback_us} budget_us={recovery_budget_us} pass={recovery_pass} local_mesh_p99_us={} direct_p99_us={} allowed_extra_us=2000 pass={local_echo_pass}",
+        mesh[30], direct[30]
+    );
+    // Keep the complete report even when functional recovery misses latency.
+    // Runtime handles clean up their owned namespaces and state on either path.
+    assert!(recovery_pass, "silent mesh cut exceeded one RTT plus 250ms");
+    assert!(
+        local_echo_pass,
+        "local mesh echo p99 exceeded direct by 2ms"
     );
     drop(next);
     drop(echo);

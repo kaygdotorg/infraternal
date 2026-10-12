@@ -213,7 +213,7 @@ async fn initial_attachment_keeps_input_cut_through_before_its_first_ack() {
 }
 
 #[tokio::test]
-#[ignore = "Run alone in the local CPUWeight scope for 200-terminal retention measurements."]
+#[ignore = "Run alone on the perf VM under the shared benchmark lock."]
 async fn input_retention_cost_at_200_terminals() {
     let mut terminals = Vec::new();
     for _ in 0..200 {
@@ -282,7 +282,10 @@ async fn input_retention_cost_at_200_terminals() {
         .sum();
     assert_eq!(retained, 0);
     println!(
-        "METRIC input_retention machine=infraternal-dev terminals=200 samples={} write_p50_ns={} write_p99_ns={} peak_buffer_bytes={} full_ack_buffer_bytes={} state_bytes_per_terminal={} max_buffer_bytes_per_terminal={} load={}",
+        "METRIC input_retention machine={} terminals=200 samples={} write_p50_ns={} write_p99_ns={} peak_buffer_bytes={} full_ack_buffer_bytes={} state_bytes_per_terminal={} max_buffer_bytes_per_terminal={} load={}",
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
         samples.len(),
         samples[samples.len() / 2],
         samples[samples.len() * 99 / 100],

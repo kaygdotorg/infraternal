@@ -667,7 +667,7 @@ async fn component_down_proves_tcp_fallback_when_enrolled_udp_is_unavailable() {
 /// removing the interface. This measures the silent-failure case seen on a
 /// network change; the enrolled fallback remains reachable throughout.
 #[tokio::test]
-#[ignore = "Run alone in the local CPUWeight scope for silent-path recovery measurements."]
+#[ignore = "Run alone on the perf VM under the shared benchmark lock."]
 async fn review_silent_mesh_interruption_returns_to_fallback_within_local_reconnect_budget() {
     use std::sync::{
         Arc,
