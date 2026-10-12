@@ -1,0 +1,14 @@
+F
+======================================================================
+FAIL: test_review_symlink_ancestor_refuses_before_removing_leftovers (__main__.EarlierSetup.test_review_symlink_ancestor_refuses_before_removing_leftovers)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/review-start-fresh/crates/plugins/ssh/tests/previous_attempt_shell.py", line 192, in test_review_symlink_ancestor_refuses_before_removing_leftovers
+    self.assertEqual(result.returncode, 71, 'a symlink ancestor must be refused')
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 71 : a symlink ancestor must be refused
+
+----------------------------------------------------------------------
+Ran 1 test in 1.063s
+
+FAILED (failures=1)

@@ -172,5 +172,26 @@ class EarlierSetup(unittest.TestCase):
         self.assertEqual(self.run_shell('\ninspect_previous').returncode, 75)
         self.assertTrue(self.socket.exists())
 
+    def test_review_symlink_ancestor_refuses_before_removing_leftovers(self):
+        self.listener.close()
+        # The final base and its immediate parent are real directories, but an
+        # earlier home-path component redirects host provisioning outside them.
+        container = self.base.parent / 'external-local'
+        container.mkdir(mode=0o700)
+        share = container / 'share'
+        share.mkdir(mode=0o700)
+        alias = self.base.parent / 'local-alias'
+        alias.symlink_to(container, target_is_directory=True)
+        outside = share / 'infraternal'
+        self.base.rename(outside)
+        receipt = Path(str(outside) + '.bootstrap-rollback-' + TRANSACTION)
+        self.receipt.rename(receipt)
+        self.base = alias / 'share/infraternal'
+        self.receipt = receipt
+        result = self.recover()
+        self.assertEqual(result.returncode, 71, 'a symlink ancestor must be refused')
+        self.assertTrue(outside.exists(), 'host provisioning removed the redirected directory')
+        self.assertTrue(receipt.exists(), 'the refused journal must survive')
+
 if __name__ == '__main__':
     unittest.main()

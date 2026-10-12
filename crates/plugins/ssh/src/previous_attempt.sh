@@ -44,7 +44,23 @@ not_live() {
     [ -z "$live" ] || exit 73
 
 }
+no_redirect() {
+    # Every directory from / to the setup root must be real, except the home
+    # directory itself or a directory above it (e.g. /home -> /var/home): a
+    # symlink below home could send recovery to leftovers somewhere else (#169).
+    path=
+    rest=${base#/}
+    while [ -n "$rest" ]; do
+        part=${rest%%/*}
+        [ "$part" = "$rest" ] && rest= || rest=${rest#*/}
+        path="$path/$part"
+        if [ -L "$path" ]; then
+            case "$HOME/" in "$path"/*) ;; *) exit 71;; esac
+        fi
+    done
+}
 inspect_previous() {
+    no_redirect
     setup_guard
     receipt=
     for candidate in "$base".bootstrap-rollback-*; do
