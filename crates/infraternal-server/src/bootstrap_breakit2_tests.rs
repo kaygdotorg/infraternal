@@ -221,13 +221,16 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
     // attachment. No user shell startup or echoed marker supplies readiness.
     let command = "\n";
     let mut wire = Vec::new();
-    for frame in [
-        Frame::Credit { bytes: 65536 },
-        Frame::Input {
-            in_seq: 0,
-            bytes: command.as_bytes(),
-        },
-    ] {
+    let delayed_credit = std::env::var_os("BREAKIT2_DELAY_CREDIT").is_some();
+    let input = Frame::Input { in_seq: 0, bytes: command.as_bytes() };
+    let credit = Frame::Credit { bytes: 65536 };
+    let frames = if delayed_credit { [input, credit] } else { [credit, input] };
+    for frame in frames {
+        // A valid unfunded attachment makes owner EOF win while final PTY bytes
+        // remain queued. Normal timing runs preserve the production input order.
+        if delayed_credit && matches!(frame, Frame::Credit { .. }) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         // Input is leg A (odd); the attachment maps it onto its even leg-B stream.
         encode_muxed_frame_into(1, &frame, &mut wire).map_err(|_| unavailable())?;
         handle
