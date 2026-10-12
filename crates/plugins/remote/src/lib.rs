@@ -113,6 +113,8 @@ pub const SERVE: ActionDef = ActionDef {
     opens: None,
 };
 pub mod cli;
+#[cfg(feature = "server")]
+pub mod inventory;
 pub mod server_restart;
 pub use server_restart::RESTART;
 
