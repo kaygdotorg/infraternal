@@ -15,6 +15,7 @@ use uuid::Uuid;
 #[derive(Default)]
 pub(crate) struct Revocations {
     signals: Mutex<HashMap<Uuid, Weak<Revocation>>>,
+    pub(crate) plugins: Mutex<crate::plugins::WeakRuntime>,
     #[cfg(test)]
     pub(crate) publication_pause: Mutex<Option<Arc<PublicationPause>>>,
 }
