@@ -22,7 +22,7 @@ policy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(policy)
 proof = policy.proof
 
-RECEIVER = """import json,socket,sys,time
+RECEIVER = """import errno,json,socket,sys,time
 s=socket.socket(socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET,socket.SOCK_STREAM if len(sys.argv)>2 else socket.SOCK_DGRAM);s.bind((sys.argv[1],5540));s.settimeout(.05)
 if len(sys.argv)>2: s.listen()
 print('ready',flush=True);arrivals=[];deadline=time.monotonic()+10;connection=None;pending=b''
@@ -40,7 +40,8 @@ while time.monotonic()<deadline:
    payload,address=s.recvfrom(4096);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
    # A restrictive update may refuse the echo after receive; retain the arrival.
    try: s.sendto(payload,address)
-   except PermissionError: pass
+   except OSError as error:
+    if error.errno not in (errno.EPERM,errno.ENOKEY): raise
  except TimeoutError: pass
 print(json.dumps(arrivals),flush=True)
 """
