@@ -1,0 +1,7 @@
+⁨⁩⁨Mesh data plane: WireGuard on nodes, coordinator wiring, deny by default, resolver, CLI⁩ ⁨⁩#⁨129⁩⁨⁩"
+By ⁨⁩⁨kayg⁩⁨⁩ — ⁨⁨⁩Open⁨⁩⁩
+
+> Mesh data plane slice (D163–D169, D196, D197): wire the coordinator into the server, the infraternal agent joins the mesh and configures kernel WireGuard through our own netlink client, deny-by-default enforcement on nodes, the <host>.internal resolver with mesh-wide records and an upstream, direct paths with relay fallback, and the human-readable `infraternal mesh` CLI with --json. Measured every round (D167).
+
+
+⁨306⁩ comments

@@ -11,7 +11,7 @@ use crate::{
 use infraternal_protocol::encode_frame_into;
 use openssl::x509::X509;
 use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::sync::Mutex;
 
 /// Local enrolled host credentials; no private material leaves the host.
 pub struct RemoteIdentity {
@@ -27,7 +27,7 @@ pub struct RemoteIdentity {
     pub execution_uid: u32,
 }
 
-/// Run until cancelled. Healthy idle connections have no retry/heartbeat timer.
+/// Run until cancelled. Fallback retries sleep; proven alternative paths own a freshness guard.
 /// # Errors
 /// Refuses local uid mismatch or invalid credentials before contacting the server.
 pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Result<()> {
@@ -68,6 +68,13 @@ async fn run_inner(
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
+    // Invalid enrollment must not create local state or start plugin work.
+    // Renewed credentials are authoritative when a renewal owner is present.
+    if let Some(renewal) = renewal {
+        crate::remote_renewal::require_current(&renewal.current()?)?;
+    } else {
+        crate::remote_renewal::require_current(&identity.identity)?;
+    }
     let state = crate::sessions::state(state)?;
     // The host control surface remains available while the authenticated server is offline.
     let service = crate::plugin_control::Service::start(
@@ -76,77 +83,7 @@ async fn run_inner(
         installation,
     )
     .await?;
-    let mut backoff = Duration::from_millis(200);
-    loop {
-        let current = match renewal {
-            Some(renewal) => renewal.current()?,
-            None => Identity {
-                certificate: identity.identity.certificate.clone(),
-                key: identity.identity.key.clone(),
-            },
-        };
-        crate::remote_renewal::require_current(&current)?;
-        let identity = RemoteIdentity {
-            identity: current,
-            roots: identity.roots.clone(),
-            endpoint: identity.endpoint,
-            server_name: identity.server_name.clone(),
-            execution_uid: identity.execution_uid,
-        };
-        let identity = &identity;
-        let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
-        let started = tokio::time::Instant::now();
-        let quic = dial_runtime::DialRuntime::new();
-        let mut endpoint = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            None,
-            std::net::UdpSocket::bind(if identity.endpoint.is_ipv6() {
-                "[::]:0"
-            } else {
-                "0.0.0.0:0"
-            })?,
-            quic.runtime(),
-        )?;
-        endpoint.set_default_client_config(remote_quic::client_config(
-            &identity.identity,
-            &identity.roots,
-        )?);
-        let connected = dial_preferred(&endpoint, identity, &tls).await;
-        match connected {
-            Ok(Connected::Quic(connection)) => {
-                let _ = quic_session(
-                    connection,
-                    identity,
-                    state.clone(),
-                    renewal,
-                    service.registry.clone(),
-                )
-                .await;
-            }
-            Ok(Connected::Tcp(connection)) => {
-                // The losing handshake otherwise retains Quinn drain timers after
-                // Connecting is dropped. Cancel only this attempt's UDP drivers;
-                // the authenticated TCP channel and rootless shims are independent.
-                drop(endpoint);
-                drop(quic);
-                let _ = daemon::run_authenticated_with_plugins(
-                    &connection.channel,
-                    state.clone(),
-                    identity.execution_uid,
-                    renewal,
-                    service.registry.clone(),
-                )
-                .await;
-            }
-            Err(_) => {}
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            backoff = Duration::from_millis(200);
-        }
-        let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
-        tokio::time::sleep(backoff + jitter).await;
-        backoff = (backoff * 2).min(Duration::from_secs(30));
-    }
+    server_path::run(identity, state, renewal, service.registry.clone()).await
 }
 
 // Keep the race in its own future. Its losing socket is dropped when this
@@ -183,17 +120,55 @@ enum Connected {
     Tcp(remote_tls::Connection),
 }
 
+// A proven TCP decoder and a native QUIC decoder retain their buffered frames.
+enum ControlChannel<'a> {
+    Quic(NativeChannel),
+    Tcp(&'a crate::remote_tls::TcpTls),
+}
+impl Channel for ControlChannel<'_> {
+    fn native_stream_id(&self) -> Option<u32> {
+        match self {
+            Self::Quic(channel) => channel.native_stream_id(),
+            Self::Tcp(channel) => channel.native_stream_id(),
+        }
+    }
+    fn frame_timeout(&self) -> Option<Duration> {
+        match self {
+            Self::Quic(channel) => channel.frame_timeout(),
+            Self::Tcp(channel) => channel.frame_timeout(),
+        }
+    }
+    fn retire(&self) {
+        match self {
+            Self::Quic(channel) => channel.retire(),
+            Self::Tcp(channel) => channel.retire(),
+        }
+    }
+    async fn read(&self, target: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Quic(channel) => channel.read(target).await,
+            Self::Tcp(channel) => channel.read(target).await,
+        }
+    }
+    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Quic(channel) => channel.write(bytes).await,
+            Self::Tcp(channel) => channel.write(bytes).await,
+        }
+    }
+}
+
 // Replay the negotiated Hello into common dispatch while retaining the same
 // decoder: its first read may also contain the following control frame.
-struct PrefixedControl {
-    channel: NativeChannel,
+struct PrefixedControl<'a> {
+    channel: ControlChannel<'a>,
     prefix: Mutex<Vec<u8>>,
     sent_greeting: Mutex<Option<Vec<u8>>>,
     receive: Mutex<Receive>,
 }
-impl Channel for PrefixedControl {
+impl Channel for PrefixedControl<'_> {
     fn native_stream_id(&self) -> Option<u32> {
-        Some(0)
+        self.channel.native_stream_id()
     }
     fn frame_timeout(&self) -> Option<Duration> {
         self.channel.frame_timeout()
@@ -206,7 +181,16 @@ impl Channel for PrefixedControl {
         if prefix.is_empty() {
             let mut receive = self.receive.lock().await;
             let frame = receive.next(&self.channel).await?;
-            encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
+            if self.channel.native_stream_id().is_some() {
+                encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
+            } else {
+                infraternal_protocol::encode_muxed_frame_into(
+                    frame.stream_id,
+                    &frame.frame,
+                    &mut prefix,
+                )
+                .map_err(io::Error::other)?;
+            }
         }
         let count = target.len().min(prefix.len());
         target[..count].copy_from_slice(&prefix[..count]);
@@ -240,53 +224,127 @@ async fn quic_connect(
     .map_err(io::Error::other)
 }
 
-async fn quic_session(
+fn client_greeting(renewal: bool) -> infraternal_protocol::Frame<'static> {
+    infraternal_protocol::Frame::Hello {
+        version: 1,
+        caps: remote_quic::REMOTE_WRITER_BINDING
+            | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+            | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
+            | if renewal {
+                crate::remote_renewal::LIVE_RENEWAL
+            } else {
+                0
+            },
+        client_info: "infraternal agent",
+    }
+}
+
+/// A proved stream retains its decoder and an optional parked server greeting.
+struct ProvedControl {
+    control: NativeChannel,
+    receive: Receive,
+    greeting: Option<Vec<u8>>,
+    primed: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
     state: PathBuf,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     plugins: crate::plugin_control::Registry,
+    proof: Option<ProvedControl>,
+    standby: &tokio::sync::watch::Sender<u64>,
+    external_native: bool,
 ) -> io::Result<()> {
     let result = async {
-        let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
-        let control = NativeChannel::control(send, receive)?;
+        let ProvedControl {
+            control,
+            receive: mut rx,
+            greeting: cached,
+            primed,
+        } = if let Some(proof) = proof {
+            proof
+        } else {
+            let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
+            ProvedControl {
+                control: NativeChannel::control(send, receive)?,
+                receive: Receive::default(),
+                greeting: None,
+                primed: false,
+            }
+        };
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
-        let greeting = infraternal_protocol::Frame::Hello { version:1, caps:remote_quic::REMOTE_WRITER_BINDING | if renewal.is_some() { crate::remote_renewal::LIVE_RENEWAL } else { 0 }, client_info:"infraternal agent" };
-        tx.send(&control, 0, &greeting).await?;
+        let greeting = client_greeting(renewal.is_some());
+        if primed {
+            // Priming already sent Hello. Only this negotiated activation may
+            // replace the server's actor and release the parked identity slot.
+            tx.send(
+                &control,
+                0,
+                &infraternal_protocol::Frame::Call {
+                    call_id: 0,
+                    action_id: "transport.activate",
+                    input_json: b"{}",
+                },
+            )
+            .await?;
+        } else {
+            tx.send(&control, 0, &greeting).await?;
+        }
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
-        let mut rx = Receive::default();
-        let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control)).await.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        let prefix = if let Some(cached) = cached {
+            cached
+        } else {
+            let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control))
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+            let mut encoded = Vec::new();
+            encode_frame_into(&hello.frame, &mut encoded).map_err(io::Error::other)?;
+            encoded
+        };
+        let hello = infraternal_protocol::decode_frame(&prefix).map_err(io::Error::other)?;
         let binding = remote_quic::negotiate_binding(&connection, &hello.frame)?;
-        let mut prefix = Vec::new();
-        encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
-        let control = PrefixedControl { channel:control, prefix:Mutex::new(prefix), sent_greeting:Mutex::new(Some(sent_greeting)), receive:Mutex::new(rx) };
-        let mut terminals = JoinSet::new();
-        let dispatch = daemon::run_authenticated_with_plugins(&control, state.clone(), identity.execution_uid, renewal,plugins);
-        tokio::pin!(dispatch);
-        loop {
-            // Keep partial binding progress across completed terminal jobs.
-            // Cancelling this accept on each completion would lose consumed bytes.
-            let next = remote_quic::accept_bound(&binding);
-            tokio::pin!(next);
-            loop {
-            tokio::select! {
-                result = &mut dispatch => return result,
-                _ = connection.closed() => return Err(io::ErrorKind::BrokenPipe.into()),
-                terminal = &mut next => {
-                    let channel = NativeChannel::terminal(terminal?)?;
-                    if terminals.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS { channel.retire(); break; }
-                    let state = state.clone();
-                    terminals.spawn(async move { let _ = daemon::run_bound_terminal(&channel,Some(state)).await; });
-                    break;
-                }
-                _ = terminals.join_next(), if !terminals.is_empty() => {}
+        let infraternal_protocol::Frame::Hello { caps, .. } = hello.frame else {
+            return Err(io::ErrorKind::InvalidData.into());
+        };
+        standby.send_replace(caps);
+        let control = PrefixedControl {
+            channel: ControlChannel::Quic(control),
+            prefix: Mutex::new(prefix),
+            sent_greeting: Mutex::new(Some(sent_greeting)),
+            receive: Mutex::new(rx),
+        };
+        let dispatch = daemon::run_authenticated_with_plugins(
+            &control,
+            state.clone(),
+            identity.execution_uid,
+            renewal,
+            plugins,
+        );
+        let native = async {
+            if external_native {
+                std::future::pending::<io::Result<()>>().await
+            } else {
+                primed_native::serve(
+                    &binding,
+                    state,
+                    caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0,
+                )
+                .await
             }
-            }
+        };
+        tokio::select! {
+            result = dispatch => result,
+            result = native => result,
+            _ = connection.closed() => Err(io::ErrorKind::BrokenPipe.into()),
         }
-    }.await;
+    }
+    .await;
     connection.close(0u32.into(), b"");
     result
 }
@@ -297,3 +355,9 @@ mod tests;
 
 #[path = "remote_dial_runtime.rs"]
 mod dial_runtime;
+
+#[path = "remote_server_path.rs"]
+mod server_path;
+
+#[path = "remote_primed_native.rs"]
+mod primed_native;

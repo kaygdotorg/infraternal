@@ -60,6 +60,10 @@ mod remote_renewal;
 #[cfg(feature = "remote")]
 mod remote_runtime;
 #[cfg(feature = "remote")]
+mod remote_standby;
+#[cfg(feature = "remote")]
+pub mod remote_standby_request;
+#[cfg(feature = "remote")]
 mod remote_startup;
 mod runtime;
 mod server_tls;

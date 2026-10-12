@@ -1,0 +1,37 @@
+{
+  "component": "actual production shim with test-only argument runner; not final shippingCLI",
+  "head": "ee192d50c68e6d2d81f2fe685dc6e15940589782",
+  "source_sha256": {
+    "crates/infraternal-shim/src/session.rs": "5559b7adcae7270dc4d9819eba087a2398a5bff33e848a1a4c9b8edcea4fc506",
+    "crates/infraternal/tests/shim.rs": "b29c7047bf57340a99d55b6ceb9b3957241e5b3dec0373c770240ed175ebd823"
+  },
+  "libraries": {
+    "infraternal_shim": {
+      "path": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libinfraternal_shim-eb91d51c10d71554.rlib",
+      "sha256": "dd0fdefc2c9c0344910d23e823cb73fdcb51522cc2fcfe0c64742d2c68db62bb"
+    },
+    "nix": {
+      "path": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libnix-0d419c7c541953e6.rlib",
+      "sha256": "f5f80c3cad2a4d823b0a32f5b3e87655a8bf5aac429d9fa221a08cbb1a79a86e"
+    },
+    "vt100": {
+      "path": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libvt100-61dd29ea5f5a269c.rlib",
+      "sha256": "30711a476652e433b0631717565b5a63bc2514232d94d698a9dda2738577b337"
+    }
+  },
+  "observed_head": "ec8a648cd3fffa83904871299302783c744ea56e",
+  "executables": {
+    "parked-shared-green-shim": {
+      "bytes": 17770312,
+      "sha256": "7991631c5e7d007bde5ea7eb904c39c68124c427af8d29657449454cafe8fe68"
+    },
+    "parked-shared-green-tests": {
+      "bytes": 19000680,
+      "sha256": "7862103f0bd98b7a9a119e8d4c3cc4ae805016443134d9e8eb3fb20ce59499c2"
+    }
+  },
+  "test_compile_log": "parked-shared-approx-build.log",
+  "result_log": "parked-shared-all-final.log",
+  "result": "13 passed; 0 failed; finished in 4.43s",
+  "qualification": "Actual production shim rlib and test-only argument runner. Test consumer executed only after rustc26513 completed; earlier all-green/all-approx logs include stale executable failures and are not this result. Default shipping CLI gate remains pending."
+}

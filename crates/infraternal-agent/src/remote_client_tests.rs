@@ -89,7 +89,7 @@ async fn prefixed_control_keeps_coalesced_suffix_and_suppresses_only_its_greetin
     let mut prefix = Vec::new();
     encode_frame_into(&hello.frame, &mut prefix).unwrap();
     let control = PrefixedControl {
-        channel,
+        channel: ControlChannel::Quic(channel),
         prefix: Mutex::new(prefix),
         sent_greeting: Mutex::new(Some(greeting_bytes.clone())),
         receive: Mutex::new(receive),
@@ -513,9 +513,146 @@ async fn expired_local_identity_stops_instead_of_retrying_forever() {
         server_name: "localhost".into(),
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     };
-    let result = tokio::time::timeout(Duration::from_millis(200), run(&identity, None)).await;
+    let directory = StateDirectory::new();
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        run(&identity, Some(directory.0.clone())),
+    )
+    .await;
     assert!(
         matches!(result, Ok(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied),
         "expired identity kept retrying"
     );
+    assert_eq!(
+        std::fs::read_dir(&directory.0).unwrap().count(),
+        0,
+        "expired identity must be refused before opening local control or session state"
+    );
+}
+
+#[path = "remote_mesh_idle_tests.rs"]
+mod idle_timers;
+
+#[tokio::test]
+async fn proven_tcp_decoder_preserves_mux_envelopes_and_buffered_suffix() {
+    let ca = root();
+    let server = leaf(&ca, true);
+    let client = leaf(&ca, false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let acceptor =
+        remote_tls::server_config(&server, std::slice::from_ref(&ca.certificate)).unwrap();
+    let peer = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        remote_tls::accept(socket, &acceptor).await.unwrap()
+    });
+    let connector =
+        remote_tls::client_config(&client, std::slice::from_ref(&ca.certificate)).unwrap();
+    let connection = remote_tls::dial(address, "localhost", &connector)
+        .await
+        .unwrap();
+    let peer = peer.await.unwrap();
+    let mut combined = Vec::new();
+    for (stream, nonce) in [(0, 11), (7, 12)] {
+        let mut frame = Vec::new();
+        infraternal_protocol::encode_muxed_frame_into(
+            stream,
+            &Frame::Ping { nonce, sent_us: 0 },
+            &mut frame,
+        )
+        .unwrap();
+        combined.extend_from_slice(&frame);
+    }
+    peer.channel.write(&combined).await.unwrap();
+    let mut receive = Receive::default();
+    assert_eq!(
+        receive.next(&connection.channel).await.unwrap().stream_id,
+        0
+    );
+    let control = PrefixedControl {
+        channel: ControlChannel::Tcp(&connection.channel),
+        prefix: Mutex::new(Vec::new()),
+        sent_greeting: Mutex::new(None),
+        receive: Mutex::new(receive),
+    };
+    let mut consumer = Receive::default();
+    let frame = consumer.next(&control).await.unwrap();
+    assert_eq!(frame.stream_id, 7);
+    assert_eq!(
+        frame.frame,
+        Frame::Ping {
+            nonce: 12,
+            sent_us: 0
+        }
+    );
+}
+
+#[tokio::test]
+async fn server_path_capability_is_advertised_on_native_and_fallback_transports() {
+    let ca = root();
+    let server_identity = leaf(&ca, true);
+    let client_identity = leaf(&ca, false);
+    for native in [true, false] {
+        let server = quinn::Endpoint::server(
+            remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+                .unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let address = server.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let tls =
+            remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+                .unwrap();
+        if !native {
+            server.close(0u32.into(), b"");
+        }
+        let identity = supervisor_identity(&ca, &client_identity, address);
+        let state = StateDirectory::new();
+        let path = state.0.clone();
+        let supervisor = tokio::spawn(async move { run(&identity, Some(path)).await });
+        let caps = tokio::time::timeout(Duration::from_secs(3), async {
+            if native {
+                let connection = server.accept().await.unwrap().await.unwrap();
+                let (send, receive) = connection.accept_bi().await.unwrap();
+                let channel = NativeChannel::control(send, receive).unwrap();
+                let mut receive = Receive::default();
+                let first = receive.next(&channel).await.unwrap();
+                let Frame::Hello {
+                    version: 1, caps, ..
+                } = first.frame
+                else {
+                    panic!("invalid greeting");
+                };
+                connection.close(0u32.into(), b"");
+                caps
+            } else {
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let Ok(connection) = remote_tls::accept(socket, &tls).await else {
+                        continue;
+                    };
+                    let mut receive = Receive::default();
+                    let first = receive.next(&connection.channel).await.unwrap();
+                    let Frame::Hello {
+                        version: 1, caps, ..
+                    } = first.frame
+                    else {
+                        panic!("invalid greeting");
+                    };
+                    break caps;
+                }
+            }
+        })
+        .await;
+        supervisor.abort();
+        let _ = supervisor.await;
+        server.close(0u32.into(), b"");
+        let caps = caps.unwrap();
+        assert_ne!(
+            caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS,
+            0
+        );
+        assert_eq!(caps & remote_quic::REMOTE_WRITER_BINDING != 0, native);
+    }
 }

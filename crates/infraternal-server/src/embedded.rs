@@ -107,6 +107,7 @@ struct AttachmentHandleInner {
     id: u64,
     stream_id: u32,
     input: mpsc::Sender<Bytes>,
+    input_acked: watch::Receiver<u64>,
     commands: mpsc::Sender<Command>,
 }
 
@@ -119,6 +120,21 @@ impl AttachmentHandle {
 
     /// Queue one complete leg-A muxed terminal frame for forwarding to leg B.
     pub async fn send_frame(&self, frame: Bytes) -> Result<(), AgentError> {
+        let decoded = decode_muxed_frame(&frame).map_err(|_| AgentError::Protocol)?;
+        if let Frame::Input { in_seq, bytes } = decoded.frame {
+            let end = in_seq
+                .checked_add(bytes.len() as u64)
+                .ok_or(AgentError::Protocol)?;
+            let mut acknowledged = self.0.input_acked.clone();
+            // The absolute shim cursor supplies byte credit, including across path
+            // replacement. Waiting here leaves the shared host actor runnable.
+            while end.saturating_sub(*acknowledged.borrow_and_update()) > MAX_FRAME_LEN as u64 {
+                acknowledged
+                    .changed()
+                    .await
+                    .map_err(|_| AgentError::Unavailable)?;
+            }
+        }
         self.0
             .input
             .send(frame)
@@ -234,6 +250,25 @@ impl EmbeddedAgent {
         )
     }
 
+    /// The secondary joins this actor only after enrolled identity admission.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn prime(&self, link: RemoteLink) -> Result<(), AgentError> {
+        let mut admission = link.priming_admission();
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .try_send(Command::Prime {
+                link: Box::new(link),
+                reply,
+            })
+            .map_err(|_| AgentError::Unavailable)?;
+        let result = tokio::time::timeout(Duration::from_secs(5), receive)
+            .await
+            .map_err(|_| AgentError::Unavailable)?
+            .map_err(|_| AgentError::Unavailable)?;
+        admission.admitted = result.is_ok();
+        result
+    }
+
     /// A bounded control call shares the existing id allocator and reply dispatcher.
     #[cfg(feature = "remote")]
     pub(crate) async fn control_call(
@@ -324,6 +359,7 @@ impl EmbeddedAgent {
     ) -> Result<TerminalAttachment, AgentError> {
         let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
+        let (input_credit, input_acked) = watch::channel(last_in_seq);
         let id = self
             .next_attachment_id
             .fetch_add(1, Ordering::Relaxed)
@@ -337,6 +373,7 @@ impl EmbeddedAgent {
                 last_out_seq,
                 last_in_seq,
                 output: output_tx,
+                input_credit,
                 reply,
             })
             .await
@@ -351,6 +388,7 @@ impl EmbeddedAgent {
                 id,
                 stream_id,
                 input,
+                input_acked,
                 commands: self.commands.clone(),
             })),
             output,
@@ -382,6 +420,11 @@ impl EmbeddedAgent {
 
 enum Command {
     #[cfg(feature = "remote")]
+    Prime {
+        link: Box<RemoteLink>,
+        reply: oneshot::Sender<Result<(), AgentError>>,
+    },
+    #[cfg(feature = "remote")]
     Control {
         action: &'static str,
         json: Vec<u8>,
@@ -404,6 +447,7 @@ enum Command {
         last_out_seq: u64,
         last_in_seq: u64,
         output: mpsc::Sender<TerminalOutput>,
+        input_credit: watch::Sender<u64>,
         reply: oneshot::Sender<Result<(u64, u32), AgentError>>,
     },
     Input {
@@ -421,8 +465,14 @@ struct AttachmentState {
     last_out_seq: u64,
     last_in_seq: u64,
     last_input_end: u64,
+    // Retained bytes span [last_in_seq, last_input_end); only a shim Ack releases them.
+    // Allocate on input, cap at one protocol frame, and free after a full Ack.
+    unacknowledged: BytesMut,
+    input_credit: watch::Sender<u64>,
     credit: u64,
     awaiting_ack: bool,
+    // Initial attachment stays cut-through; only replacement orders replay behind an Ack.
+    replaying: bool,
     output: mpsc::Sender<TerminalOutput>,
 }
 
@@ -432,7 +482,7 @@ enum Peer {
         writer: OwnedWriteHalf,
     },
     #[cfg(feature = "remote")]
-    Remote(Box<RemoteLink>),
+    Remote(Arc<RemoteLink>),
 }
 
 enum Source {
@@ -482,59 +532,7 @@ impl Source {
                 } else {
                     incoming.recv().await.ok_or(AgentError::Unavailable)?
                 };
-                let mut receive = BytesMut::with_capacity(4096);
-                let mut scratch = vec![0; READ_CHUNK];
-                let hello = Frame::Hello {
-                    version: 1,
-                    caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING,
-                    client_info: "infraternal-server/0.1",
-                };
-                let mut encode = Vec::new();
-                encode_muxed_frame_into(0, &hello, &mut encode)
-                    .map_err(|_| AgentError::Protocol)?;
-                let handshake = async {
-                    link.write(0, &hello, &encode)
-                        .await
-                        .map_err(|_| AgentError::Unavailable)?;
-                    loop {
-                        match decode_muxed_frame(&receive) {
-                            Ok(decoded) => {
-                                if decoded.stream_id != 0
-                                    || !matches!(decoded.frame, Frame::Hello { version: 1, .. })
-                                {
-                                    return Err(AgentError::Protocol);
-                                }
-                                link.hello(&decoded.frame)
-                                    .await
-                                    .map_err(|_| AgentError::Protocol)?;
-                                receive.advance(decoded.wire_len);
-                                return Ok(());
-                            }
-                            Err(DecodeError::Incomplete) => {}
-                            Err(_) => return Err(AgentError::Protocol),
-                        }
-                        if link
-                            .read(&mut receive, &mut scratch)
-                            .await
-                            .map_err(|_| AgentError::Unavailable)?
-                            == 0
-                        {
-                            return Err(AgentError::Unavailable);
-                        }
-                    }
-                };
-                tokio::time::timeout(Duration::from_secs(5), handshake)
-                    .await
-                    .map_err(|_| AgentError::Unavailable)??;
-                Ok(AgentConnection {
-                    peer: Peer::Remote(Box::new(link)),
-                    execution_uid: *uid,
-                    pid: None,
-                    receive,
-                    scratch,
-                    encode: Vec::new(),
-                    next_call_id: 1,
-                })
+                connect_remote(link, *uid).await
             }
         }
     }
@@ -567,6 +565,73 @@ impl Source {
     }
 }
 
+#[cfg(feature = "remote")]
+async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, AgentError> {
+    let mut receive = BytesMut::with_capacity(4096);
+    let mut scratch = vec![0; READ_CHUNK];
+    let hello = Frame::Hello {
+        version: 1,
+        caps: infraternal_agent::remote_quic::REMOTE_WRITER_BINDING
+            | infraternal_plugin_api::channel::REMOTE_STANDBY
+            | if link.native() {
+                infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
+            } else {
+                0
+            },
+        client_info: "infraternal-server/0.1",
+    };
+    let mut encode = Vec::new();
+    encode_muxed_frame_into(0, &hello, &mut encode).map_err(|_| AgentError::Protocol)?;
+    let handshake = async {
+        link.write(0, &hello, &encode)
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        loop {
+            match decode_muxed_frame(&receive) {
+                Ok(decoded) => {
+                    if decoded.stream_id != 0
+                        || !matches!(decoded.frame, Frame::Hello { version: 1, .. })
+                    {
+                        return Err(AgentError::Protocol);
+                    }
+                    link.hello(&decoded.frame)
+                        .await
+                        .map_err(|_| AgentError::Protocol)?;
+                    receive.advance(decoded.wire_len);
+                    return Ok(());
+                }
+                Err(DecodeError::Incomplete) => {}
+                Err(_) => return Err(AgentError::Protocol),
+            }
+            if link
+                .read(&mut receive, &mut scratch)
+                .await
+                .map_err(|_| AgentError::Unavailable)?
+                == 0
+            {
+                return Err(AgentError::Unavailable);
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), handshake)
+        .await
+        .map_err(|_| AgentError::Unavailable)??;
+    let link = Arc::new(link);
+    #[cfg(test)]
+    RemoteLink::register_test_probe(&link);
+    Ok(AgentConnection {
+        peer: Peer::Remote(link),
+        execution_uid: uid,
+        pid: None,
+        receive,
+        scratch,
+        encode: Vec::new(),
+        next_call_id: 1,
+        #[cfg(feature = "remote")]
+        owned_control: None,
+    })
+}
+
 struct AgentConnection {
     peer: Peer,
     execution_uid: u32,
@@ -575,9 +640,13 @@ struct AgentConnection {
     scratch: Vec<u8>,
     encode: Vec<u8>,
     next_call_id: u32,
+    #[cfg(feature = "remote")]
+    owned_control: Option<mpsc::Sender<Bytes>>,
 }
 
 enum Incoming {
+    #[cfg(feature = "remote")]
+    Activate,
     Hello {
         version: u16,
     },
@@ -683,8 +752,47 @@ async fn run_actor(
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
+    #[cfg(feature = "remote")]
+    let mut hot = priming::State::default();
+    #[cfg(feature = "remote")]
+    let mut writes = writes::State::default();
+    #[cfg(not(feature = "remote"))]
+    let mut hot = ();
+    #[cfg(not(feature = "remote"))]
+    let mut writes = ();
 
     loop {
+        #[cfg(feature = "remote")]
+        hot.observe(&attachments);
+        #[cfg(feature = "remote")]
+        if hot.active() {
+            writes.enable(&attachments);
+        }
+        #[cfg(feature = "remote")]
+        if let Some(link) = connection.as_mut() {
+            writes.install(link);
+            writes.schedule(link, &attachments);
+        }
+        #[cfg(feature = "remote")]
+        if connection.is_none()
+            && hot.active()
+            && matches!(&source, Source::Remote { pending: None, .. })
+        {
+            // Only recv is cancellation-safe here: once admission supplies a new
+            // link, ordinary connect owns its greeting through completion.
+            tokio::select! {
+                event = hot.next(&attachments) => {
+                    if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) { writes.stop().await; }
+                    process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
+                },
+                replacement = source.replacement() => {
+                    let Some(replacement) = replacement else { return; };
+                    hot.cancel().await;
+                    if let Source::Remote { pending, .. } = &mut source { *pending = Some(Box::new(replacement)); }
+                }
+            }
+            continue;
+        }
         if connection.is_none() {
             if source.closed() {
                 return;
@@ -713,15 +821,50 @@ async fn run_actor(
             }
         }
 
+        #[cfg(feature = "remote")]
+        hot.observe(&attachments);
         let Some(link) = connection.as_mut() else {
             continue;
         };
+        #[cfg(feature = "remote")]
+        let control_ready = writes.can_admit();
+        #[cfg(not(feature = "remote"))]
+        let control_ready = true;
+        #[cfg(feature = "remote")]
+        if let Peer::Remote(remote) = &link.peer {
+            remote.control_read_ready(control_ready);
+        }
         tokio::select! {
+            (stream, success) = next_writes(&mut writes) => {
+                #[cfg(not(feature = "remote"))]
+                let _ = (stream, success);
+                #[cfg(feature = "remote")]
+                if !success {
+                    if stream != CONTROL_STREAM && !attachments.values().any(|a| a.stream_id == stream) { continue; }
+                    if let Peer::Remote(remote) = &link.peer { remote.retire_writer(stream).await; }
+                    if stream == CONTROL_STREAM || !hot.ready(stream) {
+                        writes.stop().await;
+                        if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; }
+                    }
+                }
+            }
+            event = next_priming(&mut hot, &attachments) => {
+                #[cfg(feature = "remote")]
+                if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) { writes.stop().await; }
+                #[cfg(feature = "remote")]
+                process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
+                #[cfg(not(feature = "remote"))]
+                match event {}
+            }
             replacement = source.replacement(), if source.remote() => {
                 #[cfg(feature = "remote")]
                 let Some(replacement) = replacement else { return; };
                 #[cfg(not(feature = "remote"))]
                 let Some(()) = replacement else { return; };
+                #[cfg(feature = "remote")]
+                hot.cancel().await;
+                #[cfg(feature = "remote")]
+                writes.stop().await;
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() {
@@ -729,8 +872,19 @@ async fn run_actor(
                     session_inventory.send_replace(SessionInventoryState::Unavailable);
                 }
             }
-            command = commands.recv() => {
+            command = commands.recv(), if control_ready => {
                 let Some(command) = command else { return; };
+                #[cfg(feature = "remote")]
+                if let Command::Prime { link: secondary, reply } = command {
+                    hot.start(*secondary, link.execution_uid, &attachments, reply);
+                    continue;
+                }
+                #[cfg(feature = "remote")]
+                if writes.enabled() && matches!(&link.peer, Peer::Remote(remote) if remote.native())
+                    && let Some(ok) = retain_owned_input(&command, &mut attachments, &mut routes, &mut writes) {
+                        if !ok { writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; } }
+                        continue;
+                }
                 let ok = process_command(
                     command,
                     link,
@@ -741,6 +895,8 @@ async fn run_actor(
                 if !ok {
                     let link = connection.take();
                     if let Some(link) = link {
+                        #[cfg(feature = "remote")]
+                        writes.stop().await;
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
@@ -752,6 +908,8 @@ async fn run_actor(
                 let Some(incoming) = incoming else {
                     let link = connection.take();
                     if let Some(link) = link {
+                        #[cfg(feature = "remote")]
+                        writes.stop().await;
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
@@ -759,6 +917,24 @@ async fn run_actor(
                     }
                     continue;
                 };
+                #[cfg(feature = "remote")]
+                let mut incoming = incoming;
+                #[cfg(feature = "remote")]
+                if let Incoming::Close { stream_id, .. } = &incoming
+                    && writes.owns(*stream_id) {
+                    let stream = *stream_id;
+                    writes.block(stream);
+                    if let Peer::Remote(remote) = &link.peer { remote.retire_writer(stream).await; }
+                    if !hot.ready(stream) { writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; } }
+                    continue;
+                }
+                #[cfg(feature = "remote")]
+                if writes.enabled()
+                    && let Incoming::Ack { stream_id, .. } = &incoming
+                        && let Some(id) = routes.get(stream_id)
+                        && let Some(attachment) = attachments.get_mut(id) { attachment.replaying = false; }
+                #[cfg(feature = "remote")]
+                hot.trim(&mut incoming, &attachments);
                 // Public plugin events invalidate capability consumers; no feature
                 // payload is interpreted by terminal routing. A reconnect also invalidates.
                 if let Incoming::Event {stream_id:0,event_json}=&incoming
@@ -773,6 +949,8 @@ async fn run_actor(
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
                     let link = connection.take();
                     if let Some(link) = link {
+                        #[cfg(feature = "remote")]
+                        writes.stop().await;
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
@@ -851,6 +1029,8 @@ async fn connect_agent(
         scratch,
         encode: Vec::with_capacity(4096),
         next_call_id: 1,
+        #[cfg(feature = "remote")]
+        owned_control: None,
     })
 }
 
@@ -890,7 +1070,225 @@ async fn read_frame_from_socket(
     }
 }
 
-// The command variants mutate one shared route table, so they remain in one bounded actor turn.
+/// Reconciles the validated shadow cursor before owned primary replay resumes.
+#[cfg(feature = "remote")]
+async fn apply_cached_ack(
+    stream: u32,
+    acknowledged: u64,
+    connection: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+) -> bool {
+    // Promotion reconciles durable ownership only. The owned write lane
+    // replays its bounded suffix after this Ack; generic replay here would
+    // await socket capacity inside the shared actor and exceed the shim frame.
+    if let Some(attachment) = routes.get(&stream).and_then(|id| attachments.get_mut(id)) {
+        attachment.replaying = false;
+    }
+    process_incoming(
+        Incoming::Ack {
+            stream_id: stream,
+            in_seq_acked: acknowledged,
+        },
+        connection,
+        attachments,
+        routes,
+        pending,
+    )
+    .await
+}
+
+/// One handler services the owned shadow whether the primary is live or gone.
+#[cfg(feature = "remote")]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+async fn process_priming(
+    event: priming::Event,
+    hot: &mut priming::State,
+    connection: &mut Option<AgentConnection>,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+    changes: &tokio::sync::watch::Sender<()>,
+    writes: &mut writes::State,
+) {
+    if connection.is_none() {
+        for (id, attachment) in attachments.iter() {
+            routes.insert(attachment.stream_id, *id);
+        }
+    }
+    match event {
+        priming::Event::Prepared => {}
+        priming::Event::Hedge => {
+            if !hot.hedge(attachments).await {
+                hot.cancel().await;
+            }
+        }
+        priming::Event::Incoming(None) => hot.cancel().await,
+        priming::Event::Incoming(Some(Incoming::Activate)) => {
+            if let Ok((mut promoted, slots)) = hot.promote().await {
+                if let Some(old) = connection.take() {
+                    connection_lost(old, attachments, routes, pending).await;
+                }
+                let mut valid = true;
+                for (id, attachment) in attachments.iter_mut() {
+                    routes.insert(attachment.stream_id, *id);
+                    attachment.awaiting_ack = true;
+                    attachment.replaying = true;
+                    let cached = slots.get(&attachment.stream_id);
+                    valid &= writes.promote_writer(attachment, cached);
+                    if let Some((ack, _, _)) = cached {
+                        // A cached shadow sample cannot move a validated
+                        // durable primary cursor backwards.
+                        let acknowledged = attachment.last_in_seq.max(*ack);
+                        attachment.last_input_end = attachment.last_input_end.max(acknowledged);
+                    }
+                }
+                for (stream, (ack, _, _)) in slots {
+                    let acknowledged = routes
+                        .get(&stream)
+                        .and_then(|id| attachments.get(id))
+                        .map_or(ack, |a| a.last_in_seq.max(ack));
+                    valid &= apply_cached_ack(
+                        stream,
+                        acknowledged,
+                        &mut promoted,
+                        attachments,
+                        routes,
+                        pending,
+                    )
+                    .await;
+                }
+                if valid {
+                    writes.enable(attachments);
+                    writes.install(&mut promoted);
+                    *connection = Some(promoted);
+                    changes.send_replace(());
+                } else {
+                    cleanup_connection(promoted).await;
+                    hot.cancel().await;
+                }
+            } else {
+                hot.cancel().await;
+            }
+        }
+        priming::Event::Incoming(Some(Incoming::Close { stream_id, .. })) => {
+            hot.retire_slot(stream_id).await;
+        }
+        priming::Event::Incoming(Some(mut incoming)) => {
+            let stream = match &incoming {
+                Incoming::Ack { stream_id, .. }
+                | Incoming::Output { stream_id, .. }
+                | Incoming::Snapshot { stream_id, .. }
+                | Incoming::Event { stream_id, .. } => Some(*stream_id),
+                _ => None,
+            };
+            if hot.accept(&mut incoming, attachments) {
+                if let Incoming::Ack { stream_id, .. } = &incoming
+                    && (!hot.hedged(*stream_id)
+                        || routes
+                            .get(stream_id)
+                            .and_then(|id| attachments.get(id))
+                            .is_some_and(|a| a.awaiting_ack))
+                {
+                    return;
+                }
+                let link = if let Some(link) = connection.as_mut() {
+                    link
+                } else {
+                    let Some(link) = hot.connection() else {
+                        return;
+                    };
+                    link
+                };
+                if !process_incoming(incoming, link, attachments, routes, pending).await {
+                    if let Some(stream) = stream {
+                        hot.retire_slot(stream).await;
+                    } else {
+                        hot.cancel().await;
+                    }
+                }
+            } else if let Some(stream) = stream {
+                hot.retire_slot(stream).await;
+            } else {
+                hot.cancel().await;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "remote")]
+fn retain_owned_input(
+    command: &Command,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    writes: &mut writes::State,
+) -> Option<bool> {
+    let Command::Input {
+        attachment_id,
+        frame,
+    } = command
+    else {
+        return None;
+    };
+    let Ok(decoded) = decode_muxed_frame(frame) else {
+        return Some(true);
+    };
+    if decoded.stream_id == 0 || decoded.stream_id % 2 == 0 {
+        return Some(false);
+    }
+    let Some(a) = attachments.get_mut(attachment_id) else {
+        return Some(true);
+    };
+    let (in_seq, bytes) = match decoded.frame {
+        Frame::Input { in_seq, bytes } => (in_seq, bytes),
+        Frame::Credit { bytes } => {
+            let Some(credit) = a.credit.checked_add(u64::from(bytes)) else {
+                return Some(false);
+            };
+            if credit > MAX_OUTPUT_CREDIT || !writes.credit(a.stream_id, a.session_id, bytes) {
+                return Some(false);
+            }
+            a.credit = credit;
+            return Some(true);
+        }
+        Frame::Resize {
+            cols,
+            rows,
+            px_w,
+            px_h,
+        } => {
+            writes.resize(a.stream_id, a.session_id, [cols, rows, px_w, px_h]);
+            return Some(true);
+        }
+        _ => return Some(false),
+    };
+    let Some(end) = in_seq.checked_add(bytes.len() as u64) else {
+        return Some(false);
+    };
+    if in_seq > a.last_input_end {
+        return Some(false);
+    }
+    let append = in_seq.max(a.last_input_end);
+    if end > append {
+        let Ok(skip) = usize::try_from(append - in_seq) else {
+            return Some(false);
+        };
+        let extra = &bytes[skip..];
+        if a.unacknowledged.len().saturating_add(extra.len()) > MAX_FRAME_LEN {
+            let stream = a.stream_id;
+            let _ = a.output.try_send(TerminalOutput::Closed { code: 1013 });
+            attachments.remove(attachment_id);
+            routes.remove(&stream);
+            return Some(true);
+        }
+        a.unacknowledged.extend_from_slice(extra);
+    }
+    a.last_input_end = a.last_input_end.max(end);
+    Some(true)
+}
+
+// The command variants mutate one shared route table in one bounded actor turn.
 #[allow(clippy::too_many_lines)]
 async fn process_command(
     command: Command,
@@ -900,6 +1298,11 @@ async fn process_command(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match command {
+        #[cfg(feature = "remote")]
+        Command::Prime { reply, .. } => {
+            let _ = reply.send(Err(AgentError::Unavailable));
+            true
+        }
         #[cfg(feature = "remote")]
         Command::Control {
             action,
@@ -1016,6 +1419,7 @@ async fn process_command(
             last_out_seq,
             last_in_seq,
             output,
+            input_credit,
             reply,
         } => {
             #[cfg(feature = "remote")]
@@ -1055,8 +1459,11 @@ async fn process_command(
                     last_out_seq,
                     last_in_seq,
                     last_input_end: last_in_seq,
+                    unacknowledged: BytesMut::new(),
+                    input_credit,
                     credit: 0,
                     awaiting_ack: true,
+                    replaying: false,
                     output,
                 },
             );
@@ -1088,7 +1495,39 @@ async fn process_command(
                     if in_seq > attachment.last_input_end {
                         return false;
                     }
+                    let append_from = in_seq.max(attachment.last_input_end);
+                    if end > append_from {
+                        let Ok(skip) = usize::try_from(append_from - in_seq) else {
+                            return false;
+                        };
+                        let additional = &bytes[skip..];
+                        if attachment
+                            .unacknowledged
+                            .len()
+                            .saturating_add(additional.len())
+                            > MAX_FRAME_LEN
+                        {
+                            // Public handles wait for byte credit. A bypass or
+                            // invalid producer may retire only its own writer;
+                            // it cannot close the host transport or lose silently.
+                            return retire_stream(
+                                connection,
+                                attachments,
+                                routes,
+                                attachment_id,
+                                stream_id,
+                                "input credit exceeded; reattach",
+                            )
+                            .await;
+                        }
+                        attachment.unacknowledged.extend_from_slice(additional);
+                    }
                     attachment.last_input_end = attachment.last_input_end.max(end);
+                    // A replacement must learn the authoritative cursor before it
+                    // forwards queued input, including input accepted during the move.
+                    if attachment.replaying {
+                        return true;
+                    }
                     let forward_from = in_seq.max(attachment.last_in_seq);
                     if end <= forward_from {
                         return true;
@@ -1194,6 +1633,7 @@ async fn reattach_all(
     for (id, attachment) in attachments.iter_mut() {
         let stream_id = attachment.stream_id;
         attachment.awaiting_ack = true;
+        attachment.replaying = true;
         if !send_attach(
             connection,
             stream_id,
@@ -1311,6 +1751,8 @@ async fn process_incoming(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match incoming {
+        #[cfg(feature = "remote")]
+        Incoming::Activate => false,
         Incoming::Result { call_id, ok, json } => {
             let Some(call) = pending.remove(&call_id) else {
                 return false;
@@ -1379,12 +1821,13 @@ async fn process_incoming(
                 return true;
             }
             if out_seq != attachment.last_out_seq {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1396,12 +1839,13 @@ async fn process_incoming(
                 .try_send(TerminalOutput::Output { out_seq, bytes })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1434,12 +1878,13 @@ async fn process_incoming(
                 .try_send(TerminalOutput::Snapshot { out_seq, bytes })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1469,12 +1914,13 @@ async fn process_incoming(
                 .try_send(TerminalOutput::Event { event_json })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
             }
@@ -1498,22 +1944,62 @@ async fn process_incoming(
             }
             // The backend may have accepted input whose Ack died with the old browser.
             // Its first reattach Ack is authoritative for this same durable writer.
+            let replay = attachment.replaying;
+            attachment.replaying = false;
+            let acknowledged = usize::try_from(in_seq_acked - attachment.last_in_seq)
+                .unwrap_or(usize::MAX)
+                .min(attachment.unacknowledged.len());
+            let _ = attachment.unacknowledged.split_to(acknowledged);
+            if attachment.unacknowledged.is_empty() {
+                attachment.unacknowledged = BytesMut::new();
+            }
             attachment.last_input_end = attachment.last_input_end.max(in_seq_acked);
             attachment.awaiting_ack = false;
             attachment.last_in_seq = in_seq_acked;
+            attachment.input_credit.send_replace(in_seq_acked);
             if attachment
                 .output
                 .try_send(TerminalOutput::Ack { in_seq_acked })
                 .is_err()
             {
-                return retire_slow_stream(
+                return retire_stream(
                     connection,
                     attachments,
                     routes,
                     attachment_id,
                     stream_id,
+                    "reader fell behind; reattach",
                 )
                 .await;
+            }
+            if replay && !attachment.unacknowledged.is_empty() {
+                // Retention bounds aggregate payload, while the wire limit
+                // also counts Input's type byte and eight-byte sequence.
+                let mut sequence = in_seq_acked;
+                for bytes in attachment
+                    .unacknowledged
+                    .chunks(MAX_FRAME_LEN - 1 - size_of::<u64>())
+                {
+                    if !write_frame(
+                        connection,
+                        stream_id,
+                        &Frame::Input {
+                            in_seq: sequence,
+                            bytes,
+                        },
+                    )
+                    .await
+                    {
+                        return false;
+                    }
+                    let Ok(length) = u64::try_from(bytes.len()) else {
+                        return false;
+                    };
+                    let Some(next) = sequence.checked_add(length) else {
+                        return false;
+                    };
+                    sequence = next;
+                }
             }
             true
         }
@@ -1536,26 +2022,19 @@ async fn process_incoming(
     }
 }
 
-/// A full or disconnected consumer retires only its attachment. The PTY/ring remain
+/// A full reader or an invalid input producer retires only its attachment. The PTY/ring remain
 /// in the shim; reconnect can catch up from the browser's last delivered offset.
-async fn retire_slow_stream(
+async fn retire_stream(
     connection: &mut AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     attachment_id: u64,
     stream_id: u32,
+    reason: &'static str,
 ) -> bool {
     attachments.remove(&attachment_id);
     routes.remove(&stream_id);
-    write_frame(
-        connection,
-        stream_id,
-        &Frame::Close {
-            code: 1013,
-            reason: "reader fell behind; reattach",
-        },
-    )
-    .await
+    write_frame(connection, stream_id, &Frame::Close { code: 1013, reason }).await
 }
 
 #[derive(Deserialize)]
@@ -1632,6 +2111,17 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                 };
                 let stream_id = decoded.stream_id;
                 let frame = match decoded.frame {
+                    #[cfg(feature = "remote")]
+                    Frame::Call {
+                        call_id: 0,
+                        action_id: "transport.activate",
+                        input_json,
+                    } if stream_id == 0
+                        && crate::remote_standby::activation(input_json).is_ok()
+                        && matches!(&connection.peer, Peer::Remote(link) if link.primed()) =>
+                    {
+                        Incoming::Activate
+                    }
                     Frame::Result { call_id, ok, json }
                         if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON =>
                     {
@@ -1722,6 +2212,19 @@ fn share_payload(wire: &Bytes, payload: &[u8]) -> Option<Bytes> {
 }
 
 async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &Frame<'_>) -> bool {
+    #[cfg(feature = "remote")]
+    if stream_id == CONTROL_STREAM
+        && let Some(sender) = &connection.owned_control
+    {
+        let mut encoded = Vec::new();
+        if infraternal_protocol::encode_frame_into(frame, &mut encoded).is_err()
+            || encoded.len() > writes::CONTROL_FLIGHT
+        {
+            return false;
+        }
+        // Admission is guarded by queue readiness in the single actor turn.
+        return sender.try_send(Bytes::from(encoded)).is_ok();
+    }
     let (peer, encode) = (&mut connection.peer, &mut connection.encode);
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
         return false;
@@ -1886,3 +2389,38 @@ mod regressions;
 #[cfg(test)]
 #[path = "session_exit_latency_tests.rs"]
 mod exit_latency_tests;
+
+#[cfg(feature = "remote")]
+#[path = "embedded_priming.rs"]
+mod priming;
+
+#[cfg(feature = "remote")]
+async fn next_priming(
+    hot: &mut priming::State,
+    attachments: &HashMap<u64, AttachmentState>,
+) -> priming::Event {
+    hot.next(attachments).await
+}
+#[cfg(not(feature = "remote"))]
+enum NoPriming {}
+#[cfg(not(feature = "remote"))]
+async fn next_priming(_state: &mut (), _: &HashMap<u64, AttachmentState>) -> NoPriming {
+    std::future::pending().await
+}
+
+#[cfg(feature = "remote")]
+#[path = "embedded_writes.rs"]
+mod writes;
+#[cfg(feature = "remote")]
+async fn next_writes(writes: &mut writes::State) -> (u32, bool) {
+    writes.next().await
+}
+#[cfg(not(feature = "remote"))]
+async fn next_writes(_state: &mut ()) -> (u32, bool) {
+    std::future::pending().await
+}
+
+#[cfg(all(test, feature = "remote"))]
+pub(crate) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {
+    writes::test_control_queue_state(peer)
+}

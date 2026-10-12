@@ -11,6 +11,8 @@ pub mod relay;
 #[cfg(feature = "remote")]
 pub mod remote_client;
 #[cfg(feature = "remote")]
+pub mod remote_cursor;
+#[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_native;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_quic;

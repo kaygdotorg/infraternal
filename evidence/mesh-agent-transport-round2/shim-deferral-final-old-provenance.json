@@ -1,0 +1,35 @@
+{
+  "qualification": "Final same regression source. PTY executes immutable old actual production runner; consumer protocol codec is copied exactly from ec8a648c, not currentproduction library. nix/vt100 are UID/screen helpers only.",
+  "old_runner_sha256": "7991631c5e7d007bde5ea7eb904c39c68124c427af8d29657449454cafe8fe68",
+  "old_frame_sha256": "95ef739fc809407b57f17cadaa7709117f89f93cc1e3cbb5126141a8d9d58ba1",
+  "integration_source_sha256": "b7d35f91ecfa8bb45c7983a2587f2e0002155e61cfc13a8d50b7c4a9f8c89423",
+  "commands": [
+    [
+      "rustc",
+      "--edition=2024",
+      "--crate-name",
+      "infraternal_shim",
+      "--crate-type",
+      "rlib",
+      "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shim-deferral/old-codec.rs",
+      "-o",
+      "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shim-deferral/libold_codec.rlib"
+    ],
+    [
+      "rustc",
+      "--edition=2024",
+      "--test",
+      "crates/infraternal/tests/shim.rs",
+      "-L",
+      "dependency=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps",
+      "--extern",
+      "infraternal_shim=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shim-deferral/libold_codec.rlib",
+      "--extern",
+      "nix=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libnix-0d419c7c541953e6.rlib",
+      "--extern",
+      "vt100=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/libvt100-61dd29ea5f5a269c.rlib",
+      "-o",
+      "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shim-deferral/old-pressure-tests"
+    ]
+  ]
+}

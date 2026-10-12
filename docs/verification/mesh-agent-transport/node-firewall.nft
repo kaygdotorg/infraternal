@@ -1,0 +1,3 @@
+# Public fixture firewall evidence from isolated kernel namespace, issue #129.
+table inet mesh_proof { chain input { type filter hook input priority 0; policy drop; iifname lo accept; ct state established,related accept;  }
+}

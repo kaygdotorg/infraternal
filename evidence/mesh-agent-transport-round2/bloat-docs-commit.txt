@@ -1,0 +1,23 @@
+docs: attribute original D215 binary growth per item (#129)
+
+The original mesh transport lane added 90,496 shipping bytes without an
+item-level explanation. Record paired a5f744fb/515d3712 cargo-bloat builds,
+net symbol families and ELF section reconciliation under identical Rust,
+locked dependencies and release settings (D215).
+
+Preserve exact raw tool JSON compressed with verified byte-for-byte
+decompression, alongside hashes and compiler/load provenance. Explain the
+functional costs and offsets: the generic daemon dispatcher adds 132 net
+bytes, while extracted supervisors replace existing monolithic bodies.
+
+Reject a dispatcher/engine redesign based on added symbol names alone:
+renamed or extracted bodies are not wholly incremental duplication, and
+equal symbol names/sizes do not prove removable byte-identical code. Mark
+the 64-byte stripping-method difference unreconciled and keep final
+round-two shipping growth and gates separate from this historical evidence.
+
+Validation: isolated cf64f1d2 source formatting passed; both JSON outputs
+parse and their saved gzip payloads decompress exactly. No Rust crate or
+TypeScript implementation is changed by this evidence slice.
+
+Refs: #129

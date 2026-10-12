@@ -56,6 +56,7 @@ fn check(firewall: Firewall) {
     let mut node = Node::with_firewall(firewall);
     node.up().unwrap();
     node.chunk(Chunk {
+        server: None,
         node: NodeId(1),
         from_version: None,
         version: 1,

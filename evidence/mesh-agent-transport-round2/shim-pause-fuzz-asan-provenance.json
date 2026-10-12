@@ -1,0 +1,52 @@
+{
+  "role": "Exact-source bounded ASAN parser correctness fuzz; not latency/performance acceptance.",
+  "harness": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shared-shim-fuzz",
+  "frame_source": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/infraternal-shim/src/frame.rs",
+  "frame_sha256": "4f4af998fe90114f5bfe98aed687946aada16a94758fadfe21b1fc558cdd170e",
+  "repository_fuzz_sha256": "b4b8f8840065c1792c75e27a29ea2aba2bcc419af7f449d6727e42d27767253d",
+  "direct_target_sha256": "1afd694013409a41deae59f6dc91113e7589c047e3d9c5eac9860d193aebb3e0",
+  "manifest_sha256": "f3af6e3ad17478259641c139be4dec211a0f2e192fc8a42b162d981209b3524c",
+  "lock_sha256": "2a11a799945e20dff25cca3941458f5a59fff359c7a5f5c398908a006bfa8911",
+  "seeds": {
+    "pause-coalesced-input-state": "39b3b99b2cdc9fae00ae743ddd7230293e8634c1e2c04dfa0585e3c42ca0d208",
+    "pause-coalesced-input-input": "0f4b3adecd87782eeaf99a1039be60c7cfa8189f39f55aa887dce736e1c05cf3",
+    "pause-valid-then-malformed": "ea862652fd11f57af110d9cb34977bc318c003941019e277221a9e8616d6007a",
+    "pause-maximum-frame": "79c8f7399a9bdce25d5cc7f8e156024b8cdd673ef58d7c44266b515f441322aa"
+  },
+  "limits": {
+    "max_total_time": 31,
+    "rss_limit_mb": 1024,
+    "timeout": 10,
+    "max_len": 1048580
+  },
+  "dependencies": "Existing standalone manifest/lock and build cache reused unchanged; no dependencies added.",
+  "command": [
+    "cargo",
+    "+nightly",
+    "fuzz",
+    "run",
+    "--fuzz-dir",
+    "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shared-shim-fuzz",
+    "shim_frame_decode",
+    "--",
+    "-max_total_time=31",
+    "-rss_limit_mb=1024",
+    "-timeout=10",
+    "-max_len=1048580"
+  ],
+  "exit_code": 0,
+  "frame_unchanged": true,
+  "immutable_binary": {
+    "path": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shim-deferral/pause-frame-asan-immutable",
+    "sha256": "9a4889f85aa26a8ed5c37a394fed6029a43d8945663f08156817b12b3e87a01c"
+  },
+  "systemd_scope": "run-p647900-i9035498.scope",
+  "result": {
+    "runs": 16180,
+    "configured_seconds": 31,
+    "reported_seconds": 34,
+    "rss_mb": 342,
+    "sanitizer": "address",
+    "crash": false
+  }
+}

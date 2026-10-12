@@ -578,9 +578,12 @@ async fn build_router_core(
                 id: "server".to_owned(),
                 ip: observed_server_ip,
                 server: true,
+                server_paths: true,
                 actor: local_node,
                 #[cfg(feature = "remote")]
                 authority: None,
+                #[cfg(feature = "remote")]
+                listeners: Some(hosts.clone()),
             }))
             .await
             .map_err(|_| ServerError::InvalidConfiguration)?;

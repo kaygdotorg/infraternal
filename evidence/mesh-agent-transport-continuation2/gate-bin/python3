@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Dispatches only the required latency self-test to the owner-required perf VM.
+# Other Python invocations retain the build host's functional gate behavior.
+if [[ ${1##*/} == latency_proxy.py && ${2:-} == self-test ]]; then
+  shift
+  exec netbird ssh --no-browser root@10.69.69.208 'flock -w 30 /var/lock/perf-bench.lock /usr/bin/python3 /root/infraternal-bench/mat129-c2/scripts/latency_proxy.py self-test --samples 3'
+fi
+exec /usr/bin/python3 "$@"

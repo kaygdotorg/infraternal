@@ -1,0 +1,18 @@
+fix(server): move bounded native writes out of terminal actor turns
+
+A flow-controlled primary Input, Credit or ControlCall suspended the shared
+actor and delayed independent terminal progress. Own one <=16KiB input flight
+per writer with a durable-Ack window, coalesce credit/resize, and bound encoded
+control to one active plus one queued <=33024-byte frame. Saturating control
+pauses control admission while native terminal delivery remains readable.
+Abort and join flights on replacement; retain existing transport-loss behavior
+for ordinary failures. Reject unbounded spawning and socket-completion input
+credit because only the shim durable cursor releases retained input.
+Decisions D64, D128, D198, D215. No priming advertisement in this slice.
+
+Validation: fmt and strict all-target remote server Clippy pass; embedded real
+socket regressions 19 passed, 0 failed, 2 ignored, including MAT-R4 isolation.
+Restored the existing process_command lint annotation lost in split generation.
+Raw output: evidence/mesh-agent-transport-continuation/owned-*.log.
+
+Refs: #129

@@ -39,8 +39,21 @@ iptables is rejected. No shell evaluates policy text. Interface identifiers
 and addresses are typed before formatting. Route/netlink parser tests and a
 fuzz target cover malformed lengths, padding and kernel error replies.
 
-The remote transport continues to take its enrolled endpoint in this slice.
-The public `ServerPath` coordinate type separates a future Mesh destination
-from the enrolled fallback. TLS authority remains in the existing remote
-identity, and plugin delivery uses the transport-independent `NodeChannel`
-capability. D215 can select a destination without changing enrolled identity.
+## Infraternal agent server path [215,227,228]
+
+The coordinator identifies the server in each bounded configuration. Only an
+applied configuration publishes its server destination through a generic node
+transport capability. The enrolled fallback port and TLS server name remain
+unchanged. A replacement must prove the enrolled server identity through mutual
+TLS before the live path is retired. Terminal shims, writer identity and retained
+input/output offsets remain authoritative across replacement and fallback.
+
+The server also binds its authenticated QUIC/TLS listener to its assigned mesh
+address. The Mesh coordinator worker owns this listener lease; disabling Mesh
+retires it. Mesh status reports the observed infraternal agent server path and
+the reason for fallback, rather than inferring the transport from a handshake.
+
+Nodes ask the kernel for a free UDP port and refuse 51820. Only the actual bound
+port is advertised. Every configured peer enables persistent keepalive, so both
+ends send through stateful firewall mappings. Endpoint discovery remains public
+coordination, never authentication or proof of a working path.

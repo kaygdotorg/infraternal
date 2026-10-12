@@ -1,0 +1,143 @@
+{
+  "status": "NOT RUN: no immutable historical binary seal located; fresh exact-source build/seal required",
+  "role": "MAT-R1/R2/R3 final functional kernel review, no latency acceptance",
+  "base": "e473189880c59d112cfc62eb363587b00d21eac6",
+  "current_head": "6b3fd5c24e090c72807bff73e9bd5f5e5fe1362d",
+  "sources_unchanged": true,
+  "source_hashes": {
+    "crates/plugins/mesh/src/socket.rs": "135aa46a71165c17928af1dfce944ead8aadc11272fd95bde924b14beee733e4",
+    "crates/plugins/mesh/src/store.rs": "c1752057189c41779c0d7fb4e557483b1f6503f7ce5671e1a7f1ff672f1604ee",
+    "crates/plugins/mesh/src/node.rs": "c42fe46e2fd921104bbcc4ee7ba23077961052cf9522dea5a083b0d292b6073d",
+    "crates/plugins/mesh/src/firewall.rs": "ec3a91f44a53075082284f040f0211e2f4f9a18044a6375d6ab8bae6351d9485",
+    "crates/plugins/mesh/src/configuration.rs": "9371bd30834b5b2092d268cfc3cecb60aad388016a8ed3cd42ba18c475919a42",
+    "crates/plugins/mesh/src/descriptor.rs": "289b48ef2380dac7f0fe7fa37ce9fcab9fdd4c7a39a4e6d32020adb648fb7055",
+    "crates/plugins/mesh/src/lib.rs": "786420c205ecf6981336694191d200909ece5dc4895b384ff5e419a390cbcba0",
+    "crates/plugins/mesh/src/netlink.rs": "fc588a56f6a3b27da828fd99035d373079b6844a0293c29035c27c2fae129aee",
+    "crates/plugins/mesh/src/node_coordination.rs": "93e10685a69c41010937dfb74d3aac0680807d906bb2cbd0c9ee931546a9743d",
+    "crates/plugins/mesh/src/node_state.rs": "fa59901b4f343d10b00d9db4dd3d65f175599a09c4880de13a666707e07da5de",
+    "crates/plugins/mesh/src/api.rs": "1c64000879a2f887165468aff6529885a83317e9f53668a4fae073df779f22bc",
+    "crates/plugins/mesh/src/node_actions.rs": "87551a6122941829adc8d8d55f16296fc7cebdb9a18a553603371dd48d575c28",
+    "crates/plugins/mesh/src/settings.rs": "d3625884cee33246ca0bd1794b5bc3882df3c88a077af256fdd81672f15bfa94",
+    "crates/plugins/mesh/src/iptables.rs": "48aca264b751e700572327ff12bcf03812def0ebbb4af7e9effbbd846a8cc389",
+    "crates/plugins/mesh/src/dataplane.rs": "f779a2067ce5a112efba8cf307b480d922444ec606fd96b418a6873c8eed7b95",
+    "crates/plugins/mesh/src/node_presentation.rs": "11a7975b68b91fa2a4b1d02d1e454fe7e1eea6e8f61cd7f245d050f796e3d40c",
+    "crates/plugins/mesh/src/wireguard.rs": "0f10a3ff0520218d1033225b855bc82f23698d63516db415dde7c0d27aac94c4",
+    "crates/plugins/mesh/Cargo.toml": "959b64fa3eb3b3da6a3cbfbaf7696cd759ff3f6ba9003c517aa7e1c422e8a72e",
+    "Cargo.toml": "726ede93de7e9c129ed3e758c7eec7675fc0021335c70b8c8f7631aefca93593",
+    "Cargo.lock": "927e5badbef20ab3032f0308348b7a8c71dd62f54d3d4373564c4c97145af561",
+    "crates/plugins/mesh/tests/review_ingress_translation.rs": "a5507b125918c0fb13f4e83db1fc535d1fb22c2e874cde44825d7ecd1e68a1fc",
+    "crates/plugins/mesh/tests/review_endpoint_transaction.rs": "59fe5b56eda14704a204fa7b8c1bcd56fbb837055b525fe6e629637353e9ce17",
+    "crates/plugins/mesh/tests/review_restart_routes.rs": "582ff1483caea27897c3dc272dcc6fe23b4b39f64537e0a342b0cca98394dbb3"
+  },
+  "historical_cargo_artifacts": [
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh#infraternal-plugin-mesh@0.1.0",
+      "manifest_path": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh/Cargo.toml",
+      "target": {
+        "kind": [
+          "test"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "review_ingress_translation",
+        "src_path": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh/tests/review_ingress_translation.rs",
+        "edition": "2024",
+        "doc": false,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 2,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "features": [
+        "agent",
+        "default",
+        "server"
+      ],
+      "filenames": [
+        "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/review_ingress_translation-ab275ab52666b303"
+      ],
+      "executable": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/review_ingress_translation-ab275ab52666b303",
+      "fresh": false
+    },
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh#infraternal-plugin-mesh@0.1.0",
+      "manifest_path": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh/Cargo.toml",
+      "target": {
+        "kind": [
+          "test"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "review_endpoint_transaction",
+        "src_path": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh/tests/review_endpoint_transaction.rs",
+        "edition": "2024",
+        "doc": false,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 2,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "features": [
+        "agent",
+        "default",
+        "server"
+      ],
+      "filenames": [
+        "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/review_endpoint_transaction-d3242410fee0f431"
+      ],
+      "executable": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/review_endpoint_transaction-d3242410fee0f431",
+      "fresh": false
+    },
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh#infraternal-plugin-mesh@0.1.0",
+      "manifest_path": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh/Cargo.toml",
+      "target": {
+        "kind": [
+          "test"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "review_restart_routes",
+        "src_path": "/home/kayg/Developer/infraternal/.worktrees/mesh-agent-transport/crates/plugins/mesh/tests/review_restart_routes.rs",
+        "edition": "2024",
+        "doc": false,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 2,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "features": [
+        "agent",
+        "default",
+        "server"
+      ],
+      "filenames": [
+        "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/review_restart_routes-9d2921265144199e"
+      ],
+      "executable": "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/target/debug/deps/review_restart_routes-9d2921265144199e",
+      "fresh": false
+    }
+  ],
+  "artifact_record_sha256": "706c2c550d6b26ad7809d3b8318b100f8a370d0d14930cb26bb3aa4a8789374a"
+}

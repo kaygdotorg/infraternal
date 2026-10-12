@@ -1,0 +1,1 @@
+Committed/pushed ab85534013c0fc66ab9b98b92156bf65b92b9c05: parked identity RAII transfer and native-only negotiated priming ownership; wire consumer remains refused until next activation slice. Server fmt/strict remote Clippy pass; six standby/parser tests pass. No timing evidence.

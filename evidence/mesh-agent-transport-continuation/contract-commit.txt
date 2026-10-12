@@ -1,0 +1,12 @@
+docs(protocol): specify negotiated parked writers and bounded input deferral
+
+D215 needs fallback writer preparation without changing frozen frame layouts.
+Record leg-B bits 4/5, exact transport objects, authenticated writer markers,
+and shim queue deferral including ordinary selection and renewed FIFO tickets.
+These additions were proposed on #129 before implementation. Reuse existing
+Call/Attach/Credit and SHARED_WRITER negotiation rather than inventing another
+transport or changing legacy capacity refusal. Decisions D64, D128, D198, D215.
+Validated the appendices against parser/negotiation sources and issue proposals;
+git diff --check passes. No executable or TypeScript source changes.
+
+Refs: #129

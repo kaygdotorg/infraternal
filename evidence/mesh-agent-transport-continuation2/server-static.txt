@@ -1,0 +1,1 @@
+/home/kayg/.cache/codex-scratch/mesh-agent-transport-continuation2/artifacts/server-tests: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, not stripped

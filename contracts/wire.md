@@ -312,3 +312,48 @@ frames are binary, because they carry each keystroke and each output chunk.
 `Hello.version` is 1. New features use `caps` bits. A side sends a new frame
 type only if the peer announced the matching cap. Frames `0xF0–0xFF` never
 change.
+
+### Native leg-B parked fallback (#129, D215)
+
+These capabilities apply only to the enrolled infraternal-agent/server channel,
+independently of browser resume. Existing frame layouts remain frozen.
+`REMOTE_STANDBY` is server Hello bit 4. The server advertises
+`REMOTE_PRIMED_WRITERS` (bit 5) together with bit 4 and the existing native
+writer-binding bit 1. Both peers negotiate bits 5 and 1; the client need not
+advertise the server parking capability (bit 4). The existing mTLS,
+certificate ledger, host identity and execution-uid checks apply before any
+request. No request contains a caller-selected host or writer identity.
+
+On a proven fallback control channel, `Call(0, "transport.standby", {})` parks
+the connection without replacing the host actor. The supporting server returns
+`Result(0, true, {})` and a cached Hello. Basic parking waits for the client's
+Hello before normal admission; it owns no terminal relay or plugin worker.
+There is at most one parked connection per host and 1,000 across the listener;
+initial handshake permits are released after ledger admission. Revocation or
+expiry retires the parked connection.
+
+With native bit 5 negotiated, the same request may contain
+`{"prime":true}`. The client sends its Hello immediately, permitting native
+writer preparation while the active transport remains live. Later
+`Call(0, "transport.activate", {})` activates this authenticated connection
+without a new handshake or a second Hello. Activation rechecks ledger authority
+and belongs to the existing host actor. Standby and activation JSON are exact
+objects bounded to 64 bytes: duplicate/unknown fields, arrays and trailing
+objects are refused. TCP and peers without bit 5 retain basic parking.
+
+For each authenticated native writer binding, an ordered canonical
+`Call(0, "transport.prime", {})` immediately before AttachTerm selects shared
+shim-writer intent. This marker is permitted only after bit 5 negotiation; an
+unmarked stream retains ordinary writer behavior even after control activation.
+The shared writer first returns its authoritative InputAck and remains without
+an output subscription. `Call(0, "transport.cursor", {"out_seq":u64})` starts
+or changes that subscription; its exact object is bounded to 64 bytes and is
+valid only on a marked stream. Cursor updates never reset input ownership.
+Existing Credit, Input, Resize and Close frames retain their layouts.
+
+Shared relays reuse the existing session/writer identity, durable shim input
+cursors and bounded output credit. The actor retains unacknowledged input once;
+replay trims acknowledged prefixes and never converts a path switch into a new
+writer. Malformed requests retire their own stream. Owned supervisors and
+preparation/write tasks are cancelled on link retirement, component down or
+actor shutdown; the parked transport grants no additional session authority.

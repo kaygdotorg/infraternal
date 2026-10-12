@@ -1,0 +1,15 @@
+feat(server): transfer parked admission ownership into native priming
+
+A primed fallback must retain its bounded host parking slot through queued
+actor preparation and promotion, without retaining handshake permits. Transfer
+that RAII ownership after a native negotiated Hello, keep authority cancellation
+and refuse prime on TCP. Basic parking keeps its cached greeting/wait semantics.
+Reject releasing the identity slot before actor ownership or holding anonymous
+handshake capacity during parking. Decisions D64, D128, D198, D215.
+
+The greeting consumer still refuses prime until the activation slice. Validation:
+fmt/strict all-target remote server Clippy pass; six standby/parser tests pass
+including real TLS/QUIC legacy parking/revocation/duplicate admission. Evidence
+admission-*.log.
+
+Refs: #129

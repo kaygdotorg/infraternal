@@ -1,0 +1,16 @@
+Record authenticated arrival and scheduler gaps in the mesh scale fixture
+
+Sample the production freshness signature through test-support only, and persist
+bounded arrival-gap, RTT and guard-poll diagnostics before scale assertions.
+This distinguishes a live QUIC connection from a retired freshness watcher.
+Reusing the production counter selection avoids a second diagnostic definition;
+no learned deadline, production task or dependency is added. D128/D215 require
+latency evidence at scale rather than a healthy connection count alone.
+
+Validation: remote-plugin strict clippy and 11 real TLS/QUIC tests passed; current
+agent strict clippy passed, and serial full agent suite passed 68 tests with
+11 explicit diagnostic ignores in 25.43 s. Optimized 1000-pair evidence and
+load/provenance are recorded separately; these diagnostics do not prove PTY
+latency or the memory footprint of 1000 complete infraternal agents.
+
+Refs: #129

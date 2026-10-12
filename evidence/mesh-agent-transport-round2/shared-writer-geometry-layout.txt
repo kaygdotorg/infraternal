@@ -1,0 +1,4 @@
+after InputCursors bytes=32
+after Peer bytes=128
+Method: streamed DWARF type byte_size only, Rust1.99 native debug. Requested+accepted geometry adds16B to logical per-writer cursor state;513 maximum entries includinglegacy zero x16B x200PTYs=1,641,600B logical data delta. HashMap bucket capacity/allocator and socket/buffer RSS overhead excluded; this is not an RSS bound. No extra HashMap or per-resize allocation introduced.
+Baseline cursor had only2u64 fields (16B); baseline full-shipping DWARF scan interrupted and not used for Peer attribution because unrelated Peer types occur. New shim-only DWARF observed InputCursors32B and Peer128B.

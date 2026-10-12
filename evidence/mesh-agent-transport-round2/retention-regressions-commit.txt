@@ -1,0 +1,15 @@
+test(server): cover retained-input credit and sibling progress (#129)
+
+Preserve fb1b9bbe's independent review assertion that a 4 MiB writer cannot
+retire the shared host transport. Add a real Unix socket actor regression
+that fills the retained-byte window, verifies the next byte waits, sends
+input on a sibling writer, and frees exactly one byte with a shim Ack.
+Assert the blocked byte resumes once at its original absolute offset.
+Reject tests that only accept the old false return or exercise output
+credit: neither verifies retained input backpressure. D128, D215.
+
+Both regressions failed before 64674655. The embedded regression gate now
+passes 19 tests with 2 explicit measurements ignored; fmt and server
+all-target Clippy pass.
+
+Refs: #129

@@ -1,0 +1,13 @@
+{
+  "head": "b87c223ffb1c9f389f95a7e48eced6dd2f00c52b",
+  "build_profile": "debug, diagnostic only",
+  "guard_source_sha256": "6486ffc68c849ca2b06daea87c38ca8046af921ddd723f3fb6d4ffe0ae6dc194",
+  "executable_sha256": "b8bef3907e69ec7e98e8ce74a850d6076a7b395b067667d6f7cd92fc087a8991",
+  "scope": "run-p429814-i4623788.scope",
+  "cpu_weight": 10000,
+  "result": "SETUP_FAILED",
+  "exit": 101,
+  "elapsed_seconds": 106.62,
+  "sampling_started": false,
+  "reason": "Server incoming handshake timed out at remote_mesh_idle_tests.rs:60, propagated through JoinError; no new watchdog timeout telemetry produced."
+}

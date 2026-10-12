@@ -1,0 +1,17 @@
+Refuse expired enrollment before starting local control work
+
+An expired remote identity was checked only after creating session state
+and opening the plugin control service. Reject invalid current or renewed
+credentials before either side effect, while preserving the uid check.
+The same existing certificate-validity helper remains authoritative.
+
+The regression now uses private state and asserts it remains empty.
+Before the fix it failed with one created session directory; afterward it
+passes in0.01s. Delaying expiry until the dial loop or relaxing its timeout
+would preserve unintended local work and hide the admission ordering bug.
+Decisions64,198,215 keep authentication before remote/plugin activity.
+
+Validation: agent fmt and strict all-target mesh,remote Clippy pass;
+real supervisor expiry regression1PASS0FAIL after its recorded failure.
+
+Refs: #129

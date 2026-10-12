@@ -1,0 +1,18 @@
+Preserve component-down reason when mesh closure wins replacement
+
+An explicit mesh down racing a transport close could report interrupted
+and enter failure cooling. Derive interruption reason from the currently
+applied preferred path after the futures leave scope. A disabled component
+stays disabled whether the proof or connection closure finishes first.
+
+The real-mTLS close-during-down regression first failed with
+MeshInterrupted instead of MeshDisabled; it now passes. Biasing select or
+loosening the status assertion was rejected because neither represents
+the applied intent. Decisions198,201,215 keep runtime component state
+separate from transport availability; no server creation is involved.
+
+Validation: fmt and strict agent all-target mesh,remote Clippy pass.
+Serial agent67PASS0FAIL11ignored and transport2PASS; race test lands
+separately after the production fix.
+
+Refs: #129

@@ -2,7 +2,7 @@
 
 use super::*;
 
-async fn admitted_store(
+pub(crate) async fn admitted_store(
     host: &Identity,
     root: &X509,
 ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid, [u8; 32]) {

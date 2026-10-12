@@ -1,0 +1,14 @@
+Declare native standby writer priming independently of TLS parking (#129)
+
+D215 terminal recovery cannot meet one RTT plus250ms if every switch waits
+for a new writer AttachAck. Reserve additive capability bit5 so both peers
+opt in before shared durable-writer priming and bounded cursor requests.
+Keep existing bit4 parking and legacy writer replacement unchanged.
+Reject unconditional changes to frozen greetings or shim ownership; peers
+without the new bit retain their original behavior. D128/D198 authority
+and plugin lifetime boundaries remain with the transport callers.
+
+Validation: plugin-api fmt, all-target clippy and all library/integration
+tests pass; production transport integration remains a subsequent slice.
+
+Refs: #129
