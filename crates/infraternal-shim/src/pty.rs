@@ -235,6 +235,24 @@ pub(super) fn prepare_child(command: &mut Command) {
     }
 }
 
+/// Direct launch keeps the same signal policy and closes the trusted leg-B fd.
+pub(super) fn prepare_child_without_control(command: &mut Command) {
+    prepare_child(command);
+    // SAFETY: close is async-signal-safe and captures no runtime state. EBADF
+    // means no control descriptor exists; every other error refuses the child.
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::close(3) == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(nix::libc::EBADF) {
+                    return Err(error);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 fn reset_child_signals() -> io::Result<()> {
     // SAFETY: zero initializes sigaction's storage; sigemptyset initializes its
     // mask before any syscall consumes it. All pointers refer to live stack data.
@@ -323,6 +341,30 @@ mod child_signal_tests {
         );
         assert_eq!(nix::sys::signal::SigSet::thread_get_mask().unwrap(), before);
     }
+    #[test]
+    fn child_policy_closes_the_control_descriptor_before_direct_exec() {
+        let control = File::open("/dev/null").unwrap();
+        let fd = control.as_raw_fd();
+        let mut child = Command::new("/bin/sh");
+        child.args(["-c", "test ! -e /proc/self/fd/3"]);
+        // SAFETY: create a fixture-only inherited control descriptor with only
+        // dup2/fcntl before the production child policy runs.
+        unsafe {
+            child.pre_exec(move || {
+                if nix::libc::dup2(fd, 3) == -1 || nix::libc::fcntl(3, nix::libc::F_SETFD, 0) == -1
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        prepare_child_without_control(&mut child);
+        assert!(
+            child.status().unwrap().success(),
+            "leg-B control must be closed before direct child exec"
+        );
+    }
+
     #[test]
     #[ignore = "child spawn diagnostic; run locally in a weighted scope without own build overlap"]
     fn child_signal_reset_spawn_cost_at_128_children() {
