@@ -576,6 +576,14 @@ mod tests {
         ));
     }
 
+    mod retirement_contention {
+        //! A separate SQLite writer can outlive the connection's busy timeout.
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_retirement_contention_tests.rs"
+        ));
+    }
+
     struct Signer(Option<CaMaterial>);
     impl CaKeySource for Signer {
         fn load(&self) -> Result<CaMaterial, CaError> {
@@ -624,6 +632,14 @@ mod tests {
     }
     async fn fixture(unlocked: bool) -> Fixture {
         let (store, pool, prior) = crate::enrollment::authority::tests::enrolled().await;
+        fixture_with_store(unlocked, store, pool, prior).await
+    }
+    async fn fixture_with_store(
+        unlocked: bool,
+        store: crate::enrollment::EnrollmentStore,
+        pool: sqlx::SqlitePool,
+        prior: Uuid,
+    ) -> Fixture {
         let auth = Auth::new(
             pool.clone(),
             "remote.example.test",

@@ -9,7 +9,26 @@ impl EnrollmentStore {
     /// this owned operation, so waiting for SQLite never preserves access.
     /// # Errors
     /// Refuses changed ownership, invalid time or unavailable storage.
-    pub async fn retire_bootstrap(
+    pub(crate) async fn retire_bootstrap(
+        &self,
+        owner: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        loop {
+            match self.retire_bootstrap_once(owner, host, now).await {
+                Err(EnrollmentError::Storage(error)) if writer_contention(&error) => {
+                    // This obligation is active only during retirement. Retry
+                    // a fresh transaction after BUSY/LOCKED, including extended
+                    // codes; corruption and closed storage are never retried.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn retire_bootstrap_once(
         &self,
         owner: &str,
         host: Uuid,
@@ -22,7 +41,7 @@ impl EnrollmentStore {
         // The first write serializes behind any invitation COMMIT. An absent
         // host after this barrier means issuance never committed; only the
         // caller's pre-registered random UUID can reach this operation.
-        let changed = sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, ?) WHERE id=? AND owner_id=? AND created_at<=?")
+        let changed = sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, ?) WHERE id=? AND owner_id=? AND created_at<=? AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
             .bind(now).bind(host.as_bytes().as_slice()).bind(owner).bind(now)
             .execute(&mut *transaction).await?.rows_affected();
         if changed != 1
@@ -44,7 +63,7 @@ impl EnrollmentStore {
     /// Call only before transport admission starts; no live batches may exist.
     /// # Errors
     /// Returns storage failure without partially retiring the intent journal.
-    pub async fn retire_unfinished_bootstraps(&self) -> Result<(), sqlx::Error> {
+    pub(crate) async fn retire_unfinished_bootstraps(&self) -> Result<(), sqlx::Error> {
         let mut transaction = self.0.begin().await?;
         sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, MAX(created_at, unixepoch())) WHERE id IN (SELECT host_id FROM remote_bootstrap_retirement_intents)")
             .execute(&mut *transaction).await?;
@@ -57,13 +76,29 @@ impl EnrollmentStore {
     /// Proven installation completion releases the restart retirement obligation.
     /// # Errors
     /// Refuses foreign/revoked hosts, missing intent or unavailable storage.
-    pub async fn complete_bootstrap(&self, owner: &str, host: Uuid) -> Result<(), EnrollmentError> {
+    pub(crate) async fn complete_bootstrap(
+        &self,
+        owner: &str,
+        host: Uuid,
+    ) -> Result<(), EnrollmentError> {
         let removed = sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND owner_id=? AND revoked_at IS NULL)")
             .bind(host.as_bytes().as_slice()).bind(owner).execute(&self.0).await?.rows_affected();
         if removed != 1 {
             return Err(EnrollmentError::Denied);
         }
         Ok(())
+    }
+}
+
+/// Extended SQLite result codes retain their primary code in the low byte.
+fn writer_contention(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::PoolTimedOut => true,
+        sqlx::Error::Database(database) => database
+            .code()
+            .and_then(|code| code.parse::<u32>().ok())
+            .is_some_and(|code| matches!(code & 0xff, 5 | 6)),
+        _ => false,
     }
 }
 
@@ -142,5 +177,21 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod ownership_regression {
+    //! A completed installation without a retirement intent is never a failed attempt.
+    use super::*;
+
+    #[tokio::test]
+    async fn retirement_requires_an_unfinished_intent() {
+        let (store, _, host) = crate::enrollment::authority::tests::enrolled().await;
+        assert!(matches!(
+            store.retire_bootstrap("owner", host, 101).await,
+            Err(EnrollmentError::Denied)
+        ));
+        assert_eq!(store.admit(&[1; 32], 101).await.unwrap().host, host);
     }
 }
