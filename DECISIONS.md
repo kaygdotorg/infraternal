@@ -2443,3 +2443,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      slow viewers; input-to-photon latency is measured end to end at 60 and
      120 fps. Codec, encoder and capture-engine choices are measured and
      brought to the owner.
+255. **Adding a host gives you a shell almost at once (owner, 2026-10-12,
+     #189, #169):** the shell lives in an infraternal session from the first
+     keystroke, and only the connection to it changes.
+     - **Order:** sign in over SSH; upload the compressed binary (reused when
+       the host already has it); over that same SSH connection start the
+       session process and the shell inside it; the canvas window attaches
+       through SSH and the person can type. The infraternal agent then
+       installs and joins in the background, finds the same session, and
+       the window reattaches through it (the normal reattach and replay);
+       the SSH connection closes. Same shell, scrollback and running
+       program. A shell started by SSH outside the session process is never
+       adopted afterwards (no process stealing).
+     - **Targets:** time to a working prompt ≈ 0.3 s on a LAN and ≈ 1.5 s at
+       150 ms; fully joined well inside the D189 targets.
+     - **Progress in the pill:** when the prompt appears, the setup status
+       moves (animated) into the window's machine pill as a small circle
+       split into the remaining setup stages; each segment fills as its stage
+       completes; when all finish the circle turns into a tick, then into the
+       machine's OS icon. A failed stage turns its segment into the failure
+       state and the pill explains it on tap, in plain words.
