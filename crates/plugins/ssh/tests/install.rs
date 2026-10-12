@@ -223,7 +223,6 @@ async fn breakit2_interrupted_lock_creation_allows_cleanup_and_retry() {
 }
 
 #[tokio::test]
-#[ignore = "#169 review: receipt recovery must retire its acquisition journal"]
 async fn interrupted_acquisition_cleanup_receipt_can_resume() {
     let fixture = Fixture::new();
     executable(

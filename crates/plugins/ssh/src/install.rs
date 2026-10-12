@@ -582,6 +582,16 @@ validate_receipt() {
         [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || exit 71
     fi
 }
+# The outside receipt can outlive an interrupted retirement of the acquisition
+# journal. Remove only its exact fresh binding, after validating the base owner.
+retire_fresh_acquisition() {
+    acquiring="$base/.bootstrap-acquiring"
+    if [ -e "$acquiring" ] || [ -L "$acquiring" ]; then
+        [ -f "$acquiring" ] && [ ! -L "$acquiring" ] && [ -O "$acquiring" ] && [ "$(stat -c '%a' "$acquiring")" = 600 ] || exit 71
+        [ "$(stat -c '%s' "$acquiring")" = 39 ] && [ "$(cat "$acquiring")" = "$transaction fresh" ] || exit 72
+        rm -f "$acquiring"
+    fi
+}
 finish_fresh() {
     validate_receipt
     if [ -e "$base" ] || [ -L "$base" ]; then
@@ -589,6 +599,7 @@ finish_fresh() {
         if [ -e "$base/.bootstrap-owner" ] || [ -L "$base/.bootstrap-owner" ]; then
             [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
         fi
+        retire_fresh_acquisition
         # Never recursively delete unjournaled contents. Unexpected data keeps
         # the receipt and makes cleanup fail rather than claiming success.
         rm -f "$base/.bootstrap-ready"
