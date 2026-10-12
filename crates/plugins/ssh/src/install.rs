@@ -230,6 +230,11 @@ if [ -e "$unit" ] || [ -L "$unit" ]; then
 fi
 $manager is-enabled infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-enabled" || :
 $manager is-active infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-active" || :
+# Conventional replacement suffixes may belong to another writer. Refuse them
+# before activation; build all our replacements inside the owned transaction.
+for replacement in "$base/bin/current.new" "$launcher.new" "$unit.new"; do
+    [ ! -e "$replacement" ] && [ ! -L "$replacement" ] || exit 71
+done
 mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
 # Rename the old live binary/state into the transaction, not into a disposable
 # upload file. This makes failures after a service stop explicitly reversible.
@@ -254,13 +259,14 @@ mv "$stage/payload" "$base/bin/live"
 if [ -e "$base/state" ]; then : > "$stage/had-state"; mv "$base/state" "$stage/previous-state"; fi
 : > "$stage/replacing-state"
 mv "$stage/state" "$base/state"
-ln -s "$base/bin/live" "$base/bin/current.new"
-mv -Tf "$base/bin/current.new" "$base/bin/current"
-ln -s "$base/bin/current" "$launcher.new"
-mv -Tf "$launcher.new" "$launcher"
-printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$unit.new"
+ln -s "$base/bin/live" "$stage/current"
+mv -Tf "$stage/current" "$base/bin/current"
+ln -s "$base/bin/current" "$stage/launcher"
+: > "$stage/replacing-launcher"
+mv -Tf "$stage/launcher" "$launcher"
+printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$stage/unit"
 : > "$stage/replacing-unit"
-mv -f "$unit.new" "$unit"
+mv -f "$stage/unit" "$unit"
 "##;
         self.session
             .run(&self.script(start_body), Input::Empty)
@@ -381,13 +387,14 @@ if [ -f "$stage/activating" ]; then
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
     if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
-    rm -f "$base/bin/current.new" "$launcher.new" "$unit.new"
-    [ -f "$stage/had-launcher" ] || rm -f "$launcher"
+    # Only a journaled final replacement belongs to this attempt. Temporary
+    # files stay in stage; unrelated suffix files are never cleanup targets.
+    if [ -f "$stage/replacing-launcher" ] && [ ! -f "$stage/had-launcher" ]; then rm -f "$launcher"; fi
     [ ! -f "$stage/replacing-unit" ] || rm -f "$unit"
     # Retire replacement markers before restoring backups: a retry must never
     # delete an original already restored by an interrupted rollback. Backups
     # still present remain sufficient evidence to retry interrupted restoration.
-    rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit"
+    rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit" "$stage/replacing-launcher"
     if [ -f "$stage/previous-binary" ]; then
         mv "$stage/previous-binary" "$base/bin/live"
     fi

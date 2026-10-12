@@ -150,7 +150,6 @@ fn executable(path: &std::path::Path, text: &str) {
 // red until the follow-up fix lane. Explicit opt-in keeps the shared fast gate
 // useful while preserving executable evidence of the reported defects (#169).
 #[tokio::test]
-#[ignore = "#169 breakit2: rollback removes an unrelated launcher.new"]
 async fn breakit2_rollback_preserves_foreign_launcher_new() {
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
@@ -168,7 +167,6 @@ async fn breakit2_rollback_preserves_foreign_launcher_new() {
 }
 
 #[tokio::test]
-#[ignore = "#169 breakit2: rollback removes an unrelated unit.new"]
 async fn breakit2_rollback_preserves_foreign_unit_new() {
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
