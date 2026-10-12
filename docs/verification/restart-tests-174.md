@@ -60,20 +60,20 @@ The baseline matrix therefore reproduced exactly five failures and two stalls in
 
 The final plain-shell combined command was `cargo test -p infraternal restart` with no state-root override: exit 0 in 8.397 seconds, with 18 unit tests and 2 `agent_review` integration tests passing. Unit tests took 4.09 seconds and the integration tests 3.04 seconds. One-minute load average was 28.59 at start and 28.14 at finish.
 
-The same command ran 10 consecutive times in `systemd-run --user --scope -p CPUWeight=10000`. Every run passed 18 unit tests and 2 integration tests:
+The same command ran 10 consecutive times on the final code head in `systemd-run --user --scope -p CPUWeight=10000`. Every run passed 18 unit tests and 2 integration tests:
 
 | Run | Wall time | Load average at start | Load average at finish |
 | ---: | ---: | --- | --- |
-| 1 | 8.366s | 40.48, 44.05, 40.18 | 38.20, 43.52, 40.03 |
-| 2 | 8.569s | 38.20, 43.52, 40.03 | 37.00, 43.09, 39.93 |
-| 3 | 8.261s | 37.00, 43.09, 39.93 | 36.44, 42.77, 39.86 |
-| 4 | 7.931s | 36.44, 42.77, 39.86 | 36.33, 42.64, 39.83 |
-| 5 | 8.166s | 36.33, 42.64, 39.83 | 37.06, 42.60, 39.85 |
-| 6 | 8.401s | 37.06, 42.60, 39.85 | 36.83, 42.37, 39.80 |
-| 7 | 8.534s | 36.83, 42.37, 39.80 | 36.93, 42.30, 39.79 |
-| 8 | 7.877s | 36.93, 42.30, 39.79 | 37.62, 42.28, 39.81 |
-| 9 | 9.384s | 37.62, 42.28, 39.81 | 36.62, 41.92, 39.72 |
-| 10 | 7.923s | 36.62, 41.92, 39.72 | 34.81, 41.46, 39.59 |
+| 1 | 8.681s | 17.49, 36.01, 42.74 | 18.24, 35.56, 42.52 |
+| 2 | 8.887s | 18.24, 35.56, 42.52 | 19.98, 35.64, 42.50 |
+| 3 | 9.522s | 19.98, 35.64, 42.50 | 21.26, 35.39, 42.35 |
+| 4 | 8.719s | 21.26, 35.39, 42.35 | 23.23, 35.34, 42.26 |
+| 5 | 8.823s | 23.23, 35.34, 42.26 | 24.95, 35.31, 42.18 |
+| 6 | 8.553s | 24.95, 35.31, 42.18 | 25.19, 35.19, 42.10 |
+| 7 | 9.028s | 25.19, 35.19, 42.10 | 26.38, 35.12, 42.00 |
+| 8 | 8.530s | 26.38, 35.12, 42.00 | 31.73, 35.97, 42.20 |
+| 9 | 8.630s | 31.73, 35.97, 42.20 | 31.94, 35.87, 42.11 |
+| 10 | 8.460s | 31.94, 35.87, 42.11 | 32.47, 35.85, 42.03 |
 
 The first combined fixed diagnostic used the long state-root override described above: all 18 unit tests passed, then the two unrelated `agent_review` fixtures failed their own 116-byte path check. With the default state root, the final plain combined run and all ten scoped runs passed.
 
