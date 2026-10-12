@@ -5,10 +5,7 @@ use infraternal_agent::{
     remote_client::{self, RemoteIdentity},
     remote_tls::Identity,
 };
-use infraternal_server::{
-    enrollment::Mode,
-    remote_http::{JoinInvitation, JoinRequest, JoinResponse},
-};
+use infraternal_plugin_remote::enrollment::{JoinInvitation, JoinRequest, JoinResponse, Mode};
 use openssl::{
     hash::MessageDigest,
     pkey::PKey,
