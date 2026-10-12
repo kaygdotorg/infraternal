@@ -61,6 +61,8 @@ export interface WinRec {
   binding?: SessionBinding;
   /** Releases what the body holds (a settings panel). */
   cleanup?: () => void;
+  /** Setup still running behind this host's shell, shown in the machine pill (addhost/setup-pill.on-demand.ts, D255). */
+  setup?: { handlePill(source: "pointer" | "keyboard"): boolean; dispose(): void };
 }
 
 /** One view on the canvas: the elements that draw it, its position springs and its windows. */

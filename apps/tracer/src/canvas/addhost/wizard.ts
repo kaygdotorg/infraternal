@@ -598,7 +598,7 @@ export class Wizard {
     this.paint(job);
     this.summarise();
     if (job.view.state === "done" && was !== "done") {
-      this.deps.sink.enrolled([this.enrolledOf(job)]);
+      this.deps.sink.enrolled([this.enrolledOf(job)], this.current?.querySelector(`[data-job="${CSS.escape(job.target)}"] .ah-mark`) ?? undefined);
       // A new host window takes the camera; the wizard stays where the person is looking while it still has work to show.
       if (this.jobs.some((item) => item.view.state === "pending" || item.view.state === "running" || item.view.state === "failed")) this.surface.reveal?.();
     }
@@ -980,6 +980,8 @@ export class Wizard {
     if (running) return;
     this.dismiss(() => {
       if (!done.length) return;
+      // A host whose setup continues in its machine pill carries its own news there (D255): no "ready" toast on top of it.
+      if (this.deps.sink.setupInPill && done.length === this.jobs.length) return;
       const failed = this.jobs.length - done.length;
       this.deps.toast.show({
         ...(failed ? { tone: "error" as const } : {}),
