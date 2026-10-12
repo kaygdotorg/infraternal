@@ -149,9 +149,13 @@ version/hash, so live-image confirmation cannot mistake A for B. C is a signed,
 deliberately unusable ELF. The ARM file is a signed placeholder in this x86-only
 fixture; it is never executed or a production release artifact.
 
-The script waits up to 1800 seconds for the shared perf-VM lock. Extraction,
-the test and teardown all hold it. Every run gets its own directory, ephemeral
-loopback ports, CA, data and transient systemd unit. A private `/run` mount
+The script waits up to 3600 seconds for the shared perf-VM lock (`flock -w
+3600`, D256). Upload and extraction use the unique run directory before taking
+the lock; only the native acceptance run holds it. Directory teardown follows
+lock release. Every run gets its own directory, ephemeral loopback ports, CA,
+data and transient systemd unit. Use `--scratch` to select the current job's
+HOME-cache build directory and `--evidence` to retain a separate receipt without
+overwriting an earlier run. `TRACER_TEST_PORT` selects that job's test port. A private `/run` mount
 keeps shims out of the VM's global runtime directory. Setup reuses the real
 software passkey fixture and encrypted CA copies; only one unlock ceremony is
 performed. The administrator session remains in memory and private pipes.
@@ -172,8 +176,9 @@ before refusal to the first success afterward; no observed refusal is reported
 as zero at that resolution. p50/p99 use nearest rank over 12 brackets; p99 is
 the maximum sample. This is listener availability, not end-to-end terminal
 reconnect time. Raw VM output and machine/load context are retained in
-`evidence/deploy-pipeline/staging-proof.txt`. The unit, its process group, data,
-CA, executables and runtime libraries are removed before releasing the lock.
+`evidence/deploy-pipeline/staging-proof.txt`. The native fixture stops its own transient unit and process group before
+returning. After lock release, the runner removes its data, CA, executables and
+runtime libraries and confirms the run directory is absent.
 
 Functional packaging tests are `python3 scripts/release/staging_artifacts_test.py`.
 The ordinary deployment suite covers WAL backup, framing, rollback, web-only
