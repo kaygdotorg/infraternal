@@ -8,7 +8,7 @@ use infraternal_plugin_release::{
 };
 use std::{
     io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -73,6 +73,22 @@ impl ReleaseEngine for EmptyEngine {
     ) -> Result<(), &'static str> {
         unreachable!("an empty channel must never reach verification")
     }
+}
+
+#[test]
+#[ignore = "subprocess helper for restricted-umask lookup verification"]
+fn restricted_umask_lookup_child() {
+    let state =
+        PathBuf::from(std::env::var_os("REVIEW_UMASK_STATE").expect("state path must be supplied"));
+    let lookup = VerifiedLookup::new(
+        state,
+        "https://fixture.invalid".into(),
+        Arc::new(EmptyEngine),
+    );
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(lookup.latest("stable"))
+        .expect("private staging must be created under a restrictive umask");
 }
 
 #[test]
@@ -185,5 +201,30 @@ async fn restarted_latest_reclaims_metadata_after_process_stop() {
     assert_eq!(
         after, 0,
         "restarted lookup must reclaim abandoned metadata staging"
+    );
+}
+
+#[tokio::test]
+async fn lookup_creates_private_staging_under_owner_restrictive_umask() {
+    let state = State(
+        PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+            .join(format!("review-umask-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state.0)
+        .unwrap();
+    std::fs::set_permissions(&state.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new("sh")
+        .args(["-c", "umask 0177; exec \"$@\"", "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "restricted_umask_lookup_child", "--ignored"])
+        .env("REVIEW_UMASK_STATE", &state.0)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "lookup refused private staging under umask 0177 (exit {})",
+        output.status
     );
 }
