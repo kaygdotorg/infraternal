@@ -35,6 +35,10 @@ struct TimedSession {
     inner: Arc<dyn SshSession>,
 }
 impl SshSession for TimedSession {
+    fn authentication(&self) -> Option<infraternal_plugin_ssh::auth_order::Authentication> {
+        self.inner.authentication()
+    }
+    fn trust_lookup(&self) -> Option<String> { self.inner.trust_lookup() }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let step = match &input {

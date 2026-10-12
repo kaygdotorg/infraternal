@@ -213,7 +213,7 @@ impl Session {
             "-o",
             "NumberOfPasswordPrompts=1",
             "-o",
-            "LogLevel=ERROR",
+            "LogLevel=VERBOSE",
         ]);
         let destination = &self.configuration.destination;
         command.args(["-M", "-N", "-S"]).arg(socket);
@@ -296,6 +296,15 @@ pub fn scan_destination(original: &Destination, bytes: &[u8]) -> Option<Destinat
 }
 
 impl SshSession for Session {
+    fn authentication(&self) -> Option<crate::auth_order::Authentication> {
+        self.master
+            .as_ref()
+            .filter(|master| master.network_authenticated())
+            .map(|_| crate::auth_order::Authentication {
+                method: crate::auth_order::AuthMethod::Network,
+                network: None,
+            })
+    }
     fn trust_lookup(&self) -> Option<String> {
         self.configuration
             .trust_policy()

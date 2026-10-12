@@ -26,6 +26,7 @@ use tokio::{
 };
 
 struct Diagnostics {
+    method: crate::auth_evidence::MethodReceipt,
     bytes: Secret,
     authenticated: bool,
     failed: bool,
@@ -71,6 +72,7 @@ impl Master {
             .take()
             .ok_or_else(|| Failure::install("The SSH connection diagnostics are unavailable."))?;
         let diagnostics = Arc::new(Mutex::new(Diagnostics {
+            method: crate::auth_evidence::MethodReceipt::default(),
             bytes: Secret::new(Vec::new()),
             authenticated: false,
             failed: false,
@@ -92,6 +94,7 @@ impl Master {
                     }
                 };
                 let mut state = lock(&observed);
+                state.method.feed(&chunk[..count]);
                 // Retain no further raw diagnostics after trusted authentication.
                 // Command stderr belongs to each separate mux client's bounded pipe.
                 if state.authenticated {
@@ -183,6 +186,12 @@ impl Master {
     #[must_use]
     pub fn socket(&self) -> &Path {
         &self.socket
+    }
+
+    /// Local protocol method only; provider identity never comes from diagnostics.
+    #[must_use]
+    pub fn network_authenticated(&self) -> bool {
+        lock(&self.diagnostics).method.network() == Some(true)
     }
 }
 impl Drop for Master {
