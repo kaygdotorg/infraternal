@@ -400,7 +400,7 @@ The cache creates no background task and grants no host admission authority.
 
 The existing authenticated SSH check also classifies setup ownership, without a
 second SSH command. A live directory-lock holder, installation executable, open
-setup descriptor or session listener returns `setup_running`: “Setup is already
+setup descriptor or live session socket returns `setup_running`: “Setup is already
 running on this host. Wait for it to finish, then try again.” New setup commands
 serialize on the private installation parent and hold a bounded 180-second
 transaction lease across command gaps. Commit and rollback retire only the

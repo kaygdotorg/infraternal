@@ -121,8 +121,23 @@ class EarlierSetup(unittest.TestCase):
         body += f'flock -n "{self.base.parent}" true && exit 99\nexit 0\n'
         self.assertEqual(self.run_shell(body).returncode, 0)
 
+    def test_bound_socket_before_listen_is_live(self):
+        self.assertEqual(self.run_shell('\ninspect_previous').returncode, 73)
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(self.receipt.exists())
+
     def test_listener_started_after_observation_is_refused(self):
+        self.listener.close()
         expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        self.socket.unlink()
+        self.listener = socket.socket(socket.AF_UNIX)
+        previous = Path.cwd()
+        os.chdir(self.sessions)
+        try:
+            self.listener.bind(self.socket.name)
+        finally:
+            os.chdir(previous)
+        self.socket.chmod(0o600)
         self.listener.listen()
         self.assertEqual(self.recover(expected).returncode, 73)
         self.assertTrue(self.socket.exists())
