@@ -42,6 +42,8 @@ export interface LiveSessionsOptions {
   firstHooks?: TerminalHooks;
   /** Called with the first terminal once it is ready (the probe binds to it). */
   onFirstClient?: (client: TerminalClient) => void;
+  /** Deferred account data starts after a terminal paints, or the initial terminal cannot open. */
+  onFirstTerminalSettled?: () => void;
   /** Called when the window shows a session (restored or new). */
   onSessionCreated?: (sessionId: string) => void;
   /** The host no longer has a window's session (#158): the inventory marks it ended and the window paints that. */
@@ -70,6 +72,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
   const remotes = new Map<string, HostEntry & { address?: string }>();
   let firstHostUsed = false;
   let firstReported = false;
+  let firstSettled = false;
+  const settle = (): void => { if (!firstSettled) { firstSettled = true; options.onFirstTerminalSettled?.(); } };
   let active: Binding | undefined;
   let serial = 0;
   // The last known screens (screen-cache.on-demand.ts) load at idle; until then a switch simply has no picture to show.
@@ -160,13 +164,14 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       firstReported = true;
       const hooks: TerminalHooks = {
         ...(first ? options.firstHooks : {}),
-        onAttached: (resumed, terminal) => { this.mark("attached"); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
-        onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onAttached: (resumed, terminal) => { this.mark("attached"); if (!firstSettled) requestAnimationFrame(() => requestAnimationFrame(settle)); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
+        onPaintedOutput: (bytes, at, sequence) => { settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
-        onSessionGone: (status) => options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status),
+        onSessionGone: (status) => { if (first) settle(); options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status); },
         onOpenRefused: (message, sessionList) => {
           if (this.disposed) return true;
+          if (first) settle();
           // A window whose strip asked for this shell says why itself, where the person is looking.
           if (this.refused?.(message)) return true;
           core.toast.show({ message, tone: "error", ...(sessionList ? { duration: 0 } : {}),
@@ -216,9 +221,10 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         if (this.activeNow) core.setActiveTerminal(client);
         if (!this.visible) client.setSuspended(true);
         if (this.wantsFocus) client.focus();
-        if (this.retired) client.markSessionGone(this.retired.status);
+        if (this.retired) { client.markSessionGone(this.retired.status); if (first) settle(); }
         if (first) options.onFirstClient?.(client);
       } catch {
+        if (first && !this.disposed) settle();
         if (!this.disposed) core.toast.show({ message: "Could not open the terminal. Try again.", tone: "error", duration: 5000 });
       }
     }

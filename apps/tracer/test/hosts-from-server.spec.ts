@@ -8,14 +8,27 @@ test("admitted hosts from another browser remain discoverable without saved wind
   let admitted = true, subscription: number | undefined, reads = 0;
   let push: (() => void) | undefined;
   let routed: string | undefined;
+  let askedAfterPaint: boolean | undefined;
+  await page.addInitScript(() => {
+    Reflect.set(window, "__hostPainted", false);
+    for (const name of ["fillRect", "fillText", "drawImage"] as const) {
+      const draw = CanvasRenderingContext2D.prototype[name];
+      Reflect.set(CanvasRenderingContext2D.prototype, name, function(this: CanvasRenderingContext2D, ...args: unknown[]) {
+        const result = Reflect.apply(draw, this, args);
+        if (this.canvas.isConnected && this.canvas.closest("#terminal-host")) Reflect.set(window, "__hostPainted", true);
+        return result;
+      });
+    }
+  });
   await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
     const server = socket.connectToServer();
     push = () => { if (subscription !== undefined) socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Event", subId: subscription, eventJson: new TextEncoder().encode('{"type":"changed"}') }))); };
-    socket.onMessage((message) => {
+    socket.onMessage(async (message) => {
       if (typeof message === "string") { server.send(message); return; }
       const { frame } = decodeMuxedFrame(message);
       if (frame.type === "Call" && frame.actionId === "remote.host.list") {
         reads++;
+        askedAfterPaint ??= await page.evaluate(() => Reflect.get(window, "__hostPainted") === true);
         socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: admitted ? [{ id, name: "another-device-host", user: "operator", online: false, os: "Debian" }] : [], next: null })) })));
         return;
       }
@@ -31,6 +44,7 @@ test("admitted hosts from another browser remain discoverable without saved wind
   await page.goto("/?mock=1&proto=product&fresh=1&bg=none");
   await expect.poll(() => reads, { timeout: 20000 }).toBeGreaterThan(0);
   const palette = async () => { await page.keyboard.press("Control+Shift+K"); await page.locator("#palette-input").fill("Open shell on another-device-host"); };
+  await expect.poll(() => askedAfterPaint).toBe(true);
   await palette();
   const row = page.locator("#palette-results [role=option]").filter({ hasText: "Open shell on another-device-host" });
   await expect(row).toHaveCount(1); await expect(row).toContainText("offline");
