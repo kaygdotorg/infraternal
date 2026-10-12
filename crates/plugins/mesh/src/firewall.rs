@@ -24,6 +24,7 @@ pub struct Firewall {
     installed: bool,
     fallback_complete: bool,
     previous: Option<Config>,
+    previous_aliases: Vec<crate::policy::model::Addresses>,
     backend: Option<Backend>,
 }
 impl Firewall {
@@ -115,6 +116,14 @@ impl Firewall {
     /// # Errors
     /// Refuses unavailable nft or a failed transaction; an existing table stays unchanged.
     pub fn apply(&mut self, config: &Config) -> io::Result<()> {
+        self.apply_with_aliases(config, &[])
+    }
+    /// Fence both accepted and proposed addresses during an authorized replacement.
+    pub(crate) fn apply_with_aliases(
+        &mut self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+    ) -> io::Result<()> {
         self.select();
         // A table declaration can extend an existing table. First application
         // must therefore validate ownership even when no adapter called adopt.
@@ -122,18 +131,29 @@ impl Firewall {
             self.adopt()?;
         }
         if self.is_fallback() {
-            if let Err(error) = crate::iptables::apply(config, self.fallback_complete) {
+            if let Err(error) =
+                crate::iptables::apply_with_aliases(config, self.fallback_complete, aliases)
+            {
                 if let Some(old) = &self.previous {
-                    crate::iptables::apply(old, true)?;
+                    crate::iptables::apply_with_aliases(old, true, &self.previous_aliases)?;
                 } else {
                     crate::iptables::remove()?;
                 }
                 return Err(error);
             }
         } else {
-            run(NFT, &["-f", "-"], &render(config, self.installed))?;
+            run(
+                NFT,
+                &["-f", "-"],
+                &render_with_aliases(config, self.installed, aliases),
+            )?;
         }
         self.previous = self.is_fallback().then(|| config.clone());
+        self.previous_aliases = if self.is_fallback() {
+            aliases.to_vec()
+        } else {
+            Vec::new()
+        };
         self.installed = true;
         self.fallback_complete = self.is_fallback();
         Ok(())
@@ -156,6 +176,7 @@ impl Firewall {
             self.installed = false;
             self.fallback_complete = false;
             self.previous = None;
+            self.previous_aliases.clear();
         }
         Ok(())
     }
@@ -183,6 +204,13 @@ fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
 /// Render constant-time hash-set membership, independent of the peer count on the packet path.
 #[must_use]
 pub fn render(config: &Config, replace: bool) -> String {
+    render_with_aliases(config, replace, &[])
+}
+fn render_with_aliases(
+    config: &Config,
+    replace: bool,
+    aliases: &[crate::policy::model::Addresses],
+) -> String {
     let mut script = String::new();
     if replace {
         let _ = writeln!(script, "delete table inet {TABLE}");
@@ -258,10 +286,14 @@ pub fn render(config: &Config, replace: bool) -> String {
     // policy or conntrack acceptance: an underlay packet has no mesh identity.
     // Loopback delivery is node-local. Translation never turns an underlay
     // incoming interface into lo, so this preserves the ingress refusal [231].
-    let delivery = format!(
-        "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
-        config.addresses.ipv4, config.addresses.ipv6
-    );
+    let mut delivery = String::new();
+    for addresses in std::iter::once(&config.addresses).chain(aliases) {
+        let _ = write!(
+            delivery,
+            "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
+            addresses.ipv4, addresses.ipv6
+        );
+    }
     for (name, hook, interface, direction) in [
         ("input", "input", "iifname", "incoming"),
         ("output", "output", "oifname", "outgoing"),
@@ -282,8 +314,7 @@ pub fn render(config: &Config, replace: bool) -> String {
     // has no owner in this slice, even when a host enables IP forwarding.
     let _ = writeln!(
         script,
-        " chain ingress {{ type filter hook prerouting priority -310; policy accept; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop; }}\n}}",
-        config.addresses.ipv4, config.addresses.ipv6
+        " chain ingress {{ type filter hook prerouting priority -310; policy accept; {delivery} }}\n}}"
     );
     script
 }
