@@ -37,12 +37,13 @@ impl Ownership {
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
-    apply_with_aliases(config, installed, &[])
+    apply_with_aliases(config, installed, &[], false)
 }
 pub(crate) fn apply_with_aliases(
     config: &Config,
     installed: bool,
     aliases: &[crate::policy::model::Addresses],
+    fence: bool,
 ) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
@@ -60,13 +61,13 @@ pub(crate) fn apply_with_aliases(
     for (index, tool) in TOOLS.iter().enumerate() {
         test(
             tool,
-            &render_with_aliases(config, index == 1, installed[index], aliases),
+            &render_with_aliases(config, index == 1, installed[index], aliases, fence),
         )?;
     }
     for (index, tool) in TOOLS.iter().enumerate() {
         run(
             tool,
-            &render_with_aliases(config, index == 1, installed[index], aliases),
+            &render_with_aliases(config, index == 1, installed[index], aliases, fence),
         )?;
     }
     Ok(())
@@ -222,7 +223,7 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
 // Keep the complete per-family atomic restore batch visible together.
 #[cfg(test)]
 fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
-    render_with_aliases(config, ipv6, installed, &[])
+    render_with_aliases(config, ipv6, installed, &[], false)
 }
 // A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
 #[allow(clippy::too_many_lines)]
@@ -231,6 +232,7 @@ fn render_with_aliases(
     ipv6: bool,
     installed: Ownership,
     aliases: &[crate::policy::model::Addresses],
+    fence: bool,
 ) -> String {
     let mut script = String::from("*raw\n");
     if installed.guard {
@@ -294,19 +296,11 @@ fn render_with_aliases(
                 script,
                 "-A {chain} -m comment --comment infraternal.mesh.v1 -j DROP"
             );
-            continue;
         }
-        let _ = writeln!(
-            script,
-            "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment infraternal.mesh.v1 -j ACCEPT"
-        );
     }
     // Compact contiguous equal grants. An open 1,000-node allocation becomes
     // one range match per direction/family, without granting a gap in membership.
-    let mut groups = std::collections::BTreeMap::<
-        (usize, Option<crate::policy::rules::Port>),
-        std::collections::BTreeSet<u128>,
-    >::new();
+    let mut groups = Groups::new();
     for peer in config.peers.values() {
         let address = if ipv6 {
             u128::from(peer.peer.addresses.ipv6)
@@ -330,6 +324,25 @@ fn render_with_aliases(
             }
         }
     }
+    if !fence {
+        render_connection_checks(&mut script, config, ipv6, &groups);
+    }
+    for chain in &CHAINS[..2] {
+        if !fence {
+            // State with no current initiating permission must never fall
+            // through to the ordinary destination-port rules [242].
+            let _ = writeln!(
+                script,
+                "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED -j DROP"
+            );
+        }
+        // Keep the exact v1 ownership marker for adoption of retained tables.
+        // On accepted revisions the preceding state check makes it unreachable.
+        let _ = writeln!(
+            script,
+            "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment infraternal.mesh.v1 -j ACCEPT"
+        );
+    }
     for ((direction, port), addresses) in groups {
         let chain = CHAINS[direction];
         let flag = if direction == 0 { "-s" } else { "-d" };
@@ -338,29 +351,9 @@ fn render_with_aliases(
         } else {
             "--dst-range"
         };
-        let mut ranges = Vec::<(u128, u128)>::new();
-        for address in addresses {
-            if let Some((_, end)) = ranges.last_mut()
-                && end.checked_add(1) == Some(address)
-            {
-                *end = address;
-            } else {
-                ranges.push((address, address));
-            }
-        }
+        let ranges = address_ranges(addresses);
         for (start, end) in ranges {
-            let display = |address: u128| {
-                if ipv6 {
-                    std::net::Ipv6Addr::from(address).to_string()
-                } else {
-                    {
-                        // v4 groups are populated only from u32 addresses above.
-                        let bytes = address.to_be_bytes();
-                        std::net::Ipv4Addr::from([bytes[12], bytes[13], bytes[14], bytes[15]])
-                            .to_string()
-                    }
-                }
-            };
+            let display = |address| display_address(address, ipv6);
             let selector = if start == end {
                 format!("{flag} {}", display(start))
             } else {
@@ -394,6 +387,95 @@ fn render_with_aliases(
     }
     script.push_str("COMMIT\n");
     script
+}
+
+type Groups = std::collections::BTreeMap<
+    (usize, Option<crate::policy::rules::Port>),
+    std::collections::BTreeSet<u128>,
+>;
+fn address_ranges(addresses: impl IntoIterator<Item = u128>) -> Vec<(u128, u128)> {
+    let mut ranges = Vec::<(u128, u128)>::new();
+    for address in addresses {
+        if let Some((_, end)) = ranges.last_mut()
+            && end.checked_add(1) == Some(address)
+        {
+            *end = address;
+        } else {
+            ranges.push((address, address));
+        }
+    }
+    ranges
+}
+fn display_address(address: u128, ipv6: bool) -> String {
+    if ipv6 {
+        std::net::Ipv6Addr::from(address).to_string()
+    } else {
+        let bytes = address.to_be_bytes();
+        std::net::Ipv4Addr::from([bytes[12], bytes[13], bytes[14], bytes[15]]).to_string()
+    }
+}
+// Conntrack selectors accept CIDRs, not address intervals. Cover an interval
+// exactly with aligned prefixes, never including a gap in member ownership.
+fn prefixes(mut start: u128, end: u128, ipv6: bool) -> Vec<String> {
+    let width = if ipv6 { 128 } else { 32 };
+    let mut result = Vec::new();
+    loop {
+        let remaining = end - start;
+        let size_bits = if remaining == u128::MAX {
+            128
+        } else {
+            (remaining + 1).ilog2()
+        };
+        let bits = start.trailing_zeros().min(size_bits).min(width);
+        result.push(format!("{}/{}", display_address(start, ipv6), width - bits));
+        if bits == 128 {
+            break;
+        }
+        let size = 1_u128 << bits;
+        if remaining < size {
+            break;
+        }
+        start += size;
+    }
+    result
+}
+fn render_connection_checks(script: &mut String, config: &Config, ipv6: bool, groups: &Groups) {
+    let local = if ipv6 {
+        config.addresses.ipv6.to_string()
+    } else {
+        config.addresses.ipv4.to_string()
+    };
+    for ((direction, port), addresses) in groups {
+        let (peer_field, local_field) = if *direction == 0 {
+            ("--ctorigsrc", "--ctorigdst")
+        } else {
+            ("--ctorigdst", "--ctorigsrc")
+        };
+        let service = port.map_or_else(String::new, |port| {
+            format!(
+                " --ctproto {} --ctorigdstport {}",
+                if port.protocol == Protocol::Tcp {
+                    "tcp"
+                } else {
+                    "udp"
+                },
+                port.number
+            )
+        });
+        for (start, end) in address_ranges(addresses.iter().copied()) {
+            for prefix in prefixes(start, end, ipv6) {
+                for (chain, packet_direction) in [
+                    (CHAINS[*direction], "ORIGINAL"),
+                    (CHAINS[1 - *direction], "REPLY"),
+                ] {
+                    let _ = writeln!(
+                        script,
+                        "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir {packet_direction} {peer_field} {prefix} {local_field} {local}{service} -j ACCEPT"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -435,6 +517,17 @@ mod tests {
         }
     }
     #[test]
+    fn initiating_prefixes_cover_only_owned_intervals_even_at_family_boundaries() {
+        assert_eq!(prefixes(2, 3, false), ["0.0.0.2/31"]);
+        assert_eq!(prefixes(5, 6, false), ["0.0.0.5/32", "0.0.0.6/32"]);
+        assert_eq!(prefixes(0, u128::from(u32::MAX), false), ["0.0.0.0/0"]);
+        assert_eq!(prefixes(0, u128::MAX, true), ["::/0"]);
+        assert_eq!(
+            prefixes(u128::MAX, u128::MAX, true),
+            ["ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"]
+        );
+    }
+    #[test]
     fn contiguous_open_members_use_ranges_without_opening_gaps() {
         let thousand: Vec<_> = (2..=1001).collect();
         let rules = render(&config(&thousand), false, Ownership::default());
@@ -461,8 +554,8 @@ mod tests {
                 delivery: true,
             },
         );
-        assert_eq!(rules.matches("ESTABLISHED,RELATED").count(), 2);
-        assert_eq!(rules.matches("-j DROP").count(), 5);
+        assert_eq!(rules.matches("ESTABLISHED,RELATED").count(), 4);
+        assert_eq!(rules.matches("-j DROP").count(), 7);
         assert!(!rules.contains("-I INPUT"));
         assert!(!rules.contains("-m iprange"));
     }

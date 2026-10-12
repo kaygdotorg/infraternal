@@ -27,6 +27,7 @@ pub struct Firewall {
     previous_aliases: Vec<crate::policy::model::Addresses>,
     backend: Option<Backend>,
     accepted: Option<Config>,
+    previous_fence: bool,
 }
 impl Firewall {
     /// Select the declared compatibility backend explicitly for real-engine validation.
@@ -144,10 +145,15 @@ impl Firewall {
         }
         if self.is_fallback() {
             if let Err(error) =
-                crate::iptables::apply_with_aliases(config, self.fallback_complete, aliases)
+                crate::iptables::apply_with_aliases(config, self.fallback_complete, aliases, fence)
             {
                 if let Some(old) = &self.previous {
-                    crate::iptables::apply_with_aliases(old, true, &self.previous_aliases)?;
+                    crate::iptables::apply_with_aliases(
+                        old,
+                        true,
+                        &self.previous_aliases,
+                        self.previous_fence,
+                    )?;
                 } else {
                     crate::iptables::remove()?;
                 }
@@ -161,6 +167,7 @@ impl Firewall {
             )?;
         }
         self.previous = self.is_fallback().then(|| config.clone());
+        self.previous_fence = fence;
         self.previous_aliases = if self.is_fallback() {
             aliases.to_vec()
         } else {
