@@ -148,19 +148,22 @@ impl Plugin for InventoryPlugin {
                             Frame::Call { call_id, action_id, input_json } => {
                                 let input = decode_list(input_json);
                                 let after = input.as_ref().and_then(|request| request.after.as_deref());
-                                let mut output = Err(());
-                                if action_id == LIST.id && input.is_some() {
-                                    let read = host.authorized(Box::pin(async { output = source.list(host.user_id(), after).await; Ok(()) })).await;
-                                    if read.is_err() { break; }
-                                }
-                                send(&replies, Frame::Result { call_id, ok: output.is_ok(), json: & serde_json::to_vec(&output.unwrap_or_else(|()| json!({"error":"inventory unavailable"})) ).unwrap_or_default() }).await
+                                // Keep authorization active through outbound backpressure, not just SQL.
+                                host.authorized(Box::pin(async {
+                                    let output = if action_id == LIST.id && input.is_some() {
+                                        source.list(host.user_id(), after).await
+                                    } else { Err(()) };
+                                    let ok = output.is_ok();
+                                    let json = serde_json::to_vec(&output.unwrap_or_else(|()| json!({"error":"inventory unavailable"}))).map_err(|_| ())?;
+                                    send(&replies, Frame::Result { call_id, ok, json: &json }).await
+                                })).await
                             }
                             Frame::Subscribe { sub_id, .. } => {
                                 let generation = decoded.stream_id >> 1;
                                 if subscription_current(&registry, sub_id, generation) {
                                     subscriptions.retain(|(id, _)| *id != sub_id);
                                     subscriptions.push((sub_id, generation));
-                                    send(&replies, Frame::Event { sub_id, event_json: br#"{"type":"changed"}"# }).await
+                                    host.authorized(Box::pin(send(&replies, Frame::Event { sub_id, event_json: br#"{"type":"changed"}"# }))).await
                                 } else { Ok(()) }
                             }
                             _ => Ok(()),
@@ -211,5 +214,112 @@ mod tests {
             assert!(decode_list(invalid).is_none());
         }
         assert!(decode_list(&[b' '; 1025]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    struct Host(watch::Receiver<bool>);
+    impl SocketHost for Host {
+        fn user_id(&self) -> &'static str {
+            "owner"
+        }
+        fn token_hash(&self) -> &'static str {
+            "fixture"
+        }
+        fn authorized<'a>(
+            &'a self,
+            work: Operation<'a, Result<(), ()>>,
+        ) -> Operation<'a, Result<(), ()>> {
+            let mut live = self.0.clone();
+            Box::pin(async move {
+                if !*live.borrow_and_update() {
+                    return Err(());
+                }
+                tokio::select! { result = work => result, _ = live.changed() => Err(()) }
+            })
+        }
+        fn fresh(&self, _: i64) -> Operation<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn live(&self) -> Operation<'_, bool> {
+            Box::pin(async { *self.0.borrow() })
+        }
+        fn may_configure(&self) -> Operation<'_, bool> {
+            Box::pin(async { false })
+        }
+    }
+    struct Source {
+        read: tokio::sync::Notify,
+        changes: Changes,
+    }
+    impl Inventory for Source {
+        fn list<'a>(&'a self, _: &'a str, _: Option<&'a str>) -> Operation<'a, Result<Value, ()>> {
+            Box::pin(async {
+                self.read.notify_one();
+                Ok(json!({"hosts":[],"next":null}))
+            })
+        }
+        fn changes(&self) -> watch::Receiver<()> {
+            self.changes.subscribe()
+        }
+        fn observe(
+            &self,
+            _: Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>,
+        ) -> Operation<'_, ()> {
+            Box::pin(async {})
+        }
+    }
+    #[tokio::test]
+    async fn revocation_cancels_a_result_waiting_for_socket_credit() {
+        let (live, authority) = watch::channel(true);
+        let source = Arc::new(Source {
+            read: tokio::sync::Notify::new(),
+            changes: Changes::default(),
+        });
+        let plugin = InventoryPlugin(source.clone());
+        let (requests, receiver) = mpsc::channel(1);
+        let (outbound, mut answers) = mpsc::channel(1);
+        outbound
+            .send(infraternal_plugin_api::PluginReply {
+                plugin_id: DESCRIPTOR.id,
+                epoch: 1,
+                wire: Bytes::new(),
+            })
+            .await
+            .unwrap();
+        let reply = ReplySender::new(outbound, DESCRIPTOR.id, 1);
+        let registry = Arc::new(std::array::from_fn(|_| {
+            std::sync::atomic::AtomicU64::new(0)
+        }));
+        let worker = tokio::spawn(plugin.run(Arc::new(Host(authority)), receiver, reply, registry));
+        let mut request = Vec::new();
+        encode_muxed_frame_into(
+            0,
+            &Frame::Call {
+                call_id: 1,
+                action_id: LIST.id,
+                input_json: b"{}",
+            },
+            &mut request,
+        )
+        .unwrap();
+        requests.send(Bytes::from(request)).await.unwrap();
+        source.read.notified().await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        live.send_replace(false);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(answers.recv().await.unwrap().wire.is_empty());
+        drop(requests);
+        worker.await.unwrap();
+        assert!(
+            answers.recv().await.is_none(),
+            "revoked socket received its queued inventory result"
+        );
     }
 }
