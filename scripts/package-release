@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ship the server and both matching static host payloads in one versioned directory [17][20][205], #87.
+# Ship the full server and matching removable-component host payloads [17][20][198][201], #190.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -13,22 +13,34 @@ case "$architecture" in x86_64|aarch64) ;; *) printf 'unsupported server archite
 if [[ -e "$output" || -L "$output" ]]; then printf 'release destination already exists\n' >&2; exit 1; fi
 target="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target" = /* ]] || target="$root/$target"
+host_target="$target/bootstrap"
 if [[ "${3:-}" != --built ]]; then
     scripts/auth-toolchain
-    for arch in x86_64 aarch64; do scripts/static-cargo build --locked --release -p infraternal --target "$arch-unknown-linux-musl"; done
+    CARGO_TARGET_DIR="$host_target" scripts/auth-toolchain
+    scripts/static-cargo build --locked --release -p infraternal --target "$architecture-unknown-linux-musl"
+    # Keep component output separate so it cannot overwrite the full server.
+    # These host payloads retain enrollment, terminal and SSH support while
+    # omitting only server capabilities, as required by D198 and D201.
+    for arch in x86_64 aarch64; do
+        CARGO_TARGET_DIR="$host_target" scripts/static-cargo build --locked --release -p infraternal \
+            --no-default-features --features plugin-host-facts,remote,ssh \
+            --target "$arch-unknown-linux-musl"
+    done
 fi
 # Validate the complete set before publishing; a partial directory is never a release.
-for arch in x86_64 aarch64; do
-    file="$target/$arch-unknown-linux-musl/release/infraternal"
-    if [[ ! -x "$file" ]]; then printf 'Missing %s static host payload at %s\n' "$arch" "$file" >&2; exit 1; fi
+server="$target/$architecture-unknown-linux-musl/release/infraternal"
+files=("$server")
+for arch in x86_64 aarch64; do files+=("$host_target/$arch-unknown-linux-musl/release/infraternal"); done
+for file in "${files[@]}"; do
+    if [[ ! -x "$file" ]]; then printf 'Missing static release executable at %s\n' "$file" >&2; exit 1; fi
     readelf -h "$file" >/dev/null
-    if readelf -l "$file" | rg -q INTERP; then printf '%s payload is dynamically linked\n' "$arch" >&2; exit 1; fi
+    if readelf -l "$file" | rg -q INTERP; then printf 'Release payload is dynamically linked: %s\n' "$file" >&2; exit 1; fi
 done
 mkdir -p -- "$(dirname -- "$output")"
 staging="$(mktemp -d "$(dirname -- "$output")/.release.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
-for arch in x86_64 aarch64; do install -m 755 "$target/$arch-unknown-linux-musl/release/infraternal" "$staging/infraternal-$arch-musl"; done
-install -m 755 "$staging/infraternal-$architecture-musl" "$staging/infraternal"
+for arch in x86_64 aarch64; do install -m 755 "$host_target/$arch-unknown-linux-musl/release/infraternal" "$staging/infraternal-$arch-musl"; done
+install -m 755 "$server" "$staging/infraternal"
 (cd "$staging" && sha256sum infraternal infraternal-x86_64-musl infraternal-aarch64-musl > SHA256SUMS)
 mv -T -- "$staging" "$output"
 printf 'Release bundle: %s (server %s; x86_64 and aarch64 host payloads)\n' "$output" "$architecture"

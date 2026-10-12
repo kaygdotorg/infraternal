@@ -5,13 +5,16 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-scratch = Path.home() / '.cache/codex-scratch/release-addhost'
+scratch = Path(os.environ.get('INFRATERNAL_TEST_STATE_ROOT', str(Path.home() / '.cache/codex-scratch/release-addhost')))
+scratch.mkdir(parents=True, exist_ok=True)
 target = Path(os.environ.get('CARGO_TARGET_DIR', 'target')).resolve()
 with tempfile.TemporaryDirectory(prefix='package-', dir=scratch) as work:
     bundle = Path(work) / 'release'
     subprocess.run(['scripts/package-release', str(bundle), 'x86_64', '--built'], check=True)
     subprocess.run(['sha256sum', '--check', 'SHA256SUMS'], cwd=bundle, check=True)
-    assert (bundle / 'infraternal').read_bytes() == (bundle / 'infraternal-x86_64-musl').read_bytes()
+    assert (bundle / 'infraternal').read_bytes() == (target / 'x86_64-unknown-linux-musl/release/infraternal').read_bytes()
+    for arch in ('x86_64', 'aarch64'):
+        assert (bundle / f'infraternal-{arch}-musl').read_bytes() == (target / f'bootstrap/{arch}-unknown-linux-musl/release/infraternal').read_bytes()
     assert all((bundle / name).stat().st_mode & 0o111 for name in ['infraternal', 'infraternal-x86_64-musl', 'infraternal-aarch64-musl'])
     empty = Path(work) / 'empty-target'
     partial = Path(work) / 'partial-release'
