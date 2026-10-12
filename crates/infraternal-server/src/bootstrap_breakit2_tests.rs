@@ -46,6 +46,7 @@ impl SshSession for TimedSession {
                 Input::PayloadAndInvitation { .. } => "upload_setup",
                 Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => "upload",
                 Input::File(_) => "upload",
+                Input::Bytes(_) if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1") => "reuse_setup",
                 Input::Bytes(_) if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1") => "setup",
                 Input::Bytes(_) => "join",
                 Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => {
@@ -61,7 +62,7 @@ impl SshSession for TimedSession {
                 Input::Empty if script.contains("stage/activating") => "install",
                 Input::Signal(_) | Input::Empty => "commit",
             };
-            if step == "upload" {
+            if matches!(step, "upload" | "upload_setup") {
                 UPLOAD_STARTED.store(true, Ordering::SeqCst);
             }
             if step == "install"
@@ -73,7 +74,12 @@ impl SshSession for TimedSession {
                     "The fixture refused its first install boundary.",
                 ));
             }
-            let file_bytes = if let Input::File(path) = &input {
+            let file_bytes = if let Input::PayloadAndInvitation { payload, .. } = &input {
+                Some(match payload {
+                    infraternal_plugin_ssh::transport::PayloadInput::Bytes(bytes) => bytes.len() as u64,
+                    infraternal_plugin_ssh::transport::PayloadInput::File { size, .. } => *size,
+                })
+            } else if let Input::File(path) = &input {
                 path.metadata().ok().map(|metadata| metadata.len())
             } else if let Input::Bytes(bytes) = &input {
                 (step == "upload").then(|| u64::try_from(bytes.len()).unwrap())
@@ -83,7 +89,7 @@ impl SshSession for TimedSession {
             // Refuse activation only after the real staged enrollment has run.
             // A compound command's outer transport receipt remains successful;
             // its fixed FAIL receipt is classified by the production decoder.
-            let refused = (step == "setup"
+            let refused = (matches!(step, "setup" | "upload_setup" | "reuse_setup")
                 && std::env::var_os("BREAKIT2_RETRY").is_some()
                 && FIRST_INSTALL.swap(false, Ordering::SeqCst))
                 .then(|| script.replacen("if sh -c \"$2\"; then", "if [ \"$1\" != install ] && sh -c \"$2\"; then", 1));

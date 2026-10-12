@@ -381,10 +381,19 @@ impl SshSession for Session {
                 }
                 // Authentication already succeeded. Never treat remote stderr or
                 // a command's exit 255 as permission to try a different credential.
+                if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n")
+                    && let Err(error) = crate::install::parse_transfer_setup(&result.stdout)
+                    && error.exit_status.is_some()
+                    && error.exit_status == result.exit_status
+                {
+                    return Err(error);
+                }
                 let mut failure = classify(&result.stderr, false, MeshEvidence::default());
                 failure.exit_status = result.exit_status;
                 if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n") {
                     failure.failed_step = crate::install::interrupted_setup_step(&result.stdout);
+                } else if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n") {
+                    failure.failed_step = crate::install::interrupted_transfer_step(&result.stdout);
                 }
                 Err(failure)
             }

@@ -682,19 +682,21 @@ impl Bootstrap {
             started,
             None,
         );
-        transaction.stage(&payload).await.map_err(|mut error| {
-            if error.message == "The matching static infraternal binary is unavailable." {
-                error.missing_binary = Some(Box::new(crate::model::MissingBinary {
-                    architecture: match check.architecture {
-                        crate::probe::Architecture::X86_64 => "x86_64",
-                        crate::probe::Architecture::Aarch64 => "aarch64",
-                    },
-                    path: payload.display().to_string(),
-                }));
-            }
-            error
-        })?;
-        let linger = transaction.setup(&join).await?;
+        let linger = transaction
+            .stage_and_setup(&payload, &join)
+            .await
+            .map_err(|mut error| {
+                if error.message == "The matching static infraternal binary is unavailable." {
+                    error.missing_binary = Some(Box::new(crate::model::MissingBinary {
+                        architecture: match check.architecture {
+                            crate::probe::Architecture::X86_64 => "x86_64",
+                            crate::probe::Architecture::Aarch64 => "aarch64",
+                        },
+                        path: payload.display().to_string(),
+                    }));
+                }
+                error
+            })?;
         drop(join); // Capability plaintext is erased immediately after its stdin handoff.
         if !linger {
             emit(

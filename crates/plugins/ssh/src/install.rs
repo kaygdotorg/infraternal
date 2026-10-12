@@ -3,7 +3,7 @@
 use crate::{
     model::{Failure, InstallMode, InstallStep, Target},
     probe::Architecture,
-    transport::{Input, Secret, SshSession, shell_quote},
+    transport::{Input, PayloadInput, Secret, SshSession, shell_quote},
 };
 use std::fmt::Write as _;
 use std::{
@@ -157,6 +157,76 @@ impl Installation {
         Ok(())
     }
 
+    /// Frame a public upload before the private invitation in one setup channel.
+    /// # Errors
+    /// Preserves named upload/join/activation failures and the existing rollback journal.
+    pub async fn stage_and_setup(
+        &self,
+        binary: &Path,
+        join: &JoinMaterial,
+    ) -> Result<bool, Failure> {
+        if !self.session.setup_steps() {
+            self.stage(binary).await?;
+            return self.setup(join).await;
+        }
+        if join.host != self.host {
+            return Err(Failure::install(
+                "The enrollment invitation belongs to another host.",
+            ));
+        }
+        let payload = self.prepare_payload(binary).await?;
+        let size = if let Some(bytes) = &payload.packed {
+            bytes.len() as u64
+        } else if payload.reuse {
+            0
+        } else {
+            tokio::fs::metadata(binary)
+                .await
+                .map_err(|_| {
+                    Failure::install("The matching static infraternal binary is unavailable.")
+                })?
+                .len()
+        };
+        let mut body = payload.body.clone();
+        if !payload.reuse {
+            // head consumes exactly the public frame. Decoder EOF cannot eat
+            // the following capability, and raw SHA256 still gates execution.
+            for command in ["cat", "gzip -dc", "zstd -dc"] {
+                let original = format!("{command} > \"$stage/payload\"");
+                let framed = if command == "cat" {
+                    format!("head -c {size} > \"$stage/payload\"")
+                } else {
+                    format!("head -c {size} | {command} > \"$stage/payload\"")
+                };
+                body = body.replacen(&original, &framed, 1);
+            }
+        }
+        let script = self.setup_script(join, Some(&body))?;
+        let input = if payload.reuse {
+            Input::Bytes(join.stdin.expose())
+        } else {
+            Input::PayloadAndInvitation {
+                payload: if let Some(bytes) = &payload.packed {
+                    PayloadInput::Bytes(bytes)
+                } else {
+                    PayloadInput::File { path: binary, size }
+                },
+                invitation: join.stdin.expose(),
+            }
+        };
+        let output = self
+            .session
+            .run(&script, input)
+            .await
+            .map_err(|mut error| {
+                if error.failed_step.is_none() {
+                    error = error.at(InstallStep::Upload);
+                }
+                error.in_mode(self.mode)
+            })?;
+        parse_transfer_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+    }
+
     async fn prepare_payload(&self, binary: &Path) -> Result<PreparedPayload, Failure> {
         let digest = crate::payload::digest(binary)
             .await
@@ -300,9 +370,40 @@ impl Installation {
                 "The enrollment invitation belongs to another host.",
             ));
         }
+        let script = self.setup_script(join, None)?;
+        let output = self
+            .session
+            .run(&script, Input::Bytes(join.stdin.expose()))
+            .await
+            .map_err(|mut error| {
+                if error.failed_step.is_none() {
+                    error = error.at(InstallStep::Join);
+                }
+                error.in_mode(self.mode)
+            })?;
+        parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+    }
+
+    fn setup_script(&self, join: &JoinMaterial, upload: Option<&str>) -> Result<String, Failure> {
         let mut script = String::from(
             "# INFRATERNAL_SETUP_STEPS_V1\nset -u\nsetup_step() {\n    printf 'STEP %s\\n' \"$1\"\n    if sh -c \"$2\"; then :; else status=$?; printf 'FAIL %s %s\\n' \"$1\" \"$status\"; exit 0; fi\n}\n",
         );
+        if let Some(upload) = upload {
+            script = script.replace(
+                "# INFRATERNAL_SETUP_STEPS_V1",
+                "# INFRATERNAL_TRANSFER_SETUP_V1",
+            );
+            script = script.replace(
+                "exit 0; fi",
+                "if [ \"$1\" = upload ]; then exit \"$status\"; fi; exit 0; fi",
+            );
+            writeln!(
+                script,
+                "setup_step upload {}",
+                shell_quote(&self.script(upload))
+            )
+            .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
+        }
         for (name, body) in [
             ("join", setup_scripts::join(&join.url)),
             ("install", setup_scripts::ACTIVATE.to_owned()),
@@ -326,17 +427,7 @@ impl Installation {
             .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
         }
         script.push_str("printf 'DONE\\n'\n");
-        let output = self
-            .session
-            .run(&script, Input::Bytes(join.stdin.expose()))
-            .await
-            .map_err(|mut error| {
-                if error.failed_step.is_none() {
-                    error = error.at(InstallStep::Join);
-                }
-                error.in_mode(self.mode)
-            })?;
-        parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+        Ok(script)
     }
 
     /// Ask policy to persist this user's manager without sudo or an interactive prompt.
@@ -708,6 +799,17 @@ pub fn parse_linger(bytes: &[u8]) -> Result<bool, Failure> {
 /// # Errors
 /// Refuses malformed order, extra output, zero failure status and unknown step names.
 pub fn parse_setup(bytes: &[u8]) -> Result<bool, Failure> {
+    parse_steps(bytes, false)
+}
+
+/// Decode the same fixed setup receipts with an initial verified upload step.
+/// # Errors
+/// Rejects noncanonical output and preserves the exact named failure/status.
+pub fn parse_transfer_setup(bytes: &[u8]) -> Result<bool, Failure> {
+    parse_steps(bytes, true)
+}
+
+fn parse_steps(bytes: &[u8], upload: bool) -> Result<bool, Failure> {
     if bytes.len() > 256 {
         return Err(invalid_setup());
     }
@@ -717,10 +819,12 @@ pub fn parse_setup(bytes: &[u8]) -> Result<bool, Failure> {
     }
     // Preserve CR bytes: only the fixed LF receipt is canonical.
     let mut lines = text.split_terminator('\n');
-    for (index, name) in ["join", "install", "start", "linger"]
-        .into_iter()
-        .enumerate()
-    {
+    let names = if upload {
+        &["upload", "join", "install", "start", "linger"][..]
+    } else {
+        &["join", "install", "start", "linger"][..]
+    };
+    for (index, name) in names.iter().copied().enumerate() {
         if lines.next() != Some(format!("STEP {name}").as_str()) {
             return Err(invalid_setup());
         }
@@ -735,7 +839,12 @@ pub fn parse_setup(bytes: &[u8]) -> Result<bool, Failure> {
             {
                 return Err(invalid_setup());
             }
-            let mut error = Failure::install("The remote setup step failed.").at(setup_step(index));
+            let mut error =
+                Failure::install("The remote setup step failed.").at(if upload && index == 0 {
+                    InstallStep::Upload
+                } else {
+                    setup_step(index - usize::from(upload))
+                });
             error.exit_status = Some(status);
             return Err(error);
         }
@@ -750,6 +859,16 @@ pub fn parse_setup(bytes: &[u8]) -> Result<bool, Failure> {
 /// Retain the last authenticated fixed step on an interrupted compound command.
 #[must_use]
 pub fn interrupted_setup_step(bytes: &[u8]) -> Option<InstallStep> {
+    interrupted_steps(bytes, false)
+}
+
+/// Retain only exact complete step prefixes from an interrupted framed transfer.
+#[must_use]
+pub fn interrupted_transfer_step(bytes: &[u8]) -> Option<InstallStep> {
+    interrupted_steps(bytes, true)
+}
+
+fn interrupted_steps(bytes: &[u8], upload: bool) -> Option<InstallStep> {
     if bytes.len() > 256 {
         return None;
     }
@@ -757,13 +876,22 @@ pub fn interrupted_setup_step(bytes: &[u8]) -> Option<InstallStep> {
     if !text.ends_with('\n') {
         return None;
     }
+    let names = if upload {
+        &["upload", "join", "install", "start", "linger"][..]
+    } else {
+        &["join", "install", "start", "linger"][..]
+    };
     let mut last = None;
     for (index, line) in text.split_terminator('\n').enumerate() {
-        let name = ["join", "install", "start", "linger"].get(index).copied()?;
+        let name = names.get(index).copied()?;
         if line != format!("STEP {name}") {
             return None;
         }
-        last = Some(setup_step(index));
+        last = Some(if upload && index == 0 {
+            InstallStep::Upload
+        } else {
+            setup_step(index - usize::from(upload))
+        });
     }
     last
 }

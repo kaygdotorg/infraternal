@@ -217,6 +217,94 @@ impl SshSession for CorruptUpload {
 }
 
 #[tokio::test]
+async fn framed_upload_keeps_invitation_after_verified_raw_and_compressed_payloads() {
+    for compressed in [false, true] {
+        let fixture = Fixture::new();
+        let mut program = std::fs::read_to_string(&fixture.binary).unwrap().replace(
+            "cat >/dev/null",
+            "received=$(cat); [ \"$received\" = synthetic-capability ] || exit 1",
+        );
+        if compressed {
+            program.push_str("\n# ");
+            program.extend(std::iter::repeat_n('x', 70_000));
+            program.push('\n');
+        }
+        std::fs::write(&fixture.binary, program).unwrap();
+        let install = Installation::new(
+            Arc::new(Compound(Local {
+                root: fixture.root.clone(),
+            })),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        assert!(
+            install
+                .stage_and_setup(&fixture.binary, &fixture.join)
+                .await
+                .unwrap()
+        );
+        assert!(fixture.base().join(".bootstrap-lock/activating").exists());
+        install.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+    }
+}
+
+#[tokio::test]
+async fn framed_join_refusal_keeps_status_separate_from_upload() {
+    let fixture = Fixture::new();
+    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    let install = Installation::new(
+        Arc::new(Compound(Local {
+            root: fixture.root.clone(),
+        })),
+        &fixture.target,
+        &fixture.join,
+    )
+    .unwrap();
+    let error = install
+        .stage_and_setup(&fixture.binary, &fixture.join)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Join)
+    ));
+    assert_eq!(error.exit_status, Some(71));
+    assert!(!fixture.base().join(".bootstrap-lock/activating").exists());
+    install.rollback().await.unwrap();
+}
+
+#[test]
+fn framed_receipts_preserve_upload_failures_and_reject_extra_output() {
+    use infraternal_plugin_ssh::{install::parse_transfer_setup, model::InstallStep};
+    assert!(matches!(
+        infraternal_plugin_ssh::install::interrupted_transfer_step(
+            b"STEP upload\nSTEP join\nSTEP install\n"
+        ),
+        Some(infraternal_plugin_ssh::model::InstallStep::Install)
+    ));
+    assert!(
+        infraternal_plugin_ssh::install::interrupted_transfer_step(b"STEP upload\r\n").is_none()
+    );
+    let error = parse_transfer_setup(b"STEP upload\nFAIL upload 71\n").unwrap_err();
+    assert!(matches!(error.failed_step, Some(InstallStep::Upload)));
+    assert_eq!(error.exit_status, Some(71));
+    assert!(
+        parse_transfer_setup(
+            b"STEP upload\nSTEP join\nSTEP install\nSTEP start\nSTEP linger\nyes\nDONE\n"
+        )
+        .unwrap()
+    );
+    assert!(
+        parse_transfer_setup(b"STEP upload\nFAIL upload 71\nextra\n")
+            .unwrap_err()
+            .exit_status
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn compressed_stage_roundtrips_and_rejects_corruption_before_execution() {
     for corrupt in [false, true] {
         let fixture = Fixture::new();
