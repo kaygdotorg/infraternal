@@ -1,0 +1,77 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p315769-i8703370.scope; invocation ID: ea60fb049b2c4cca9c33cbaa3f76ffff
+    Blocking waiting for file lock on build directory
+   Compiling crypto-common v0.1.7
+   Compiling tokio v1.53.2
+   Compiling nix v0.30.1
+   Compiling inout v0.1.4
+   Compiling digest v0.10.7
+   Compiling cipher v0.4.4
+   Compiling sha2 v0.10.9
+   Compiling sha1 v0.10.7
+   Compiling universal-hash v0.5.1
+   Compiling opaque-debug v0.3.1
+   Compiling polyval v0.6.2
+   Compiling tungstenite v0.29.0
+   Compiling ghash v0.5.1
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling hmac v0.12.1
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
+   Compiling aes-gcm v0.10.3
+   Compiling argon2 v0.5.3
+   Compiling hkdf v0.12.4
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-shim)
+   Compiling tokio-util v0.7.19
+   Compiling tokio-stream v0.1.19
+   Compiling tokio-openssl v0.6.5
+   Compiling quinn v0.11.12
+   Compiling tower v0.5.3
+   Compiling sqlx-core v0.8.6
+   Compiling tokio-tungstenite v0.29.0
+   Compiling h2 v0.4.19
+   Compiling fs-err v3.3.2
+   Compiling tower-http v0.6.11
+   Compiling sqlx-sqlite v0.8.6
+   Compiling hyper v1.11.1
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-plugin-api)
+   Compiling hyper-util v0.1.21
+   Compiling axum v0.8.9
+   Compiling axum-server v0.8.0
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-agent)
+warning: field `0` is never read
+  --> crates/infraternal-server/src/remote_http.rs:95:36
+   |
+95 | pub(crate) struct InvitationIssuer(Api);
+   |                   ---------------- ^^^
+   |                   |
+   |                   field in this struct
+   |
+   = help: consider removing this field
+   = note: `InvitationIssuer` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `issue`, `ready`, `origin`, and `store` are never used
+   --> crates/infraternal-server/src/remote_http.rs:114:25
+    |
+ 96 | impl InvitationIssuer {
+    | --------------------- methods in this implementation
+...
+114 |     pub(crate) async fn issue(
+    |                         ^^^^^
+...
+121 |     pub(crate) fn ready(&self) -> bool {
+    |                   ^^^^^
+...
+124 |     pub(crate) fn origin(&self) -> &str {
+    |                   ^^^^^^
+...
+127 |     pub(crate) fn store(&self) -> &EnrollmentStore {
+    |                   ^^^^^
+
+warning: `infraternal-server` (lib test) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 25m 33s

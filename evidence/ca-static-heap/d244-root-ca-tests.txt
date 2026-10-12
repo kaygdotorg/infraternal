@@ -1,0 +1,45 @@
+uid=0 memlock_bytes=8388608 cores=4
+machine=infraternal-perf-test kernel=6.12.69+deb13-amd64
+load_before=0.05 0.04 0.01 2/222 95940
+
+running 1 test
+
+running 1 test
+METRIC unlocked_ca_vm_lck_kib=1024 rss_before_kib=6432 rss_unlocked_kib=10272 secure_before_bytes=0 secure_unlocked_bytes=832 servers=1 heap_bytes=1048576
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.01s
+
+test ca_update_audit_tests::unlocked_signer_requires_persistent_locked_pages ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.01s
+
+
+running 1 test
+test auth::tests::ca_administration_tests::http_tests::ca_http_real_passkey_unlock_returns_only_lock_status_without_a_session_cookie ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.13s
+
+
+running 1 test
+
+running 1 test
+METRIC mode=before secure_heap_live_keys=10000 used_bytes=0 heap_bytes=1048576 rss_before_kib=6372 rss_live_kib=12800 vm_lck_kib=0 cores=4 load=0.05 0.04 0.01 1/226 95952
+METRIC secure_heap_after_drop_bytes=0
+test ca_update_audit_tests::secure_heap_capacity_at_10000_live_keys ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.40s
+
+
+running 1 test
+METRIC mode=after secure_heap_live_keys=10000 used_bytes=320512 heap_bytes=1048576 rss_before_kib=8060 rss_live_kib=12764 vm_lck_kib=1024 cores=4 load=0.13 0.05 0.01 1/226 95954
+METRIC secure_heap_after_drop_bytes=512
+test ca_update_audit_tests::secure_heap_capacity_at_10000_live_keys ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.40s
+
+test ca_update_audit_tests::secure_heap_capacity_at_10000_live_keys ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.81s
+
+load_after=0.13 0.05 0.01 2/222 95954

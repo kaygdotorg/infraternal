@@ -1,0 +1,13 @@
+# Original-production and D244 release image measurements; no ARM runtime proof.
+baseline-x86: bytes=20090384 sha256=81d6d22651a07c5d2f8c40630a29c37df57ca6aeae89c39e3e2eac54a10bef1d
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent
+candidate-x86: bytes=20098960 sha256=4e72a992762e69c51372ce6cee0aad9dbe10d097f0651ec91e22ba1557c2bb69
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent
+baseline-arm: bytes=17906336 sha256=aaed28a77ac12441bced32b31530bd70434b562e90268e858b64498d244f86ed
+ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+PT_INTERP: absent
+candidate-arm: bytes=17914528 sha256=3031e1ea41e18d94b7d41cdc3b2b04bb53eeaf9a3cd134d71d1917bd15ba998b
+ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+PT_INTERP: absent
