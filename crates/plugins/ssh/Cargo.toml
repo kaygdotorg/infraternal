@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 infraternal-plugin-api.workspace = true
 infraternal-shim.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["uio"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
