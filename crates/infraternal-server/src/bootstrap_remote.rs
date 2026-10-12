@@ -715,6 +715,78 @@ mod tests {
         assert!(prior);
     }
 
+    /// Measures real admission with the declared maximum attempt journal held.
+    /// SSH sniffing is read-only synthetic; auth and owner state use real SQLite.
+    #[tokio::test]
+    #[ignore = "#169 local bounded-journal scale evidence under CPUWeight scope"]
+    async fn destination_reservation_admission_at_1600_pending_hosts() {
+        fn rss() -> usize {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("VmRSS:")
+                        .map(|value| value.split_whitespace().next().unwrap().parse().unwrap())
+                })
+                .unwrap()
+        }
+        let f = fixture(true).await;
+        let before = rss();
+        let (capacity, string_bytes) = {
+            let mut attempts = f.backend.attempts.lock().unwrap();
+            for index in 0..1600 {
+                attempts.insert(
+                    Uuid::new_v4(),
+                    Attempt {
+                        owner: "owner".into(),
+                        batch: Uuid::new_v4(),
+                        uid: 1002,
+                        destination: Some((format!("user@host-{index}.example.invalid"), None)),
+                        canary: None,
+                    },
+                );
+            }
+            let bytes: usize = attempts
+                .values()
+                .map(|attempt| {
+                    attempt.owner.capacity() + attempt.destination.as_ref().unwrap().0.capacity()
+                })
+                .sum();
+            (attempts.capacity(), bytes)
+        };
+        let held = rss();
+        let mut samples = Vec::new();
+        for _ in 0..100 {
+            let started = std::time::Instant::now();
+            let batches: Vec<_> = (0..8).map(|_| start(&f, "owner")).collect();
+            let events = futures_util::future::join_all(batches.iter().map(finished)).await;
+            assert!(events.iter().all(
+                |event| event.message.contains("Too many host installations")
+                    && event.host_id.is_none()
+            ));
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM remote_hosts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        println!(
+            "METRIC destination_admission pending=1600 active_per_sample=8 samples=100 admissions=800 map_capacity={capacity} attempt_size={} string_capacity_bytes={string_bytes} rss_before_kib={before} rss_held_kib={held} p50_ms={:.3} p99_ms={:.3}",
+            std::mem::size_of::<Attempt>(),
+            samples[50],
+            samples[99]
+        );
+        println!(
+            "ENVIRONMENT machine=infraternal-dev cores={} load={}",
+            std::thread::available_parallelism().unwrap().get(),
+            std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+        );
+    }
+
     #[tokio::test]
     async fn breakit2_unpublished_invitation_retires_durable_authority() {
         let f = fixture(true).await;
