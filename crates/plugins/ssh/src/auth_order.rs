@@ -6,7 +6,7 @@ use crate::{
     transport::{CommandOutput, Credentials, Input, Operation, SshSession, SshTransport},
 };
 use serde::Serialize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Mesh identity is trusted inventory evidence; an SSH banner cannot identify a provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -254,15 +254,24 @@ impl SshSession for Pending {
     }
 }
 
-// Exact generation, not prefix matching: an appended write or arbitrary input
-// must never be replayed while choosing a credential. The ownership inspection
-// only reads existing paths and locks existing directories; it creates no files.
+/// Ownership inspection is part of the fixed read-only check after start-fresh.
+/// Exact equality is essential: a caller cannot append a mutation and have an
+/// authentication refusal cause it to replay under another credential.
 fn authentication_check(script: &str) -> bool {
-    script == CHECK_SCRIPT
-        || script == format!("{CHECK_SCRIPT}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'")
-        || [InstallMode::Rootless, InstallMode::Root]
-            .into_iter()
-            .any(|mode| script == crate::previous_attempt::check_script(mode))
+    static CHECKS: OnceLock<[String; 3]> = OnceLock::new();
+    if script == CHECK_SCRIPT {
+        return true;
+    }
+    CHECKS
+        .get_or_init(|| {
+            [
+                crate::previous_attempt::check_script(InstallMode::Rootless),
+                crate::previous_attempt::check_script(InstallMode::Root),
+                format!("{CHECK_SCRIPT}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'"),
+            ]
+        })
+        .iter()
+        .any(|check| script == check)
 }
 
 #[cfg(test)]

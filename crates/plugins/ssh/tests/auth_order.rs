@@ -416,3 +416,64 @@ async fn ownership_check_fallback_repeats_only_the_allowlisted_read_only_command
         );
     }
 }
+
+#[tokio::test]
+async fn ownership_checks_authenticate_once_without_replaying_a_different_check() {
+    use infraternal_plugin_ssh::{model::InstallMode, previous_attempt};
+
+    struct ExactCheck(String);
+    impl SshTransport for ExactCheck {
+        fn open(
+            &self,
+            _: Destination,
+            _: Credentials,
+            _: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            Box::pin(async move { Ok(Arc::new(Self(self.0.clone())) as Arc<dyn SshSession>) })
+        }
+    }
+    impl SshSession for ExactCheck {
+        fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+            assert_eq!(
+                script, self.0,
+                "authentication must run the requested fixed check"
+            );
+            assert!(matches!(input, Input::Empty));
+            Box::pin(async { Ok(CommandOutput { stdout: Vec::new() }) })
+        }
+    }
+
+    for script in [
+        previous_attempt::check_script(InstallMode::Rootless),
+        previous_attempt::check_script(InstallMode::Root),
+        format!(
+            "{}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'",
+            infraternal_plugin_ssh::probe::CHECK_SCRIPT
+        ),
+    ] {
+        let provider = Arc::new(Provider {
+            requested: Mutex::new(Vec::new()),
+        });
+        let session = AutoAuth::new(Arc::new(ExactCheck(script.clone())))
+            .open(
+                Destination::parse("user@fixture").unwrap(),
+                Credentials::Automatic(provider.clone()),
+                MeshEvidence::default(),
+            )
+            .await
+            .unwrap();
+        // A recognized prefix must never admit arbitrary trailing shell code.
+        assert!(
+            session
+                .run(&format!("{script}\n: > arbitrary-file"), Input::Empty)
+                .await
+                .is_err()
+        );
+        session.run(&script, Input::Empty).await.unwrap();
+        assert_eq!(
+            session.authentication().unwrap().method,
+            AuthMethod::Network
+        );
+        assert!(provider.requested.lock().unwrap().is_empty());
+    }
+}
