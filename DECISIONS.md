@@ -2470,3 +2470,31 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      result that misses a target is fixed in the code, never by asking for a
      bigger machine. The owner's own Mac and iPhone are available for
      real-device checks on request.
+257. **Two crypto size options are decided by measurement (owner,
+     2026-10-12, #175, D243):** S1 — the static build drops OpenSSL's
+     AVX-512 AES-GCM code (about 659 KB) only if measurement shows no change
+     in keystroke latency and less than 5% bulk-throughput loss on an
+     AVX-512 machine; otherwise it stays. S2 — one crypto library: QUIC and
+     passkey verification move from ring onto the OpenSSL already in the
+     binary only if QUIC handshakes and passkey checks are no slower, the
+     replacement crates are maintained and AGPL-compatible, and the auth code
+     passes the strictest review; if the replacements look poorly
+     maintained, ring stays. Measure first; the orchestrator applies these
+     rules to the numbers and reports the outcome before anything ships.
+258. **`/install` and `/download` on the person's own server (owner,
+     2026-10-12, Q28):** `/install` is the one-line host install that
+     add-host offers when the server cannot reach a host over SSH:
+     `curl -fsSL https://<server>/install | sh` returns the script; a browser
+     gets a short page showing the command and what it does. `/download` is
+     the page for people with the apps (macOS, iOS, later Windows) and the
+     CLI, added when apps ship. Both are served by the infraternal server
+     itself, never by a third party.
+259. **Reconnect has two budgets (owner, 2026-10-12, #192):** (1) the
+     session's last screen is back within one frame (16 ms; 8 ms at 120 Hz),
+     drawn from the copy the client already holds, with a subtle sign that it
+     is catching up; (2) the terminal is up to date and typable within one
+     round trip + 50 ms after the network path recovers (about 200 ms
+     India–Germany). Keystrokes typed meanwhile get normal prediction (D130).
+     The goal is that reconnecting feels instant, while the second number keeps
+     the claim honest. Full-screen prediction, a latest-screen view lane and a
+     UDP transport for mesh SSH are decided only after measurement.
