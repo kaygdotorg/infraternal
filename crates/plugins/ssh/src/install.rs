@@ -485,7 +485,16 @@ if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then
 fi
 [ -d "$stage" ] && [ ! -L "$stage" ] || exit 71
 if [ -e "$stage/transaction" ] || [ -L "$stage/transaction" ]; then
-    [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+    [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] || exit 72
+    if [ "$(cat "$stage/transaction")" != "$transaction" ]; then
+        # Creation can succeed before the receipt's bytes fit on disk. Only
+        # the exact acquisition journal owns this private, empty lock; never
+        # treat a different nonempty transaction as an interrupted write.
+        [ "$acquired" = yes ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 72
+        [ -O "$stage/transaction" ] && [ "$(stat -c '%a:%s:%h' "$stage/transaction")" = 600:0:1 ] || exit 72
+        rm "$stage/transaction"
+        rmdir "$stage" || exit 72
+    fi
 else
     # Only the pre-mkdir journal authorizes an empty, uninitialized lock.
     [ "$acquired" = yes ] || exit 72

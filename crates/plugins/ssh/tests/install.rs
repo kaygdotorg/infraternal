@@ -146,6 +146,32 @@ fn executable(path: &std::path::Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+#[tokio::test]
+async fn review_interrupted_transaction_receipt_allows_owned_cleanup() {
+    let fixture = Fixture::new();
+    // A full filesystem can create the transaction file but refuse its bytes.
+    // The exact pre-mkdir acquisition journal still binds this empty lock.
+    executable(
+        &fixture.root.join("tools/mkdir"),
+        "#!/bin/sh\n/usr/bin/mkdir \"$@\" || exit $?\ncase \"$*\" in *.bootstrap-lock) : > \"$1/transaction\"; exit 42;; esac\n",
+    );
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/mkdir")).unwrap();
+    assert_eq!(
+        std::fs::metadata(fixture.base().join(".bootstrap-lock/transaction"))
+            .unwrap()
+            .len(),
+        0
+    );
+    let cleaned = transaction.rollback().await;
+    assert!(
+        cleaned.is_ok(),
+        "exact acquisition journal did not recover an incomplete transaction receipt: {cleaned:?}"
+    );
+    assert!(!fixture.base().exists());
+}
+
 // These break-it regressions state the desired contract and intentionally stay
 // red until the follow-up fix lane. Explicit opt-in keeps the shared fast gate
 // useful while preserving executable evidence of the reported defects (#169).
