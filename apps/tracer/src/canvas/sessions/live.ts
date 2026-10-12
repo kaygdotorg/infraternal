@@ -58,6 +58,8 @@ export interface LiveSessions extends SessionService {
   /** Registers only an admitted UUID; readable labels never become routing authority. */
   registerHost(host: HostEntry & { address?: string }): void;
   forgetHost(id: string): void;
+  /** Replaces remote admission in one notification; returns identities whose access disappeared. */
+  replaceHosts(hosts: (HostEntry & { address?: string })[]): string[];
   dispose(): void;
 }
 
@@ -300,6 +302,15 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       if (!isCanonicalUuid(entry.id)) throw new Error("Host identity is not valid.");
       remotes.set(entry.id, { ...entry });
       for (const listener of listeners) listener();
+    },
+    replaceHosts(entries) {
+      const ids = new Set(entries.map((entry) => entry.id));
+      if (entries.some((entry) => !isCanonicalUuid(entry.id)) || ids.size !== entries.length) throw new Error("Host inventory is not valid.");
+      const removed = [...remotes.keys()].filter((id) => !ids.has(id));
+      remotes.clear();
+      for (const entry of entries) remotes.set(entry.id, { ...entry });
+      for (const listener of listeners) listener();
+      return removed;
     },
     forgetHost(id) { remotes.delete(id); for (const listener of listeners) listener(); },
     hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }, ...remotes.values()]; },

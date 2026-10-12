@@ -47,6 +47,8 @@ export interface HostEntry {
   /** The person's login on the host, for the pill. */
   user?: string;
   os?: HostPlatform;
+  /** Last server-observed infraternal agent connectivity; offline hosts remain available in inventory. */
+  online?: boolean;
 }
 
 export interface SessionService {

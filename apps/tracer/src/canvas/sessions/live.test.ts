@@ -39,3 +39,18 @@ test("removed hosts disappear from inventory and cannot route a new shell", () =
   expect(sessions.open("worker").noAccess).toBe(true);
   sessions.dispose();
 });
+
+test("an authoritative host snapshot replaces admission with one notification", () => {
+  const sessions = service();
+  sessions.registerHost({ id, name: "worker" });
+  let notifications = 0;
+  sessions.onChange(() => { notifications++; });
+  const replacement = "66666666-2222-3333-4444-555555555555";
+  expect(sessions.replaceHosts([{ id: replacement, name: "worker", online: false }])).toEqual([id]);
+  expect(notifications).toBe(1);
+  expect(sessions.open(id).noAccess).toBe(true);
+  expect(sessions.open(replacement).hostId).toBe(replacement);
+  expect(() => sessions.replaceHosts([{ id: replacement, name: "worker" }, { id: replacement, name: "duplicate" }])).toThrow();
+  expect(sessions.hosts()).toHaveLength(2);
+  sessions.dispose();
+});
