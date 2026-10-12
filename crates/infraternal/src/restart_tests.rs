@@ -137,6 +137,14 @@ fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
     let directory = Directory::new();
     let binary = directory.0.join("infraternal");
     std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+    assert!(
+        std::process::Command::new("strip")
+            .arg("--strip-debug")
+            .arg(&binary)
+            .status()
+            .unwrap()
+            .success()
+    );
     let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
     assert!(infraternal_server::ca_handoff_binary::capable(&opened.file).unwrap());
     assert!(!opened.warm);
@@ -156,6 +164,14 @@ fn root_owned_marked_target_requires_protected_root_parents() {
     let directory = Directory::new();
     let binary = directory.0.join("infraternal");
     std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+    assert!(
+        std::process::Command::new("strip")
+            .arg("--strip-debug")
+            .arg(&binary)
+            .status()
+            .unwrap()
+            .success()
+    );
     let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
     assert!(opened.warm);
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
@@ -174,7 +190,12 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
     const NAME: &str =
         "restart::tests::real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin";
     if std::env::var_os("INFRATERNAL_RESTART_FD_TEST").is_some() {
-        if std::env::current_exe().unwrap().file_name().unwrap() == "retained" {
+        if std::env::current_exe()
+            .unwrap()
+            .as_os_str()
+            .as_bytes()
+            .starts_with(b"/memfd:")
+        {
             assert_eq!(
                 std::fs::read_link("/proc/self/fd/0").unwrap(),
                 Path::new("/dev/null")
@@ -184,6 +205,14 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
         let directory = PathBuf::from(std::env::var_os("INFRATERNAL_RESTART_FD_TEST").unwrap());
         let binary = directory.join("candidate");
         std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        assert!(
+            std::process::Command::new("strip")
+                .arg("--strip-debug")
+                .arg(&binary)
+                .status()
+                .unwrap()
+                .success()
+        );
         let opened = crate::restart_binary::Opened::open(binary.clone()).unwrap();
         std::fs::rename(&binary, directory.join("retained")).unwrap();
         std::fs::copy("/usr/bin/bash", &binary).unwrap();

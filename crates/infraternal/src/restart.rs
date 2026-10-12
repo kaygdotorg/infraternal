@@ -187,7 +187,9 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<PathBuf> {
 
 fn current_binary() -> io::Result<PathBuf> {
     let running = std::env::current_exe()?;
-    if running.as_os_str().as_bytes().ends_with(b" (deleted)") {
+    if running.as_os_str().as_bytes().ends_with(b" (deleted)")
+        || running.as_os_str().as_bytes().starts_with(b"/memfd:")
+    {
         // ExecStart/our pinned exec argv[0] retains the configured install path.
         // Reopen its newly installed inode rather than the vanished old image.
         let configured = std::env::args_os()

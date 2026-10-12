@@ -9,7 +9,7 @@ use std::{
 };
 
 pub(crate) struct Opened {
-    pub file: File,
+    pub image: crate::restart_image::Image,
     pub path: PathBuf,
     pub warm: bool,
 }
@@ -79,11 +79,35 @@ impl Opened {
                 private = true;
             }
         }
-        verify_release_fd(&file)?;
+        let running = File::open("/proc/self/exe")
+            .and_then(|file| file.metadata())
+            .is_ok_and(|running| {
+                running.dev() == metadata.dev() && running.ino() == metadata.ino()
+            });
+        // Running development/test images may carry debug sections. Only the
+        // kernel-pinned current image gets this larger bound; replacements stay at 128 MiB.
+        let limit = if running {
+            512 * 1024 * 1024
+        } else {
+            crate::restart_image::MAX_IMAGE
+        };
+        let image = crate::restart_image::Image::copy_limit(
+            &file,
+            path.parent().ok_or(io::ErrorKind::InvalidInput)?,
+            limit,
+        )?;
+        verify_release_fd(&image.file)?;
         let warm = owner == 0
             && root_protected
-            && infraternal_server::ca_handoff_binary::capable(&file).unwrap_or(false);
-        Ok(Self { file, path, warm })
+            && infraternal_server::ca_handoff_binary::capable(&image.file).unwrap_or(false);
+        Ok(Self { image, path, warm })
+    }
+}
+
+impl std::ops::Deref for Opened {
+    type Target = crate::restart_image::Image;
+    fn deref(&self) -> &Self::Target {
+        &self.image
     }
 }
 
