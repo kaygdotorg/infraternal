@@ -13,7 +13,7 @@ pub(crate) fn acceptor(config: OpenSSLConfig) -> OpenSSLAcceptor<NoDelayAcceptor
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Tests `TCP_NODELAY` on a real accepted TLS socket, before any HTTP application bytes.
     use super::*;
     use axum_server::accept::Accept;
@@ -29,9 +29,19 @@ mod tests {
             store::X509StoreBuilder,
         },
     };
+    use tokio::net::TcpStream;
 
     #[tokio::test]
     async fn standalone_https_disables_nagle_before_application_bytes() {
+        assert_nodelay_with(acceptor).await;
+    }
+
+    /// Reuse the same real socket assertion for provisioning fixtures.
+    pub(crate) async fn assert_nodelay_with<F, A>(build: F)
+    where
+        F: FnOnce(OpenSSLConfig) -> A,
+        A: Accept<TcpStream, (), Stream = tokio_openssl::SslStream<TcpStream>, Service = ()>,
+    {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
         name.append_entry_by_text("CN", "localhost").unwrap();
@@ -91,7 +101,7 @@ mod tests {
             stream
         });
         let (socket, _) = listener.accept().await.unwrap();
-        let (stream, ()) = acceptor(config).accept(socket, ()).await.unwrap();
+        let (stream, ()) = build(config).accept(socket, ()).await.unwrap();
         assert!(
             stream.get_ref().nodelay().unwrap(),
             "standalone HTTPS retains Nagle on terminal traffic"

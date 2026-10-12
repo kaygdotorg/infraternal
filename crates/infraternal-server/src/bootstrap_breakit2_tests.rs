@@ -4,6 +4,18 @@ use infraternal_plugin_ssh::auth_order::{AuthProvider, AutoAuth, NetworkProvider
 use infraternal_plugin_ssh::openssh::OpenSsh;
 use std::{io::Read, path::PathBuf, time::Instant};
 
+/// The provisioning listener's socket admission is exercised directly below.
+fn enrollment_acceptor(
+    config: axum_server::tls_openssl::OpenSSLConfig,
+) -> axum_server::tls_openssl::OpenSSLAcceptor<axum_server::accept::NoDelayAcceptor> {
+    crate::server_tls::acceptor(config)
+}
+
+#[tokio::test]
+async fn provisioning_https_uses_production_tcp_admission() {
+    crate::server_tls::tests::assert_nodelay_with(enrollment_acceptor).await;
+}
+
 static FIRST_INSTALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static UPLOAD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -426,7 +438,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     )
     .unwrap();
     let server = tokio::spawn(
-        axum_server::bind_openssl(std::net::SocketAddr::new(controller_ip, 4929), http_tls)
+        axum_server::bind(std::net::SocketAddr::new(controller_ip, 4929))
+            .acceptor(enrollment_acceptor(http_tls))
             .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
     );
     f.backend = Arc::new(RemoteBackend {
