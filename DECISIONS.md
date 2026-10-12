@@ -2344,6 +2344,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **No CA lock on binary deploys:** deploys use the in-process binary
        handoff (#154) instead of stop and start, once release pipeline
        round 4 (signature check, sealed image, recovery) has passed review.
+       This was already decided as D217 (2026-10-10); the orchestrator's
+       deploy script never implemented it, which is why deploys locked the CA.
      - **Builds within the host's capacity:** only as many build-heavy jobs
        run as the build host can take; release builds get a reserved CPU
        share and are built for each `dev` head that passes, so a deploy only
