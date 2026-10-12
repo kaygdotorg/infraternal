@@ -2526,3 +2526,31 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        endpoint guessing; AI agents get the same evidence through MCP with
        no automatic remediation. Nothing is built until measured end to end
        on the perf VM at 1,000 machines.
+261. **Observability, round 2 (owner, 2026-10-12, #193; extends D260).**
+     Decided now, built later: logs, metrics and alerting come before
+     container and Kubernetes support, which then plug into them.
+     - **Retention rule:** each machine keeps N days of logs, never more than
+       5% of its free disk, whichever limit is reached first; N per kind of
+       machine comes from the log-volume research. History the OS already
+       keeps stays searchable on demand. The UI states the real span covered.
+     - **Where alerts reach people:** the Inbox is always the record; push
+       notifications to phone and desktop for what needs someone now;
+       optional email; outgoing webhooks for chat tools.
+     - **Who gets alerts is an access rule:** a new verb, "get alerts", in the
+       sentence model ("Ops get alerts for tag:prod", "Kayg gets alerts for
+       db-01 until Friday"). On-call is a rule with an ending; view rights
+       bound what anyone can be alerted about.
+     - **No noise:** one alert per problem, updated in place, never repeated
+       on a timer; related alerts grouped; snooze is an ending; an alert
+       clears itself with a quiet "resolved" note.
+     - **Search without choosing:** people type natural language or plain
+       keywords; recognised parts (level, machine, service, time) show as
+       chips the person may remove, but nobody ever has to pick a filter.
+       Parsing is local and instant; no AI model is needed to search.
+     - **Watched by default, zero setup:** CPU and pressure, memory and
+       memory pressure, disk space and time-to-full, disk I/O, network,
+       services (unit restarts and failures), reboots, clock drift.
+       Per-process detail is live while viewed, never stored by default.
+     - **Containers and Kubernetes,** when they arrive, are more sources in
+       the same search, vitals and alerts.
+     - **Process monitoring** is its own feature, to be grilled later.
