@@ -8,6 +8,8 @@ use tokio::sync::{Notify, Semaphore};
 
 struct HeldCensus {
     input: Mutex<(Vec<u8>, usize)>,
+    greeting_len: usize,
+    census_held: Notify,
     written: mpsc::UnboundedSender<Vec<u8>>,
     writes: AtomicUsize,
     release: Semaphore,
@@ -15,9 +17,20 @@ struct HeldCensus {
 }
 impl Channel for HeldCensus {
     async fn read(&self, destination: &mut [u8]) -> io::Result<usize> {
+        let greeted = self.input.lock().unwrap().1 >= self.greeting_len;
+        if greeted && self.writes.load(Ordering::Relaxed) < 2 {
+            self.census_held.notified().await;
+        }
         let copied = {
             let mut input = self.input.lock().unwrap();
-            let count = destination.len().min(input.0.len() - input.1);
+            // The census must leave its control slot before all eight Pongs arrive.
+            // Otherwise setup itself correctly exercises overflow, not retirement retry.
+            let end = if input.1 < self.greeting_len {
+                self.greeting_len
+            } else {
+                input.0.len()
+            };
+            let count = destination.len().min(end - input.1);
             destination[..count].copy_from_slice(&input.0[input.1..input.1 + count]);
             input.1 += count;
             count
@@ -30,6 +43,7 @@ impl Channel for HeldCensus {
     }
     async fn write(&self, bytes: &[u8]) -> io::Result<()> {
         if self.writes.fetch_add(1, Ordering::Relaxed) == 1 {
+            self.census_held.notify_one();
             self.release
                 .acquire()
                 .await
@@ -90,6 +104,7 @@ async fn full_control_lane_retries_retirement_census_on_capacity_without_request
     });
     let mut input = Vec::new();
     let mut frame = Vec::new();
+    let mut greeting_len = 0;
     for request in std::iter::once(Frame::Hello {
         version: 1,
         caps: 0,
@@ -99,10 +114,15 @@ async fn full_control_lane_retries_retirement_census_on_capacity_without_request
     {
         infraternal_protocol::encode_muxed_frame_into(0, &request, &mut frame).unwrap();
         input.extend_from_slice(&frame);
+        if greeting_len == 0 {
+            greeting_len = input.len();
+        }
     }
     let (written, mut frames) = mpsc::unbounded_channel();
     let channel = Arc::new(HeldCensus {
         input: Mutex::new((input, 0)),
+        greeting_len,
+        census_held: Notify::new(),
         written,
         writes: AtomicUsize::new(0),
         release: Semaphore::new(0),
@@ -113,12 +133,19 @@ async fn full_control_lane_retries_retirement_census_on_capacity_without_request
         run_channel(daemon_channel.as_ref(), Some(root), None, None, None).await
     });
     // The writer holds the first census; all eight Pongs occupy control slots.
-    tokio::time::timeout(
+    let setup = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         channel.drained.notified(),
     )
-    .await
-    .unwrap();
+    .await;
+    if setup.is_err() {
+        let outcome = if daemon.is_finished() {
+            format!("{:?}", daemon.await)
+        } else {
+            "still running".to_owned()
+        };
+        panic!("census setup never drained; daemon outcome: {outcome}");
+    }
     shim.await.unwrap();
     std::fs::remove_file(&path).unwrap();
     // Directory readiness gives the dispatcher another turn with the lane full.
