@@ -5,7 +5,7 @@ async fn fresh_removal_revokes_offline_host_and_cannot_replay() {
     let mut f = fixture().await;
     let host = Uuid::new_v4();
     sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)").bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
-    sqlx::query("INSERT INTO remote_host_bootstrap VALUES(?,'root@host.example',NULL)")
+    sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'root@host.example',NULL)")
         .bind(host.as_bytes().as_slice())
         .execute(&f.auth.pool)
         .await
