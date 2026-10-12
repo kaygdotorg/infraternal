@@ -56,6 +56,71 @@ with tempfile.TemporaryDirectory(dir=scratch) as temporary:
   expect(exit).toBe(0);
 });
 
+test("web-only deployment does not record the candidate as the running binary", async () => {
+  const child = Bun.spawn(["python3", "-c", `
+import io
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
+from deploy_test import deploy
+
+scratch = Path.home() / ".cache/codex-scratch/deploy-pipeline-review/fixtures"
+scratch.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+    home = Path(temporary)
+    sha = "b" * 40
+    cache = home / ".cache/infraternal-releases"
+    cache.mkdir(parents=True, mode=0o700)
+    release = cache / sha
+    release.mkdir(mode=0o700)
+    (release / "SOURCE").write_text(sha + "\\n")
+    (release / "GATE").write_text(json.dumps({"sha": sha, "result": "passed", "mode": "local"}))
+    # Keep this a transport/ref test: functional web-only checks separately
+    # prove that the daemon is never replaced. No external command runs here.
+    class Upload:
+        def __init__(self, *args, **kwargs):
+            self.stdin = io.BytesIO()
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def wait(self):
+            return 0
+    def command(*args, **kwargs):
+        if "systemctl show" in args[-1]:
+            return subprocess.CompletedProcess(args, 0, stdout="100")
+        return subprocess.CompletedProcess(args, 0, stdout=b'{"state":"deployed","ca_unlocked":true}')
+    calls = []
+    def git(*args):
+        calls.append(args)
+        return ""
+    with patch.object(deploy.Path, "home", return_value=home), \\
+         patch.object(deploy.sys, "argv", ["deploy", sha, "--web-only", "--review-clear"]), \\
+         patch.object(deploy.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b"fixture-session"))), \\
+         patch.object(deploy, "checksums"), patch.object(deploy, "signed"), \\
+         patch.object(deploy, "archive"), patch.object(deploy, "git", side_effect=git), \\
+         patch.object(deploy, "command", side_effect=command), \\
+         patch.object(deploy.subprocess, "Popen", Upload):
+        deploy.main()
+    moved = any(args[0] == "push" and sha + ":refs/heads/main" in args for args in calls)
+    print("WEB_ONLY_RECORD candidate_binary_recorded=" + str(moved).lower())
+    assert not moved, "web-only deployment recorded an unchanged binary as the candidate commit"
+`], {
+    cwd: import.meta.dir,
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+    stdout: "pipe", stderr: "pipe",
+  });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ]);
+  await Bun.write(join(process.env.HOME!, ".cache/codex-scratch/deploy-pipeline-review/web-only-record.log"), stdout + stderr);
+  console.log(stdout.trim());
+  expect(exit).toBe(0);
+});
+
 test("alias restoration failure still requests the retained warm rollback", async () => {
   const child = Bun.spawn(["python3", "-c", `
 import errno
