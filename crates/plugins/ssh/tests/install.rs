@@ -242,7 +242,6 @@ impl SshSession for ReceiptBudget {
 }
 
 #[tokio::test]
-#[ignore = "#169 T4: owned payload must be freed before receipt allocation"]
 async fn full_stage_frees_payload_before_allocating_a_cleanup_receipt() {
     let fixture = Fixture::new();
     let transaction = fixture.transaction();

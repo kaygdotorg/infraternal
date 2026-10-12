@@ -470,6 +470,9 @@ if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop
     $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then
+    # An incomplete upload is owned by this transaction. Reclaim it before
+    # allocating the outside receipt, including when the home filesystem is full.
+    rm -f "$stage/payload"
     if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
         printf '%s %s fresh %s\n' "$host" "$transaction" "$(stat -c '%d:%i' "$base")" > "$receipt"
     fi
