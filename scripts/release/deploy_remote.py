@@ -15,6 +15,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -218,7 +219,8 @@ def apply(config):
         # Persist the original executable as a recovery artifact. Warm rollback
         # uses its existing signed release metadata, never an unsigned copy.
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        saved = root / "backups" / (stamp + "-" + config["sha"])
+        # Rapid retry/redeploy of the same release must retain both snapshots.
+        saved = root / "backups" / (stamp + "-" + uuid.uuid4().hex + "-" + config["sha"])
         saved.parent.mkdir(mode=0o700, exist_ok=True)
         backup(data, saved)
         previous_directory = saved / "previous"

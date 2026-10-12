@@ -203,6 +203,19 @@ class DeploymentTests(unittest.TestCase):
             restart.assert_not_called()
         self.assertEqual((self.root / "web/index.html").read_text(), "old web")
 
+    def test_two_deployments_in_one_second_retain_distinct_backups(self):
+        config, _ = self.setup_apply()
+        config["web_only"] = True
+        with patch.object(remote.os, "geteuid", return_value=0), patch.object(remote, "healthy", return_value=True), \
+                patch.object(remote, "verify_signed"), patch.object(remote, "endpoint", return_value=(1, 2)), \
+                patch.object(remote, "backup", side_effect=lambda data, saved: saved.mkdir()), \
+                patch.object(remote.time, "strftime", return_value="20261012T000000Z"):
+            first = remote.apply(config)
+            second = remote.apply(config)
+        self.assertNotEqual(first["backup"], second["backup"])
+        self.assertTrue(Path(first["backup"]).is_dir())
+        self.assertTrue(Path(second["backup"]).is_dir())
+
     def test_load_backoff_starts_no_fetch_or_build(self):
         with patch.object(builder.os, "getloadavg", return_value=(9, 8, 7)), patch.object(builder, "run") as run:
             builder.cycle(self.root, self.root, self.root, "required-gate", 8, "a" * 40)
