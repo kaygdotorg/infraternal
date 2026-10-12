@@ -355,8 +355,12 @@ async fn greeting<C: Channel>(
                 Frame::Call {
                     call_id: 0,
                     action_id: "transport.standby",
-                    input_json: b"{}",
-                } => return Ok::<Option<Vec<u8>>, io::Error>(None),
+                    input_json,
+                } if crate::remote_standby_request::wants_prime(input_json)
+                    .is_ok_and(|prime| !prime) =>
+                {
+                    return Ok::<Option<Vec<u8>>, io::Error>(None);
+                }
                 _ => return Err(io::ErrorKind::InvalidData.into()),
             }
         } else {
