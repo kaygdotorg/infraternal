@@ -1,0 +1,20 @@
+[
+  {
+    "path": "crates/infraternal-server/src/auth/socket_tests/fresh_delete.rs",
+    "dev": "21b37bca7099c6a80ca0ddcdbfa2b6a73bc5d81f",
+    "sha256": "7be9a5d20c39cd2a50a9a3956d2bcf5510b5994dd05ff5ea70c73b7fa410f9c0",
+    "byte_identical": true
+  },
+  {
+    "path": "crates/infraternal-server/src/auth/socket_tests/review_liveness.rs",
+    "dev": "21b37bca7099c6a80ca0ddcdbfa2b6a73bc5d81f",
+    "sha256": "8f750c61251a55b0abc8456c34867158a803d4bfa50b0af979317c35e43f2bbb",
+    "byte_identical": true
+  },
+  {
+    "path": "crates/infraternal-server/src/auth/socket_tests/review_fresh_wait.rs",
+    "dev": "21b37bca7099c6a80ca0ddcdbfa2b6a73bc5d81f",
+    "sha256": "1b5513df8fae30b32d312cd990680a5878a72060fb49c025e77231bca72397a0",
+    "byte_identical": true
+  }
+]

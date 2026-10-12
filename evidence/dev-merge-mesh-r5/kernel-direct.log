@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/evidence/dev-merge-mesh-r5/run-kernel.py", line 8, in <module>
+    subprocess.run(["cargo", "test", "--locked", "-p", "infraternal-plugin-mesh", "--all-features", "--all-targets", "--no-run"], stdout=log, stderr=subprocess.STDOUT, check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['cargo', 'test', '--locked', '-p', 'infraternal-plugin-mesh', '--all-features', '--all-targets', '--no-run']' returned non-zero exit status 101.
