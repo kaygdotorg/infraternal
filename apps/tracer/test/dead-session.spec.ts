@@ -22,6 +22,8 @@ async function openProduct(page: Page): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?theme=ink&bg=none");
   await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
+  // The client connection flag precedes host receipt of AttachTerm on the delayed link.
+  await expect.poll(async () => (await mockState(request)).attach_count, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
 }
 
 test("a dead session disappears and does not retry after the ended state", async ({ page }, testInfo) => {
