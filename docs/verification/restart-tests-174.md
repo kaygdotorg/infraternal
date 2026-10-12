@@ -77,6 +77,10 @@ The same command ran 10 consecutive times in `systemd-run --user --scope -p CPUW
 
 The first combined fixed diagnostic used the long state-root override described above: all 18 unit tests passed, then the two unrelated `agent_review` fixtures failed their own 116-byte path check. With the default state root, the final plain combined run and all ten scoped runs passed.
 
+## Full-gate fixture correction
+
+The first full gate with `CARGO_TARGET_DIR` under the required job scratch path reached `agent_review::initial_attach_requires_explicit_credit_before_replay`, whose helper failed before its assertions with `FileNotFoundError: target/ac<PID>` because the worktree had no `target/` directory. `scripts/verify-agent-attach-credit.py` now uses the shared `fixture_state('ac')` helper for a private state path. With the worktree `target/` still absent, the exact integration test passed in the weighted systemd scope in 2.95 seconds. This was an unrelated verification-script path assumption surfaced by keeping build output outside the worktree.
+
 ## Author review
 
 - Production restart code and its strict executable/ownership checks are unchanged.
