@@ -1,0 +1,74 @@
+{
+  "machine": "infraternal-perf-test",
+  "loadBefore": "1.67 1.18 0.81 1/261 1057336",
+  "hosts": 1000,
+  "samples": 12,
+  "rttMs": 300,
+  "tracerTestPort": "4394",
+  "firstFrameDefinition": "first glyph draw on the visible terminal canvas",
+  "baseline": {
+    "firstFrameMs": [
+      1372.7000000178814,
+      1206.0999999940395,
+      1229.800000011921,
+      1363.2000000178814,
+      1216.5,
+      1371,
+      1602.800000011921,
+      2430.5999999940395,
+      1384.199999988079,
+      1369.9000000059605,
+      1567.3999999761581,
+      1375.9000000059605
+    ],
+    "p50Ms": 1371,
+    "p99Ms": 2430.5999999940395,
+    "inventoryAskedBeforeFirstFrame": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "candidate": {
+    "firstFrameMs": [
+      1373.199999988079,
+      2406.699999988079,
+      1355,
+      1365.0999999940395,
+      1375.0999999940395,
+      1379.6000000238419,
+      1379,
+      1584,
+      1394.300000011921,
+      1570.9000000059605,
+      1364,
+      1569.2000000178814
+    ],
+    "p50Ms": 1379,
+    "p99Ms": 2406.699999988079,
+    "inventoryAskedBeforeFirstFrame": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "loadAfter": "1.32 1.13 0.82 1/262 1057990"
+}
