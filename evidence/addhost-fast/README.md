@@ -94,6 +94,9 @@ cancellation. Each executes exactly one live test. An early wrong-feature
 controller executed zero tests; `regressions-zero-tests/` is excluded. The
 harness now refuses such a binary before creating a target. The existing
 round-3/start-fresh Rust cases also remain in the workspace gate.
+`regressions-root/` adds successful setup through password-free sudo and
+refusal when sudo is missing or requires a password. These three cases also
+execute exactly one live test; all sixteen live cases pass.
 
 Pinned HTTPS delivery and explicit send buffers were slower in the measured
 diagnostic cases. Per-socket CUBIC improved the three-target median by about
