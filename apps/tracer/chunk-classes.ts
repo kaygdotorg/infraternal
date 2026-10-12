@@ -21,8 +21,8 @@ export interface MetaOutput {
   inputs: Record<string, unknown>;
 }
 
-/** Modules that start the canvas lazily; their chunk and what only they use are deferred. */
-export const DEFERRED_ROOTS = ["src/canvas/product.ts", "src/canvas/mock/index.ts"];
+/** Canvas and account-data entry points loaded after terminal readiness; their exclusive imports are deferred. */
+export const DEFERRED_ROOTS = ["src/canvas/product.ts", "src/canvas/mock/index.ts", "src/canvas/sessions/hosts.ts"];
 /** Modules the person's action loads: named `*.on-demand.ts`. */
 export const ON_DEMAND_PATTERN = /\.on-demand\.ts$/;
 
