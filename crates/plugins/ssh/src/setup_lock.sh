@@ -23,6 +23,17 @@ start_setup_lease() {
     lease_pid=$!
     lease_birth=$(awk '{print $22}' "/proc/$lease_pid/stat")
     printf '%s %s\n' "$lease_pid" "$lease_birth" > "$stage/lease"
+    # Fork publication can precede the child's descriptor teardown. A following
+    # setup step must not collide with our own inherited parent guard. Keep the
+    # recovery receipt first, then bound the readiness checks and require the
+    # exact transaction descriptor before releasing our copy of that lock.
+    lease_checks=0
+    while [ -L "/proc/$lease_pid/fd/9" ]; do
+        lease_checks=$((lease_checks + 1))
+        [ "$lease_checks" -le 200 ] || exit 73
+        sleep 0.01
+    done
+    [ "$(readlink "/proc/$lease_pid/fd/7" 2>/dev/null || :)" = "$stage" ] || exit 73
     exec 7<&-
 }
 retire_setup_lease() {
