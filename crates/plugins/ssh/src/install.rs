@@ -5,6 +5,7 @@ use crate::{
     probe::Architecture,
     transport::{Input, Secret, SshSession, shell_quote},
 };
+use std::fmt::Write as _;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -262,6 +263,58 @@ impl Installation {
             .await
             .map_err(|error| error.at(InstallStep::Start).in_mode(self.mode))?;
         Ok(())
+    }
+
+    /// Collapse fixed remote setup steps while preserving their scripts and journal.
+    /// # Errors
+    /// Returns the exact named step/status receipt or a classified transport failure.
+    pub async fn setup(&self, join: &JoinMaterial) -> Result<bool, Failure> {
+        if !self.session.setup_steps() {
+            self.enroll_and_start(join).await?;
+            return self.enable_linger().await;
+        }
+        if join.host != self.host {
+            return Err(Failure::install(
+                "The enrollment invitation belongs to another host.",
+            ));
+        }
+        let mut script = String::from(
+            "# INFRATERNAL_SETUP_STEPS_V1\nset -u\nsetup_step() {\n    printf 'STEP %s\\n' \"$1\"\n    if sh -c \"$2\"; then :; else status=$?; printf 'FAIL %s %s\\n' \"$1\" \"$status\"; exit 0; fi\n}\n",
+        );
+        for (name, body) in [
+            ("join", setup_scripts::join(&join.url)),
+            ("install", setup_scripts::ACTIVATE.to_owned()),
+            ("start", setup_scripts::START.to_owned()),
+            (
+                "linger",
+                if self.mode == InstallMode::Root {
+                    "printf 'yes\\n'".to_owned()
+                } else {
+                    setup_scripts::LINGER.to_owned()
+                },
+            ),
+        ] {
+            // A fresh child shell keeps errexit active even when its parent
+            // observes status. Testing a shell function would suppress errexit.
+            writeln!(
+                script,
+                "setup_step {name} {}",
+                shell_quote(&self.script(&body))
+            )
+            .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
+        }
+        script.push_str("printf 'DONE\\n'\n");
+        let output = self
+            .session
+            .run(&script, Input::Bytes(join.stdin.expose()))
+            .await
+            .map_err(|mut error| {
+                if error.failed_step.is_none() {
+                    error = error.at(InstallStep::Join);
+                }
+                error.in_mode(self.mode)
+            })?;
+        parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
     }
 
     /// Ask policy to persist this user's manager without sudo or an interactive prompt.
@@ -595,4 +648,78 @@ pub fn parse_linger(bytes: &[u8]) -> Result<bool, Failure> {
         b"no\n" => Ok(false),
         _ => Err(Failure::install("The linger policy response was invalid.")),
     }
+}
+
+/// Decode bounded setup receipts; arbitrary command text never becomes diagnostics.
+/// # Errors
+/// Refuses malformed order, extra output, zero failure status and unknown step names.
+pub fn parse_setup(bytes: &[u8]) -> Result<bool, Failure> {
+    if bytes.len() > 256 {
+        return Err(invalid_setup());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid_setup())?;
+    if !text.ends_with('\n') {
+        return Err(invalid_setup());
+    }
+    let mut lines = text.lines();
+    for (index, name) in ["join", "install", "start", "linger"]
+        .into_iter()
+        .enumerate()
+    {
+        if lines.next() != Some(format!("STEP {name}").as_str()) {
+            return Err(invalid_setup());
+        }
+        let next = lines.clone().next().ok_or_else(invalid_setup)?;
+        if let Some(failed) = next.strip_prefix("FAIL ") {
+            let (step, status) = failed.split_once(' ').ok_or_else(invalid_setup)?;
+            let status: u8 = status.parse().map_err(|_| invalid_setup())?;
+            if step != name
+                || status == 0
+                || next != format!("FAIL {name} {status}")
+                || lines.count() != 1
+            {
+                return Err(invalid_setup());
+            }
+            let mut error = Failure::install("The remote setup step failed.").at(setup_step(index));
+            error.exit_status = Some(status);
+            return Err(error);
+        }
+    }
+    let linger = parse_linger(format!("{}\n", lines.next().ok_or_else(invalid_setup)?).as_bytes())?;
+    if lines.next() != Some("DONE") || lines.next().is_some() {
+        return Err(invalid_setup());
+    }
+    Ok(linger)
+}
+
+/// Retain the last authenticated fixed step on an interrupted compound command.
+#[must_use]
+pub fn interrupted_setup_step(bytes: &[u8]) -> Option<InstallStep> {
+    if bytes.len() > 256 {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    if !text.ends_with('\n') {
+        return None;
+    }
+    let mut last = None;
+    for (index, line) in text.lines().enumerate() {
+        let name = ["join", "install", "start", "linger"].get(index).copied()?;
+        if line != format!("STEP {name}") {
+            return None;
+        }
+        last = Some(setup_step(index));
+    }
+    last
+}
+
+fn setup_step(index: usize) -> InstallStep {
+    match index {
+        0 => InstallStep::Join,
+        2 => InstallStep::Start,
+        _ => InstallStep::Install,
+    }
+}
+fn invalid_setup() -> Failure {
+    Failure::install("The host setup response was invalid.")
 }

@@ -694,9 +694,9 @@ impl Bootstrap {
             }
             error
         })?;
-        transaction.enroll_and_start(&join).await?;
+        let linger = transaction.setup(&join).await?;
         drop(join); // Capability plaintext is erased immediately after its stdin handoff.
-        if !transaction.enable_linger().await? {
+        if !linger {
             emit(
                 batch,
                 target,

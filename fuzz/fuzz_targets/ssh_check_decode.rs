@@ -3,7 +3,7 @@
 
 use infraternal_plugin_ssh::{
     auth_evidence::MethodReceipt,
-    install::parse_linger,
+    install::{interrupted_setup_step, parse_linger, parse_setup},
     model::{Destination, FailureKind, MeshEvidence},
     openssh::{classify, scan_destination},
     previous_attempt::parse_check,
@@ -12,6 +12,8 @@ use infraternal_plugin_ssh::{
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|bytes: &[u8]| {
+    let _ = parse_setup(bytes);
+    let _ = interrupted_setup_step(bytes);
     let mut whole = MethodReceipt::default();
     whole.feed(bytes);
     let mut split = MethodReceipt::default();

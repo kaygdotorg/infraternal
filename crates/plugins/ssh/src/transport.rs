@@ -83,6 +83,10 @@ pub trait SshTransport: Send + Sync {
 
 /// A session owns ephemeral credentials and cleans them when its final owner drops it.
 pub trait SshSession: Send + Sync {
+    /// Opt into fixed setup-step receipts; older adapters retain separate steps.
+    fn setup_steps(&self) -> bool {
+        false
+    }
     /// Exact public host lookup used by this authenticated connection, when app-managed.
     fn trust_lookup(&self) -> Option<String> {
         None

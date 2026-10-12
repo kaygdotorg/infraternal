@@ -296,6 +296,9 @@ pub fn scan_destination(original: &Destination, bytes: &[u8]) -> Option<Destinat
 }
 
 impl SshSession for Session {
+    fn setup_steps(&self) -> bool {
+        true
+    }
     fn authentication(&self) -> Option<crate::auth_order::Authentication> {
         self.master
             .as_ref()
@@ -380,6 +383,9 @@ impl SshSession for Session {
                 // a command's exit 255 as permission to try a different credential.
                 let mut failure = classify(&result.stderr, false, MeshEvidence::default());
                 failure.exit_status = result.exit_status;
+                if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n") {
+                    failure.failed_step = crate::install::interrupted_setup_step(&result.stdout);
+                }
                 Err(failure)
             }
             .await

@@ -211,6 +211,13 @@ struct Pending {
     trust_lookup: Mutex<Option<String>>,
 }
 impl SshSession for Pending {
+    fn setup_steps(&self) -> bool {
+        self.selected.try_lock().is_ok_and(|selected| {
+            selected
+                .as_ref()
+                .is_some_and(|session| session.setup_steps())
+        })
+    }
     fn trust_lookup(&self) -> Option<String> {
         self.trust_lookup
             .lock()

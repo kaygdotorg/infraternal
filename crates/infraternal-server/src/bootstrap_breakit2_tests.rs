@@ -35,6 +35,7 @@ struct TimedSession {
     inner: Arc<dyn SshSession>,
 }
 impl SshSession for TimedSession {
+    fn setup_steps(&self) -> bool { self.inner.setup_steps() }
     fn authentication(&self) -> Option<infraternal_plugin_ssh::auth_order::Authentication> {
         self.inner.authentication()
     }
@@ -44,6 +45,7 @@ impl SshSession for TimedSession {
             let step = match &input {
                 Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => "upload",
                 Input::File(_) => "upload",
+                Input::Bytes(_) if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1") => "setup",
                 Input::Bytes(_) => "join",
                 Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => {
                     "check"

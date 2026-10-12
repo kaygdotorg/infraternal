@@ -8,11 +8,21 @@ use infraternal_plugin_ssh::{
     model::{Failure, InstallMode, Target, TargetAddress},
     transport::{CommandOutput, Input, Operation, Secret, SshSession},
 };
+use std::fmt::Write as _;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 use tokio::{io::AsyncWriteExt, process::Command};
 
 struct Local {
     root: PathBuf,
+}
+struct Compound(Local);
+impl SshSession for Compound {
+    fn setup_steps(&self) -> bool {
+        true
+    }
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        self.0.run(script, input)
+    }
 }
 impl SshSession for Local {
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
@@ -203,6 +213,120 @@ async fn compressed_stage_roundtrips_and_rejects_corruption_before_execution() {
         install.rollback().await.unwrap();
         assert!(!fixture.base().exists());
     }
+}
+
+#[test]
+fn setup_receipts_require_exact_order_and_preserve_failure_boundaries() {
+    use infraternal_plugin_ssh::install::{interrupted_setup_step, parse_setup};
+    use infraternal_plugin_ssh::model::InstallStep;
+    let prefix = "STEP join\nSTEP install\nSTEP start\nSTEP linger\n";
+    assert!(parse_setup(format!("{prefix}yes\nDONE\n").as_bytes()).unwrap());
+    assert!(!parse_setup(format!("{prefix}no\nDONE\n").as_bytes()).unwrap());
+    let mut receipt = String::new();
+    for (name, expected) in [
+        ("join", InstallStep::Join),
+        ("install", InstallStep::Install),
+        ("start", InstallStep::Start),
+        ("linger", InstallStep::Install),
+    ] {
+        writeln!(receipt, "STEP {name}").unwrap();
+        assert_eq!(
+            format!("{:?}", interrupted_setup_step(receipt.as_bytes())),
+            format!("{:?}", Some(expected))
+        );
+        let error = parse_setup(format!("{receipt}FAIL {name} 71\n").as_bytes()).unwrap_err();
+        assert_eq!(
+            format!("{:?}", error.failed_step),
+            format!("{:?}", Some(expected))
+        );
+        assert_eq!(error.exit_status, Some(71));
+    }
+    for invalid in [
+        "",
+        "STEP join",
+        "STEP start\n",
+        "STEP join\nFAIL join 0\n",
+        "STEP join\nFAIL join 071\n",
+        "STEP join\nFAIL install 71\n",
+        "STEP join\nFAIL join 71\nextra\n",
+    ] {
+        assert!(parse_setup(invalid.as_bytes()).is_err(), "{invalid:?}");
+    }
+    assert!(parse_setup(&[b'x'; 257]).is_err());
+    assert!(interrupted_setup_step(b"STEP join\nprivate\n").is_none());
+}
+
+#[tokio::test]
+async fn compound_setup_keeps_owned_rollback_and_linger_warning() {
+    let fixture = Fixture::new();
+    let session = Arc::new(Compound(Local {
+        root: fixture.root.clone(),
+    }));
+    let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+    install.stage(&fixture.binary).await.unwrap();
+    std::fs::write(fixture.root.join("deny-linger"), b"deny").unwrap();
+    assert!(!install.setup(&fixture.join).await.unwrap());
+    assert!(fixture.base().join(".bootstrap-lock/activating").exists());
+    install.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+}
+
+#[tokio::test]
+async fn compound_activation_and_start_failures_keep_exact_step_and_rollback() {
+    use infraternal_plugin_ssh::model::InstallStep;
+    for refuse_start in [false, true] {
+        let fixture = Fixture::new();
+        let install = Installation::new(
+            Arc::new(Compound(Local {
+                root: fixture.root.clone(),
+            })),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        install.stage(&fixture.binary).await.unwrap();
+        let launcher = fixture.root.join(".local/bin/infraternal");
+        if refuse_start {
+            std::fs::write(fixture.root.join("refuse-start"), b"refuse").unwrap();
+        } else {
+            std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+            std::fs::write(&launcher, b"foreign").unwrap();
+        }
+        let error = install.setup(&fixture.join).await.unwrap_err();
+        if refuse_start {
+            assert!(matches!(error.failed_step, Some(InstallStep::Start)));
+            assert_eq!(error.exit_status, Some(1));
+        } else {
+            assert!(matches!(error.failed_step, Some(InstallStep::Install)));
+            assert_eq!(error.exit_status, Some(71));
+        }
+        install.rollback().await.unwrap();
+        if !refuse_start {
+            assert_eq!(std::fs::read(&launcher).unwrap(), b"foreign");
+        }
+        assert!(!fixture.base().exists());
+    }
+}
+
+#[tokio::test]
+async fn compound_join_failure_preserves_the_original_status_and_boundary() {
+    let fixture = Fixture::new();
+    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    let session = Arc::new(Compound(Local {
+        root: fixture.root.clone(),
+    }));
+    let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+    install.stage(&fixture.binary).await.unwrap();
+    let error = install.setup(&fixture.join).await.unwrap_err();
+    assert!(matches!(
+        error.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Join)
+    ));
+    assert_eq!(error.exit_status, Some(71));
+    assert!(!error.message.contains("move"));
+    assert!(!fixture.base().join(".bootstrap-lock/activating").exists());
+    install.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
 }
 
 #[tokio::test]
