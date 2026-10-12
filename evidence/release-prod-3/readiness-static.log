@@ -1,0 +1,9 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p456036-i4650010.scope; invocation ID: 2c6cd3b7ca47449fa6eefac9cf272d37
+machine=infraternal-dev cores=12 load=68.31 51.06 50.78
+READINESS startup=tmux real_pty=true marker=true rc_executed=false elapsed_ms=1247.4
+READINESS startup=zellij real_pty=true marker=true rc_executed=false elapsed_ms=1308.7
+READINESS startup=menu real_pty=true marker=true rc_executed=false elapsed_ms=1273.4
+READINESS startup=bash real_pty=true marker=true rc_executed=false elapsed_ms=1216.6
+CLEANUP abandoned=False real_pty=true scope_active=false artifacts=0 elapsed_ms=310.8
+CLEANUP abandoned=True real_pty=true scope_active=false artifacts=0 elapsed_ms=9893.3

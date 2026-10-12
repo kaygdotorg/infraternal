@@ -1,0 +1,100 @@
+Running as unit: run-p1169178-i5363114.scope; invocation ID: 87d338b284bb4189a87049c3d04bed32
+$ bun x tsc --project tsconfig.json
+bun test v1.4.2 (744846f84)
+
+browser-build.test.ts:
+(pass) the browser renderer has no unresolved Vite Node-file shim request [22.04ms]
+
+chunk-classes.test.ts:
+(pass) the first screen is critical, the canvas product module and what only it uses are deferred [1.26ms]
+(pass) a chunk that both sides use stays critical [0.26ms]
+(pass) code only an action loads is on demand, even when the lazy canvas is what loads it [0.38ms]
+(pass) startup preloads follow static cycles but omit terminal, action and worker roots [1.46ms]
+
+precompress.test.ts:
+(pass) text sidecars round-trip deterministically; compressed formats remain identity [18.68ms]
+
+ 6 pass
+ 0 fail
+ 25 expect() calls
+Ran 6 tests across 3 files. [81.00ms]
+$ bun run build.ts
+built chunk-q2nxayqq.js, chunk-atqxstac.js, chunk-vz8669mg.js, chunk-73vpw1b6.js, chunk-sy5c9k7h.js, chunk-89ccban2.js, chunk-a895a34j.js, chunk-gtm292qm.js, chunk-e0avzm8t.js, chunk-k71g8q2j.js, chunk-czfxmdbk.js, chunk-5s6a3m50.js, main.js, chunk-hna59wqc.js, chunk-p3wfa4x0.js, chunk-rqn6pfk3.js, chunk-x216nypz.js, chunk-6axwnhkg.js, chunk-ybs9dq57.js, chunk-hmekhczb.js, chunk-yr0r38s4.js, chunk-8t7pe4ht.js, chunk-xtvakb7c.js, chunk-axbkkqp1.js, chunk-e1622zzn.js, chunk-b05r5z0s.js, chunk-c0qknatg.js, chunk-d3jvh9b6.js, chunk-sch82hwd.js, chunk-pb02t2fg.js, chunk-sqb18geb.js, chunk-nxttme6d.js, chunk-pe177ne5.js, chunk-hzdryxbs.js, chunk-djpdjgmf.js, chunk-mcrrtrb6.js, chunk-ftkqgmy1.js, chunk-wkqeh53w.js, chunk-9xd3g65e.js, chunk-28rbcdd5.js, chunk-61xwpgvs.js, chunk-p1bghk7k.js, chunk-nm1z0gca.js, chunk-p3awaaf2.js, chunk-xs0axa8m.js, chunk-21nt664r.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-xmp4zh80.js, chunk-f2r0hhqc.js, chunk-9nd0far1.js, chunk-mrjrswdq.js, chunk-8517mt41.js
+critical chunk-8t7pe4ht.js: identity=1104 gzip=666 brotli=604 bytes
+onDemand chunk-mcrrtrb6.js: identity=7662 gzip=3397 brotli=2972 bytes
+critical chunk-28rbcdd5.js: identity=39 gzip=39 brotli=39 bytes
+critical chunk-hna59wqc.js: identity=8377 gzip=3574 brotli=3181 bytes
+onDemand chunk-p3awaaf2.js: identity=6773 gzip=3177 brotli=2889 bytes
+deferred chunk-pb02t2fg.js: identity=95108 gzip=32352 brotli=28539 bytes
+onDemand chunk-xs0axa8m.js: identity=31922 gzip=12262 brotli=11046 bytes
+critical chunk-rqn6pfk3.js: identity=5443 gzip=2604 brotli=2382 bytes
+onDemand chunk-p3wfa4x0.js: identity=2557 gzip=1180 brotli=1010 bytes
+onDemand chunk-wkqeh53w.js: identity=10496 gzip=4091 brotli=3740 bytes
+onDemand chunk-czfxmdbk.js: identity=5760 gzip=1905 brotli=1684 bytes
+onDemand chunk-d3jvh9b6.js: identity=4575 gzip=2013 brotli=1785 bytes
+onDemand chunk-k71g8q2j.js: identity=191 gzip=170 brotli=131 bytes
+critical faulty-terminal.worker.js: identity=1086 gzip=559 brotli=487 bytes
+critical backdrop.worker.js: identity=243 gzip=212 brotli=158 bytes
+onDemand chunk-sqb18geb.js: identity=1170 gzip=708 brotli=589 bytes
+onDemand chunk-hzdryxbs.js: identity=5359 gzip=2579 brotli=2298 bytes
+onDemand chunk-p1bghk7k.js: identity=48002 gzip=15094 brotli=13401 bytes
+onDemand chunk-djpdjgmf.js: identity=4640 gzip=1932 brotli=1705 bytes
+onDemand chunk-5s6a3m50.js: identity=2108 gzip=1037 brotli=869 bytes
+critical chunk-a895a34j.js: identity=88 gzip=88 brotli=74 bytes
+critical chunk-axbkkqp1.js: identity=90 gzip=90 brotli=78 bytes
+onDemand chunk-pe177ne5.js: identity=11529 gzip=4653 brotli=4251 bytes
+onDemand chunk-gtm292qm.js: identity=228 gzip=178 brotli=165 bytes
+onDemand chunk-ftkqgmy1.js: identity=13384 gzip=5027 brotli=4496 bytes
+critical chunk-6axwnhkg.js: identity=17627 gzip=6247 brotli=5566 bytes
+onDemand chunk-sy5c9k7h.js: identity=3891 gzip=1735 brotli=1516 bytes
+critical chunk-xmp4zh80.js: identity=9810 gzip=4016 brotli=3452 bytes
+onDemand chunk-nxttme6d.js: identity=540 gzip=354 brotli=314 bytes
+critical chunk-f2r0hhqc.js: identity=128 gzip=109 brotli=111 bytes
+critical chunk-9xd3g65e.js: identity=39 gzip=39 brotli=39 bytes
+critical chunk-hmekhczb.js: identity=2519 gzip=1008 brotli=876 bytes
+critical chunk-nm1z0gca.js: identity=162 gzip=150 brotli=148 bytes
+onDemand chunk-vz8669mg.js: identity=5745 gzip=2164 brotli=1917 bytes
+onDemand chunk-e0avzm8t.js: identity=2420 gzip=1199 brotli=1079 bytes
+critical chunk-atqxstac.js: identity=2943 gzip=1315 brotli=1126 bytes
+critical chunk-q2nxayqq.js: identity=21235 gzip=6859 brotli=6134 bytes
+onDemand chunk-c0qknatg.js: identity=2824 gzip=1386 brotli=1202 bytes
+onDemand chunk-xtvakb7c.js: identity=1026 gzip=624 brotli=498 bytes
+onDemand chunk-b05r5z0s.js: identity=6198 gzip=2795 brotli=2528 bytes
+critical chunk-mrjrswdq.js: identity=199 gzip=161 brotli=139 bytes
+critical chunk-yr0r38s4.js: identity=386 gzip=238 brotli=196 bytes
+critical chunk-89ccban2.js: identity=707 gzip=367 brotli=307 bytes
+onDemand chunk-sch82hwd.js: identity=1616 gzip=863 brotli=739 bytes
+critical chunk-8517mt41.js: identity=42395 gzip=14485 brotli=12982 bytes
+critical chunk-x216nypz.js: identity=15859 gzip=6178 brotli=5477 bytes
+critical chunk-e1622zzn.js: identity=703957 gzip=203922 brotli=165201 bytes
+critical main.js: identity=110306 gzip=40147 brotli=34805 bytes
+critical chunk-61xwpgvs.js: identity=49 gzip=49 brotli=49 bytes
+deferred chunk-73vpw1b6.js: identity=42962 gzip=16556 brotli=14610 bytes
+onDemand chunk-21nt664r.js: identity=2428 gzip=1083 brotli=912 bytes
+critical chunk-ybs9dq57.js: identity=590 gzip=327 brotli=321 bytes
+onDemand chunk-9nd0far1.js: identity=1063 gzip=652 brotli=519 bytes
+JavaScript transfer, critical: identity=945381 gzip=293449/307200 brotli=243932/256000 bytes
+JavaScript transfer, deferred: identity=138070 gzip=48908/51200 brotli=43149/45056 bytes
+JavaScript transfer, onDemand: identity=184107 gzip=72258/20480 brotli=64255/18432 bytes
+JavaScript transfer, onDemand largest chunk chunk-p1bghk7k.js: gzip=15094/20480 brotli=13401/18432 bytes (class total gzip=72258 brotli=64255, not limited)
+fonts/monaspace-neon/italic.latin.woff2: identity=44324 gzip=44324 brotli=44324 bytes
+fonts/monaspace-neon/roman.latin.woff2: identity=40016 gzip=40016 brotli=40016 bytes
+fonts/jetbrains-mono/italic.latin.woff2: identity=36316 gzip=36316 brotli=36316 bytes
+fonts/jetbrains-mono/roman.latin.woff2: identity=34068 gzip=34068 brotli=34068 bytes
+fonts/source-code-pro/italic.latin.woff2: identity=23612 gzip=23612 brotli=23612 bytes
+fonts/source-code-pro/roman.latin.woff2: identity=22872 gzip=22872 brotli=22872 bytes
+fonts/geist-mono/italic.latin.woff2: identity=21380 gzip=21380 brotli=21380 bytes
+fonts/geist-mono/roman.latin.woff2: identity=19984 gzip=19984 brotli=19981 bytes
+fonts/ibm-plex-mono/italic.latin.woff2: identity=22296 gzip=22296 brotli=22296 bytes
+fonts/ibm-plex-mono/roman.latin.woff2: identity=19048 gzip=19048 brotli=19047 bytes
+fonts/cascadia-code/italic.latin.woff2: identity=44404 gzip=44404 brotli=44404 bytes
+fonts/cascadia-code/roman.latin.woff2: identity=40604 gzip=40604 brotli=40604 bytes
+fonts/maple-mono-nf/italic.latin.woff2: identity=53444 gzip=53444 brotli=53444 bytes
+fonts/maple-mono-nf/roman.latin.woff2: identity=46432 gzip=46432 brotli=46432 bytes
+fonts/nerd-symbols.woff2: identity=223748 gzip=223748 brotli=223748 bytes
+fonts/fira-code/roman.latin.woff2: identity=36756 gzip=36756 brotli=36756 bytes
+fonts/commit-mono/italic-400.latin.woff2: identity=18716 gzip=18716 brotli=18716 bytes
+fonts/commit-mono/italic-700.latin.woff2: identity=18352 gzip=18352 brotli=18352 bytes
+fonts/commit-mono/roman-400.latin.woff2: identity=17484 gzip=17484 brotli=17484 bytes
+fonts/commit-mono/roman-700.latin.woff2: identity=17260 gzip=17260 brotli=17260 bytes
+Font transfer: monaspace-neon=84340/88064 jetbrains-mono=70384/75776 source-code-pro=46484/49152 geist-mono=41364/45056 ibm-plex-mono=41344/45056 cascadia-code=85008/88064 maple-mono-nf=99876/106496 (critical 46432/51200) symbols=223748/235520 fira-code=36756/40960 commit-mono=71812/75776 bytes

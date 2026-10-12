@@ -1,0 +1,6 @@
+Running as unit: run-p94305-i4288339.scope; invocation ID: 05ac68d41b514739a1134aa3efa79254
+fmt-corrected exit=0
+remote-shim-agent-ssh exit=101
+remote-server-bootstrap exit=0
+remote-server-setup exit=101
+readiness-corrected exit=0

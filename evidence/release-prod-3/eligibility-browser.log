@@ -1,0 +1,16 @@
+Running as unit: run-p869562-i5063527.scope; invocation ID: 165b102185e844ac9b7b80148540f420
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-rsw786zt.js, chunk-dpg6mcx9.js, chunk-28x83d1e.js, chunk-5wjqz9g6.js, chunk-jhpywepd.js, chunk-hfmhknnv.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-w63wv6vw.js, chunk-vfswpvpp.js, chunk-aegc6dk4.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-r1dk37qm.js, chunk-dr3c5pcf.js, chunk-s2f83r9m.js, chunk-ssv08qk4.js, chunk-t0afx66y.js, chunk-9388ta1f.js, chunk-mnegzjh9.js, chunk-9g73ww7j.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-ge8kq9x5.js, chunk-9eazpnhn.js, chunk-s99tv9k4.js, chunk-xgh77s66.js, chunk-5753zf8s.js, chunk-c1kvx68e.js, chunk-87t13p38.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-v36kp4qr.js, chunk-cwxd6s78.js, chunk-e0pv5rxn.js, chunk-eqzd6sg6.js, chunk-1hje8sjn.js, chunk-w8j80wzv.js, chunk-axbkkqp1.js, chunk-rgcx8y21.js, chunk-xp1aq71z.js, chunk-5rzr35ad.js, chunk-hbf5rbwh.js, chunk-mg6c10r3.js, chunk-shp3mzqc.js, chunk-gdpwxedj.js, chunk-zb0cqen4.js, chunk-ns7dyvd8.js, chunk-1awnfjqd.js, chunk-pn4gte7r.js, chunk-certghh5.js, chunk-4k3bdnsk.js, chunk-hy8t3bt0.js, chunk-fg9bhry3.js, chunk-mhp6mpky.js, chunk-d8hjym39.js, chunk-h8nhpmrv.js, chunk-fbtp7jwn.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-kbjqkbw3.js, chunk-2f1etyx6.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-7fv1j4mm.js
+[WebServer] latency proxy listening on http://localhost:4935; upstream port=4936
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4936
+
+Running 4 tests using 1 worker
+
+(node:872333) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/sessions-canvas.spec.ts:54:1 › a window's actions are one pill as tall as its title pill (11.5s)
+  ✓  2 test/sessions-canvas.spec.ts:260:1 › both splits open a new shell through the header actions and stack down in the column (12.8s)
+  ✓  3 test/sessions-canvas.spec.ts:352:1 › on touch every control is 44 px and a row swipes open 1:1 with the finger (9.6s)
+  ✓  4 test/sessions-canvas.spec.ts:408:1 › on a phone the canvas row has a Sessions action that opens the manager of the active window (7.8s)
+
+  4 passed (49.2s)

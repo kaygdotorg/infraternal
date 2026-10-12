@@ -1,0 +1,3 @@
+$ bun x tsc --project tsconfig.json
+test/mock-server.ts(922,48): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string | number | readonly string[]'.
+  Type 'undefined' is not assignable to type 'string | number | readonly string[]'.

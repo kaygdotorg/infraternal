@@ -1,0 +1,7 @@
+fmt exit=1
+clippy exit=0
+fmt-corrected exit=0
+remote-shim-agent-ssh exit=101
+remote-server-bootstrap exit=0
+remote-server-setup exit=101
+readiness-corrected exit=0
