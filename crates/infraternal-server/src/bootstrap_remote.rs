@@ -457,6 +457,13 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    mod breakit2_live {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_breakit2_tests.rs"
+        ));
+    }
+
     struct Signer(Option<CaMaterial>);
     impl CaKeySource for Signer {
         fn load(&self) -> Result<CaMaterial, CaError> {
@@ -689,6 +696,43 @@ mod tests {
                 .await
                 .unwrap();
         assert!(prior);
+    }
+
+    #[tokio::test]
+    #[ignore = "#169 breakit2: unpublished invitation survives address persistence failure"]
+    async fn breakit2_unpublished_invitation_retires_durable_authority() {
+        let f = fixture(true).await;
+        // A deterministic SQLite failure after issue() commits tests the exact
+        // unpublished boundary without exposing the memory-only invitation.
+        sqlx::query("CREATE TRIGGER breakit2_refuse_address BEFORE INSERT ON remote_host_bootstrap BEGIN SELECT RAISE(ABORT,'fixture address persistence refusal'); END")
+            .execute(&f.pool).await.unwrap();
+        assert_eq!(finished(&start(&f, "owner")).await.step, Step::Failed);
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
+        let live: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            live, 1,
+            "unpublished cleanup removed memory ownership but leaked durable host authority"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "#169 breakit2: concurrent destination checks are not an atomic reservation"]
+    async fn breakit2_concurrent_same_destination_issues_only_one_invitation() {
+        let f = fixture(true).await;
+        let batches: Vec<_> = (0..8).map(|_| start(&f, "owner")).collect();
+        let events = futures_util::future::join_all(batches.iter().map(finished)).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.host_id.is_some())
+                .count(),
+            1,
+            "concurrent batches reserved the same destination and issued distinct host identities"
+        );
     }
 }
 
