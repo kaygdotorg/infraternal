@@ -160,7 +160,7 @@ mod tests;
 
 #[cfg(test)]
 #[path = "ca_handoff_shipping_tests.rs"]
-mod shipping_tests;
+pub(crate) mod shipping_tests;
 
 /// Keep injection at the syscall boundary so each failure can be reproduced.
 fn clear_stdin(

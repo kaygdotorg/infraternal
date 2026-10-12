@@ -24,9 +24,15 @@ async fn unlock_fixture() -> UnlockFixture {
     let auth = fixture().await;
     let material = crate::ca::tests::test_material();
     let source = Arc::new(MemoryCaSource::cold_start(material.issuer().clone()));
-    let root = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(".cache/codex-scratch/remote-agents/ca-administration-tests")
-        .join(Uuid::new_v4().to_string());
+    let root = std::env::var_os("INFRATERNAL_CA_TEST_ROOT")
+        .map_or_else(
+            || {
+                PathBuf::from(std::env::var_os("HOME").unwrap())
+                    .join(".cache/codex-scratch/remote-agents/ca-administration-tests")
+            },
+            PathBuf::from,
+        )
+        .join(&Uuid::new_v4().simple().to_string()[..16]);
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)

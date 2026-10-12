@@ -308,9 +308,9 @@ async fn shipping_restart_reload_rollback_and_cold_start() {
             .bind(uuid::Uuid::new_v4().as_bytes().as_slice()).bind(if nix::unistd::Uid::effective().is_root() { "rootful" } else { "rootless" }).bind(nix::unistd::Uid::effective().as_raw()).execute(&mut *transaction).await.unwrap();
     }
     transaction.commit().await.unwrap();
-    let sessions = terminals(address, &token).await;
+    let sessions = terminals(address, &token, "https://localhost").await;
     let original_pids = shim_pids(&fixture.directory, &sessions);
-    let mut attached = attach_all(address, &token, &sessions).await;
+    let mut attached = attach_all(address, &token, &sessions, "https://localhost").await;
     let candidate = fixture.directory.join("candidate");
     std::fs::copy(&binary, &candidate).unwrap();
     let mut times = Vec::new();
@@ -414,7 +414,7 @@ async fn shipping_restart_reload_rollback_and_cold_start() {
         active.store(false, std::sync::atomic::Ordering::Relaxed);
         gaps.push(probe.await.unwrap());
     }
-    attached = attach_all(address, &token, &sessions).await;
+    attached = attach_all(address, &token, &sessions, "https://localhost").await;
     assert_eq!(attached.len(), sessions.len().div_ceil(25));
     wire_send(
         &mut attached[0],
@@ -574,9 +574,13 @@ async fn shipping_restart_reload_rollback_and_cold_start() {
     pool.close().await;
 }
 
-type Browser =
+pub(crate) type Browser =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-async fn wire_send(socket: &mut Browser, stream: u32, frame: &infraternal_protocol::Frame<'_>) {
+pub(crate) async fn wire_send(
+    socket: &mut Browser,
+    stream: u32,
+    frame: &infraternal_protocol::Frame<'_>,
+) {
     use futures_util::SinkExt;
     let mut bytes = Vec::new();
     infraternal_protocol::encode_muxed_frame_into(stream, frame, &mut bytes).unwrap();
@@ -587,7 +591,7 @@ async fn wire_send(socket: &mut Browser, stream: u32, frame: &infraternal_protoc
         .await
         .unwrap();
 }
-async fn wire_read(socket: &mut Browser) -> bytes::Bytes {
+pub(crate) async fn wire_read(socket: &mut Browser) -> bytes::Bytes {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
     loop {
@@ -619,7 +623,7 @@ async fn wire_read(socket: &mut Browser) -> bytes::Bytes {
         }
     }
 }
-async fn browser(address: std::net::SocketAddr, token: &str) -> Browser {
+async fn browser(address: std::net::SocketAddr, token: &str, origin: &str) -> Browser {
     use infraternal_protocol::{Frame, decode_muxed_frame};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = format!("ws://{address}/v1/ws")
@@ -627,7 +631,7 @@ async fn browser(address: std::net::SocketAddr, token: &str) -> Browser {
         .unwrap();
     request
         .headers_mut()
-        .insert("Origin", "https://localhost".parse().unwrap());
+        .insert("Origin", origin.parse().unwrap());
     request.headers_mut().insert(
         "Cookie",
         format!("__Host-infraternal={token}").parse().unwrap(),
@@ -655,9 +659,13 @@ async fn browser(address: std::net::SocketAddr, token: &str) -> Browser {
     ));
     socket
 }
-async fn terminals(address: std::net::SocketAddr, token: &str) -> Vec<[u8; 16]> {
+pub(crate) async fn terminals(
+    address: std::net::SocketAddr,
+    token: &str,
+    origin: &str,
+) -> Vec<[u8; 16]> {
     use infraternal_protocol::{Frame, decode_muxed_frame};
-    let mut socket = browser(address, token).await;
+    let mut socket = browser(address, token, origin).await;
     let mut sessions = Vec::new();
     for call_id in 1..=u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS).unwrap()
     {
@@ -700,15 +708,16 @@ async fn terminals(address: std::net::SocketAddr, token: &str) -> Vec<[u8; 16]> 
     }
     sessions
 }
-async fn attach_all(
+pub(crate) async fn attach_all(
     address: std::net::SocketAddr,
     token: &str,
     sessions: &[[u8; 16]],
+    origin: &str,
 ) -> Vec<Browser> {
     use infraternal_protocol::{Frame, decode_muxed_frame};
     let mut browsers = Vec::new();
     for chunk in sessions.chunks(25) {
-        let mut socket = browser(address, token).await;
+        let mut socket = browser(address, token, origin).await;
         for (index, session_id) in chunk.iter().enumerate() {
             let stream = u32::try_from(index * 2 + 1).unwrap();
             wire_send(
@@ -734,7 +743,7 @@ async fn attach_all(
     }
     browsers
 }
-fn shim_pids(directory: &std::path::Path, sessions: &[[u8; 16]]) -> Vec<i32> {
+pub(crate) fn shim_pids(directory: &std::path::Path, sessions: &[[u8; 16]]) -> Vec<i32> {
     sessions
         .iter()
         .map(|id| {
