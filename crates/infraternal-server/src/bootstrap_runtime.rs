@@ -266,7 +266,7 @@ fn log_bootstrap_failure(
         InstallMode::Root => "root",
     };
     tracing::warn!(host_id = %host.map_or_else(|| "unassigned".into(), |host| host.to_string()),
-        target_id = %target.id, step, exit_status = %failure.exit_status.map_or_else(|| "unavailable".into(), |status| status.to_string()),
+        target_id = %target.id, step, failure_kind = failure.diagnostic_kind(), exit_status = %failure.exit_status.map_or_else(|| "unavailable".into(), |status| status.to_string()),
         mode, "host bootstrap failed");
 }
 
@@ -486,7 +486,12 @@ mod failure_log_tests {
             root_consent: false,
         };
         let host = uuid::Uuid::new_v4();
-        let mut failure = Failure::install("private-message-sentinel");
+        let mut failure = infraternal_plugin_ssh::openssh::classify(
+            b"private-output-sentinel",
+            false,
+            infraternal_plugin_ssh::model::MeshEvidence::default(),
+        );
+        failure.message = "private-message-sentinel";
         failure.failed_step = Some(InstallStep::Upload);
         failure.exit_status = Some(71);
         failure.log_tail.push("private-output-sentinel");
@@ -500,6 +505,7 @@ mod failure_log_tests {
             "target_id=one".into(),
             "step=\"upload\"".into(),
             "exit_status=71".into(),
+            "failure_kind=\"channel\"".into(),
             "mode=\"rootless\"".into(),
         ] {
             assert!(
