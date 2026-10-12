@@ -79,6 +79,12 @@ pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 
+# Credential helper identity hashes use the same bounded reply deadline in
+# native tests as in production. Keep the approved SHA256 implementation
+# optimized in dev/test too; never extend the deadline or omit the digest [217,250].
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = true
