@@ -24,7 +24,7 @@ impl SshSession for TimedSession {
             let step = match &input {
                 Input::File(_) => "upload",
                 Input::Bytes(_) => "join",
-                Input::Empty if script == infraternal_plugin_ssh::probe::CHECK_SCRIPT => "check",
+                Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => "check",
                 Input::Empty if script.contains("ln \"$cache/payload\" \"$stage/payload\"") => "reuse_payload",
                 Input::Empty if script.contains("validate_cache") => "payload_lookup",
                 Input::Empty if script.contains("validate_receipt") => "rollback",

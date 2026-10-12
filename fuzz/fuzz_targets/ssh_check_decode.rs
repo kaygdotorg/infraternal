@@ -5,6 +5,7 @@ use infraternal_plugin_ssh::{
     install::parse_linger,
     model::{Destination, FailureKind, MeshEvidence},
     openssh::{classify, scan_destination},
+    previous_attempt::parse_check,
     probe::Check,
 };
 use libfuzzer_sys::fuzz_target;
@@ -44,6 +45,12 @@ fuzz_target!(|bytes: &[u8]| {
     {
         assert!(text.len() <= 320);
         assert!(!endpoint.host().starts_with('-'));
+    }
+    if parse_check(bytes).is_ok() {
+        assert!(bytes.len() <= 512);
+        let mut suffix = bytes.to_vec();
+        suffix.push(b'!');
+        assert!(parse_check(&suffix).is_err());
     }
     if let Ok(check) = Check::parse(bytes) {
         assert!(bytes.len() <= 256);

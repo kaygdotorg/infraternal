@@ -1196,3 +1196,324 @@ async fn setup_transaction_holds_a_live_lock_between_shell_commands() {
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
 }
+
+#[tokio::test]
+async fn stale_previous_attempt_socket_can_be_retired_without_manual_cleanup() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let sessions = fixture.base().join("sessions/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    for directory in [&sessions, sessions.parent().unwrap()] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let socket = sessions.join(format!("{}.sock", uuid::Uuid::new_v4().simple()));
+    assert!(Command::new("python3")
+        .args(["-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); __import__(\"os\").chmod(sys.argv[1],0o600)"])
+        .arg(socket.file_name().unwrap())
+        .current_dir(&sessions)
+        .status().await.unwrap().success());
+    // A failed earlier setup has retired its transaction but cannot finish
+    // removing the rendezvous directory while this stale socket remains.
+    assert!(transaction.rollback().await.is_err());
+    assert!(fixture.receipt().exists());
+    let next = fixture.transaction();
+    assert!(next.stage(&fixture.binary).await.is_err());
+    // Desired recovery boundary: the earlier attempt owns this socket, and no
+    // listener remains. Ordinary rollback currently cannot retire it.
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let output = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await
+        .unwrap();
+    let (_, previous) =
+        infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout).unwrap();
+    previous
+        .unwrap()
+        .start_fresh(&session, &fixture.target)
+        .await
+        .unwrap();
+    assert!(!socket.exists());
+    next.stage(&fixture.binary).await.unwrap();
+    next.enroll_and_start(&fixture.join).await.unwrap();
+    next.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn active_transaction_is_live_between_ssh_setup_commands() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let result = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await;
+    let refused = infraternal_plugin_ssh::previous_attempt::classify(result.err().unwrap());
+    assert_eq!(
+        refused.kind,
+        infraternal_plugin_ssh::model::FailureKind::SetupRunning
+    );
+    assert!(fixture.base().join(".bootstrap-lock").exists());
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+}
+
+#[test]
+fn earlier_attempt_records_reject_suffixes_truncation_and_unbounded_counts() {
+    let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
+    let valid = format!(
+        "{check}INFRATERNAL_SETUP_STALE {} {} 1:2 1\n",
+        "1".repeat(32),
+        "2".repeat(32)
+    );
+    let (_, previous) =
+        infraternal_plugin_ssh::previous_attempt::parse_check(valid.as_bytes()).unwrap();
+    assert!(previous.is_some());
+    for end in 0..valid.len() {
+        assert!(
+            infraternal_plugin_ssh::previous_attempt::parse_check(&valid.as_bytes()[..end])
+                .is_err()
+        );
+    }
+    for invalid in [
+        format!("{valid}extra"),
+        valid.replace("1:2 1\n", "1:2 1025\n"),
+        valid.replace("1:2", "1:2:3"),
+        valid.replace("STALE", "UNKNOWN"),
+    ] {
+        assert!(infraternal_plugin_ssh::previous_attempt::parse_check(invalid.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn earlier_attempt_classification_preserves_status_boundary_and_authentication() {
+    use infraternal_plugin_ssh::model::{FailureKind, InstallStep};
+    for status in [71, 72, 73, 75] {
+        let mut error = Failure::install("withheld").at(InstallStep::Connect);
+        error.exit_status = Some(status);
+        let classified = infraternal_plugin_ssh::previous_attempt::classify(error);
+        assert_eq!(classified.exit_status, Some(status));
+        assert!(matches!(classified.failed_step, Some(InstallStep::Connect)));
+        let mut auth = Failure::new(FailureKind::Auth, "Authentication was refused.");
+        auth.exit_status = Some(status);
+        assert_eq!(
+            infraternal_plugin_ssh::previous_attempt::classify(auth).kind,
+            FailureKind::Auth
+        );
+    }
+}
+
+#[tokio::test]
+async fn start_fresh_resumes_the_same_attempt_after_owner_confirmation() {
+    exercise_start_fresh(false).await;
+}
+
+#[tokio::test]
+async fn turning_off_paused_host_provisioning_preserves_earlier_leftovers() {
+    exercise_start_fresh(true).await;
+}
+
+// Reuse one real-filesystem fixture for completion and component cancellation.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the real shell fixture and same-attempt admission assertions together."
+)]
+async fn exercise_start_fresh(turn_off: bool) {
+    use infraternal_plugin_api::{ComponentPlugin, PluginState};
+    use infraternal_plugin_ssh::{
+        bootstrap::{Authority, Backend, Bootstrap, Resolved},
+        install::BinaryPaths,
+        model::{Destination, MeshEvidence, Step},
+        probe::Check,
+        transport::{Credentials, SshTransport},
+    };
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Ready {
+        host: uuid::Uuid,
+        invitations: AtomicUsize,
+        recoveries: Mutex<Vec<&'static str>>,
+    }
+    impl Backend for Ready {
+        fn resolve<'a>(
+            &'a self,
+            _: &'a Authority,
+            _: &'a Target,
+            _: Option<&'a str>,
+        ) -> Operation<'a, Resolved> {
+            Box::pin(async {
+                Ok(Resolved {
+                    destination: Destination::parse("user@fixture").unwrap(),
+                    credentials: Credentials::Network,
+                    mesh: MeshEvidence::default(),
+                })
+            })
+        }
+        fn invitation<'a>(
+            &'a self,
+            _: &'a Authority,
+            _: &'a Target,
+            _: &'a Check,
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.invitations.fetch_add(1, Ordering::SeqCst);
+                Ok(JoinMaterial {
+                    host: self.host,
+                    url: "https://fixture.invalid/join".into(),
+                    stdin: Secret::new(b"synthetic-capability\n".to_vec()),
+                })
+            })
+        }
+        fn connected_facts<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn terminal_canary<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn record_start_fresh(
+            &self,
+            _: &Target,
+            _: uuid::Uuid,
+            _: uuid::Uuid,
+            outcome: &'static str,
+        ) {
+            self.recoveries.lock().unwrap().push(outcome);
+        }
+        fn failed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    struct Transport {
+        root: PathBuf,
+    }
+    impl SshTransport for Transport {
+        fn open(
+            &self,
+            _: Destination,
+            _: Credentials,
+            _: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            Box::pin(async move {
+                Ok(Arc::new(Local {
+                    root: self.root.clone(),
+                }) as Arc<dyn SshSession>)
+            })
+        }
+    }
+    let fixture = Fixture::new();
+    let old = fixture.transaction();
+    old.stage(&fixture.binary).await.unwrap();
+    // A foreign root entry preserves the original journal through rollback.
+    let foreign = fixture.base().join("keep");
+    std::fs::write(&foreign, "foreign data").unwrap();
+    assert!(old.rollback().await.is_err());
+    std::fs::remove_file(&foreign).unwrap();
+    let backend = Arc::new(Ready {
+        host: fixture.join.host,
+        invitations: AtomicUsize::new(0),
+        recoveries: Mutex::new(Vec::new()),
+    });
+    let runner = Bootstrap::new(
+        Arc::new(Transport {
+            root: fixture.root.clone(),
+        }),
+        backend.clone(),
+        BinaryPaths {
+            x86_64: fixture.binary.clone(),
+            aarch64: fixture.binary.clone(),
+        },
+    );
+    let batch = runner
+        .start("owner".into(), vec![fixture.target.clone()], None)
+        .unwrap();
+    let mut changes = batch.subscribe();
+    let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let (_, events) = batch.events(0);
+            if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
+                assert_eq!(event.attempt, 1);
+                assert!(event.host_id.is_none(), "pause must precede enrollment");
+                return event.leftovers.as_ref().unwrap().challenge;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+    assert!(backend.recoveries.lock().unwrap().is_empty());
+    if turn_off {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            runner.set_enabled(false),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(runner.status().state, PluginState::Off);
+        assert_eq!(runner.status().active_work, 0);
+        assert!(fixture.receipt().exists());
+        assert!(fixture.base().join(".bootstrap-owner").exists());
+        assert!(backend.recoveries.lock().unwrap().is_empty());
+        assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+        assert!(
+            runner
+                .start_fresh(&batch, "owner", "one", challenge)
+                .is_err()
+        );
+        return;
+    }
+    assert!(
+        runner
+            .start_fresh(&batch, "other-owner", "one", challenge)
+            .is_err()
+    );
+    assert!(
+        runner
+            .start_fresh(&batch, "owner", "one", uuid::Uuid::new_v4())
+            .is_err()
+    );
+    runner
+        .start_fresh(&batch, "owner", "one", challenge)
+        .unwrap();
+    assert!(
+        runner
+            .start_fresh(&batch, "owner", "one", challenge)
+            .is_err()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let (_, events) = batch.events(0);
+            if let Some(event) = events
+                .iter()
+                .find(|event| matches!(event.step, Step::Done | Step::Failed))
+            {
+                assert_eq!(event.step, Step::Done, "{}", event.message);
+                assert_eq!(event.attempt, 1);
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(fixture.base().join("bin/current").exists());
+    assert!(!fixture.base().join(".bootstrap-lock").exists());
+    assert_eq!(backend.invitations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *backend.recoveries.lock().unwrap(),
+        vec!["started", "completed"]
+    );
+}

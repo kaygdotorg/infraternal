@@ -898,3 +898,21 @@ async fn split_cookie_fields_preserve_bootstrap_owner_authority() {
     }
     serving.abort();
 }
+
+#[test]
+fn start_fresh_request_is_bound_to_a_target_and_public_challenge() {
+    let challenge = uuid::Uuid::new_v4();
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "action": "start-fresh", "target": "host-one", "challenge": challenge,
+    }))
+    .unwrap();
+    assert!(
+        matches!(request, Request::StartFresh {target, challenge: observed} if target == "host-one" && observed == challenge)
+    );
+    for value in [
+        serde_json::json!({"action":"start-fresh","target":"host-one"}),
+        serde_json::json!({"action":"start-fresh","target":"host-one","challenge":challenge,"path":"/foreign"}),
+    ] {
+        assert!(serde_json::from_value::<Request>(value).is_err());
+    }
+}

@@ -365,8 +365,9 @@ issuing another invitation, and the UI directs the person to its existing termin
 Failure adds optional `exit_status` from the authenticated command process (a
 signal or unavailable status omits it). Fixed installer codes 71 and 72 retain
 `failed_step` and identify the approved root/rootless directory with ownership
-or lock/rollback guidance. Other failures name the command boundary and next
-check. Arbitrary stdout/stderr remains withheld. One server log line per failed
+or ownership guidance. A competing transaction (72) directs the person back
+to the host check; a live setup (73) offers to wait. Other failures name the
+command boundary and next check. Arbitrary stdout/stderr remains withheld. One server log line per failed
 attempt contains only host UUID (unassigned before issuance), target id, step,
 exit status and static mode; cleanup warnings do not replace the original phase.
 The existing dialog Details disclosure shows the trusted failed-step label.
@@ -394,3 +395,46 @@ inside the owned transaction. Rollback retains this declared retry cache while
 removing that attempt's installation artifacts; subsequent uploads replace its
 single payload, bounding retained storage to one executable per execution mode.
 The cache creates no background task and grants no host admission authority.
+
+### Start fresh over earlier setup leftovers (#169)
+
+The existing authenticated SSH check also classifies setup ownership, without a
+second SSH command. A live directory-lock holder, installation executable, open
+setup descriptor or session listener returns `setup_running`: “Setup is already
+running on this host. Wait for it to finish, then try again.” New setup commands
+serialize on the private installation parent and hold a bounded 180-second
+transaction lease across command gaps. Commit and rollback retire only the
+lease whose PID birth and inherited descriptor match that transaction.
+
+A private owner marker plus the exact fresh transaction journal may return
+`stale_previous_attempt` on a `check` event, with optional `leftovers` containing
+`challenge`, the approved `mode`, and bounded fixed public `findings`. This is a
+pause in the existing attempt, before issuing an invitation or uploading. The
+same authenticated WebSocket accepts `{ "action": "start-fresh", "target": "…",
+"challenge": "…" }` (registry action `ssh.start-fresh`, permission `ssh.manage`).
+The target and single-use challenge belong to that socket's batch and owner;
+clients never select a path, host identity or previous transaction. Socket loss,
+component disable or the existing attempt deadline cancels the pause without
+removing earlier leftovers.
+
+Confirmation rechecks the owner, transaction, device/inode binding, full root
+and supported staging inventory, and all liveness evidence under the same
+directory lock. Only proven fresh artifacts are retired through the existing
+rollback. Canonical private session sockets with no listener may be removed;
+empty owned directories, marker and journal follow. Unknown files anywhere in
+the setup root or old lock refuse the entire recovery before any removal.
+Upgrade journals, advanced unknown staging layouts and older journals without
+an inode binding are refused with an explicit unsupported/changed-format reason.
+Foreign data remains untouched. A changed observation needs another host check.
+
+Successful recovery continues the same attempt and issues one new invitation.
+Content-free server logs record the previous host UUID, transaction UUID,
+execution mode, fresh ownership journal and started/completed/refused outcome.
+Authenticated command status and setup-step diagnostics remain available; no
+file contents, process arguments, environments or arbitrary remote output enter
+public findings or logs. No existing enrolled identity is adopted by recovery.
+
+Exact screen copy for the later UI pass: title “This host has leftovers from an
+earlier setup”; body “infraternal didn't finish setting up here before. Start
+fresh to remove what it left behind and continue.”; primary “Start fresh”;
+secondary “Back”. Paths belong only in Details.
