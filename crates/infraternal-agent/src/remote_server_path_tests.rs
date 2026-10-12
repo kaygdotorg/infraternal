@@ -92,6 +92,8 @@ struct Server {
     accepted: tokio::sync::mpsc::Receiver<Accepted>,
     parked: tokio::sync::mpsc::Receiver<()>,
     task: tokio::task::JoinHandle<()>,
+    proof_valid: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    connection_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Server {
     fn new(
@@ -124,6 +126,10 @@ impl Server {
         )
         .unwrap();
         let listen = endpoint.clone();
+        let proof_valid = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(valid));
+        let connection_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let valid = proof_valid.clone();
+        let connections = connection_count.clone();
         let (notices, accepted) = tokio::sync::mpsc::channel(8);
         let (parking, parked) = tokio::sync::mpsc::channel(8);
         let task = tokio::spawn(async move {
@@ -132,10 +138,13 @@ impl Server {
                 while sessions.try_join_next().is_some() {}
                 let notices = notices.clone();
                 let parking = parking.clone();
+                let valid = valid.clone();
+                let connections = connections.clone();
                 sessions.spawn(async move {
                     let Ok(connection) = incoming.await else {
                         return;
                     };
+                    connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Ok((send, receive)) = connection.accept_bi().await else {
                         return;
                     };
@@ -151,7 +160,11 @@ impl Server {
                                 control.as_ref(),
                                 0,
                                 &Frame::Pong {
-                                    nonce: if valid { nonce } else { nonce.wrapping_add(1) },
+                                    nonce: if valid.load(std::sync::atomic::Ordering::Relaxed) {
+                                        nonce
+                                    } else {
+                                        nonce.wrapping_add(1)
+                                    },
                                     sent_us,
                                 },
                             )
@@ -252,6 +265,8 @@ impl Server {
             accepted,
             parked,
             task,
+            proof_valid,
+            connection_count,
         }
     }
     async fn admitted(&mut self) {
@@ -836,4 +851,51 @@ async fn assert_remote_status(active: &mut Accepted, expected: ServerLinkKind) {
     };
     let status: ServerLink = serde_json::from_slice(json).unwrap();
     assert_eq!(status.kind, expected);
+}
+
+/// A parked proof remains usable when new admission is refused; down must not redial.
+#[tokio::test]
+async fn component_down_activates_the_warm_fallback_without_a_new_connection() {
+    use std::sync::atomic::Ordering;
+    let ca = root();
+    let server = leaf(&ca, true);
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut fallback =
+        Server::with_options(&server, roots, "127.0.0.1:0".parse().unwrap(), true, true);
+    let address = fallback.endpoint.local_addr().unwrap();
+    let mesh_address = SocketAddr::new("127.0.0.2".parse().unwrap(), address.port());
+    let mut mesh = Server::with_options(&server, roots, mesh_address, true, true);
+    let identity = RemoteIdentity {
+        identity: leaf(&ca, false),
+        roots: vec![ca.certificate.clone()],
+        endpoint: address,
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let directory = Directory::new();
+    let registry = registry();
+    let control = registry.clone();
+    let state = directory.0.clone();
+    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
+    fallback.admitted().await;
+    preference(&registry, Some(mesh_address.ip())).await;
+    mesh.admitted().await;
+    fallback.parked().await;
+    // Refuse only future path proofs, preserving the parked authenticated stream.
+    fallback.proof_valid.store(false, Ordering::Relaxed);
+    let before = fallback.connection_count.load(Ordering::Relaxed);
+    preference(&registry, None).await;
+    let mut active = fallback.admitted_channel().await;
+    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
+    assert_eq!(
+        status(&registry).await.reason,
+        ServerLinkReason::MeshDisabled
+    );
+    assert_eq!(
+        fallback.connection_count.load(Ordering::Relaxed),
+        before,
+        "component down opened another fallback connection despite a healthy parked proof"
+    );
+    supervisor.abort();
+    let _ = supervisor.await;
 }
