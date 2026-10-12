@@ -2498,3 +2498,31 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      The goal is that reconnecting feels instant, while the second number keeps
      the claim honest. Full-screen prediction, a latest-screen view lane and a
      UDP transport for mesh SSH are decided only after measurement.
+260. **Logs, metrics and alerting are our own, built lean (owner,
+     2026-10-12, #193):** the guiding line: "we keep it lean, we keep it
+     small. we are non-intrusive, extremely reliable and ridiculously fast."
+     - **Placement: hybrid.** The server keeps a small recent summary per
+       machine (about 15 minutes of errors and warnings, grouped repeats,
+       vitals; about 64 KB per machine) that answers ⌘K at once; full history
+       stays on the machine and is fetched on demand. Results state their
+       coverage ("searched 12 of 14 machines"). A machine can be pinned to
+       send everything when outage-time completeness matters.
+     - **Engine:** SQLite FTS5 (SQLite already ships) goes to a production
+       spike first; our own small index stays a challenger for hot recent
+       data. Tantivy is not used (+3.6 MB, new lines searchable too slowly).
+     - **Vitals (an explicit D81 exception):** one reading every 10 s for
+       history (24 h, then thinned to 30 days), once a second only while a
+       graph is open; nothing when the feature is off. History is never
+       invented: finer detail exists only from when it was recorded.
+     - **Alerting is ours (amends D35):** built-in plain warnings in the
+       Inbox first (disk filling, restart loops, sustained pressure), no
+       formula language, no required exporter; an optional export stays off
+       by default. A full alerting design is a later grill.
+     - **Secrets are redacted on the machine** before anything is indexed or
+       sent; the server summary keeps safe fields and redacted examples.
+     - **Retention defaults wait for research** on real log volumes per kind
+       of machine.
+     - Who can read logs is an ordinary access rule; no port scans or
+       endpoint guessing; AI agents get the same evidence through MCP with
+       no automatic remediation. Nothing is built until measured end to end
+       on the perf VM at 1,000 machines.
