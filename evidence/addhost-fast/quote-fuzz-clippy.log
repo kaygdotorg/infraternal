@@ -1,0 +1,65 @@
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+error: method `open_readiness` is never used
+   --> crates/infraternal-server/src/embedded.rs:255:25
+    |
+164 | impl EmbeddedAgent {
+    | ------------------ method in this implementation
+...
+255 |     pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
+    |                         ^^^^^^^^^^^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: methods `retire_bootstrap`, `retire_bootstrap_once`, and `complete_bootstrap` are never used
+  --> crates/infraternal-server/src/bootstrap_retirement.rs:12:25
+   |
+ 6 | impl EnrollmentStore {
+   | -------------------- methods in this implementation
+...
+12 |     pub(crate) async fn retire_bootstrap(
+   |                         ^^^^^^^^^^^^^^^^
+...
+31 |     async fn retire_bootstrap_once(
+   |              ^^^^^^^^^^^^^^^^^^^^^
+...
+79 |     pub(crate) async fn complete_bootstrap(
+   |                         ^^^^^^^^^^^^^^^^^^
+
+error: function `writer_contention` is never used
+  --> crates/infraternal-server/src/bootstrap_retirement.rs:94:4
+   |
+94 | fn writer_contention(error: &sqlx::Error) -> bool {
+   |    ^^^^^^^^^^^^^^^^^
+
+error: field `0` is never read
+  --> crates/infraternal-server/src/remote_http.rs:71:36
+   |
+71 | pub(crate) struct InvitationIssuer(Api);
+   |                   ---------------- ^^^
+   |                   |
+   |                   field in this struct
+   |
+   = help: consider removing this field
+   = note: `InvitationIssuer` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+error: methods `issue_bootstrap`, `ready`, `origin`, and `store` are never used
+   --> crates/infraternal-server/src/remote_http.rs:91:25
+    |
+ 72 | impl InvitationIssuer {
+    | --------------------- methods in this implementation
+...
+ 91 |     pub(crate) async fn issue_bootstrap(
+    |                         ^^^^^^^^^^^^^^^
+...
+100 |     pub(crate) fn ready(&self) -> bool {
+    |                   ^^^^^
+...
+103 |     pub(crate) fn origin(&self) -> &str {
+    |                   ^^^^^^
+...
+106 |     pub(crate) fn store(&self) -> &EnrollmentStore {
+    |                   ^^^^^
+
+error: could not compile `infraternal-server` (lib) due to 5 previous errors

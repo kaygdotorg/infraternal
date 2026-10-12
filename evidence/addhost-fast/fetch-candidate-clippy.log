@@ -1,0 +1,27 @@
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+error: unnecessary hashes around raw string literal
+  --> /home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server/src/bootstrap_payload_candidates.rs:36:28
+   |
+36 |   const FETCH_SCRIPT: &str = r#"import gzip, ssl, sys, urllib.request
+   |  ____________________________^
+37 | | context = ssl.create_default_context(cadata=sys.argv[2])
+38 | | context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+39 | | request = urllib.request.Request(sys.argv[1])
+...  |
+50 | |             sys.stdout.buffer.write(chunk)
+51 | | "#;
+   | |__^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_raw_string_hashes
+   = note: `-D clippy::needless-raw-string-hashes` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::needless_raw_string_hashes)]`
+help: remove all the hashes around the string literal
+   |
+36 ~ const FETCH_SCRIPT: &str = r"import gzip, ssl, sys, urllib.request
+37 | context = ssl.create_default_context(cadata=sys.argv[2])
+...
+50 |             sys.stdout.buffer.write(chunk)
+51 ~ ";
+   |
+
+error: could not compile `infraternal-server` (lib test) due to 1 previous error

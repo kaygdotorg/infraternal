@@ -1,0 +1,45 @@
+   Compiling libsqlite3-sys v0.30.1
+   Compiling openssl-sys v0.9.117
+   Compiling ring v0.17.14
+   Compiling hyper v1.11.1
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+   Compiling arbitrary v1.4.2
+   Compiling sqlx-sqlite v0.8.6
+   Compiling libfuzzer-sys v0.4.13
+   Compiling openssl v0.10.81
+   Compiling hyper-util v0.1.21
+   Compiling rustls-webpki v0.103.15
+   Compiling axum v0.8.9
+   Compiling rustls v0.23.45
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-plugin-api)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/host-facts)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/mesh)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-shim)
+   Compiling tokio-openssl v0.6.5
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling axum-server v0.8.0
+   Compiling webauthn-rs-core v0.5.5
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+   Compiling quinn-proto v0.11.19
+   Compiling webauthn-rs v0.5.5
+   Compiling quinn v0.11.12
+   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/remote)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-agent)
+   Compiling infraternal-fuzz v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/fuzz)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.93s
+     Running `/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/ssh_check_decode -runs=10000`
+WARNING: Failed to find function "__sanitizer_acquire_crash_state".
+WARNING: Failed to find function "__sanitizer_print_stack_trace".
+WARNING: Failed to find function "__sanitizer_set_death_callback".
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 4175573438
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED exec/s: 0 rss: 510Mb
+WARNING: no interesting inputs were found so far. Is the code instrumented for coverage?
+This may also happen if the target rejected all inputs we tried so far
+#10000	DONE   corp: 1/1b lim: 98 exec/s: 0 rss: 510Mb
+Done 10000 runs in 0 second(s)

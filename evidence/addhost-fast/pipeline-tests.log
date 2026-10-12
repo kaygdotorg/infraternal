@@ -1,0 +1,67 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+error[E0369]: binary operation `==` cannot be applied to type `Option<InstallStep>`
+   --> crates/plugins/ssh/tests/install.rs:189:9
+    |
+189 |         assert_eq!(interrupted_setup_step(receipt.as_bytes()), Some(expected));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |         |
+    |         Option<InstallStep>
+    |         Option<InstallStep>
+    |
+note: `InstallStep` does not implement `PartialEq`
+   --> crates/plugins/ssh/src/model.rs:200:1
+    |
+200 | pub enum InstallStep {
+    | ^^^^^^^^^^^^^^^^^^^^ `InstallStep` is defined in another crate
+
+error[E0369]: binary operation `==` cannot be applied to type `Option<InstallStep>`
+   --> crates/plugins/ssh/tests/install.rs:191:9
+    |
+191 |         assert_eq!(error.failed_step, Some(expected));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |         |
+    |         Option<InstallStep>
+    |         Option<InstallStep>
+    |
+note: `InstallStep` does not implement `PartialEq`
+   --> crates/plugins/ssh/src/model.rs:200:1
+    |
+200 | pub enum InstallStep {
+    | ^^^^^^^^^^^^^^^^^^^^ `InstallStep` is defined in another crate
+
+error[E0369]: binary operation `==` cannot be applied to type `Option<InstallStep>`
+   --> crates/plugins/ssh/tests/install.rs:206:5
+    |
+206 |     assert_eq!(interrupted_setup_step(b"STEP join\nprivate\n"), None);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     |
+    |     Option<InstallStep>
+    |     Option<InstallStep>
+    |
+note: `InstallStep` does not implement `PartialEq`
+   --> crates/plugins/ssh/src/model.rs:200:1
+    |
+200 | pub enum InstallStep {
+    | ^^^^^^^^^^^^^^^^^^^^ `InstallStep` is defined in another crate
+
+error[E0369]: binary operation `==` cannot be applied to type `Option<InstallStep>`
+   --> crates/plugins/ssh/tests/install.rs:270:5
+    |
+270 | /     assert_eq!(
+271 | |         error.failed_step,
+272 | |         Some(infraternal_plugin_ssh::model::InstallStep::Join)
+273 | |     );
+    | |     ^
+    | |     |
+    | |_____Option<InstallStep>
+    |       Option<InstallStep>
+    |
+note: `InstallStep` does not implement `PartialEq`
+   --> crates/plugins/ssh/src/model.rs:200:1
+    |
+200 | pub enum InstallStep {
+    | ^^^^^^^^^^^^^^^^^^^^ `InstallStep` is defined in another crate
+
+For more information about this error, try `rustc --explain E0369`.
+error: could not compile `infraternal-plugin-ssh` (test "install") due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...

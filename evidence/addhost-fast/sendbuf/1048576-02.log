@@ -1,0 +1,41 @@
+usermod: no changes
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=0.95 1.58 1.78 1/282 778114 ssh_server=openssh case=clean user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
+
+running 1 test
+METRIC payload_prepare startup_ms=1576.998
+METRIC breakit2 step=key_sign_in elapsed_ms=1293.948 ok=true
+METRIC breakit2 step=check elapsed_ms=423.846 ok=true
+METRIC breakit2 step=invitation elapsed_ms=1.926 ok=true
+METRIC breakit2 step=payload_lookup elapsed_ms=321.082 ok=true
+METRIC breakit2 file_input_bytes=4754025 accepted=true
+METRIC breakit2 step=upload elapsed_ms=3816.774 ok=true
+METRIC breakit2 step=setup elapsed_ms=1170.352 ok=true
+METRIC breakit2 step=facts elapsed_ms=358.567 ok=true
+METRIC breakit2 step=readiness elapsed_ms=358.281 ok=true
+METRIC breakit2 step=commit elapsed_ms=879.583 ok=true
+METRIC breakit2 step=authority_commit elapsed_ms=0.311 ok=true
+METRIC breakit2 event=Check cumulative_ms=0 message=Checking the SSH host.
+METRIC breakit2 event=Install cumulative_ms=1721 message=Installing the infraternal agent.
+METRIC breakit2 event=Facts cumulative_ms=7030 message=Waiting for authenticated host facts.
+METRIC breakit2 event=Connect cumulative_ms=7389 message=Checking a terminal through the infraternal agent.
+METRIC breakit2 event=Done cumulative_ms=7910 message=The infraternal agent is ready.
+LEDGER breakit2 active_hosts=2 prior_hosts=1 unconsumed_live_tokens=0 attempts=0
+test bootstrap_runtime::remote_backend::tests::breakit2_live::breakit2_live_ssh_install_join_and_terminal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 9.51s
+
+QDISC device=eth0
+qdisc netem 81d1: root refcnt 5 limit 1000 delay 75ms seed 7460338947604533522
+ Sent 106008 bytes 1336 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 66b 1p requeues 0
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+ Sent 4887036 bytes 3433 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+QDISC device=ifb0
+qdisc netem 81d2: root refcnt 2 limit 1000 delay 75ms seed 10773644691329048130
+ Sent 5044992 bytes 3434 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 66b 1p requeues 0
+CLEANUP base_present=True launcher_present=True unit_present=True foreign_present=False
+CLEANUP live_unit=inactive
+CLEANUP user_unit=active
+PROCESS_STATE user_running_session_scopes=0 infraternal_processes=1

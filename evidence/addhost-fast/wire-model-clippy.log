@@ -1,0 +1,23 @@
+    Checking infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-plugin-api)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-shim)
+    Checking infraternal-protocol v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-protocol)
+    Checking infraternal-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-mesh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal)
+    Checking infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/host-facts)
+    Checking infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/mesh)
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/remote)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-agent)
+error: unused import: `Serialize`
+  --> crates/infraternal-server/src/remote_http.rs:18:26
+   |
+18 | use serde::{Deserialize, Serialize};
+   |                          ^^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `infraternal-server` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `infraternal-server` (lib test) due to 1 previous error

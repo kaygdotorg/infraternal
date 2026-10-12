@@ -1,0 +1,40 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+error[E0004]: non-exhaustive patterns: `&infraternal_plugin_ssh::transport::Input::Signal(_)` not covered
+  --> /home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server/src/bootstrap_breakit2_tests.rs:41:30
+   |
+41 |             let step = match &input {
+   |                              ^^^^^^ pattern `&infraternal_plugin_ssh::transport::Input::Signal(_)` not covered
+   |
+note: `infraternal_plugin_ssh::transport::Input<'_>` defined here
+  --> crates/plugins/ssh/src/transport.rs:44:1
+   |
+44 | pub enum Input<'a> {
+   | ^^^^^^^^^^^^^^^^^^
+...
+49 |     Signal(tokio::sync::oneshot::Receiver<()>),
+   |     ------ not covered
+   = note: the matched value is of type `&infraternal_plugin_ssh::transport::Input<'_>`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+   |
+52 ~                 Input::Empty => "commit",
+53 ~                 &infraternal_plugin_ssh::transport::Input::Signal(_) => todo!(),
+   |
+
+warning: unused variable: `script`
+  --> /home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server/src/bootstrap_breakit2_tests.rs:39:26
+   |
+39 |     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+   |                          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_script`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `input`
+  --> /home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server/src/bootstrap_breakit2_tests.rs:39:43
+   |
+39 |     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+   |                                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+
+For more information about this error, try `rustc --explain E0004`.
+warning: `infraternal-server` (lib test) generated 2 warnings
+error: could not compile `infraternal-server` (lib test) due to 1 previous error; 2 warnings emitted

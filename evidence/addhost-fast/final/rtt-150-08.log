@@ -1,0 +1,39 @@
+usermod: no changes
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=1.10 0.54 0.34 1/293 900988 ssh_server=openssh case=clean user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
+
+running 1 test
+METRIC payload_prepare startup_ms=1549.996
+METRIC breakit2 step=key_sign_in elapsed_ms=1264.619 ok=true
+METRIC breakit2 step=check elapsed_ms=418.101 ok=true
+METRIC breakit2 step=invitation elapsed_ms=1.396 ok=true
+METRIC breakit2 file_input_bytes=4754039 accepted=true
+METRIC breakit2 step=upload_setup elapsed_ms=2429.609 ok=true
+METRIC breakit2 step=facts elapsed_ms=356.597 ok=true
+METRIC breakit2 step=readiness elapsed_ms=331.710 ok=true
+METRIC breakit2 step=commit elapsed_ms=844.750 ok=true
+METRIC breakit2 step=authority_commit elapsed_ms=0.305 ok=true
+METRIC breakit2 event=Check cumulative_ms=0 message=Checking the SSH host.
+METRIC breakit2 event=Install cumulative_ms=1685 message=Installing the infraternal agent.
+METRIC breakit2 event=Facts cumulative_ms=4115 message=Waiting for authenticated host facts.
+METRIC breakit2 event=Connect cumulative_ms=4471 message=Checking a terminal through the infraternal agent.
+METRIC breakit2 event=Done cumulative_ms=4960 message=The infraternal agent is ready.
+LEDGER breakit2 active_hosts=2 prior_hosts=1 unconsumed_live_tokens=0 attempts=0
+test bootstrap_runtime::remote_backend::tests::breakit2_live::breakit2_live_ssh_install_join_and_terminal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 6.53s
+
+QDISC device=eth0
+qdisc netem 8233: root refcnt 5 limit 1000 delay 75ms seed 17127179488787246295
+ Sent 71936 bytes 827 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+ Sent 4856752 bytes 3400 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+QDISC device=ifb0
+qdisc netem 8234: root refcnt 2 limit 1000 delay 75ms seed 10430354481450016738
+ Sent 5039570 bytes 3401 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+CLEANUP base_present=True launcher_present=True unit_present=True foreign_present=False
+CLEANUP live_unit=inactive
+CLEANUP user_unit=active
+PROCESS_STATE user_running_session_scopes=0 infraternal_processes=1

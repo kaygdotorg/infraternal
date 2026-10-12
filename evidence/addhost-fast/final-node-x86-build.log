@@ -1,0 +1,493 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling libc v0.2.190
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.14
+   Compiling cfg-if v1.0.5
+   Compiling serde_core v1.0.229
+   Compiling version_check v0.9.5
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling stable_deref_trait v1.2.1
+   Compiling pkg-config v0.3.34
+   Compiling vcpkg v0.2.15
+   Compiling autocfg v1.5.1
+   Compiling cc v1.6.0
+   Compiling pin-project-lite v0.2.17
+   Compiling generic-array v0.14.7
+   Compiling serde v1.0.229
+   Compiling parking_lot_core v0.9.12
+   Compiling thiserror v2.0.21
+   Compiling crossbeam-utils v0.8.23
+   Compiling bytes v1.12.1
+   Compiling smallvec v1.16.2
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling futures-core v0.3.34
+   Compiling num-traits v0.2.19
+   Compiling utf8_iter v1.0.4
+   Compiling scopeguard v1.2.0
+   Compiling typenum v1.20.1
+   Compiling lock_api v0.4.14
+   Compiling futures-sink v0.3.34
+   Compiling libsqlite3-sys v0.30.1
+   Compiling zmij v1.0.23
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling cfg_aliases v0.2.2
+   Compiling equivalent v1.0.2
+   Compiling memchr v2.8.3
+   Compiling syn v3.0.6
+   Compiling syn v2.0.119
+   Compiling percent-encoding v2.3.2
+   Compiling form_urlencoded v1.2.2
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling tracing-core v0.1.36
+   Compiling slab v0.4.12
+   Compiling log v0.4.34
+   Compiling futures-io v0.3.34
+   Compiling allocator-api2 v0.2.21
+   Compiling serde_json v1.0.151
+   Compiling futures-task v0.3.34
+   Compiling foldhash v0.1.5
+   Compiling futures-util v0.3.34
+   Compiling digest v0.10.7
+   Compiling parking_lot v0.12.5
+   Compiling openssl-src v300.6.1+3.6.3
+   Compiling hashbrown v0.15.5
+   Compiling tokio v1.53.2
+   Compiling parking v2.2.1
+   Compiling crc-catalog v2.5.0
+   Compiling hashbrown v0.17.1
+   Compiling cpufeatures v0.2.17
+   Compiling crossbeam-queue v0.3.14
+   Compiling crc v3.4.0
+   Compiling event-listener v5.4.2
+   Compiling sha2 v0.10.9
+   Compiling hashlink v0.10.0
+   Compiling futures-intrusive v0.5.0
+   Compiling openssl-sys v0.9.117
+   Compiling indexmap v2.14.2
+   Compiling tracing-attributes v0.1.31
+   Compiling spin v0.9.9
+   Compiling rand_core v0.10.1
+   Compiling heck v0.5.0
+   Compiling ryu v1.0.23
+   Compiling base64 v0.22.1
+   Compiling synstructure v0.14.0
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling tokio-macros v2.7.2
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling futures-executor v0.3.34
+   Compiling atoi v2.0.0
+   Compiling flume v0.11.1
+   Compiling tracing v0.1.44
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling futures-channel v0.3.34
+   Compiling tokio-stream v0.1.19
+   Compiling ring v0.17.14
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_locale_core v2.3.0
+   Compiling getrandom v0.4.3
+   Compiling icu_collections v2.3.0
+warning: ring@0.17.14: Compiler family detection failed due to error: ToolExecError: command did not execute successfully (status code exit status: 127): "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" "-E" "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/ring-7be2c006e6a3cd44/out/6900321429822364457detect_compiler_family.c"
+warning: ring@0.17.14: Compiler family detection failed due to error: ToolExecError: command did not execute successfully (status code exit status: 127): "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" "-E" "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/ring-7be2c006e6a3cd44/out/12134410972740501940detect_compiler_family.c"
+warning: ring@0.17.14: /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+error: failed to run custom build command for `ring v0.17.14`
+
+Caused by:
+  process didn't exit successfully: `/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/release/build/ring-48968b29a8540ab2/build-script-build` (exit status: 1)
+  --- stdout
+  cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR
+  cargo:rerun-if-env-changed=CARGO_PKG_NAME
+  cargo:rerun-if-env-changed=CARGO_PKG_VERSION_MAJOR
+  cargo:rerun-if-env-changed=CARGO_PKG_VERSION_MINOR
+  cargo:rerun-if-env-changed=CARGO_PKG_VERSION_PATCH
+  cargo:rerun-if-env-changed=CARGO_PKG_VERSION_PRE
+  cargo:rerun-if-env-changed=CARGO_MANIFEST_LINKS
+  cargo:rerun-if-env-changed=RING_PREGENERATE_ASM
+  cargo:rerun-if-env-changed=OUT_DIR
+  cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH
+  cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS
+  cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ENV
+  cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ENDIAN
+  cargo:rerun-if-env-changed=CC_x86_64-unknown-linux-musl
+  CC_x86_64-unknown-linux-musl = None
+  cargo:rerun-if-env-changed=CC_x86_64_unknown_linux_musl
+  CC_x86_64_unknown_linux_musl = Some(/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:warning=Compiler family detection failed due to error: ToolExecError: command did not execute successfully (status code exit status: 127): "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" "-E" "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/ring-7be2c006e6a3cd44/out/6900321429822364457detect_compiler_family.c"
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  TARGET_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_x86_64_unknown_linux_musl
+  CFLAGS_x86_64_unknown_linux_musl = None
+  cargo:rerun-if-env-changed=CFLAGS_x86_64-unknown-linux-musl
+  CFLAGS_x86_64-unknown-linux-musl = None
+  cargo:warning=Compiler family detection failed due to error: ToolExecError: command did not execute successfully (status code exit status: 127): "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" "-E" "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/ring-7be2c006e6a3cd44/out/12134410972740501940detect_compiler_family.c"
+  cargo:warning=/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+
+  --- stderr
+
+
+  error occurred in cc-rs: command did not execute successfully (status code exit status: 127): "/home/kayg/.nix-profile/bin/sccache" "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" "-O3" "-ffunction-sections" "-fdata-sections" "-fPIC" "-m64" "-static" "-I" "/home/kayg/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ring-0.17.14/include" "-I" "/home/kayg/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ring-0.17.14/pregenerated" "-Wall" "-Wextra" "-fvisibility=hidden" "-std=c1x" "-Wall" "-Wbad-function-cast" "-Wcast-align" "-Wcast-qual" "-Wconversion" "-Wmissing-field-initializers" "-Wmissing-include-dirs" "-Wnested-externs" "-Wredundant-decls" "-Wshadow" "-Wsign-compare" "-Wsign-conversion" "-Wstrict-prototypes" "-Wundef" "-Wuninitialized" "-g3" "-DNDEBUG" "-o" "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/ring-7be2c006e6a3cd44/out/25ac62e5b3c53843-curve25519.o" "-c" "/home/kayg/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ring-0.17.14/crypto/curve25519/curve25519.c"
+
+
+warning: build failed, waiting for other jobs to finish...
+warning: openssl-sys@0.9.117: Compiler family detection failed due to error: ToolExecError: command did not execute successfully (status code exit status: 127): "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" "-E" "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/1747084271871913345detect_compiler_family.c"
+warning: openssl-sys@0.9.117: building OpenSSL: 'make' reported failure with exit status: 2
+warning: openssl-sys@0.9.117: openssl-src: failed to build OpenSSL from source
+error: failed to run custom build command for `openssl-sys v0.9.117`
+
+Caused by:
+  process didn't exit successfully: `/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/release/build/openssl-sys-64b2e2e7af923a23/build-script-main` (exit status: 1)
+  --- stdout
+  cargo:rustc-check-cfg=cfg(osslconf, values("OPENSSL_NO_OCB", "OPENSSL_NO_SM4", "OPENSSL_NO_SEED", "OPENSSL_NO_CHACHA", "OPENSSL_NO_CAST", "OPENSSL_NO_IDEA", "OPENSSL_NO_CAMELLIA", "OPENSSL_NO_RC4", "OPENSSL_NO_BF", "OPENSSL_NO_PSK", "OPENSSL_NO_DEPRECATED_3_0", "OPENSSL_NO_SCRYPT", "OPENSSL_NO_SM3", "OPENSSL_NO_RMD160", "OPENSSL_NO_EC2M", "OPENSSL_NO_OCSP", "OPENSSL_NO_CMS", "OPENSSL_NO_COMP", "OPENSSL_NO_SOCK", "OPENSSL_NO_STDIO", "OPENSSL_NO_EC", "OPENSSL_NO_SSL3_METHOD", "OPENSSL_NO_KRB5", "OPENSSL_NO_TLSEXT", "OPENSSL_NO_SRP", "OPENSSL_NO_SRTP", "OPENSSL_NO_RFC3779", "OPENSSL_NO_SHA", "OPENSSL_NO_NEXTPROTONEG", "OPENSSL_NO_ENGINE", "OPENSSL_NO_BUF_FREELISTS", "OPENSSL_NO_RC2"))
+  cargo:rustc-check-cfg=cfg(openssl)
+  cargo:rustc-check-cfg=cfg(libressl)
+  cargo:rustc-check-cfg=cfg(boringssl)
+  cargo:rustc-check-cfg=cfg(awslc)
+  cargo:rustc-check-cfg=cfg(awslc_pregenerated)
+  cargo:rustc-check-cfg=cfg(libressl250)
+  cargo:rustc-check-cfg=cfg(libressl251)
+  cargo:rustc-check-cfg=cfg(libressl252)
+  cargo:rustc-check-cfg=cfg(libressl261)
+  cargo:rustc-check-cfg=cfg(libressl270)
+  cargo:rustc-check-cfg=cfg(libressl271)
+  cargo:rustc-check-cfg=cfg(libressl273)
+  cargo:rustc-check-cfg=cfg(libressl280)
+  cargo:rustc-check-cfg=cfg(libressl281)
+  cargo:rustc-check-cfg=cfg(libressl291)
+  cargo:rustc-check-cfg=cfg(libressl310)
+  cargo:rustc-check-cfg=cfg(libressl321)
+  cargo:rustc-check-cfg=cfg(libressl332)
+  cargo:rustc-check-cfg=cfg(libressl340)
+  cargo:rustc-check-cfg=cfg(libressl350)
+  cargo:rustc-check-cfg=cfg(libressl360)
+  cargo:rustc-check-cfg=cfg(libressl361)
+  cargo:rustc-check-cfg=cfg(libressl370)
+  cargo:rustc-check-cfg=cfg(libressl380)
+  cargo:rustc-check-cfg=cfg(libressl381)
+  cargo:rustc-check-cfg=cfg(libressl382)
+  cargo:rustc-check-cfg=cfg(libressl390)
+  cargo:rustc-check-cfg=cfg(libressl400)
+  cargo:rustc-check-cfg=cfg(libressl410)
+  cargo:rustc-check-cfg=cfg(libressl420)
+  cargo:rustc-check-cfg=cfg(libressl430)
+  cargo:rustc-check-cfg=cfg(ossl101)
+  cargo:rustc-check-cfg=cfg(ossl102)
+  cargo:rustc-check-cfg=cfg(ossl102f)
+  cargo:rustc-check-cfg=cfg(ossl102h)
+  cargo:rustc-check-cfg=cfg(ossl110)
+  cargo:rustc-check-cfg=cfg(ossl110f)
+  cargo:rustc-check-cfg=cfg(ossl110g)
+  cargo:rustc-check-cfg=cfg(ossl110h)
+  cargo:rustc-check-cfg=cfg(ossl111)
+  cargo:rustc-check-cfg=cfg(ossl111b)
+  cargo:rustc-check-cfg=cfg(ossl111c)
+  cargo:rustc-check-cfg=cfg(ossl111d)
+  cargo:rustc-check-cfg=cfg(ossl300)
+  cargo:rustc-check-cfg=cfg(ossl310)
+  cargo:rustc-check-cfg=cfg(ossl320)
+  cargo:rustc-check-cfg=cfg(ossl330)
+  cargo:rustc-check-cfg=cfg(ossl340)
+  cargo:rustc-check-cfg=cfg(ossl400)
+  cargo:rerun-if-env-changed=X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR
+  X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR unset
+  cargo:rerun-if-env-changed=OPENSSL_NO_VENDOR
+  OPENSSL_NO_VENDOR unset
+  cargo:rerun-if-env-changed=X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_CONFIG_DIR
+  X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_CONFIG_DIR unset
+  cargo:rerun-if-env-changed=OPENSSL_CONFIG_DIR
+  OPENSSL_CONFIG_DIR unset
+  cargo:rerun-if-env-changed=CC_x86_64-unknown-linux-musl
+  CC_x86_64-unknown-linux-musl = None
+  cargo:rerun-if-env-changed=CC_x86_64_unknown_linux_musl
+  CC_x86_64_unknown_linux_musl = Some(/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh)
+  cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+  cargo:warning=Compiler family detection failed due to error: ToolExecError: command did not execute successfully (status code exit status: 127): "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" "-E" "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/1747084271871913345detect_compiler_family.c"
+  cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+  CRATE_CC_NO_DEFAULTS = None
+  cargo:rerun-if-env-changed=CFLAGS
+  CFLAGS = None
+  cargo:rerun-if-env-changed=TARGET_CFLAGS
+  TARGET_CFLAGS = None
+  cargo:rerun-if-env-changed=CFLAGS_x86_64_unknown_linux_musl
+  CFLAGS_x86_64_unknown_linux_musl = None
+  cargo:rerun-if-env-changed=CFLAGS_x86_64-unknown-linux-musl
+  CFLAGS_x86_64-unknown-linux-musl = None
+  cargo:rerun-if-env-changed=AR_x86_64-unknown-linux-musl
+  AR_x86_64-unknown-linux-musl = None
+  cargo:rerun-if-env-changed=AR_x86_64_unknown_linux_musl
+  AR_x86_64_unknown_linux_musl = Some(/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-ar.sh)
+  cargo:rerun-if-env-changed=ARFLAGS
+  ARFLAGS = None
+  cargo:rerun-if-env-changed=TARGET_ARFLAGS
+  TARGET_ARFLAGS = None
+  cargo:rerun-if-env-changed=ARFLAGS_x86_64_unknown_linux_musl
+  ARFLAGS_x86_64_unknown_linux_musl = None
+  cargo:rerun-if-env-changed=ARFLAGS_x86_64-unknown-linux-musl
+  ARFLAGS_x86_64-unknown-linux-musl = None
+  cargo:rerun-if-env-changed=RANLIB_x86_64-unknown-linux-musl
+  RANLIB_x86_64-unknown-linux-musl = None
+  cargo:rerun-if-env-changed=RANLIB_x86_64_unknown_linux_musl
+  RANLIB_x86_64_unknown_linux_musl = None
+  cargo:rerun-if-env-changed=TARGET_RANLIB
+  TARGET_RANLIB = None
+  cargo:rerun-if-env-changed=RANLIB
+  RANLIB = None
+  cargo:rerun-if-env-changed=CROSS_COMPILE
+  CROSS_COMPILE = None
+  PATH = Some(/home/kayg/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path:/home/kayg/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/home/kayg/.local/bin:/home/kayg/.config/openai1/tmp/arg0/codex-arg0VjpPgt:/home/kayg/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path:/home/kayg/.nix-profile/bin:/home/kayg/.cargo/bin:/home/kayg/.bun/bin:/usr/local/bin:/usr/bin:/bin)
+  cargo:rerun-if-env-changed=RANLIBFLAGS
+  RANLIBFLAGS = None
+  cargo:rerun-if-env-changed=TARGET_RANLIBFLAGS
+  TARGET_RANLIBFLAGS = None
+  cargo:rerun-if-env-changed=RANLIBFLAGS_x86_64_unknown_linux_musl
+  RANLIBFLAGS_x86_64_unknown_linux_musl = None
+  cargo:rerun-if-env-changed=RANLIBFLAGS_x86_64-unknown-linux-musl
+  RANLIBFLAGS_x86_64-unknown-linux-musl = None
+  running cd "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src" && env -u CROSS_COMPILE AR="/home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-ar.sh" CC="/home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh" RANLIB="ranlib" "perl" "./Configure" "--prefix=/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install" "--openssldir=/usr/local/ssl" "no-shared" "no-module" "no-tests" "no-comp" "no-zlib" "no-zlib-dynamic" "--libdir=lib" "no-ssl3" "no-md2" "no-rc5" "no-weak-ssl-ciphers" "no-camellia" "no-idea" "no-seed" "no-engine" "no-async" "linux-x86_64" "-O2" "-ffunction-sections" "-fdata-sections" "-fPIC" "-m64" "-w" "-DOPENSSL_NO_SECURE_MEMORY"
+  Configuring OpenSSL version 3.6.3 for target linux-x86_64
+  Using os-specific seed configuration
+  Created configdata.pm
+  Running configdata.pm
+  Created Makefile.in
+  Created Makefile
+  Created include/openssl/configuration.h
+
+  **********************************************************************
+  ***                                                                ***
+  ***   OpenSSL has been successfully configured                     ***
+  ***                                                                ***
+  ***   If you encounter a problem while building, please open an    ***
+  ***   issue on GitHub <https://github.com/openssl/openssl/issues>  ***
+  ***   and include the output from the following command:           ***
+  ***                                                                ***
+  ***       perl configdata.pm --dump                                ***
+  ***                                                                ***
+  ***   (If you are new to OpenSSL, you might want to consult the    ***
+  ***   'Troubleshooting' section in the INSTALL.md file first)      ***
+  ***                                                                ***
+  **********************************************************************
+  running cd "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src" && "make" "depend"
+  running cd "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src" && MAKEFLAGS="-j --jobserver-fds=3,5 --jobserver-auth=3,5" "make" "build_libs"
+  /usr/bin/perl util/mkinstallvars.pl COMMENT="This file should be used when building against this OpenSSL build, and should never be installed" PREFIX=. BINDIR=apps APPLINKDIR=ms LIBDIR= INCLUDEDIR=include "INCLUDEDIR=./include" ENGINESDIR=engines MODULESDIR=providers "VERSION=3.6.3" "LDLIBS=-ldl -pthread " > builddata.pm
+  /usr/bin/perl util/mkinstallvars.pl "PREFIX=/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install" BINDIR=bin "LIBDIR=lib" "libdir=/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib" INCLUDEDIR=include APPLINKDIR=include/openssl "ENGINESDIR=/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3" "MODULESDIR=/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules" "PKGCONFIGDIR=/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/pkgconfig" "CMAKECONFIGDIR=/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/cmake/OpenSSL" "LDLIBS=-ldl -pthread " "VERSION=3.6.3" > installdata.pm
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/crypto/bn_conf.h.in > include/crypto/bn_conf.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/crypto/dso_conf.h.in > include/crypto/dso_conf.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/asn1.h.in > include/openssl/asn1.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/asn1t.h.in > include/openssl/asn1t.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/bio.h.in > include/openssl/bio.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/cmp.h.in > include/openssl/cmp.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/cms.h.in > include/openssl/cms.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/comp.h.in > include/openssl/comp.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/conf.h.in > include/openssl/conf.h
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" include/openssl/core_names.h.in > include/openssl/core_names.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/crmf.h.in > include/openssl/crmf.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/crypto.h.in > include/openssl/crypto.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/ct.h.in > include/openssl/ct.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/err.h.in > include/openssl/err.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/ess.h.in > include/openssl/ess.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/fipskey.h.in > include/openssl/fipskey.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/lhash.h.in > include/openssl/lhash.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/ocsp.h.in > include/openssl/ocsp.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/opensslv.h.in > include/openssl/opensslv.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/pkcs12.h.in > include/openssl/pkcs12.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/pkcs7.h.in > include/openssl/pkcs7.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/safestack.h.in > include/openssl/safestack.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/srp.h.in > include/openssl/srp.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/ssl.h.in > include/openssl/ssl.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/ui.h.in > include/openssl/ui.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/x509.h.in > include/openssl/x509.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/x509_acert.h.in > include/openssl/x509_acert.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/x509_vfy.h.in > include/openssl/x509_vfy.h
+  /usr/bin/perl "-I." "-Mconfigdata" "util/dofile.pl" "-oMakefile" include/openssl/x509v3.h.in > include/openssl/x509v3.h
+  /usr/bin/perl "-I." "-Mconfigdata" "-Mbuilddata" "util/dofile.pl" "-oMakefile" exporters/pkg-config/libcrypto.pc.in > libcrypto.pc
+  /usr/bin/perl "-I." "-Mconfigdata" "-Mbuilddata" "util/dofile.pl" "-oMakefile" exporters/pkg-config/libssl.pc.in > libssl.pc
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/asymciphers/rsa_enc.c.in > providers/implementations/asymciphers/rsa_enc.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/asymciphers/sm2_enc.c.in > providers/implementations/asymciphers/sm2_enc.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/ciphers/cipher_chacha20_poly1305.c.in > providers/implementations/ciphers/cipher_chacha20_poly1305.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/ciphers/ciphercommon.c.in > providers/implementations/ciphers/ciphercommon.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/ciphers/ciphercommon_ccm.c.in > providers/implementations/ciphers/ciphercommon_ccm.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/ciphers/ciphercommon_gcm.c.in > providers/implementations/ciphers/ciphercommon_gcm.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/digests/blake2_prov.c.in > providers/implementations/digests/blake2_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/digests/digestcommon.c.in > providers/implementations/digests/digestcommon.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/digests/sha3_prov.c.in > providers/implementations/digests/sha3_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/encode_decode/decode_der2key.c.in > providers/implementations/encode_decode/decode_der2key.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/encode_decode/decode_epki2pki.c.in > providers/implementations/encode_decode/decode_epki2pki.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/encode_decode/decode_pem2der.c.in > providers/implementations/encode_decode/decode_pem2der.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/encode_decode/decode_pvk2key.c.in > providers/implementations/encode_decode/decode_pvk2key.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/encode_decode/decode_spki2typespki.c.in > providers/implementations/encode_decode/decode_spki2typespki.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/encode_decode/encode_key2any.c.in > providers/implementations/encode_decode/encode_key2any.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/encode_decode/encode_key2ms.c.in > providers/implementations/encode_decode/encode_key2ms.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/exchange/dh_exch.c.in > providers/implementations/exchange/dh_exch.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/exchange/ecdh_exch.c.in > providers/implementations/exchange/ecdh_exch.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/exchange/ecx_exch.c.in > providers/implementations/exchange/ecx_exch.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/include/prov/blake2_params.inc.in > providers/implementations/include/prov/blake2_params.inc
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/argon2.c.in > providers/implementations/kdfs/argon2.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/hkdf.c.in > providers/implementations/kdfs/hkdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/hmacdrbg_kdf.c.in > providers/implementations/kdfs/hmacdrbg_kdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/kbkdf.c.in > providers/implementations/kdfs/kbkdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/krb5kdf.c.in > providers/implementations/kdfs/krb5kdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/pbkdf1.c.in > providers/implementations/kdfs/pbkdf1.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/pbkdf2.c.in > providers/implementations/kdfs/pbkdf2.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/pkcs12kdf.c.in > providers/implementations/kdfs/pkcs12kdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/pvkkdf.c.in > providers/implementations/kdfs/pvkkdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/scrypt.c.in > providers/implementations/kdfs/scrypt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/sshkdf.c.in > providers/implementations/kdfs/sshkdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/sskdf.c.in > providers/implementations/kdfs/sskdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/tls1_prf.c.in > providers/implementations/kdfs/tls1_prf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kdfs/x942kdf.c.in > providers/implementations/kdfs/x942kdf.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kem/ec_kem.c.in > providers/implementations/kem/ec_kem.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kem/ecx_kem.c.in > providers/implementations/kem/ecx_kem.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kem/ml_kem_kem.c.in > providers/implementations/kem/ml_kem_kem.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/kem/rsa_kem.c.in > providers/implementations/kem/rsa_kem.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/keymgmt/ecx_kmgmt.c.in > providers/implementations/keymgmt/ecx_kmgmt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/keymgmt/lms_kmgmt.c.in > providers/implementations/keymgmt/lms_kmgmt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/keymgmt/ml_dsa_kmgmt.c.in > providers/implementations/keymgmt/ml_dsa_kmgmt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/keymgmt/ml_kem_kmgmt.c.in > providers/implementations/keymgmt/ml_kem_kmgmt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/keymgmt/mlx_kmgmt.c.in > providers/implementations/keymgmt/mlx_kmgmt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/keymgmt/slh_dsa_kmgmt.c.in > providers/implementations/keymgmt/slh_dsa_kmgmt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/keymgmt/template_kmgmt.c.in > providers/implementations/keymgmt/template_kmgmt.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/macs/cmac_prov.c.in > providers/implementations/macs/cmac_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/macs/gmac_prov.c.in > providers/implementations/macs/gmac_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/macs/hmac_prov.c.in > providers/implementations/macs/hmac_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/macs/kmac_prov.c.in > providers/implementations/macs/kmac_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/macs/poly1305_prov.c.in > providers/implementations/macs/poly1305_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/macs/siphash_prov.c.in > providers/implementations/macs/siphash_prov.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/rands/drbg_ctr.c.in > providers/implementations/rands/drbg_ctr.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/rands/drbg_hash.c.in > providers/implementations/rands/drbg_hash.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/rands/drbg_hmac.c.in > providers/implementations/rands/drbg_hmac.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/rands/fips_crng_test.c.in > providers/implementations/rands/fips_crng_test.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/rands/seed_src.c.in > providers/implementations/rands/seed_src.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/rands/seed_src_jitter.c.in > providers/implementations/rands/seed_src_jitter.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/rands/test_rng.c.in > providers/implementations/rands/test_rng.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/signature/dsa_sig.c.in > providers/implementations/signature/dsa_sig.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/signature/ecdsa_sig.c.in > providers/implementations/signature/ecdsa_sig.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/signature/eddsa_sig.c.in > providers/implementations/signature/eddsa_sig.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/signature/ml_dsa_sig.c.in > providers/implementations/signature/ml_dsa_sig.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/signature/rsa_sig.c.in > providers/implementations/signature/rsa_sig.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/signature/slh_dsa_sig.c.in > providers/implementations/signature/slh_dsa_sig.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/signature/sm2_sig.c.in > providers/implementations/signature/sm2_sig.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/skeymgmt/generic.c.in > providers/implementations/skeymgmt/generic.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/storemgmt/file_store.c.in > providers/implementations/storemgmt/file_store.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/storemgmt/file_store_any2obj.c.in > providers/implementations/storemgmt/file_store_any2obj.c
+  /usr/bin/perl "-I." "-Iutil/perl" "-Mconfigdata" "-MOpenSSL::paramnames" "util/dofile.pl" "-oMakefile" providers/implementations/storemgmt/winstore_store.c.in > providers/implementations/storemgmt/winstore_store.c
+  /usr/bin/perl "-I." "-Mconfigdata" "-Mbuilddata" "util/dofile.pl" "-oMakefile" exporters/cmake/OpenSSLConfig.cmake.in > OpenSSLConfig.cmake
+  /usr/bin/perl "-I." "-Mconfigdata" "-Minstalldata" "util/dofile.pl" "-oMakefile" exporters/cmake/OpenSSLConfig.cmake.in > exporters/OpenSSLConfig.cmake
+  /usr/bin/perl "-I." "-Mconfigdata" "-Minstalldata" "util/dofile.pl" "-oMakefile" exporters/pkg-config/libcrypto.pc.in > exporters/libcrypto.pc
+  /usr/bin/perl "-I." "-Mconfigdata" "-Minstalldata" "util/dofile.pl" "-oMakefile" exporters/pkg-config/libssl.pc.in > exporters/libssl.pc
+  /usr/bin/perl "-I." "-Mconfigdata" "-Mbuilddata" "-Mbuilddata" "-Mbuilddata" "util/dofile.pl" "-oMakefile" exporters/pkg-config/openssl.pc.in > openssl.pc
+  /usr/bin/perl "-I." "-Mconfigdata" "-Mconfigdata" "-Minstalldata" "util/dofile.pl" "-oMakefile" exporters/cmake/OpenSSLConfigVersion.cmake.in > exporters/OpenSSLConfigVersion.cmake
+  /usr/bin/perl "-I." "-Mconfigdata" "-Mconfigdata" "-Mbuilddata" "util/dofile.pl" "-oMakefile" exporters/cmake/OpenSSLConfigVersion.cmake.in > OpenSSLConfigVersion.cmake
+  /usr/bin/perl "-I." "-Mconfigdata" "-Mconfigdata" "-Mconfigdata" "-Minstalldata" "util/dofile.pl" "-oMakefile" exporters/pkg-config/openssl.pc.in > exporters/openssl.pc
+  "make" depend && "make" _build_libs
+  make[1]: Entering directory '/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src'
+  make[1]: Leaving directory '/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src'
+  make[1]: Entering directory '/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src'
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-app_libctx.o apps/lib/app_libctx.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-app_params.o apps/lib/app_params.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-app_provider.o apps/lib/app_provider.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-app_rand.o apps/lib/app_rand.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-app_x509.o apps/lib/app_x509.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-apps.o apps/lib/apps.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-apps_opt_printf.o apps/lib/apps_opt_printf.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-apps_ui.o apps/lib/apps_ui.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-columns.o apps/lib/columns.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-engine.o apps/lib/engine.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-engine_loader.o apps/lib/engine_loader.c
+  /home/kayg/.nix-profile/bin/sccache /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh  -I. -Iinclude -Iapps/include  -fPIC -pthread -m64 -Wall -O3 -O2 -ffunction-sections -fdata-sections -fPIC -m64 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSLDIR="\"/usr/local/ssl\"" -DENGINESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3\"" -DMODULESDIR="\"/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules\"" -DOPENSSL_BUILDING_OPENSSL -DNDEBUG -DOPENSSL_NO_SECURE_MEMORY  -c -o apps/lib/libapps-lib-fmt.o apps/lib/fmt.c
+  make[1]: Leaving directory '/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src'
+  cargo:warning=building OpenSSL: 'make' reported failure with exit status: 2
+  cargo:warning=openssl-src: failed to build OpenSSL from source
+
+  --- stderr
+  DEBUG: all keys: APPLINKDIR, BINDIR, CMAKECONFIGDIR, COMMENT, ENGINESDIR, INCLUDEDIR, LDLIBS, LIBDIR, MODULESDIR, PKGCONFIGDIR, PREFIX, VERSION, libdir
+  DEBUG: LIBDIR = lib, libdir = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib => LIBDIR = lib
+  No value given for COMMENT
+  DEBUG: PREFIX = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install => PREFIX = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install
+  DEBUG: libdir = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib => libdir = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib
+  DEBUG: BINDIR = bin => BINDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/bin, BINDIR_REL_PREFIX = bin
+  DEBUG: LIBDIR = lib => LIBDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib, LIBDIR_REL_PREFIX = lib
+  DEBUG: INCLUDEDIR = include => INCLUDEDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/include, INCLUDEDIR_REL_PREFIX = include
+  DEBUG: APPLINKDIR = include/openssl => APPLINKDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/include/openssl, APPLINKDIR_REL_PREFIX = include/openssl
+  DEBUG: ENGINESDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3 => ENGINESDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/engines-3, ENGINESDIR_REL_LIBDIR = engines-3
+  DEBUG: MODULESDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules => MODULESDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/ossl-modules, MODULESDIR_REL_LIBDIR = ossl-modules
+  DEBUG: PKGCONFIGDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/pkgconfig => PKGCONFIGDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/pkgconfig, PKGCONFIGDIR_REL_LIBDIR = pkgconfig
+  DEBUG: CMAKECONFIGDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/cmake/OpenSSL => CMAKECONFIGDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/install/lib/cmake/OpenSSL, CMAKECONFIGDIR_REL_LIBDIR = cmake/OpenSSL
+  Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 137.
+  DEBUG: all keys: APPLINKDIR, BINDIR, CMAKECONFIGDIR, COMMENT, ENGINESDIR, INCLUDEDIR, LDLIBS, LIBDIR, MODULESDIR, PKGCONFIGDIR, PREFIX, VERSION, libdir
+  Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 55.
+  DEBUG: LIBDIR = , libdir =  => Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 57.
+  LIBDIR = 
+  No value given for CMAKECONFIGDIR
+  No value given for PKGCONFIGDIR
+  No value given for libdir
+  DEBUG: PREFIX = . => PREFIX = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src
+  Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 72.
+  DEBUG: libdir =  => Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 75.
+  libdir = 
+  DEBUG: BINDIR = apps => BINDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src/apps, BINDIR_REL_PREFIX = apps
+  DEBUG: LIBDIR = Use of uninitialized value in print at util/mkinstallvars.pl line 91.
+   => Use of uninitialized value in concatenation (.) or string at util/mkinstallvars.pl line 108.
+  LIBDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src, LIBDIR_REL_PREFIX = 
+  DEBUG: INCLUDEDIR = [ include, ./include ] => INCLUDEDIR = [ /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src/include, /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src/include ], INCLUDEDIR_REL_PREFIX = [ include, ./include ]
+  DEBUG: APPLINKDIR = ms => APPLINKDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src/ms, APPLINKDIR_REL_PREFIX = ms
+  DEBUG: ENGINESDIR = engines => ENGINESDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src/engines, ENGINESDIR_REL_LIBDIR = engines
+  DEBUG: MODULESDIR = providers => MODULESDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src/providers, MODULESDIR_REL_LIBDIR = providers
+  DEBUG: PKGCONFIGDIR = . => PKGCONFIGDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src, PKGCONFIGDIR_REL_LIBDIR = .
+  DEBUG: CMAKECONFIGDIR = . => CMAKECONFIGDIR = /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src, CMAKECONFIGDIR_REL_LIBDIR = .
+  Use of uninitialized value in join or string at util/mkinstallvars.pl line 157.
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  make[1]: *** [Makefile:3456: apps/lib/libapps-lib-app_libctx.o] Error 127
+  make[1]: *** Waiting for unfinished jobs....
+  make[1]: *** [Makefile:3460: apps/lib/libapps-lib-app_provider.o] Error 127
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  make[1]: *** [Makefile:3458: apps/lib/libapps-lib-app_params.o] Error 127
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  /home/kayg/Developer/infraternal/.worktrees/addhost-fast/.cargo/musl-cc.sh: line 29: /home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/auth-tools/zig/zig: No such file or directory
+  make[1]: *** [Makefile:3474: apps/lib/libapps-lib-engine.o] Error 127
+  make[1]: *** [Makefile:3478: apps/lib/libapps-lib-fmt.o] Error 127
+  make[1]: *** [Makefile:3464: apps/lib/libapps-lib-app_x509.o] Error 127
+  make[1]: *** [Makefile:3470: apps/lib/libapps-lib-apps_ui.o] Error 127
+  make[1]: *** [Makefile:3472: apps/lib/libapps-lib-columns.o] Error 127
+  make[1]: *** [Makefile:3468: apps/lib/libapps-lib-apps_opt_printf.o] Error 127
+  make[1]: *** [Makefile:3466: apps/lib/libapps-lib-apps.o] Error 127
+  make[1]: *** [Makefile:3476: apps/lib/libapps-lib-engine_loader.o] Error 127
+  make[1]: *** [Makefile:3462: apps/lib/libapps-lib-app_rand.o] Error 127
+  make: *** [Makefile:1770: build_libs] Error 2
+
+
+
+  Error building OpenSSL:
+      'make' reported failure with exit status: 2
+      Command failed: cd "/home/kayg/.cache/codex-scratch/addhost-fast/target/bootstrap/x86_64-unknown-linux-musl/release/build/openssl-sys-4868e401bfbf1ef9/out/openssl-build/build/src" && MAKEFLAGS="-j --jobserver-fds=3,5 --jobserver-auth=3,5" "make" "build_libs"
+
+
+

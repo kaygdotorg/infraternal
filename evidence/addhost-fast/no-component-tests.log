@@ -1,0 +1,21 @@
+   Compiling futures-util v0.3.34
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-shim)
+   Compiling futures-executor v0.3.34
+   Compiling sqlx-core v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-plugin-api)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 07s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/infraternal-bd1f483039bfcfdd)
+
+running 3 tests
+test embedded_cli::tests::dispatch_keeps_public_help_operator_modes_and_foreign_commands ... ok
+test embedded_cli::tests::inherited_flags_keep_public_parser_validation_and_values ... ok
+test startup_tests::process_dumpability_is_disabled_before_dispatch ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

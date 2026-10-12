@@ -1,0 +1,31 @@
+usermod: no changes
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=0.65 0.86 0.60 1/298 994010 ssh_server=openssh case=clean user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
+
+running 1 test
+METRIC payload_prepare startup_ms=1365.116
+METRIC breakit2 step=key_sign_in elapsed_ms=1260.294 ok=true
+METRIC breakit2 step=check elapsed_ms=420.611 ok=true
+METRIC breakit2 step=invitation elapsed_ms=1.678 ok=true
+CANCEL breakit2 boundary=upload action=drop_batch
+METRIC breakit2 step=rollback elapsed_ms=394.073 ok=true
+METRIC breakit2 step=authority_retirement elapsed_ms=0.007 ok=true
+CANCEL breakit2 active_hosts=1 prior_hosts=1 attempts=0
+test bootstrap_runtime::remote_backend::tests::breakit2_live::breakit2_live_ssh_install_join_and_terminal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 3.60s
+
+QDISC device=eth0
+qdisc netem 8295: root refcnt 5 limit 1000 delay 75ms seed 6154952108736761083
+ Sent 7413 bytes 46 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 132b 2p requeues 0
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+ Sent 57602 bytes 69 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+QDISC device=ifb0
+qdisc netem 8296: root refcnt 2 limit 1000 delay 75ms seed 11331159353468002040
+ Sent 59064 bytes 67 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+CLEANUP base_present=False launcher_present=False unit_present=False foreign_present=False
+CLEANUP live_unit=inactive
+CLEANUP user_unit=inactive
+PROCESS_STATE user_running_session_scopes=0 infraternal_processes=0

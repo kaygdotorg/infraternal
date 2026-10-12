@@ -1,0 +1,39 @@
+RUN_EXIT=0
+
+RTT 0 ms, n=10; p95 uses nearest rank (maximum of ten).
+| Setup step | p50 ms | p95 ms |
+| --- | ---: | ---: |
+| Check → Done | 1208.500 | 1420.000 |
+| network_discovery | 92.055 | 110.996 |
+| key_sign_in | 128.102 | 141.586 |
+| check | 68.269 | 77.605 |
+| invitation | 2.039 | 3.005 |
+| payload_lookup | 12.192 | 20.086 |
+| upload | 359.718 | 498.135 |
+| join | 91.621 | 104.202 |
+| install | 49.569 | 58.004 |
+| start | 130.846 | 165.847 |
+| linger | 25.834 | 32.114 |
+| facts | 52.526 | 53.510 |
+| readiness | 39.644 | 54.452 |
+| commit | 22.011 | 26.818 |
+| authority_commit | 0.379 | 0.483 |
+
+RTT 150 ms, n=10; p95 uses nearest rank (maximum of ten).
+| Setup step | p50 ms | p95 ms |
+| --- | ---: | ---: |
+| Check → Done | 9445.000 | 9505.000 |
+| network_discovery | 1280.179 | 1281.934 |
+| key_sign_in | 1464.969 | 1472.335 |
+| check | 377.553 | 385.031 |
+| invitation | 1.809 | 3.751 |
+| payload_lookup | 318.351 | 322.838 |
+| upload | 2811.048 | 2832.614 |
+| join | 1136.564 | 1141.171 |
+| install | 352.296 | 359.400 |
+| start | 433.704 | 466.637 |
+| linger | 324.300 | 329.095 |
+| facts | 151.720 | 152.485 |
+| readiness | 336.087 | 346.669 |
+| commit | 323.736 | 326.407 |
+| authority_commit | 0.379 | 0.464 |

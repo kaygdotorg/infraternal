@@ -1,0 +1,28 @@
+RUN_EXIT=0
+
+RTT 0 ms, n=10; p95 uses nearest rank (maximum of ten).
+| Setup step | p50 ms | p95 ms |
+| --- | ---: | ---: |
+| Check → Done | 567.000 | 608.000 |
+| key_sign_in | 67.163 | 80.969 |
+| check | 49.116 | 70.498 |
+| invitation | 1.462 | 1.790 |
+| upload_setup | 352.507 | 392.062 |
+| facts | 53.197 | 53.564 |
+| readiness | 33.840 | 45.903 |
+| commit | 93.398 | 105.600 |
+| authority_commit | 0.267 | 0.346 |
+
+RTT 150 ms, n=10; p95 uses nearest rank (maximum of ten).
+| Setup step | p50 ms | p95 ms |
+| --- | ---: | ---: |
+| Check → Done | 4961.500 | 4982.000 |
+| key_sign_in | 1263.789 | 1271.553 |
+| check | 418.943 | 421.109 |
+| invitation | 1.413 | 1.927 |
+| upload_setup | 2429.495 | 2446.939 |
+| facts | 356.861 | 358.006 |
+| readiness | 330.408 | 344.503 |
+| commit | 843.805 | 858.192 |
+| authority_commit | 0.297 | 0.312 |
+REGRESSION_EXIT=101

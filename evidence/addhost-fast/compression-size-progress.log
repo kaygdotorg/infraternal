@@ -1,0 +1,3 @@
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=0.95 0.39 0.43 1/308 577882 ssh_server=openssh case=clean user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=20355632
+METRIC breakit2 file_input_bytes=8987325 accepted=true
+compression/rtt-150-07.log

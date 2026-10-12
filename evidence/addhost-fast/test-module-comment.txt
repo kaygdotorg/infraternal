@@ -1,0 +1,2 @@
+<!-- Records an inherited non-test module compilation warning and its narrow correction. -->
+Untouched static baseline build emitted unused import super::* at readiness_exit_tests.rs:2, because daemon.rs:1139 omitted #[cfg(test)] on the test module. Strict -D warnings gates reject that build. Added the missing guard only; the queued private-output regression stays enabled under cfg(test). Separate touched-agent fmt/clippy/regression gates precede its commit. No runtime feature or admission change.

@@ -1,0 +1,22 @@
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 07s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/infraternal_server-4b1e4e70b0a39665)
+
+running 1 test
+test bootstrap_runtime::remote_backend::tests::breakit2_live::provisioning_https_uses_production_tcp_admission ... FAILED
+
+failures:
+
+---- bootstrap_runtime::remote_backend::tests::breakit2_live::provisioning_https_uses_production_tcp_admission stdout ----
+
+thread 'bootstrap_runtime::remote_backend::tests::breakit2_live::provisioning_https_uses_production_tcp_admission' (3098169) panicked at crates/infraternal-server/src/server_tls.rs:105:9:
+standalone HTTPS retains Nagle on terminal traffic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bootstrap_runtime::remote_backend::tests::breakit2_live::provisioning_https_uses_production_tcp_admission
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 365 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

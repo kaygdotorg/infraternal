@@ -1,0 +1,32 @@
+usermod: no changes
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=0.18 0.08 0.24 2/287 811509 ssh_server=openssh case=clean user=target rtt_ms=0 mode=rootless shell=bash payload_bytes=11045696
+
+running 1 test
+METRIC payload_prepare startup_ms=1355.036
+METRIC breakit2 step=key_sign_in elapsed_ms=67.222 ok=true
+METRIC breakit2 step=check elapsed_ms=73.886 ok=true
+METRIC breakit2 step=invitation elapsed_ms=1.279 ok=true
+METRIC breakit2 file_input_bytes=4754025 accepted=true
+METRIC breakit2 step=upload_setup elapsed_ms=346.960 ok=true
+METRIC breakit2 step=facts elapsed_ms=52.333 ok=true
+METRIC breakit2 step=readiness elapsed_ms=25.182 ok=true
+METRIC breakit2 step=commit elapsed_ms=83.513 ok=true
+METRIC breakit2 step=authority_commit elapsed_ms=0.272 ok=true
+METRIC breakit2 event=Check cumulative_ms=0 message=Checking the SSH host.
+METRIC breakit2 event=Install cumulative_ms=143 message=Installing the infraternal agent.
+METRIC breakit2 event=Facts cumulative_ms=490 message=Waiting for authenticated host facts.
+METRIC breakit2 event=Connect cumulative_ms=543 message=Checking a terminal through the infraternal agent.
+METRIC breakit2 event=Done cumulative_ms=574 message=The infraternal agent is ready.
+LEDGER breakit2 active_hosts=2 prior_hosts=1 unconsumed_live_tokens=0 attempts=0
+test bootstrap_runtime::remote_backend::tests::breakit2_live::breakit2_live_ssh_install_join_and_terminal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 366 filtered out; finished in 1.95s
+
+QDISC device=eth0
+qdisc noqueue 0: root refcnt 2 
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+CLEANUP base_present=True launcher_present=True unit_present=True foreign_present=False
+CLEANUP live_unit=inactive
+CLEANUP user_unit=active
+PROCESS_STATE user_running_session_scopes=0 infraternal_processes=1

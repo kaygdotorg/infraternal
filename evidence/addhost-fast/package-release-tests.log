@@ -1,0 +1,5 @@
+Release bundle: /home/kayg/.cache/codex-scratch/a/package-1j365oiy/release (server x86_64; x86_64 and aarch64 host payloads)
+infraternal: OK
+infraternal-x86_64-musl: OK
+infraternal-aarch64-musl: OK
+PASS: release includes server + both executable host payloads; checksums match; incomplete bundle never publishes

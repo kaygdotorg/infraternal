@@ -1,0 +1,33 @@
+usermod: no changes
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=1.14 0.63 0.73 1/278 455721 ssh_server=openssh case=clean user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=20329584
+
+running 1 test
+METRIC breakit2 step=network_discovery elapsed_ms=1292.951 ok=false
+METRIC breakit2 step=key_sign_in elapsed_ms=1480.711 ok=true
+METRIC breakit2 step=check elapsed_ms=398.461 ok=true
+METRIC breakit2 step=invitation elapsed_ms=2.121 ok=true
+METRIC breakit2 step=payload_lookup elapsed_ms=319.661 ok=true
+METRIC breakit2 file_input_bytes=20329584 accepted=true
+METRIC breakit2 step=upload elapsed_ms=2806.265 ok=true
+METRIC breakit2 step=join elapsed_ms=1189.814 ok=true
+METRIC breakit2 step=install elapsed_ms=362.112 ok=true
+METRIC breakit2 step=start elapsed_ms=467.225 ok=true
+METRIC breakit2 step=linger elapsed_ms=329.991 ok=true
+METRIC breakit2 step=facts elapsed_ms=151.759 ok=true
+METRIC breakit2 step=readiness elapsed_ms=340.379 ok=true
+METRIC breakit2 step=commit elapsed_ms=335.194 ok=true
+METRIC breakit2 step=authority_commit elapsed_ms=0.358 ok=true
+METRIC breakit2 event=Check cumulative_ms=0 message=Checking the SSH host.
+METRIC breakit2 event=Install cumulative_ms=3175 message=Installing the infraternal agent.
+METRIC breakit2 event=Facts cumulative_ms=8786 message=Waiting for authenticated host facts.
+METRIC breakit2 event=Connect cumulative_ms=8938 message=Checking a terminal through the infraternal agent.
+METRIC breakit2 event=Done cumulative_ms=9615 message=The infraternal agent is ready.
+LEDGER breakit2 active_hosts=2 prior_hosts=1 unconsumed_live_tokens=0 attempts=0
+test bootstrap_runtime::remote_backend::tests::breakit2_live::breakit2_live_ssh_install_join_and_terminal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 364 filtered out; finished in 9.65s
+
+CLEANUP base_present=True launcher_present=True unit_present=True foreign_present=False
+CLEANUP live_unit=inactive
+CLEANUP user_unit=active
+PROCESS_STATE user_running_session_scopes=0 infraternal_processes=1

@@ -1,0 +1,20 @@
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+error: `format!(..)` appended to existing `String`
+   --> crates/plugins/ssh/tests/install.rs:231:9
+    |
+231 |         receipt.push_str(&format!("STEP {name}\n"));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+    = note: `-D clippy::format-push-string` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::format_push_string)]`
+help: consider using `write!` to avoid the extra allocation
+    |
+231 -         receipt.push_str(&format!("STEP {name}\n"));
+231 +         let _ = write!(receipt, "STEP {name}\n");
+    |
+
+error: could not compile `infraternal-plugin-ssh` (test "install") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

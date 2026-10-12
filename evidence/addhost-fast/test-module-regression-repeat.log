@@ -1,0 +1,20 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.97s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/infraternal_agent-528d1ce50bf6cb6b)
+
+running 1 test
+
+thread 'daemon::readiness_exit_tests::ownership_eof_does_not_discard_private_terminal_output' (2208437) panicked at crates/infraternal-agent/src/readiness_exit_tests.rs:87:5:
+assertion failed: matches!(messages.recv().await, Some(Message::Shim(2, Shim::Output(0, bytes)))
+    if bytes == b"infraternal-ready")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test daemon::readiness_exit_tests::ownership_eof_does_not_discard_private_terminal_output ... FAILED
+
+failures:
+
+failures:
+    daemon::readiness_exit_tests::ownership_eof_does_not_discard_private_terminal_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p infraternal-agent --lib`

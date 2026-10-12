@@ -1,0 +1,2 @@
+8b3400c501ebfedce9af977462c99602052c2d406c3c8dd54bd32b0a10bbed1d  /home/kayg/.cache/codex-scratch/addhost-fast/artifacts/negotiated-setup/controller
+30c81f52404d3409af8e39607ac11760a3645825f0766a694878f7f7a16344e4  /home/kayg/.cache/codex-scratch/addhost-fast/artifacts/negotiated-setup/infraternal

@@ -1,0 +1,48 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-vf4w70my.js, chunk-nrq0b5pb.js, chunk-0jf5h3d8.js, chunk-hfpt1dvz.js, chunk-60feyazr.js, chunk-k5mmz6jb.js, chunk-5ya0a0pp.js, chunk-hwvcdaet.js, chunk-matnh41d.js, chunk-m03dh4nf.js, chunk-k6gmjf97.js, chunk-53ka8tp5.js, chunk-6gtm055g.js, chunk-1d9nqh5v.js, chunk-caryt9qe.js, chunk-k2kb5v9s.js, chunk-sh0yhpv5.js, chunk-g2gh0ry9.js, chunk-gxm2wxy2.js, chunk-mr4dd1yf.js, chunk-f6j9nzxd.js, chunk-na49xj9e.js, main.js, chunk-pktj0qtf.js, chunk-mqfdvw2d.js, chunk-mgmrd0t1.js, chunk-qpqbp52h.js, chunk-xt7j2bk6.js, chunk-vgb3rt8t.js, chunk-v5xxbyvy.js, chunk-8gqdshxw.js, chunk-jnvx8hs0.js, chunk-xg40ybqn.js, chunk-de89b94k.js, chunk-whqvzd3b.js, chunk-cewgmk7r.js, chunk-nn904m4v.js, chunk-vxvhp47p.js, chunk-9bndyb7m.js, chunk-w1rsqf4a.js, chunk-5mz8ese4.js, chunk-axbkkqp1.js, chunk-5nzqjpvt.js, chunk-sjmabeyb.js, chunk-eef1paed.js, chunk-djrr928k.js, chunk-6vspxy03.js, chunk-z80njz29.js, chunk-tk7hraxt.js, chunk-5ae1725c.js, chunk-y4ny7vtq.js, chunk-ah2bd20y.js, chunk-tw3dk1vk.js, chunk-nnfy0hag.js, chunk-fx0kyrrg.js, chunk-psdvsr2e.js, chunk-gkvqdyss.js, chunk-bc1f7nfa.js, chunk-5eb1qhfa.js, chunk-x4dv9bbb.js, chunk-5qtar27f.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-17rzk13t.js, chunk-fx8mq076.js, chunk-0qmaxw8n.js, chunk-rhea1djy.js, chunk-782yrjgw.js
+[WebServer] latency proxy listening on http://localhost:4480; upstream port=4481
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4481
+
+Running 36 tests using 1 worker
+
+  -   1 test/addhost-captures.spec.ts:73:5 › captures 1440x900 ink
+  -   2 test/addhost-captures.spec.ts:73:5 › captures 1440x900 paper
+  -   3 test/addhost-captures.spec.ts:73:5 › captures 393x852 ink
+  -   4 test/addhost-captures.spec.ts:73:5 › captures 393x852 paper
+(node:134999) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   5 test/addhost-start-fresh-captures.spec.ts:22:3 › captures desktop (10.1s)
+  ✓   6 test/addhost-start-fresh-captures.spec.ts:22:3 › captures phone (10.3s)
+  ✓   7 test/addhost-wizard.spec.ts:46:1 › the toolbar button and the palette open the wizard (3.1s)
+  ✓   8 test/addhost-wizard.spec.ts:60:1 › network access: detected, shown by name, and the host lands in Console and the sidebar (8.6s)
+  ✓   9 test/addhost-wizard.spec.ts:81:1 › closing the flow window from its own frame ends the wizard (3.6s)
+  ✓  10 test/addhost-wizard.spec.ts:90:1 › the server's own key is the fallback when the network does not sign in (6.1s)
+  ✓  11 test/addhost-wizard.spec.ts:99:1 › a batch shows every host's own progress and opens every host (6.7s)
+  ✓  12 test/addhost-wizard.spec.ts:110:1 › all automatic methods refused: asked to choose, and a password is sent once and never kept (10.6s)
+  ✓  13 test/addhost-wizard.spec.ts:136:1 › a pasted private key signs in as the user's key (7.2s)
+  ✓  14 test/addhost-wizard.spec.ts:149:1 › a saved key (unlocked with the passkey) is offered only when the browser holds one (6.8s)
+  ✓  15 test/addhost-wizard.spec.ts:162:1 › without a saved key the choice does not offer one (5.3s)
+  ✓  16 test/addhost-wizard.spec.ts:170:1 › the server key is shown to copy; adding it and trying again signs in (7.2s)
+  ✓  17 test/addhost-wizard.spec.ts:185:1 › a locked server key is still shown, with the reason (5.4s)
+  ✓  18 test/addhost-wizard.spec.ts:193:1 › no server key to show: the choice is paste or password only (5.7s)
+  ✓  19 test/addhost-wizard.spec.ts:202:1 › an unknown host key shows its fingerprint and is never trusted without a click (8.8s)
+  ✓  20 test/addhost-wizard.spec.ts:219:1 › a host that does not answer: what happened, Retry, and the one-line install from the host (11.5s)
+  ✓  21 test/addhost-wizard.spec.ts:235:1 › a mesh policy block says possible, not certain (6.7s)
+  ✓  22 test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can (15.1s)
+  ✓  23 test/addhost-wizard.spec.ts:270:1 › one refusal without choose_method still offers another way to sign in (6.0s)
+  ✓  24 test/addhost-wizard.spec.ts:277:1 › empty, loading and error states of discovery (6.0s)
+  ✓  25 test/addhost-wizard.spec.ts:302:1 › an SSH config pasted into the field becomes chips (1.3s)
+  ✓  26 test/addhost-wizard.spec.ts:316:1 › closing mid-install asks first, and cancelling ends the run (4.8s)
+  ✓  27 test/addhost-wizard.spec.ts:331:1 › the wizard works on a phone and keeps the footer on screen (2.8s)
+  ✓  28 test/addhost-wizard.spec.ts:355:3 › fresh CA explains passkey confirmation before starting SSH (5.4s)
+  ✓  29 test/addhost-wizard.spec.ts:355:3 › locked CA explains passkey confirmation before starting SSH (5.7s)
+  ✓  30 test/addhost-wizard.spec.ts:373:1 › a canvas flow remains nonmodal (1.6s)
+  ✓  31 test/addhost-wizard.spec.ts:379:1 › Escape in the palette leaves the add-host flow open (3.2s)
+  ✓  32 test/addhost-wizard.spec.ts:393:1 › Tab can leave a canvas flow (1.6s)
+  ✓  33 test/addhost-wizard.spec.ts:402:1 › a typed root login requires consent and cannot pretend to install as a user (6.3s)
+  ✓  34 test/addhost-wizard.spec.ts:425:1 › leftovers: one Start fresh continues the same setup to done (8.4s)
+  ✓  35 test/addhost-wizard.spec.ts:445:1 › leftovers: Back returns to the host list and Start fresh needs the server's challenge (8.9s)
+  ✓  36 test/addhost-wizard.spec.ts:459:1 › a setup that is still running: wait, then try again (9.7s)
+
+  4 skipped
+  32 passed (3.6m)

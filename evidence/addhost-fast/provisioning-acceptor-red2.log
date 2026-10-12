@@ -1,0 +1,18 @@
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+error[E0308]: mismatched types
+   --> crates/infraternal-server/src/server_tls.rs:104:22
+    |
+104 |         let (stream, ()) = build(config).accept(socket, ()).await.unwrap();
+    |                      ^^    ----------------------------------------------- this expression has type `(SslStream<TcpStream>, <A as Accept<TcpStream, ()>>::Service)`
+    |                      |
+    |                      expected associated type, found `()`
+    |
+    = note: expected associated type `<A as axum_server::accept::Accept<tokio::net::TcpStream, ()>>::Service`
+                     found unit type `()`
+    = help: consider constraining the associated type `<A as axum_server::accept::Accept<tokio::net::TcpStream, ()>>::Service` to `()`
+    = note: for more information, visit https://doc.rust-lang.org/book/ch19-03-advanced-traits.html
+    = note: the full name for the type has been written to '/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/infraternal_server-4b1e4e70b0a39665.long-type-7726495186416981372.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `infraternal-server` (lib test) due to 1 previous error

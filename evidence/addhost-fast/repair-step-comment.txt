@@ -1,0 +1,4 @@
+<!-- Records two prerequisite repairs and their functional gates. -->
+Completed and pushed 0d7cbaac: exact generated ownership checks authenticate once; arbitrary appended code is refused. Red ownership-auth-red.log: 0/1; green authentication 7/7, complete SSH suite 104 passed/8 ignored (ownership-auth-suite-green.log), fmt and strict all-target SSH clippy pass. This repairs the supplied base; it is not a speedup claim.
+
+Completed f28492ad: test-only readiness module and exact initial replay-fence assertion. Prior fixture 0/1; repaired queued-private-output regression 1/1; fmt and strict all-target remote-agent clippy pass. No relay behavior or deadlines changed. Original static payload was frozen before these source repairs (supplied-payload-sha256.txt); release controller compilation continues for the functional before baseline. New cache source is prepared but not wired into production or this baseline.

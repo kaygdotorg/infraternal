@@ -1,0 +1,22 @@
+usermod: no changes
+ENVIRONMENT machine=infraternal-perf-test cores=4 load=0.51 0.20 0.18 1/290 868596 ssh_server=openssh case=readonly-home user=target rtt_ms=150 mode=rootless shell=bash payload_bytes=11045696
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 211 filtered out; finished in 0.00s
+
+QDISC device=eth0
+qdisc netem 8217: root refcnt 5 limit 1000 delay 75ms seed 3493741913700692105
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc ingress ffff: parent ffff:fff1 ---------------- 
+ Sent 346 bytes 4 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+QDISC device=ifb0
+qdisc netem 8218: root refcnt 2 limit 1000 delay 75ms seed 4100327415748789596
+ Sent 301 bytes 3 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+CLEANUP base_present=False launcher_present=False unit_present=False foreign_present=False
+CLEANUP live_unit=inactive
+CLEANUP user_unit=inactive
+PROCESS_STATE user_running_session_scopes=0 infraternal_processes=0

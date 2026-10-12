@@ -1,0 +1,95 @@
+    Blocking waiting for file lock on package cache
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 25s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/infraternal-3d4d29d4d46347d6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.00s
+
+     Running tests/agent_daemon.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/agent_daemon-6af66b6d8fed210c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/agent_queues.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/agent_queues-73ee5968fd16562c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/agent_review.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/agent_review-8524147b7a48e483)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/agent_sessions-1a2a20c33f92fc57)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/idle_canary.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/idle_canary-5b2c444eb2b76593)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/key_memory.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/key_memory-1ccf2550b49281f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/remote_output.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/remote_output-d73985546eb80ed4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/session_bounds_review.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/session_bounds_review-acb0a64d42e00526)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/session_exit_events.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/session_exit_events-43b3bfba5c869c59)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/session_retention.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/session_retention-6089ced70ef88a30)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/shim.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/shim-3b447ede409676fe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/ssh_askpass-360ac29b2e1077be)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/vt_credit.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/vt_credit-5845b439fca88af2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/vt_reconnect.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/vt_reconnect-4276d59dc9ed6ad4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

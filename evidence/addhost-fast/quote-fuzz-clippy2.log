@@ -1,0 +1,3 @@
+    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
+    Checking infraternal-fuzz v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/fuzz)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.83s

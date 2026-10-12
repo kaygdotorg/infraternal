@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/docs/verification/addhost-breakit2/measure.py", line 203, in <module>
+    main()
+    ~~~~^^
+  File "/home/kayg/Developer/infraternal/.worktrees/addhost-fast/docs/verification/addhost-breakit2/measure.py", line 54, in main
+    raise RuntimeError("The controller must contain exactly one live host provisioning test; build with the remote feature")
+RuntimeError: The controller must contain exactly one live host provisioning test; build with the remote feature

@@ -1,0 +1,21 @@
+Resolving dependencies
+Resolved, downloaded and extracted [4]
+Saved lockfile
+Error: Cannot find package 'playwright' imported from /home/kayg/Developer/infraternal/.worktrees/addhost-fast/apps/tracer/playwright.config.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:314:9)
+    at packageResolve (node:internal/modules/esm/resolve:772:81)
+    at moduleResolve (node:internal/modules/esm/resolve:859:18)
+    at defaultResolve (node:internal/modules/esm/resolve:989:11)
+    at ModuleLoader.#cachedDefaultResolve (node:internal/modules/esm/loader:747:20)
+    at ModuleLoader.#resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:783:38)
+    at nextStep (node:internal/modules/customization_hooks:189:26)
+    at resolve (/home/kayg/.cache/codex-scratch/a/bunx-1001-playwright@latest/node_modules/playwright/lib/common/index.js:829:19)
+    at nextStep (node:internal/modules/customization_hooks:189:26)
+    at resolveWithHooks (node:internal/modules/customization_hooks:417:10)
+    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:803:14)
+    at ModuleLoader.resolve (node:internal/modules/esm/loader:719:19)
+    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:320:38)
+    at ModuleJob._link (node:internal/modules/esm/module_job:182:49)
+    at processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}

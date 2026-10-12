@@ -1,0 +1,13 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-agent)
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 35.16s
+     Running tests/remote_output.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/remote_output-2897b275f0797bbe)
+
+running 3 tests
+test human_remote_refusal_has_sections_and_next_steps_without_color ... ok
+test json_remote_run_refuses_missing_identity_without_reflecting_its_path ... ok
+test node_build_refuses_server_creation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
