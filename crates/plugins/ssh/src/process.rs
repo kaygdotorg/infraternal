@@ -1,6 +1,10 @@
 //! Bounds bootstrap child input/output, deadlines and cancellation; arbitrary helper bytes never become diagnostics.
 
-use crate::{model::Failure, prompt::PromptParent, transport::Input};
+use crate::{
+    model::Failure,
+    prompt::PromptParent,
+    transport::{Input, PayloadInput},
+};
 use nix::{
     sys::{
         signal::{Signal, killpg},
@@ -231,6 +235,54 @@ async fn write_input(
     input: Input<'_>,
 ) -> Result<(), Failure> {
     match input {
+        Input::PayloadAndInvitation {
+            payload,
+            invitation,
+        } => {
+            match payload {
+                PayloadInput::Bytes(bytes) => stdin
+                    .write_all(bytes)
+                    .await
+                    .map_err(|_| Failure::install("The SSH upload was interrupted."))?,
+                PayloadInput::File { path, size } => {
+                    let file = tokio::fs::File::open(path).await.map_err(|_| {
+                        Failure::install("The matching infraternal binary is unavailable.")
+                    })?;
+                    if file
+                        .metadata()
+                        .await
+                        .map_err(|_| Failure::install("The payload metadata is unavailable."))?
+                        .len()
+                        != size
+                    {
+                        return Err(Failure::install(
+                            "The static payload changed before transfer.",
+                        ));
+                    }
+                    let mut frame = file.take(size);
+                    let copied = tokio::io::copy(&mut frame, &mut stdin)
+                        .await
+                        .map_err(|_| Failure::install("The SSH upload was interrupted."))?;
+                    if copied != size
+                        || frame
+                            .get_ref()
+                            .metadata()
+                            .await
+                            .map_err(|_| Failure::install("The payload metadata is unavailable."))?
+                            .len()
+                            != size
+                    {
+                        return Err(Failure::install(
+                            "The static payload changed during transfer.",
+                        ));
+                    }
+                }
+            }
+            stdin
+                .write_all(invitation)
+                .await
+                .map_err(|_| Failure::install("The SSH input pipe closed."))?;
+        }
         Input::Signal(release) => {
             release.await.map_err(|_| {
                 Failure::install("Host provisioning stopped before terminal proof.")

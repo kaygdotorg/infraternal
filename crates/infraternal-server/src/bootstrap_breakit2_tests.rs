@@ -43,6 +43,7 @@ impl SshSession for TimedSession {
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let step = match &input {
+                Input::PayloadAndInvitation { .. } => "upload_setup",
                 Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => "upload",
                 Input::File(_) => "upload",
                 Input::Bytes(_) if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1") => "setup",

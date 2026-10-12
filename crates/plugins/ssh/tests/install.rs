@@ -6,7 +6,7 @@ mod common;
 use infraternal_plugin_ssh::{
     install::{Installation, JoinMaterial},
     model::{Failure, InstallMode, Target, TargetAddress},
-    transport::{CommandOutput, Input, Operation, Secret, SshSession},
+    transport::{CommandOutput, Input, Operation, PayloadInput, Secret, SshSession},
 };
 use std::fmt::Write as _;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
@@ -61,6 +61,23 @@ impl SshSession for Local {
             // A refusal may close stdin before consuming an upload. Inspect the
             // command status first; successful commands still require a full write.
             let written = match input {
+                Input::PayloadAndInvitation {
+                    payload,
+                    invitation,
+                } => {
+                    let payload = match payload {
+                        PayloadInput::Bytes(bytes) => bytes.to_vec(),
+                        PayloadInput::File { path, size } => {
+                            let bytes = std::fs::read(path).unwrap();
+                            assert_eq!(bytes.len() as u64, size);
+                            bytes
+                        }
+                    };
+                    match stdin.write_all(&payload).await {
+                        Ok(()) => stdin.write_all(invitation).await,
+                        Err(error) => Err(error),
+                    }
+                }
                 Input::Signal(release) => match release.await {
                     Ok(()) => stdin.write_all(b"\n").await,
                     Err(_) => Err(std::io::ErrorKind::Interrupted.into()),

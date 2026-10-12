@@ -41,7 +41,18 @@ pub enum Credentials {
 }
 
 /// Command input is private stdin; neither binary bytes nor secrets enter argv.
+/// A public payload source has a known frame length before private invitation input.
+pub enum PayloadInput<'a> {
+    Bytes(&'a [u8]),
+    File { path: &'a Path, size: u64 },
+}
+
 pub enum Input<'a> {
+    /// Public payload first, then private invitation; never concatenate/copy secrets.
+    PayloadAndInvitation {
+        payload: PayloadInput<'a>,
+        invitation: &'a [u8],
+    },
     /// Release a fixed commit command only after authenticated terminal proof.
     Signal(tokio::sync::oneshot::Receiver<()>),
     Empty,
