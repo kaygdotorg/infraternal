@@ -136,6 +136,22 @@ class EarlierSetup(unittest.TestCase):
         self.assertTrue(self.socket.exists())
         self.assertTrue(self.receipt.exists())
 
+    def test_changed_acquisition_beside_receipt_refuses_before_removal(self):
+        self.listener.close()
+        acquiring = self.base / '.bootstrap-acquiring'
+        acquiring.write_text('9' * 32 + ' fresh\n')
+        acquiring.chmod(0o600)
+        self.assertEqual(self.recover().returncode, 75)
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(acquiring.exists())
+
+    def test_foreign_private_root_without_setup_marker_is_refused(self):
+        self.listener.close()
+        self.owner.unlink()
+        self.receipt.unlink()
+        self.assertEqual(self.run_shell('\ninspect_previous').returncode, 71)
+        self.assertTrue(self.socket.exists())
+
     def test_foreign_file_inside_old_lock_is_refused_before_removal(self):
         self.listener.close()
         stage = self.base / '.bootstrap-lock'

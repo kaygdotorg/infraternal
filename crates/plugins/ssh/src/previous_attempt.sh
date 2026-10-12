@@ -53,6 +53,11 @@ inspect_previous() {
         receipt=$candidate
     done
     if [ -z "$receipt" ] && [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] && [ ! -e "$base/.bootstrap-acquiring" ] && [ ! -L "$base/.bootstrap-acquiring" ]; then
+        if [ -e "$base" ] || [ -L "$base" ]; then
+            private_file "$base/.bootstrap-owner"
+            [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
+            hex_id "$(cat "$base/.bootstrap-owner")"
+        fi
         printf 'INFRATERNAL_SETUP_CLEAR\n'
         return
     fi
@@ -118,6 +123,13 @@ inspect_previous() {
                 [ ! -e "$entry" ] && [ ! -L "$entry" ] || exit 71
             done
         fi
+    fi
+    # A receipt may coexist with interrupted acquisition retirement. Validate
+    # that sibling binding before removing even otherwise-owned sockets.
+    if [ -e "$base/.bootstrap-acquiring" ] || [ -L "$base/.bootstrap-acquiring" ]; then
+        private_file "$base/.bootstrap-acquiring"
+        [ "$(stat -c '%s' "$base/.bootstrap-acquiring")" = 39 ] || exit 75
+        [ "$(cat "$base/.bootstrap-acquiring")" = "$previous_transaction fresh" ] || exit 75
     fi
     # Any unjournaled root entry refuses the entire recovery before mutation,
     # including sockets elsewhere that would otherwise be safe to retire.
