@@ -55,7 +55,7 @@ impl Image {
             c"infraternal-replacement",
             nix::sys::memfd::MFdFlags::MFD_CLOEXEC | nix::sys::memfd::MFdFlags::MFD_ALLOW_SEALING,
         )?;
-        let file = reserve_stdio(File::from(fd))?;
+        let file = reserve_control(File::from(fd))?;
         Ok(Self { file })
     }
     #[cfg(target_os = "linux")]
@@ -85,7 +85,7 @@ impl Image {
             .mode(0o600)
             .open(directory.join("image"))?;
         Ok(Self {
-            file: reserve_stdio(file)?,
+            file: reserve_control(file)?,
             directory,
         })
     }
@@ -97,7 +97,7 @@ impl Image {
             .set_permissions(std::fs::Permissions::from_mode(0o500))?;
         // Close the writable descriptor before exec to avoid ETXTBSY. macOS has
         // no seals: the same owner can still chmod/rewrite this private copy.
-        self.file = reserve_stdio(
+        self.file = reserve_control(
             std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
@@ -134,9 +134,9 @@ impl Image {
         let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()));
         #[cfg(not(target_os = "linux"))]
         let path = self.directory.join("image");
-        // Reserve null handles above stdio. A closed fd0 can otherwise be reused
+        // Reserve null handles above stdio and control fd3. A closed fd0 can otherwise be reused
         // as a CLOEXEC source, and dup2(0,0) would close it at the probe boundary.
-        let null = reserve_stdio(
+        let null = reserve_control(
             std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -149,7 +149,7 @@ impl Image {
             .stdin(Stdio::from(null.try_clone()?))
             .stdout(Stdio::from(null.try_clone()?))
             .stderr(Stdio::from(null));
-        infraternal_shim::prepare_child(&mut command);
+        infraternal_shim::prepare_child_without_control(&mut command);
         let mut child = command.spawn()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -169,10 +169,10 @@ impl Image {
         }
     }
 }
-/// Never let stdin redirection close an image descriptor, including private copies.
-fn reserve_stdio(mut file: File) -> io::Result<File> {
+/// Keep image/null descriptors above stdio and the isolated control fd3.
+fn reserve_control(mut file: File) -> io::Result<File> {
     let mut reserved = Vec::new();
-    while file.as_raw_fd() < 3 {
+    while file.as_raw_fd() < 4 {
         let duplicate = file.try_clone()?;
         reserved.push(file);
         file = duplicate;
@@ -224,5 +224,49 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_never_inherits_the_control_descriptor() {
+        if let Some(path) = std::env::var_os("INFRATERNAL_PROBE_CONTROL_FIXTURE") {
+            let source = File::open(&path).unwrap();
+            let image = Image::copy(&source, std::path::Path::new(".")).unwrap();
+            assert!(
+                image.probe().is_ok(),
+                "the secret-free probe must close inherited control fd3"
+            );
+            return;
+        }
+        let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
+        let fixture = root.join(format!("probe-{}", uuid::Uuid::new_v4()));
+        assert!(
+            Command::new("cc")
+                .args(["-O2", "-o"])
+                .arg(&fixture)
+                .arg(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/probe-control.c")
+                )
+                .status()
+                .unwrap()
+                .success()
+        );
+        let result = Command::new(&fixture)
+            .arg("launch")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "restart_image::tests::probe_never_inherits_the_control_descriptor",
+                "--nocapture",
+            ])
+            .env("INFRATERNAL_PROBE_CONTROL_FIXTURE", &fixture)
+            .output()
+            .unwrap();
+        std::fs::remove_file(fixture).unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
     }
 }
