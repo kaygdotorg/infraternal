@@ -288,11 +288,12 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     open(hostName, opts): WindowModel {
       // Explicit UUIDs and splits preserve affinity even when host labels are duplicated.
       const explicit = opts?.from?.hostId ?? (isCanonicalUuid(hostName) ? hostName : undefined);
+      const embeddedTarget = hostName === "embedded" || Boolean(opts?.from && !opts.from.hostId && !opts.from.noAccess && opts.from.host === host.name);
       const matches = [...remotes.values()].filter((entry) => entry.name === hostName);
-      const remote = explicit ? remotes.get(explicit) : matches.length === 1 && hostName !== host.name ? matches[0] : undefined;
-      const local = !explicit && hostName === host.name && matches.length === 0;
+      const remote = explicit ? remotes.get(explicit) : !embeddedTarget && matches.length === 1 && hostName !== host.name ? matches[0] : undefined;
+      const local = !explicit && (embeddedTarget || hostName === host.name && matches.length === 0);
       return {
-        id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? hostName,
+        id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? (local ? host.name : hostName),
         ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local && host.user ? { user: host.user, ...(host.os ? { os: host.os } : {}) } : { noAccess: !local }),
         ...(opts?.from ? { splitOf: opts.from.id } : {}),
         ...(opts?.session ? { sessionId: opts.session } : {}),

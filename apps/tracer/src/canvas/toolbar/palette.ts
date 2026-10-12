@@ -75,7 +75,7 @@ export function installPalette(cx: Ctx): () => void {
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
     for (const host of cx.adapters.sessions.hosts()) {
       if (host.id !== "embedded" && cx.adapters.hostRemoval?.label()) out.push({ group: "Hosts", glyph: "×", label: `${cx.adapters.hostRemoval.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });
-      out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id === "embedded" ? host.name : host.id}` });
+      out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
     }
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
     // Every session on every host (D178), by name, with its state in the hint so "detached" or "exited" finds them.

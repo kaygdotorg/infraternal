@@ -54,3 +54,15 @@ test("an authoritative host snapshot replaces admission with one notification", 
   expect(sessions.hosts()).toHaveLength(2);
   sessions.dispose();
 });
+
+test("the embedded inventory identity still opens locally beside an equally named remote", () => {
+  const sessions = service();
+  sessions.registerHost({ id, name: "server" });
+  const embedded = sessions.open("embedded");
+  expect(embedded.host).toBe("server");
+  expect(embedded.hostId).toBeUndefined();
+  expect(embedded.noAccess).not.toBe(true);
+  expect(sessions.open(embedded.host, { from: embedded }).noAccess).not.toBe(true);
+  expect(sessions.open(id).hostId).toBe(id);
+  sessions.dispose();
+});
