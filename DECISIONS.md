@@ -2370,3 +2370,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        current version and channel, the quiet-window setting, Update now,
        Roll back to the previous version, and the update history. Hosts'
        infraternal agents follow their server's version.
+252. **Names for access (owner, 2026-10-12; renames terms in D154, D164,
+     D216, D228, D235):** three kinds of access, each a list of **rules**,
+     all in Settings → Access under these headings. The words "grant" and
+     "policy" are no longer used for them in the product, docs or code.
+     - **Roles** (app level; was D154 "grants"): what a person can do in
+       infraternal — Owner, Admin, Operator, Viewer and custom roles, over
+       all hosts or host tags.
+     - **Network access** (mesh level; was "network policy" and the D164
+       arrow "grant"): which machine may reach which machine, on which
+       ports and protocols. The Mesh view's arrows are network access
+       rules; the edition default (D216) is "Machines can reach each other
+       until you add rules".
+     - **Login access** (host and account level; D235): which person may
+       become which account on which host. It covers every way to a shell —
+       `ssh` over the mesh, infraternal terminals through the server, app
+       windows and files — whether or not the mesh is involved.
+     A mesh `ssh` login passes network access and login access; a terminal
+     opened in the app passes roles and login access.
