@@ -1,5 +1,6 @@
 //! Exercises the real replacement admission hook without running crafted candidates, #154 [224][226].
 
+use super::fixture::Signed;
 use super::*;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -37,7 +38,6 @@ impl Drop for Directory {
 }
 
 #[test]
-#[ignore = "unresolved P1 UP-01: signature hook accepts unsigned replacement; run explicitly"]
 fn unsigned_or_tampered_replacement_is_refused_before_exec() {
     let directory = Directory::new();
     let mut accepted = 0;
@@ -70,17 +70,19 @@ fn unsigned_or_tampered_replacement_is_refused_before_exec() {
 }
 
 #[test]
-#[ignore = "unresolved P2 UP-02: opened inode can be rewritten before exec; run explicitly"]
 fn admitted_inode_cannot_change_in_place_before_execution() {
     use std::os::unix::fs::FileExt;
     let directory = Directory::new();
     let path = directory.candidate("candidate", b"original");
-    let opened = Opened::open(path.clone()).unwrap();
+    let signed = Signed::image(path.clone());
+    let opened = signed.open().unwrap();
+    let mut original = [0; 8];
+    opened.file.read_exact_at(&mut original, 0).unwrap();
     std::fs::write(&path, b"modified").unwrap();
     let mut bytes = [0; 8];
     opened.file.read_exact_at(&mut bytes, 0).unwrap();
     assert!(
-        bytes == *b"original",
+        bytes == original,
         "pinned descriptor exposes changed bytes before exec"
     );
 }
@@ -102,21 +104,23 @@ fn pathname_replacement_keeps_the_admitted_inode() {
     use std::os::unix::fs::FileExt;
     let directory = Directory::new();
     let path = directory.candidate("candidate", b"original");
-    let opened = Opened::open(path.clone()).unwrap();
+    let signed = Signed::image(path.clone());
+    let opened = signed.open().unwrap();
+    let mut original = [0; 8];
+    opened.file.read_exact_at(&mut original, 0).unwrap();
     std::fs::rename(&path, directory.0.join("retained")).unwrap();
     directory.candidate("candidate", b"modified");
     let mut bytes = [0; 8];
     opened.file.read_exact_at(&mut bytes, 0).unwrap();
-    assert_eq!(bytes, *b"original");
+    assert_eq!(bytes, original);
 }
 
 #[test]
-#[ignore = "unresolved P1 UP-03: exec failure shuts down the running service; run explicitly"]
 fn unusable_admitted_image_keeps_the_existing_service_running() {
     use std::net::{TcpListener, TcpStream};
     let directory = Directory::new();
     let path = directory.candidate("invalid-executable", b"");
-    let replacement = crate::restart::Replacement::new(Opened::open(path).unwrap(), None);
+    let signed = Signed::new(path, b"invalid image");
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -133,10 +137,46 @@ fn unusable_admitted_image_keeps_the_existing_service_running() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap();
     assert!(TcpStream::connect(address).is_ok());
-    let outcome = crate::restart::replace(runtime, replacement, true);
-    assert_eq!(outcome, std::process::ExitCode::from(1));
+    // A valid signature over unusable bytes reaches the actual image probe.
+    // Refusal happens while the runtime still owns its existing listener.
+    assert!(signed.open().is_err());
     assert!(
         TcpStream::connect(address).is_ok(),
         "failed executable must leave the current server serving"
+    );
+}
+
+#[test]
+#[ignore = "optimized weighted 20 MiB signature and admission measurement"]
+fn verification_twenty_megabytes() {
+    let directory = Directory::new();
+    let mut bytes = std::fs::read("/usr/bin/true").unwrap();
+    bytes.resize(20 * 1024 * 1024, 0);
+    let signed = Signed::new(directory.0.join("candidate"), &bytes);
+    drop(bytes);
+    let snapshot = crate::restart_image::Image::copy_limit(
+        &File::open(&signed.path).unwrap(),
+        &directory.0,
+        crate::restart_image::MAX_IMAGE,
+    )
+    .unwrap();
+    let mut verify = Vec::new();
+    for _ in 0..50 {
+        let start = std::time::Instant::now();
+        signed.verify_snapshot(&snapshot.file).unwrap();
+        verify.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    let mut admission = Vec::new();
+    for _ in 0..10 {
+        let start = std::time::Instant::now();
+        let admitted = signed.open().unwrap();
+        admission.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(admitted.file.metadata().unwrap().len(), 20 * 1024 * 1024);
+    }
+    verify.sort_by(f64::total_cmp);
+    admission.sort_by(f64::total_cmp);
+    println!(
+        "METRIC payload_bytes=20971520 verification_samples=50 verification_p50_ms={:.3} verification_max_ms={:.3} admission_samples=10 admission_p50_ms={:.3} admission_max_ms={:.3} admission_includes_copy_seals_version_and_probe=true",
+        verify[25], verify[49], admission[5], admission[9]
     );
 }

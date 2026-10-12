@@ -21,6 +21,8 @@ mod remote_server;
 mod restart;
 #[cfg(feature = "remote")]
 mod restart_binary;
+#[cfg(feature = "remote")]
+mod restart_image;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
 
@@ -72,6 +74,11 @@ struct InstallArgs {
 }
 
 fn main() -> ExitCode {
+    run_invocation()
+}
+
+/// Re-enter the same action dispatch if both replacement exec attempts are refused.
+fn run_invocation() -> ExitCode {
     if harden_startup().is_err() {
         return ExitCode::FAILURE;
     }

@@ -22,7 +22,7 @@ struct Staging {
 }
 impl Staging {
     fn new(state: &Path) -> std::io::Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
         // Serialize creation with restart cleanup so a new empty directory cannot
         // be collected before its lifetime lock is established.
@@ -33,7 +33,14 @@ impl Staging {
         let path = state.join(format!("release-check-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new().mode(0o700).create(&path)?;
         let (lock, metadata) = lock_directory(&path, nix::fcntl::FlockArg::LockExclusiveNonblock)?;
-        if !owned_private_staging(&metadata) {
+        // umask may remove owner execute (0177 turns 0700 into 0600).
+        // Set the exact mode through the locked descriptor, never a pathname
+        // that could have been replaced. The requested mode never grants public access.
+        if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        lock.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        if !owned_private_staging(&lock.metadata()?) {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         drop(state_lock);

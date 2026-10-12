@@ -15,4 +15,7 @@ fuzz_target!(|input: &[u8]| {
     let signature = &input[2 + length..];
     let _ =
         infraternal_server::release_verify::verify_release_file(file, "payload", sums, signature);
+    let _ = infraternal_server::release_manifest::verify_release_manifest(
+        file, "payload", sums, signature,
+    );
 });
