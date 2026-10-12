@@ -152,7 +152,6 @@
 /* A toast is a small card of its own, not text over a busy terminal: the material's halo would only smear its glyphs. */
 .ui-toast, .ui-toast * { text-shadow: none; }
 .ui-toast[hidden] { display: none !important; }
-.ui-toast[data-tone="error"] .ui-toast-marker { display: none; }
 .ui-toast[data-open="false"] { opacity: 0; transform: translateY(8px) scale(0.97); pointer-events: none; }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
 .ui-toast { min-height: 44px; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 14px; }
@@ -166,6 +165,7 @@
 /* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
 .ui-toast-glyph { display: grid; width: 22px; height: 22px; flex: none; place-items: center; color: var(--fg-2); }
 .ui-toast-glyph[hidden] { display: none; }
+.ui-toast[data-tone="error"] .ui-toast-glyph { color: var(--danger); }
 .ui-toast-glyph svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .ui-toast[data-icon="true"] .ui-toast-marker { display: none; }
 /* The optional dismiss control: a quiet icon, the same height as the action. */
