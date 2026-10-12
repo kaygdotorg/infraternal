@@ -1,0 +1,6 @@
+acac81fc3e65fa3ed96546db59eb3c5a6db0cd5a7c7d9118cdf37118d0b1b75f  crates/plugins/ssh/src/probe.rs
+241d1a95bf52a699c30e602d02a8e2b6824ef5fd5b6853da74c71c4816784b4f  crates/plugins/ssh/src/setup_lock.sh
+8dda2592229e694468771ae3722137ff193b14c8144b35c94ffc019f2b96e4c0  crates/plugins/ssh/src/previous_attempt.sh
+6eb2ec4ba97ec8c85dd00192f66fa5032bbb56b3d88c02ad48be95d7bb199287  crates/plugins/ssh/src/previous_attempt.rs
+8104313b41428dedaeab2539b66d67d75a3e70b930a93004db667a7dc743fff8  crates/plugins/ssh/src/bootstrap.rs
+a5a6ae82518d69ddea63ebe7867d180a3adf11e0f42ae8712fd0e6cb1a0327e8  crates/plugins/ssh/src/manifest.rs

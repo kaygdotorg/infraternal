@@ -1,0 +1,9 @@
+machine infraternal-perf-test cores 4 load 0.00 0.00 0.05 1/221 200011
+baseline n=31 p50_ms=15.598 p99_ms=26.921
+combined n=31 p50_ms=19.574 p99_ms=33.990
+paired_delta n=31 p50_ms=3.475 max_ms=18.843 additional_ssh_roundtrips=0
+Traceback (most recent call last):
+  File "/root/infraternal-bench/addhost-start-fresh/evidence/addhost-start-fresh/perf-check.py", line 48, in <module>
+    listener.bind(str(rendezvous))
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+OSError: AF_UNIX path too long

@@ -1,0 +1,3 @@
+LEASE_STARTED
+PASS lease remains live across real NetBird SSH command closure
+PASS exact lease retired
