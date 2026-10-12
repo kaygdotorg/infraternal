@@ -1069,3 +1069,7 @@ mod gone_tests;
 #[cfg(test)]
 #[path = "stream_memory_tests.rs"]
 mod stream_memory_tests;
+
+#[cfg(test)]
+#[path = "daemon_census_retry_tests.rs"]
+mod census_retry_tests;
