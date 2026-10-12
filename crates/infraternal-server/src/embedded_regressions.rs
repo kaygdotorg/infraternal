@@ -13,6 +13,8 @@ fn connection() -> (AgentConnection, UnixStream) {
             scratch: vec![0; 4096],
             encode: Vec::new(),
             next_call_id: 1,
+            #[cfg(feature = "remote")]
+            owned_control: None,
         },
         peer,
     )

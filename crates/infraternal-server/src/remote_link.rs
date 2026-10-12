@@ -43,6 +43,7 @@ pub(crate) struct QuicLink {
     _control: mpsc::Sender<Packet>,
     output: mpsc::Sender<Packet>,
     pumps: Mutex<JoinSet<()>>,
+    control_reads: std::sync::atomic::AtomicBool,
 }
 
 // Native delivery retains channel identity so queued old frames cannot affect
@@ -58,6 +59,8 @@ struct Incoming {
     // Actor select may cancel while channel-identity validation awaits the map.
     // Ownership stays here until delivery or explicit stale-frame retirement.
     pending: Option<Packet>,
+    // Hold one dequeued control frame while the outbound FIFO is full.
+    held_control: Option<Packet>,
 }
 
 impl Drop for QuicLink {
@@ -184,6 +187,7 @@ impl RemoteLink {
             control: control_input,
             bulk,
             pending: None,
+            held_control: None,
         };
         let mut pumps = JoinSet::new();
         pumps.spawn(pump(
@@ -201,6 +205,7 @@ impl RemoteLink {
                 _control: control_output,
                 output,
                 pumps: Mutex::new(pumps),
+                control_reads: std::sync::atomic::AtomicBool::new(true),
             }),
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
@@ -235,13 +240,34 @@ impl RemoteLink {
             }
             LinkTransport::Quic(link) => loop {
                 let mut incoming = link.incoming.lock().await;
+                let read_control = link
+                    .control_reads
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if !read_control
+                    && incoming
+                        .pending
+                        .as_ref()
+                        .is_some_and(|message| message.source.native_stream_id() == Some(0))
+                {
+                    if incoming.held_control.is_some() {
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    incoming.held_control = incoming.pending.take();
+                }
+                if incoming.pending.is_none() {
+                    incoming.pending = if read_control {
+                        incoming.held_control.take()
+                    } else {
+                        None
+                    };
+                }
                 if incoming.pending.is_none() {
                     incoming.pending = tokio::select! {
                         biased;
                         _ = link.connection.closed() => return Ok(0),
                         message = async {
                             let Incoming { control, bulk, .. } = &mut *incoming;
-                            tokio::select! { biased; message = control.recv() => message, message = bulk.recv() => message }
+                            tokio::select! { biased; message = control.recv(), if read_control => message, message = bulk.recv() => message }
                         } => message,
                     };
                 }
@@ -272,6 +298,61 @@ impl RemoteLink {
                 target.extend_from_slice(&message.bytes);
                 return Ok(message.bytes.len());
             },
+        }
+    }
+
+    pub(crate) fn control_read_ready(&self, ready: bool) {
+        if let LinkTransport::Quic(link) = &self.transport {
+            link.control_reads
+                .store(ready, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn native(&self) -> bool {
+        matches!(self.transport, LinkTransport::Quic(_))
+    }
+
+    pub(crate) async fn write_encoded_terminal(
+        &self,
+        stream: u32,
+        encoded: &[u8],
+    ) -> io::Result<()> {
+        let LinkTransport::Quic(link) = &self.transport else {
+            return Err(io::ErrorKind::Unsupported.into());
+        };
+        let channel = link.streams.lock().await.get(&stream).cloned();
+        let write = async {
+            if let Some(channel) = channel {
+                return channel.write(encoded).await;
+            }
+            let decoded = infraternal_protocol::decode_frame(encoded)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            if decoded.wire_len != encoded.len() {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if !matches!(decoded.frame, Frame::AttachTerm { .. }) {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            // Promotion removed incomplete shadow owners. Only Attach may
+            // establish their replacement; data cannot invent a writer binding.
+            self.write_transport(stream, &decoded.frame, encoded).await
+        };
+        let Some(authority) = &self.authority else {
+            return write.await;
+        };
+        let _permit = authority.write_permit().await?;
+        tokio::select! {
+            biased;
+            () = authority.cancelled() => Err(io::ErrorKind::PermissionDenied.into()),
+            result = write => result,
+        }
+    }
+
+    pub(crate) async fn retire_writer(&self, stream: u32) {
+        if let LinkTransport::Quic(link) = &self.transport
+            && let Some(channel) = link.streams.lock().await.remove(&stream)
+        {
+            channel.retire();
         }
     }
 

@@ -490,6 +490,8 @@ impl Source {
                     scratch,
                     encode: Vec::new(),
                     next_call_id: 1,
+                    #[cfg(feature = "remote")]
+                    owned_control: None,
                 })
             }
         }
@@ -523,6 +525,8 @@ struct AgentConnection {
     scratch: Vec<u8>,
     encode: Vec<u8>,
     next_call_id: u32,
+    #[cfg(feature = "remote")]
+    owned_control: Option<mpsc::Sender<Bytes>>,
 }
 
 enum Incoming {
@@ -612,6 +616,8 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
+// One actor select owns bounded writer completion and command admission.
+#[allow(clippy::too_many_lines)]
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
@@ -623,8 +629,22 @@ async fn run_actor(
     let mut connection: Option<AgentConnection> = None;
     let mut backoff = Duration::from_millis(200);
     let mut first_attempt = true;
+    #[cfg(feature = "remote")]
+    let mut writes = writes::State::default();
+    #[cfg(not(feature = "remote"))]
+    let mut writes = ();
 
     loop {
+        #[cfg(feature = "remote")]
+        if matches!(connection.as_ref().map(|c| &c.peer), Some(Peer::Remote(link)) if link.native())
+        {
+            writes.enable(&attachments);
+        }
+        #[cfg(feature = "remote")]
+        if let Some(link) = connection.as_mut() {
+            writes.install(link);
+            writes.schedule(link, &attachments);
+        }
         if connection.is_none() {
             if source.closed() {
                 return;
@@ -656,18 +676,51 @@ async fn run_actor(
         let Some(link) = connection.as_mut() else {
             continue;
         };
+        #[cfg(feature = "remote")]
+        if matches!(&link.peer, Peer::Remote(remote) if remote.native()) {
+            writes.enable(&attachments);
+            writes.install(link);
+            writes.schedule(link, &attachments);
+        }
+        #[cfg(feature = "remote")]
+        let control_ready = writes.can_admit();
+        #[cfg(not(feature = "remote"))]
+        let control_ready = true;
+        #[cfg(feature = "remote")]
+        if let Peer::Remote(remote) = &link.peer {
+            remote.control_read_ready(control_ready);
+        }
         tokio::select! {
+            (stream, success) = next_writes(&mut writes) => {
+                #[cfg(not(feature = "remote"))]
+                let _ = (stream, success);
+                #[cfg(feature = "remote")]
+                if !success {
+                    if stream != CONTROL_STREAM && !attachments.values().any(|a| a.stream_id == stream) { continue; }
+                    if let Peer::Remote(remote) = &link.peer { remote.retire_writer(stream).await; }
+                    writes.stop().await;
+                    if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; }
+                }
+            }
             replacement = source.replacement(), if source.remote() => {
                 #[cfg(feature = "remote")]
                 let Some(replacement) = replacement else { return; };
                 #[cfg(not(feature = "remote"))]
                 let Some(()) = replacement else { return; };
                 #[cfg(feature = "remote")]
+                writes.stop().await;
+                #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() { connection_lost(old,&mut attachments,&mut routes,&mut pending).await; }
             }
-            command = commands.recv() => {
+            command = commands.recv(), if control_ready => {
                 let Some(command) = command else { return; };
+                #[cfg(feature = "remote")]
+                if writes.enabled() && matches!(&link.peer, Peer::Remote(remote) if remote.native())
+                    && let Some(ok) = retain_owned_input(&command, &mut attachments, &mut routes, &mut writes) {
+                        if !ok { writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; } }
+                        continue;
+                }
                 let ok = process_command(
                     command,
                     link,
@@ -678,6 +731,8 @@ async fn run_actor(
                 if !ok {
                     let link = connection.take();
                     if let Some(link) = link {
+                        #[cfg(feature = "remote")]
+                        writes.stop().await;
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
                         backoff = (backoff * 2).min(Duration::from_secs(30));
                         first_attempt = false;
@@ -688,12 +743,28 @@ async fn run_actor(
                 let Some(incoming) = incoming else {
                     let link = connection.take();
                     if let Some(link) = link {
+                        #[cfg(feature = "remote")]
+                        writes.stop().await;
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
                         backoff = (backoff * 2).min(Duration::from_secs(30));
                         first_attempt = false;
                     }
                     continue;
                 };
+                #[cfg(feature = "remote")]
+                if let Incoming::Close { stream_id, .. } = &incoming
+                    && writes.owns(*stream_id) {
+                    let stream = *stream_id;
+                    writes.block(stream);
+                    if let Peer::Remote(remote) = &link.peer { remote.retire_writer(stream).await; }
+                    writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; }
+                    continue;
+                }
+                #[cfg(feature = "remote")]
+                if writes.enabled()
+                    && let Incoming::Ack { stream_id, .. } = &incoming
+                        && let Some(id) = routes.get(stream_id)
+                        && let Some(attachment) = attachments.get_mut(id) { attachment.replaying = false; }
                 // Public plugin events invalidate capability consumers; no feature
                 // payload is interpreted by terminal routing. A reconnect also invalidates.
                 if let Incoming::Event {stream_id:0,event_json}=&incoming
@@ -703,6 +774,8 @@ async fn run_actor(
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
                     let link = connection.take();
                     if let Some(link) = link {
+                        #[cfg(feature = "remote")]
+                        writes.stop().await;
                         connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
                         backoff = (backoff * 2).min(Duration::from_secs(30));
                         first_attempt = false;
@@ -767,6 +840,8 @@ async fn connect_agent(
         scratch,
         encode: Vec::with_capacity(4096),
         next_call_id: 1,
+        #[cfg(feature = "remote")]
+        owned_control: None,
     })
 }
 
@@ -806,7 +881,79 @@ async fn read_frame_from_socket(
     }
 }
 
-// The command variants mutate one shared route table, so they remain in one bounded actor turn.
+// Native retention mutates cursors without awaiting transport backpressure.
+#[cfg(feature = "remote")]
+fn retain_owned_input(
+    command: &Command,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    writes: &mut writes::State,
+) -> Option<bool> {
+    let Command::Input {
+        attachment_id,
+        frame,
+    } = command
+    else {
+        return None;
+    };
+    let Ok(decoded) = decode_muxed_frame(frame) else {
+        return Some(true);
+    };
+    if decoded.stream_id == 0 || decoded.stream_id % 2 == 0 {
+        return Some(false);
+    }
+    let Some(a) = attachments.get_mut(attachment_id) else {
+        return Some(true);
+    };
+    let (in_seq, bytes) = match decoded.frame {
+        Frame::Input { in_seq, bytes } => (in_seq, bytes),
+        Frame::Credit { bytes } => {
+            let Some(credit) = a.credit.checked_add(u64::from(bytes)) else {
+                return Some(false);
+            };
+            if credit > MAX_OUTPUT_CREDIT || !writes.credit(a.stream_id, a.session_id, bytes) {
+                return Some(false);
+            }
+            a.credit = credit;
+            return Some(true);
+        }
+        Frame::Resize {
+            cols,
+            rows,
+            px_w,
+            px_h,
+        } => {
+            writes.resize(a.stream_id, a.session_id, [cols, rows, px_w, px_h]);
+            return Some(true);
+        }
+        _ => return Some(false),
+    };
+    let Some(end) = in_seq.checked_add(bytes.len() as u64) else {
+        return Some(false);
+    };
+    if in_seq > a.last_input_end {
+        return Some(false);
+    }
+    let append = in_seq.max(a.last_input_end);
+    if end > append {
+        let Ok(skip) = usize::try_from(append - in_seq) else {
+            return Some(false);
+        };
+        let extra = &bytes[skip..];
+        if a.unacknowledged.len().saturating_add(extra.len()) > MAX_FRAME_LEN {
+            let stream = a.stream_id;
+            let _ = a.output.try_send(TerminalOutput::Closed { code: 1013 });
+            attachments.remove(attachment_id);
+            routes.remove(&stream);
+            return Some(true);
+        }
+        a.unacknowledged.extend_from_slice(extra);
+    }
+    a.last_input_end = a.last_input_end.max(end);
+    Some(true)
+}
+
+// Command variants mutate one shared route table in a bounded actor turn.
 #[allow(clippy::too_many_lines)]
 async fn process_command(
     command: Command,
@@ -1599,6 +1746,19 @@ fn share_payload(wire: &Bytes, payload: &[u8]) -> Option<Bytes> {
 }
 
 async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &Frame<'_>) -> bool {
+    #[cfg(feature = "remote")]
+    if stream_id == CONTROL_STREAM
+        && let Some(sender) = &connection.owned_control
+    {
+        let mut encoded = Vec::new();
+        if infraternal_protocol::encode_frame_into(frame, &mut encoded).is_err()
+            || encoded.len() > writes::CONTROL_FLIGHT
+        {
+            return false;
+        }
+        // Admission is guarded by queue readiness in the single actor turn.
+        return sender.try_send(Bytes::from(encoded)).is_ok();
+    }
     let (peer, encode) = (&mut connection.peer, &mut connection.encode);
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
         return false;
@@ -1725,3 +1885,15 @@ async fn stop_child(_pid: nix::unistd::Pid) {}
 #[cfg(test)]
 #[path = "embedded_regressions.rs"]
 mod regressions;
+
+#[cfg(feature = "remote")]
+#[path = "embedded_writes.rs"]
+mod writes;
+#[cfg(feature = "remote")]
+async fn next_writes(writes: &mut writes::State) -> (u32, bool) {
+    writes.next().await
+}
+#[cfg(not(feature = "remote"))]
+async fn next_writes(_state: &mut ()) -> (u32, bool) {
+    std::future::pending().await
+}
