@@ -111,6 +111,8 @@ export interface Adapters {
   activeTerminal?(): { adjustFontSize(step: number | "reset"): void } | undefined;
   /** Lists, names and ends sessions (D178, D183); absent until the lifecycle API exists, and the manager, the markers and the final-screen strip are then not offered. */
   inventory?: import("./sessions/inventory").SessionInventory;
+  /** The "teach once" gate (`hints.ts`): true when an explanatory hint should show now. Absent: such hints stay quiet. */
+  teach?: (hint: string) => boolean;
   /** The canvas document's home (local storage today, the server sync of #98 later). */
   store: CanvasStore;
   /** Mesh data and edits; absent until the Mesh API exists, and the Mesh view is then not offered. */
