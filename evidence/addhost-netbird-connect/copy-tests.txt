@@ -1,0 +1,49 @@
+bun test v1.4.2 (744846f84)
+
+test/addhost-copy.test.ts:
+(pass) a user key does not imply that it was saved [0.13ms]
+(pass) exhausted sign-in does not invent an available saved key [0.26ms]
+(pass) a failure before installation does not claim that cleanup is needed [0.05ms]
+(pass) leftovers offer one way forward in plain words, with a neutral tone [0.22ms]
+(pass) a setup already running says to wait [0.09ms]
+(pass) install advice follows the step that stopped, and never tells people to restore access [0.62ms]
+(pass) connect failure says what failed once and does not invent a dropped connection [0.10ms]
+(pass) Details keep the diagnostic cause without repeating the summary or next step [0.17ms]
+
+src/canvas/addhost/model.test.ts:
+(pass) stagesOf > a host with no event is waiting everywhere [0.45ms]
+(pass) stagesOf > check before sign-in is detecting how to sign in [0.54ms]
+(pass) stagesOf > the sign-in report finishes detect and starts the system check [0.14ms]
+(pass) stagesOf > install, facts and connect map to install, enrol and first session [0.30ms]
+(pass) stagesOf > an auth failure before sign-in fails detect and says it in plain words, not the server's [0.19ms]
+(pass) stagesOf > an unsupported host fails the system check, after sign-in [0.15ms]
+(pass) stagesOf > an install failure fails the install stage and keeps the earlier ones done [0.08ms]
+(pass) stagesOf > a new attempt starts over and forgets the old sign-in [0.11ms]
+(pass) authLabel > names the method and a trusted network provider only [0.06ms]
+(pass) guideFor > installation failures never claim that incomplete cleanup succeeded [0.05ms]
+(pass) guideFor > each failure kind names its fix [0.13ms]
+(pass) guideFor > mesh-policy words say possible, not certain [0.03ms]
+(pass) parseTarget > reads user, host and port [0.38ms]
+(pass) parseTarget > refuses what cannot name a host [0.04ms]
+(pass) parseSshConfig > reads aliases with HostName, User and Port, skipping wildcards and Match [0.63ms]
+(pass) parseSshConfig > recognises config text [0.09ms]
+(pass) parseSshConfig > a hostname that is an option is dropped [0.06ms]
+(pass) plain words > an unknown or missing failure gets the generic sentence, never the server's text [0.07ms]
+(pass) plain words > no headline carries an arrow, an id or an API noun [0.18ms]
+(pass) only a completed canonical host identity becomes terminal authority [0.14ms]
+(pass) parseTarget > accepts user@host, host, user@host:port, IPv4 and bracketed IPv6 with an optional port [0.10ms]
+(pass) parseTarget > rejects partial and malformed tokens, so they wait or show the hint [0.05ms]
+(pass) matchListed > a name that is exactly one host's id or address names that host [0.27ms]
+(pass) matchListed > a name that is also the start of another host's name is named but still prefixed [0.05ms]
+(pass) matchListed > a partial name that starts several hosts names none and waits [0.03ms]
+(pass) matchListed > a new name that starts no host is neither named nor waiting [0.03ms]
+(pass) install diagnostics name the failed step and public host error [0.09ms]
+(pass) missing payload tells the operator the architecture and expected server path [0.06ms]
+(pass) an already added host says so and offers opening its existing terminal [0.30ms]
+(pass) leftovers pause (#169) > a check event with leftovers pauses the running attempt; the next event clears it [0.14ms]
+(pass) leftovers pause (#169) > a pause without leftovers offers nothing to start fresh [0.09ms]
+
+ 39 pass
+ 0 fail
+ 127 expect() calls
+Ran 39 tests across 2 files. [161.00ms]

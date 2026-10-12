@@ -6,7 +6,7 @@
  *   (detect, connect, install, enrol, first session). Stage status comes only from events; nothing is
  *   guessed from time.
  * - `guideFor` turns a failure into what happened, what to do next and which action fixes it. The server's
- *   own text is shown beside it and is never matched on (contracts/ssh-bootstrap.md).
+ *   diagnostic text stays in Details and never determines the failure category (contracts/ssh-bootstrap.md).
  * - `parseTarget` and `parseSshConfig` read what the person types or pastes into the host field.
  */
 import { awaitingFresh } from "../../provisioning-client";
@@ -46,7 +46,10 @@ export function failureLine(failure: FailureDetail | undefined): string {
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
         return `Get the ${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"} binary: ${failure.message}`;
       }
-      if (failure.already_added) return failure.message; if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`; return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
+      if (failure.already_added) return failure.message;
+      if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`;
+      if (failure.failed_step === "connect") return "Connecting to the host failed.";
+      return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
     default: return "Something went wrong while setting up this host. Try again.";
   }
 }
@@ -109,7 +112,7 @@ export interface Guide { title: string; happened: string; next: string; fix: Fix
 export const STEP_ADVICE: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
   "get-arm64-binary": "Check this server’s release channel and signed arm64 binary, then try again.",
   "get-x86-64-binary": "Check this server’s release channel and signed x86_64 binary, then try again.",
-  connect: "The connection to the host dropped. Make sure it is still on, then try again.",
+  connect: "Check SSH access and the host service, then try again.",
   upload: "Copying the infraternal agent to the host didn't finish. Try again.",
   install: "Installing the infraternal agent stopped partway. Try again, or open the details to see where.",
   join: "The host couldn't join this server. Try again in a moment.",
@@ -250,3 +253,11 @@ export function parseSshConfig(text: string): string[] {
 
 /** True when the text looks like ssh_config rather than a host name. */
 export const looksLikeSshConfig = (text: string): boolean => /^\s*Host\s+\S/im.test(text);
+
+/** Details retain diagnostic evidence once, excluding sentences already displayed in the failure card. */
+export function failureDiagnostics(failure: FailureDetail | undefined, guide: Guide): string[] {
+  if (!failure) return [];
+  const visible = `${guide.happened} ${guide.next}`;
+  const evidence = [failure.kind !== "stale_previous_attempt" ? failure.message : "", ...failure.log_tail];
+  return [...new Set(evidence.filter((line) => line && !visible.includes(line)))];
+}

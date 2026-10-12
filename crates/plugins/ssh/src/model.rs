@@ -266,6 +266,35 @@ impl Failure {
             host_key_challenge: None,
         }
     }
+    /// Bounded diagnosis for server logs; authentication and trust always retain their categories.
+    #[must_use]
+    pub fn diagnostic_kind(&self) -> &'static str {
+        match self.kind {
+            FailureKind::Auth => "auth",
+            FailureKind::HostKey => "host-key",
+            FailureKind::Unreachable | FailureKind::MeshPolicy => "transport",
+            _ if self.log_tail.contains(&"The SSH command channel failed.") => "channel",
+            _ if self.log_tail.contains(&"The SSH connection setup failed.") => "transport",
+            _ => "setup",
+        }
+    }
+
+    /// Attach a fixed local boundary: channel execution when true, connection setup otherwise.
+    #[must_use]
+    pub fn at_ssh_boundary(mut self, channel: bool) -> Self {
+        // Reuse bounded, static diagnostics rather than growing every retained
+        // Failure/event with a field solely for server instrumentation.
+        let boundary = if channel {
+            "The SSH command channel failed."
+        } else {
+            "The SSH connection setup failed."
+        };
+        if !self.log_tail.contains(&boundary) {
+            self.log_tail.push(boundary);
+        }
+        self
+    }
+
     /// Attach the command boundary without changing authentication/trust classification.
     #[must_use]
     pub fn at(mut self, step: InstallStep) -> Self {

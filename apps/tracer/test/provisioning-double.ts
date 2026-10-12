@@ -60,7 +60,7 @@ interface BootstrapEvent {
   elapsed_ms: number;
   log_tail: string[];
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { failed_step?: "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
+  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -118,7 +118,7 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
   return known;
 }
 
-interface Failure { failed_step?: "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[] }
+interface Failure { failed_step?: "connect" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[] }
 
 /** Host keys the person trusted on the same bootstrap socket, until `reset`. */
 const trusted = new Set<string>();
@@ -154,6 +154,8 @@ function failureOf(target: Target): Failure | undefined {
   }
   if (/^refused/.test(name)) return { phase: 0, beforeLogin: true, kind: "auth", message: "The host refused the server key.", evidence: "The host answered on port 22 and refused the SSH identity." };
   if (/^running/.test(name)) return { phase: 0, beforeLogin: false, kind: "setup_running", message: "Another setup is still running on this host.", evidence: "A setup holds the lock on this host." };
+  if (/^nodetail/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "Setup stopped before this host was ready.", evidence: "Setup stopped before this host was ready." };
+  if (/^connectfail/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "install", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", evidence: "The SSH connection setup failed." };
   if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;
 }

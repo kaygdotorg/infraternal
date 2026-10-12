@@ -1,0 +1,41 @@
+Running as unit: run-p981995-i17756954.scope; invocation ID: 602867c2f7ab4183920ce3b64000d9fc
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-q12aryty.js, chunk-px28wsnv.js, chunk-s8549ccm.js, chunk-zgts83wx.js, chunk-x4vfh75w.js, chunk-350ecvz1.js, chunk-5zw4jgc6.js, chunk-j7yf75ng.js, chunk-n6k6san7.js, chunk-td43hzba.js, chunk-b354sg8t.js, chunk-53ka8tp5.js, chunk-6gtm055g.js, chunk-4thk80r1.js, chunk-caryt9qe.js, chunk-wss8kbdg.js, chunk-p998a1nr.js, chunk-csbc9b3b.js, chunk-nr4df2sa.js, chunk-gecpjysc.js, chunk-sm0h9pg3.js, chunk-na49xj9e.js, main.js, chunk-8n70sfjx.js, chunk-mqfdvw2d.js, chunk-a0p5t716.js, chunk-248kfr7s.js, chunk-e5vcaq9c.js, chunk-pqfhvpn3.js, chunk-en8k88as.js, chunk-8gqdshxw.js, chunk-5e6mkehy.js, chunk-80xyexxk.js, chunk-s07315jh.js, chunk-whqvzd3b.js, chunk-1636vr0c.js, chunk-zt0pnrs3.js, chunk-ed0wcfht.js, chunk-kw0eq8rr.js, chunk-021wn3fz.js, chunk-5zjtnjm4.js, chunk-axbkkqp1.js, chunk-vjgdcckg.js, chunk-mmjm6dz1.js, chunk-ygy9664f.js, chunk-9p68j54k.js, chunk-ykzdccfj.js, chunk-b9rjrsc3.js, chunk-7e7jpemf.js, chunk-x8p9h0ht.js, chunk-x0gb5wgh.js, chunk-k9w02w4c.js, chunk-8b7zanrx.js, chunk-s05s5kjn.js, chunk-gjnafk5k.js, chunk-8gqvma8s.js, chunk-ynye4gn2.js, chunk-mar8sat1.js, chunk-h6hen6w8.js, chunk-pqwscpvq.js, chunk-s4eb8syv.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-per9k9t9.js, chunk-b4eyn7s4.js, chunk-0qmaxw8n.js, chunk-07d0fb5q.js, chunk-f4rwa4x8.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4396
+[WebServer] latency proxy listening on http://localhost:4395; upstream port=4396
+
+Running 1 test using 1 worker
+
+(node:983712) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/addhost-wizard.spec.ts:490:1 › empty failure Details do not fall back to the visible summary (13.8s)
+
+
+  1) test/addhost-wizard.spec.ts:490:1 › empty failure Details do not fall back to the visible summary 
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator:  locator('.ah-float').locator('.ah-details pre')
+    Expected: "No additional diagnostic details were reported."
+    Received: "Setup stopped before this host was ready."
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveText" with timeout 5000ms
+      - waiting for locator('.ah-float').locator('.ah-details pre')
+        14 × locator resolved to <pre>Setup stopped before this host was ready.</pre>
+           - unexpected value "Setup stopped before this host was ready."
+
+
+      494 |   await expect(page.getByRole("heading", { name: "Setting up nodetail.lab didn't finish" })).toBeVisible();
+      495 |   await wizard(page).locator(".ah-details summary").click();
+    > 496 |   await expect(wizard(page).locator(".ah-details pre")).toHaveText("No additional diagnostic details were reported.");
+          |                                                         ^
+      497 | });
+      498 |
+        at /home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/apps/tracer/test/addhost-wizard.spec.ts:496:57
+
+    Error Context: test-results/addhost-wizard-empty-failu-0ad24-back-to-the-visible-summary/error-context.md
+
+  1 failed
+    test/addhost-wizard.spec.ts:490:1 › empty failure Details do not fall back to the visible summary 

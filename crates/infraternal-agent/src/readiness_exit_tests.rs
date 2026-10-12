@@ -76,10 +76,10 @@ async fn ownership_eof_does_not_discard_private_terminal_output() {
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(0)))
     ));
-    // Dev emits an ordered replay fence for the empty Hello.head before new
-    // output. Keep that control event distinct from the credit-funded bytes.
+    // A zero-head Hello emits an ordered replay-complete event before
+    // credit-funded output; keep that control event distinct from the bytes.
     let Some(Message::Event(2, fence_bytes)) = messages.recv().await else {
-        panic!("missing empty replay fence")
+        panic!("missing initial replay completion")
     };
     let fence: serde_json::Value = serde_json::from_slice(&fence_bytes).unwrap();
     assert_eq!(fence["type"], "terminal.replay_complete");

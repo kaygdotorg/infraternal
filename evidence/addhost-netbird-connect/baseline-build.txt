@@ -1,0 +1,8 @@
+    Blocking waiting for file lock on build directory
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/.cache/codex-scratch/n195/bisect/crates/infraternal-plugin-api)
+   Compiling infraternal-shim v0.1.0 (/home/kayg/.cache/codex-scratch/n195/bisect/crates/infraternal-shim)
+   Compiling infraternal-protocol v0.1.0 (/home/kayg/.cache/codex-scratch/n195/bisect/crates/infraternal-protocol)
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/n195/bisect/crates/infraternal-mesh)
+   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/n195/bisect/crates/infraternal-server)
+   Compiling infraternal v0.1.0 (/home/kayg/.cache/codex-scratch/n195/bisect/crates/infraternal)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/.cache/codex-scratch/n195/bisect/crates/plugins/host-facts)

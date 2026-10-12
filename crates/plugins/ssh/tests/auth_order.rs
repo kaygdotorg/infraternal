@@ -70,7 +70,15 @@ impl SshSession for Session {
         Some("[fixture]:2222".into())
     }
     fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
-        assert_eq!(script, infraternal_plugin_ssh::probe::CHECK_SCRIPT);
+        assert!(
+            script == infraternal_plugin_ssh::probe::CHECK_SCRIPT
+                || [
+                    infraternal_plugin_ssh::model::InstallMode::Rootless,
+                    infraternal_plugin_ssh::model::InstallMode::Root
+                ]
+                .into_iter()
+                .any(|mode| script == infraternal_plugin_ssh::previous_attempt::check_script(mode))
+        );
         Box::pin(async move {
             if self.success {
                 Ok(CommandOutput { stdout: Vec::new() })
@@ -370,4 +378,41 @@ async fn cancelling_authentication_consumes_the_attempt_without_requesting_secre
     assert_eq!(transport.0.load(Ordering::Relaxed), 1);
     assert!(provider.requested.lock().unwrap().is_empty());
     assert!(session.authentication().is_none());
+}
+
+#[tokio::test]
+async fn ownership_check_fallback_repeats_only_the_allowlisted_read_only_command() {
+    for mode in [
+        infraternal_plugin_ssh::model::InstallMode::Rootless,
+        infraternal_plugin_ssh::model::InstallMode::Root,
+    ] {
+        let transport = Arc::new(Transport {
+            succeed_at: 2,
+            failure: FailureKind::Auth,
+            opens: Mutex::new(0),
+        });
+        let provider = Arc::new(Provider {
+            requested: Mutex::new(Vec::new()),
+        });
+        let adapter = AutoAuth::new(transport.clone());
+        let session = adapter
+            .open(
+                Destination::parse("user@fixture").unwrap(),
+                Credentials::Automatic(provider.clone()),
+                MeshEvidence::default(),
+            )
+            .await
+            .unwrap();
+        let script = infraternal_plugin_ssh::previous_attempt::check_script(mode);
+        session.run(&script, Input::Empty).await.unwrap();
+        assert_eq!(*transport.opens.lock().unwrap(), 2);
+        assert_eq!(
+            *provider.requested.lock().unwrap(),
+            vec![AuthMethod::ServerKey]
+        );
+        assert_eq!(
+            session.authentication().unwrap().method,
+            AuthMethod::ServerKey
+        );
+    }
 }

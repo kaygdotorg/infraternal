@@ -1,0 +1,28 @@
+    Blocking waiting for file lock on build directory
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/ssh)
+error[E0599]: no method named `diagnostic_kind` found for struct `Failure` in the current scope
+   --> crates/plugins/ssh/tests/diagnostics.rs:243:58
+    |
+243 |     assert_eq!(Failure::new(FailureKind::Auth, "static").diagnostic_kind(), "auth");
+    |                                                          ^^^^^^^^^^^^^^^ method not found in `Failure`
+
+error[E0599]: no method named `diagnostic_kind` found for struct `Failure` in the current scope
+   --> crates/plugins/ssh/tests/diagnostics.rs:244:61
+    |
+244 |     assert_eq!(Failure::new(FailureKind::HostKey, "static").diagnostic_kind(), "host-key");
+    |                                                             ^^^^^^^^^^^^^^^ method not found in `Failure`
+
+error[E0599]: no method named `diagnostic_kind` found for struct `Failure` in the current scope
+   --> crates/plugins/ssh/tests/diagnostics.rs:245:65
+    |
+245 |     assert_eq!(Failure::new(FailureKind::Unreachable, "static").diagnostic_kind(), "transport");
+    |                                                                 ^^^^^^^^^^^^^^^ method not found in `Failure`
+
+error[E0599]: no method named `diagnostic_kind` found for struct `Failure` in the current scope
+   --> crates/plugins/ssh/tests/diagnostics.rs:249:24
+    |
+249 |     assert_eq!(command.diagnostic_kind(), "channel");
+    |                        ^^^^^^^^^^^^^^^ method not found in `Failure`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `infraternal-plugin-ssh` (test "diagnostics") due to 4 previous errors

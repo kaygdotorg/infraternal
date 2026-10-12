@@ -1,0 +1,16 @@
+bun test v1.4.2 (744846f84)
+
+test/addhost-copy.test.ts:
+(pass) a user key does not imply that it was saved [0.20ms]
+(pass) exhausted sign-in does not invent an available saved key [0.26ms]
+(pass) a failure before installation does not claim that cleanup is needed [0.06ms]
+(pass) leftovers offer one way forward in plain words, with a neutral tone [0.26ms]
+(pass) a setup already running says to wait [0.09ms]
+(pass) install advice follows the step that stopped, and never tells people to restore access [0.60ms]
+(pass) connect failure says what failed once and does not invent a dropped connection [0.09ms]
+(pass) Details keep the diagnostic cause without repeating the summary or next step [0.29ms]
+
+ 8 pass
+ 0 fail
+ 22 expect() calls
+Ran 8 tests across 1 file. [67.00ms]

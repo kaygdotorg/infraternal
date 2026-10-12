@@ -31,7 +31,7 @@ import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
 import { ICON, escapeHtml, svg } from "./icons";
-import { failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES } from "./model";
+import { failureDiagnostics, failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES } from "./model";
 import type { Guide, ParsedTarget } from "./model";
 import { matchListed } from "./model";
 import { ServiceError } from "./service";
@@ -780,8 +780,8 @@ export class Wizard {
   // ── Failure, host key, choose a method, install ────────────────────────────
   private detailsOf(job: Job): string {
     const failure = job.view.failure;
-    const lines = [...(job.view.leftovers?.findings ?? []), failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", failure && failure.kind !== "stale_previous_attempt" ? `The server said: ${failure.message}` : "", ...(failure?.log_tail ?? [])].filter(Boolean);
-    return lines.join("\n") || job.view.message;
+    const lines = [...(job.view.leftovers?.findings ?? []), failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", ...failureDiagnostics(failure, guideFor(job.entry.label, failure)).map((line) => line === failure?.message ? `The server said: ${line}` : line)].filter(Boolean);
+    return lines.join("\n") || "No additional diagnostic details were reported.";
   }
 
   private renderFailure(page: HTMLElement): void {

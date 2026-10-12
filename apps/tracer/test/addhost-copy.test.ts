@@ -1,6 +1,6 @@
 /** Pins add-host copy to actual authentication and installation evidence (#87). */
 import { expect, test } from "bun:test";
-import { authLabel, guideFor } from "../src/canvas/addhost/model";
+import { authLabel, failureDiagnostics, guideFor } from "../src/canvas/addhost/model";
 
 test("a user key does not imply that it was saved", () => {
   expect(authLabel({ method: "user-key" })).toBe("your key");
@@ -37,4 +37,17 @@ test("install advice follows the step that stopped, and never tells people to re
   expect(new Set(advice).size).toBe(steps.length);
   for (const line of advice) expect(line).not.toMatch(/restore access/i);
   expect(guideFor("host", { kind: "install", message: "m", log_tail: [] }).next).toBe("Try again, or open the details to see where it stopped.");
+});
+
+test("connect failure says what failed once and does not invent a dropped connection", () => {
+  const guide = guideFor("host", { kind: "install", failed_step: "connect", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", log_tail: ["The SSH helper could not start."] });
+  expect(guide.happened).toBe("Connecting to the host failed.");
+  expect(guide.next).not.toContain("dropped");
+  expect(guide.happened).not.toContain("The SSH helper");
+});
+
+test("Details keep the diagnostic cause without repeating the summary or next step", () => {
+  const failure = { kind: "install", failed_step: "connect", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", log_tail: ["The SSH helper could not start.", "The SSH helper could not start."] } as const;
+  const detail = { ...failure, log_tail: [...failure.log_tail] };
+  expect(failureDiagnostics(detail, guideFor("host", detail))).toEqual(["The SSH helper could not start."]);
 });

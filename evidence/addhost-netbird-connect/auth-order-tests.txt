@@ -1,0 +1,15 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.76s
+     Running tests/auth_order.rs (/home/kayg/.cache/codex-scratch/n195/target/debug/deps/auth_order-a78fc72ef54a14f6)
+
+running 7 tests
+test authentication_never_replays_a_mutating_first_command_or_reuses_a_failed_scope ... ok
+test later_command_auth_errors_never_restart_the_selected_method_sequence ... ok
+test only_exhausted_auth_returns_typed_choose_method ... ok
+test ownership_check_fallback_repeats_only_the_allowlisted_read_only_command ... ok
+test trust_network_and_remote_command_failures_stop_without_loading_local_secrets ... ok
+test successful_authentication_is_reported_and_later_secrets_are_never_requested ... ok
+test cancelling_authentication_consumes_the_attempt_without_requesting_secrets ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

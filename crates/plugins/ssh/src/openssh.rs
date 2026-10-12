@@ -39,6 +39,7 @@ impl SshTransport for OpenSsh {
             let configuration = effective_destination(&self.ssh, &destination).await?;
             self.open_configuration(configuration, credentials, mesh)
                 .await
+                .map_err(|error| error.at_ssh_boundary(false))
         })
     }
 }
@@ -51,51 +52,55 @@ impl OpenSsh {
         mesh: MeshEvidence,
     ) -> Operation<'_, Arc<dyn SshSession>> {
         Box::pin(async move {
-            if !configuration.validate_trust_paths() {
-                return Err(Failure::unsupported(
-                    "The SSH public trust paths are ambiguous or inaccessible.",
-                ));
-            }
-            let credentials = CredentialSession::prepare(
-                &CredentialConfig {
-                    ssh_agent: self.ssh_agent.clone(),
-                    ssh_add: self.ssh_add.clone(),
-                    askpass_binary: self.askpass_binary.clone(),
-                    scratch: self.scratch.clone(),
-                },
-                credentials,
-            )
-            .await?;
-            let mut session = Session {
-                ssh: self.ssh.clone(),
-                keyscan: self.ssh_keyscan.clone(),
-                keygen: self.ssh_keygen.clone(),
-                configuration,
-                credentials,
-                mesh,
-                timeout: self.command_timeout,
-                master: None,
-            };
-            let socket = session.credentials.control_socket()?;
-            match Master::start(
-                session.command(&socket),
-                socket,
-                session.timeout,
-                session.mesh,
-                &session.credentials.prompt_parent,
-            )
-            .await
-            {
-                Ok(master) => session.master = Some(master),
-                Err(mut failure) => {
-                    if failure.kind == FailureKind::HostKey {
-                        failure.fingerprints = session.observed_fingerprints().await;
-                    }
-                    return Err(failure);
+            async {
+                if !configuration.validate_trust_paths() {
+                    return Err(Failure::unsupported(
+                        "The SSH public trust paths are ambiguous or inaccessible.",
+                    ));
                 }
+                let credentials = CredentialSession::prepare(
+                    &CredentialConfig {
+                        ssh_agent: self.ssh_agent.clone(),
+                        ssh_add: self.ssh_add.clone(),
+                        askpass_binary: self.askpass_binary.clone(),
+                        scratch: self.scratch.clone(),
+                    },
+                    credentials,
+                )
+                .await?;
+                let mut session = Session {
+                    ssh: self.ssh.clone(),
+                    keyscan: self.ssh_keyscan.clone(),
+                    keygen: self.ssh_keygen.clone(),
+                    configuration,
+                    credentials,
+                    mesh,
+                    timeout: self.command_timeout,
+                    master: None,
+                };
+                let socket = session.credentials.control_socket()?;
+                match Master::start(
+                    session.command(&socket),
+                    socket,
+                    session.timeout,
+                    session.mesh,
+                    &session.credentials.prompt_parent,
+                )
+                .await
+                {
+                    Ok(master) => session.master = Some(master),
+                    Err(mut failure) => {
+                        if failure.kind == FailureKind::HostKey {
+                            failure.fingerprints = session.observed_fingerprints().await;
+                        }
+                        return Err(failure);
+                    }
+                }
+                session.credentials.authenticated().await?;
+                Ok(Arc::new(session) as Arc<dyn SshSession>)
             }
-            session.credentials.authenticated().await?;
-            Ok(Arc::new(session) as Arc<dyn SshSession>)
+            .await
+            .map_err(|error: Failure| error.at_ssh_boundary(false))
         })
     }
 }
@@ -279,74 +284,78 @@ impl SshSession for Session {
     }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
-            let master = self.master.as_ref().ok_or_else(|| {
-                Failure::new(FailureKind::Unreachable, "The SSH connection has closed.")
-            })?;
-            if !master.alive()? {
-                return Err(Failure::new(
-                    FailureKind::Unreachable,
-                    "The SSH connection has closed.",
-                ));
+            async {
+                let master = self.master.as_ref().ok_or_else(|| {
+                    Failure::new(FailureKind::Unreachable, "The SSH connection has closed.")
+                })?;
+                if !master.alive()? {
+                    return Err(Failure::new(
+                        FailureKind::Unreachable,
+                        "The SSH connection has closed.",
+                    ));
+                }
+                let mut command = Command::new(&self.ssh);
+                command
+                    .env_remove("SSH_AUTH_SOCK")
+                    .env_remove("SSH_ASKPASS")
+                    .env("SSH_ASKPASS_REQUIRE", "never")
+                    .env("LC_ALL", "C");
+                // A missing/stale master must fail locally, never create another
+                // connection or reuse the browser's now-erased credential.
+                command
+                    .args(["-F", "/dev/null", "-T", "-S"])
+                    .arg(master.socket())
+                    .args([
+                        "-o",
+                        "ControlMaster=no",
+                        "-o",
+                        "ControlPersist=no",
+                        "-o",
+                        "ProxyJump=none",
+                        "-o",
+                        "ProxyCommand=/bin/sh -c 'exit 1'",
+                        "-o",
+                        "ForkAfterAuthentication=no",
+                        "-o",
+                        "IdentityFile=none",
+                        "-o",
+                        "CertificateFile=none",
+                        "-o",
+                        "IdentityAgent=none",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "PubkeyAuthentication=no",
+                        "-o",
+                        "PasswordAuthentication=no",
+                        "-o",
+                        "KbdInteractiveAuthentication=no",
+                        "-o",
+                        "GSSAPIAuthentication=no",
+                    ]);
+                let destination = &self.configuration.destination;
+                command
+                    .arg("-l")
+                    .arg(destination.user())
+                    .arg("-p")
+                    .arg(destination.port().unwrap_or(22).to_string())
+                    .arg("--")
+                    .arg(destination.host());
+                command.arg(format!("sh -c {}", shell_quote(script)));
+                let result = execute(&mut command, input, self.timeout).await?;
+                if result.success {
+                    return Ok(CommandOutput {
+                        stdout: result.stdout,
+                    });
+                }
+                // Authentication already succeeded. Never treat remote stderr or
+                // a command's exit 255 as permission to try a different credential.
+                let mut failure = classify(&result.stderr, false, MeshEvidence::default());
+                failure.exit_status = result.exit_status;
+                Err(failure)
             }
-            let mut command = Command::new(&self.ssh);
-            command
-                .env_remove("SSH_AUTH_SOCK")
-                .env_remove("SSH_ASKPASS")
-                .env("SSH_ASKPASS_REQUIRE", "never")
-                .env("LC_ALL", "C");
-            // A missing/stale master must fail locally, never create another
-            // connection or reuse the browser's now-erased credential.
-            command
-                .args(["-F", "/dev/null", "-T", "-S"])
-                .arg(master.socket())
-                .args([
-                    "-o",
-                    "ControlMaster=no",
-                    "-o",
-                    "ControlPersist=no",
-                    "-o",
-                    "ProxyJump=none",
-                    "-o",
-                    "ProxyCommand=/bin/sh -c 'exit 1'",
-                    "-o",
-                    "ForkAfterAuthentication=no",
-                    "-o",
-                    "IdentityFile=none",
-                    "-o",
-                    "CertificateFile=none",
-                    "-o",
-                    "IdentityAgent=none",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "PubkeyAuthentication=no",
-                    "-o",
-                    "PasswordAuthentication=no",
-                    "-o",
-                    "KbdInteractiveAuthentication=no",
-                    "-o",
-                    "GSSAPIAuthentication=no",
-                ]);
-            let destination = &self.configuration.destination;
-            command
-                .arg("-l")
-                .arg(destination.user())
-                .arg("-p")
-                .arg(destination.port().unwrap_or(22).to_string())
-                .arg("--")
-                .arg(destination.host());
-            command.arg(format!("sh -c {}", shell_quote(script)));
-            let result = execute(&mut command, input, self.timeout).await?;
-            if result.success {
-                return Ok(CommandOutput {
-                    stdout: result.stdout,
-                });
-            }
-            // Authentication already succeeded. Never treat remote stderr or
-            // a command's exit 255 as permission to try a different credential.
-            let mut failure = classify(&result.stderr, false, MeshEvidence::default());
-            failure.exit_status = result.exit_status;
-            Err(failure)
+            .await
+            .map_err(|error: Failure| error.at_ssh_boundary(true))
         })
     }
 }
@@ -418,5 +427,5 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
             failure.log_tail.push(line);
         }
     }
-    failure
+    failure.at_ssh_boundary(!ssh_failure)
 }
