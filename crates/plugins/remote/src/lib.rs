@@ -14,6 +14,8 @@ use infraternal_plugin_api::{
 #[cfg(feature = "transport")]
 pub mod remote_bindings;
 #[cfg(feature = "transport")]
+pub mod enrollment;
+#[cfg(feature = "transport")]
 pub mod remote_native;
 #[cfg(feature = "transport")]
 mod remote_path_copies;
