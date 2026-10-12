@@ -320,6 +320,13 @@ fn render_with_aliases(
             }
         }
         let _ = writeln!(script, " chain {direction} {{");
+        // Exact retirement removes both kernel tuple directions. Loose TCP
+        // tracking can nevertheless classify a continuation as a fresh flow.
+        // Only an initiating SYN may create replacement TCP state [164,242].
+        let _ = writeln!(
+            script,
+            "  ct state new tcp flags & (fin | syn | rst | ack) != syn drop"
+        );
         // Recovery must never reopen entries refused by saved intent [242].
         let _ = writeln!(
             script,
@@ -459,7 +466,13 @@ mod tests {
         let mut config = config();
         let rules = render(&config, false);
         assert_eq!(rules.matches(" accept").count(), 40);
-        assert_eq!(rules.matches(" drop").count(), 12);
+        assert_eq!(rules.matches(" drop").count(), 14);
+        assert_eq!(
+            rules
+                .matches("ct state new tcp flags & (fin | syn | rst | ack) != syn drop")
+                .count(),
+            2
+        );
         let peer = config.peers.get_mut(&NodeId(2)).expect("member");
         peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
             crate::policy::rules::Port {
