@@ -1,5 +1,7 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
 import { AuthError, checkStatus, checkSession, recoveryAuth } from "./auth";
+import { registerSignOut } from "./sign-out";
+import { lastAccountKey, tabSessionKey } from "./account-storage";
 import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
@@ -57,6 +59,7 @@ declare global {
       } | undefined;
       benchmarkFullRedraw: (iterations: number) => number[] | undefined;
       freezeCursorForTest: () => void;
+      cursorLayerState: () => TerminalClient["cursorLayerState"] | undefined;
       benchmarkOutputAt10MBps: () => Promise<{
         bytes: number;
         elapsedMs: number;
@@ -66,6 +69,14 @@ declare global {
         wasmMemoryBytes: number;
       }> | undefined;
       trace: () => ProbeTraceSample[];
+    };
+    /** The product-canvas mock exposes the first PTY for replay regression assertions. */
+    __tracerProductTestDouble?: {
+      isConnected: () => boolean;
+      dropConnection: () => void;
+      screenText: () => string;
+      rendererMetrics: () => { outputSequence: string } | undefined;
+      currentView: () => string;
     };
   }
 }
@@ -228,7 +239,7 @@ function renderAuth(setupRequired: boolean, message = ""): void {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   mountOnboarding(app, setupRequired, message, (userId, firstSetup, welcomeName, instant) => {
-    saveBrowserId("tracer.user-id", userId);
+    saveBrowserId(lastAccountKey, userId);
     activeUserId = userId;
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
     else void showTerminal(undefined, instant);
@@ -335,6 +346,8 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
   const proto = query.get("proto");
+  // Browser regressions can exercise the real product canvas over the test-double PTY.
+  const productTestMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "product";
   const canvasMode = __CLUSTERS_PREVIEW__ && mockMode && (proto === "windows" || proto === "addhost");
   // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
@@ -342,7 +355,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   const predictiveEcho = query.get("predict") === "1";
   // The canvas is the product screen. The test double's plain page and the latency probe keep the single
   // terminal screen: the terminal specs and the probe drive that one terminal.
-  const useCanvas = !mockMode && !probeMode;
+  const useCanvas = (!mockMode || productTestMode) && !probeMode;
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
@@ -405,6 +418,16 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
         host: { name: hostName, ...(identity?.username ? { user: identity.username } : {}) },
         accountId: activeUserId ?? "account",
         predictiveEcho,
+        ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {
+          window.__tracerProductTestDouble = {
+            isConnected: () => client.isConnected,
+            dropConnection: () => client.forceDrop(),
+            screenText: () => client.readScreenText(),
+            rendererMetrics: () => client.rendererMetrics,
+            currentView: () => (productCanvas as unknown as { canvas?: { cx?: { state?: { currentView?: string } } } } | undefined)
+              ?.canvas?.cx?.state?.currentView ?? "",
+          };
+        } } : {}),
         onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen.setRecoveryPending(readyAt); },
       });
     } catch (error: unknown) {
@@ -419,7 +442,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
   screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
-  const sessionKey = activeUserId ? `tracer.session.${activeUserId}` : undefined;
+  const sessionKey = activeUserId ? tabSessionKey(activeUserId) : undefined;
   const initialSessionId = query.get("session") ?? (sessionKey ? loadTabSession(sessionKey) : undefined);
   const hooks = {
     ...probeHooks,
@@ -482,6 +505,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
           return (currentTerminal as unknown as { benchmarkFullRedraw: (count: number) => number[] }).benchmarkFullRedraw(iterations);
         },
         freezeCursorForTest: () => currentTerminal?.freezeCursorForTest(),
+        cursorLayerState: () => currentTerminal?.cursorLayerState,
         benchmarkOutputAt10MBps: () => {
           if (!currentTerminal) return undefined;
           return (currentTerminal as unknown as {
@@ -516,7 +540,7 @@ async function showRecovery(): Promise<void> {
   document.documentElement.removeAttribute("data-ui-font");
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
     activeUserId = userId;
-    saveBrowserId("tracer.user-id", userId);
+    saveBrowserId(lastAccountKey, userId);
     showWelcome(displayName ?? "", instant);
   });
   scheduleBackdrop();
@@ -557,6 +581,35 @@ let canvasPrototype: { dispose(): void } | undefined;
 /** The product canvas: Console on real sessions (a lazy chunk, loaded after sign-in). */
 let productCanvas: { dispose(): void } | undefined;
 
+/**
+ * Lets go of the signed-in app and shows the sign-in screen: the terminals' connections, the canvas (with its inbox
+ * and overlays), the core screen, the frame meter and the test double's handle. Used when the server says the session
+ * is gone and when the person signs out (sign-out.ts). Local preferences stay; sign-out
+ * removes the account's stored data afterwards (sign-out.ts).
+ */
+function endSession(message = ""): void {
+  welcomeEffect?.destroy();
+  welcomeEffect = undefined;
+  window.clearTimeout(welcomeTimer);
+  currentTerminal?.dispose();
+  currentTerminal = undefined;
+  canvasPrototype?.dispose();
+  canvasPrototype = undefined;
+  productCanvas?.dispose();
+  productCanvas = undefined;
+  performanceProbe?.dispose();
+  performanceProbe = undefined;
+  perfHudGeneration++;
+  perfHud?.dispose();
+  perfHud = undefined;
+  coreScreen?.dispose();
+  coreScreen = undefined;
+  delete window.__tracerTestDouble;
+  activeUserId = undefined;
+  renderAuth(false, message);
+}
+registerSignOut(() => endSession(), () => activeUserId);
+
 async function checkForegroundSession(): Promise<void> {
   if (checkingResume || !activeUserId) return;
   checkingResume = true;
@@ -566,19 +619,7 @@ async function checkForegroundSession(): Promise<void> {
     // A delayed HTTP snapshot must not overwrite a newer WebSocket state event.
     if (session && noticeGeneration === recoveryNoticeGeneration) coreScreen?.setRecoveryPending(session.recovery_pending?.ready_at);
     if (!session && previewProto()) { location.reload(); return; }
-    if (!session) {
-      currentTerminal?.dispose();
-      currentTerminal = undefined;
-      productCanvas?.dispose();
-      productCanvas = undefined;
-      performanceProbe?.dispose();
-      performanceProbe = undefined;
-      coreScreen?.dispose();
-      coreScreen = undefined;
-      delete window.__tracerTestDouble;
-      activeUserId = undefined;
-      renderAuth(false, "Your session ended. Sign in again to reconnect.");
-    }
+    if (!session) endSession("Your session ended. Sign in again to reconnect.");
   } catch {
     // The session check is background housekeeping, not something the person asked for. When it
     // cannot complete (the server restarting, the link dropping, a proxy answering with a page)

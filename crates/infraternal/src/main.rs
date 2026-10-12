@@ -1006,6 +1006,7 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             .unwrap_or(600_000)
             .try_into()
             .unwrap_or(600_000),
+        matches.get_flag("readiness"),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -1277,6 +1278,7 @@ fn run_shim(
     detach: bool,
     ring_capacity: usize,
     exit_retention_ms: u64,
+    readiness: bool,
 ) -> std::io::Result<()> {
     if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(std::io::Error::new(
@@ -1300,6 +1302,7 @@ fn run_shim(
             rows,
             state,
             ring_capacity,
+            readiness,
         },
         std::time::Duration::from_millis(exit_retention_ms),
     )

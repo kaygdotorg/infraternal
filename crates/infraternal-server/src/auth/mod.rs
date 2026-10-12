@@ -27,6 +27,9 @@ use sessions::insert_session;
 pub(crate) use sessions::require_session_tx;
 pub use wraps::Wrap;
 use wraps::put_wrap;
+mod migration_compat;
+#[cfg(test)]
+mod migration_compat_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -189,7 +192,8 @@ impl Auth {
             .rp_name("infraternal")
             .build()
             .map_err(|_| Error::Invalid)?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        migration_compat::normalize_production_index(&pool).await?;
+        migration_compat::MIGRATIONS.run(&pool).await?;
         let (setup_consumed, _) = watch::channel(());
         Ok(Self {
             pool,

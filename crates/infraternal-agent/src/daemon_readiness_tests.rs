@@ -4,6 +4,61 @@ use super::*;
 #[cfg(feature = "remote")]
 use std::sync::{Mutex, atomic::AtomicBool};
 
+#[test]
+fn replay_prefix_stops_at_the_shim_hello_head() {
+    assert_eq!(replay_prefix_len(100, 50, Some(125)), 25);
+    assert_eq!(replay_prefix_len(125, 50, Some(125)), 0);
+    assert_eq!(replay_prefix_len(130, 50, Some(125)), 0);
+    assert_eq!(replay_prefix_len(100, 50, None), 50);
+}
+
+#[tokio::test]
+async fn replay_complete_preserves_the_full_output_cursor_as_decimal() {
+    let id = [0x5a; 16];
+    let (tx, mut messages) = mpsc::channel(1);
+    replay_complete(&tx, 17, id, u64::MAX).await.unwrap();
+    let Some(Message::Event(stream, json)) = messages.recv().await else {
+        panic!("replay completion was not emitted as an Event");
+    };
+    let event: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(stream, 17);
+    assert_eq!(event["type"], "terminal.replay_complete");
+    assert_eq!(event["session_id"], uuid::Uuid::from_bytes(id).to_string());
+    assert_eq!(event["out_seq"], u64::MAX.to_string());
+}
+
+#[test]
+fn fixture_fence_processes_messages_before_the_control_pong() {
+    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let source = r#"
+import struct
+import sys
+sys.path.insert(0, sys.argv[1])
+from agent_fixture import Binary
+binary = object.__new__(Binary)
+binary.fence_nonce = 0
+preceding = (1, 0x11, struct.pack("<Q", 0) + b"x")
+frames = iter([preceding, (0, 0x09, struct.pack("<QQ", 1, 0))])
+binary.read = lambda: next(frames)
+binary.send = lambda *args: None
+seen = []
+binary.process = lambda credit=True, frame=None: seen.append(frame)
+binary.fence()
+assert seen == [preceding], seen
+"#;
+    let result = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(source)
+        .arg(scripts)
+        .output()
+        .expect("Python must be available for the real-binary fixture tests");
+    assert!(
+        result.status.success(),
+        "fixture fence discarded a preceding frame: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 #[cfg(feature = "remote")]
 struct StalledWriter {
     input: Mutex<(Vec<u8>, usize)>,
@@ -218,4 +273,66 @@ async fn uninstall_handoff_runs_only_after_a_successful_real_socket_write() {
         assert_eq!(result.is_ok(), healthy);
         assert_eq!(count.load(Ordering::SeqCst), usize::from(healthy));
     }
+}
+
+#[tokio::test]
+async fn census_and_open_result_share_fifo_order() {
+    let (bulk, bulk_rx) = mpsc::channel(8);
+    let (control, control_rx) = mpsc::channel(8);
+    let mut published = None;
+    assert!(
+        publish_session_snapshot(
+            &control,
+            &crate::lifecycle::Registry::default(),
+            &mut published
+        )
+        .unwrap()
+    );
+    reply(&control, Message::Result(0, 1, true, b"{}".to_vec())).unwrap();
+    let (written, mut frames) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
+    });
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        infraternal_protocol::decode_muxed_frame(&first)
+            .unwrap()
+            .frame,
+        Frame::Event { .. }
+    ));
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        infraternal_protocol::decode_muxed_frame(&second)
+            .unwrap()
+            .frame,
+        Frame::Result {
+            call_id: 1,
+            ok: true,
+            ..
+        }
+    ));
+    drop((bulk, control));
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_saturated_census_queue_cannot_establish_the_open_fence() {
+    let (control, mut receiver) = mpsc::channel(1);
+    reply(&control, Message::Pong(1, 0)).unwrap();
+    let registry = crate::lifecycle::Registry::default();
+    let mut published = None;
+    assert!(!publish_session_snapshot(&control, &registry, &mut published).unwrap());
+    assert!(published.is_none());
+    receiver.recv().await.unwrap();
+    assert!(publish_session_snapshot(&control, &registry, &mut published).unwrap());
+    assert!(matches!(
+        receiver.recv().await.unwrap(),
+        Message::Event(0, _)
+    ));
 }

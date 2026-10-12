@@ -50,8 +50,13 @@ impl SshSession for UnsupportedHost {
         })
     }
 }
-struct ReadOnly;
+struct ReadOnly(AtomicUsize);
 impl Backend for ReadOnly {
+    fn record_failure(&self, _: &Target, host: Option<uuid::Uuid>, phase: Step, _: &Failure) {
+        assert!(host.is_none());
+        assert!(matches!(phase, Step::Check));
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
     fn resolve<'a>(
         &'a self,
         _: &'a Authority,
@@ -86,9 +91,10 @@ impl Backend for ReadOnly {
 }
 #[tokio::test]
 async fn unsupported_host_reports_method_and_retry_never_replays_it_as_current() {
+    let backend = Arc::new(ReadOnly(AtomicUsize::new(0)));
     let runner = Bootstrap::new(
         Arc::new(Transport(AtomicUsize::new(0))),
-        Arc::new(ReadOnly),
+        backend.clone(),
         BinaryPaths {
             x86_64: "unused".into(),
             aarch64: "unused".into(),
@@ -154,4 +160,9 @@ async fn unsupported_host_reports_method_and_retry_never_replays_it_as_current()
             );
         }
     }
+    assert_eq!(
+        backend.0.load(Ordering::SeqCst),
+        2,
+        "exactly one failure record per attempt"
+    );
 }

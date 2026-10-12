@@ -1,0 +1,9 @@
+Running as unit: run-p3089205-i7283104.scope; invocation ID: a47957f6e85b4e36830f968bf203e694
+$ bun x tsc --project tsconfig.json
+error TS2688: Cannot find type definition file for 'bun-types'.
+  The file is in the program because:
+    Entry point of type library 'bun-types' specified in compilerOptions
+error TS2688: Cannot find type definition file for 'node'.
+  The file is in the program because:
+    Entry point of type library 'node' specified in compilerOptions
+error: script "check" exited with code 1

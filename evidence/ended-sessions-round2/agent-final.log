@@ -1,0 +1,48 @@
+Running as unit: run-p3564108-i3564408.scope; invocation ID: 2a6c209040ae4000b27f3767825d2692
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.75s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/infraternal_agent-6314302bd17c9224)
+
+running 39 tests
+test daemon::gone_tests::scale_review::two_hundred_vanished_sessions_preserve_the_same_channel ... ignored, scale measurement; run alone under CPUWeight=10000
+test daemon::readiness_tests::reply_lane_memory_at_1000_channels ... ignored, queue-only scale diagnostic; run alone without build/browser overlap, not whole-daemon memory
+test daemon::readiness_tests::census_and_open_result_share_fifo_order ... ok
+test daemon::readiness_tests::control_precedes_bulk_without_reordering_snapshot_notice ... ok
+test daemon::readiness_tests::a_saturated_census_queue_cannot_establish_the_open_fence ... ok
+test daemon::session_commands::measurements::command_coordination_cost_against_existing_fifo ... ignored, release command coordination diagnostic, not end-to-end throughput; run without own build overlap
+test daemon::session_commands::tests::credit_allowance_does_not_cross_ordered_command_barriers ... ok
+test daemon::session_commands::tests::credit_bursts_do_not_consume_ordered_input_capacity ... ok
+test daemon::stream_memory_tests::terminal_stream_memory_at_200 ... ignored, weighted release measurement of 200 idle relay tasks
+test daemon::readiness_tests::uninstall_handoff_runs_only_after_a_successful_real_socket_write ... ok
+test relay::tests::input_overlap_gap_and_restart_from_confirmed_offset ... ok
+test relay::tests::output_partial_credit_and_dedup ... ok
+test lifecycle::tests::process_birth_parser_handles_command_bytes_and_numeric_bounds ... ok
+test daemon::session_commands::tests::input_and_resize_keep_their_shared_fifo_order_around_credit ... ok
+test lifecycle::tests::directory_inode_changes_do_not_retire_the_same_process ... ok
+test relay::tests::attachment_has_no_implicit_output_or_snapshot_credit ... ok
+test relay::tests::output_payload_move_measurement ... ignored, release ownership versus payload-copy measurement
+test relay::tests::overflowing_ranges_never_mutate_cursors ... ok
+test relay::tests::returned_credit_cancels_starvation_and_state_has_no_payload_buffer ... ok
+test relay::tests::starvation_is_one_shot_and_snapshot_length_does_not_advance_sequence ... ok
+test sessions::tests::reader_borrow_measurement ... ignored, release borrowed versus owned asynchronous receive measurement
+test relay::tests::positive_insufficient_credit_arms_a_one_shot_deadline ... ok
+test relay::tests::expired_credit_resumes_retained_bytes_at_the_same_cursor ... ok
+test sessions::tests::borrowed_reader_payload_uses_reusable_cancel_safe_storage ... ok
+test lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime ... ok
+test daemon::session_commands::tests::zero_credit_is_idle_and_overflow_refuses_without_mutating_accounting ... ok
+test sessions::tests::cancelled_fragmented_shim_read_retains_header_and_body_progress ... ok
+test daemon::session_commands::tests::credit_above_one_wire_word_is_exact_and_idle_after_drain ... ok
+test sessions::tests::refused_socket_is_removed_but_insecure_directory_is_rejected ... ok
+test sessions::tests::post_listen_chmod_wakes_a_connection_refused_at_bind ... ok
+test lifecycle::tests::window_ownership_and_process_identity_bound_live_counts ... ok
+test sessions::tests::symlink_state_cannot_redirect_private_runtime_storage ... ok
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... ok
+test sessions::tests::sequenced_attach_intersects_caps_and_legacy_attach_stays_zero ... ok
+test transport::remote_deadline_tests::remote_partial_frame_deadline_survives_receive_cancellation ... ok
+test transport::remote_deadline_tests::coalesced_partial_suffix_keeps_its_arrival_deadline ... ok
+test transport::remote_deadline_tests::wholly_idle_remote_channel_has_no_frame_expiry ... ok
+test transport::remote_deadline_tests::queued_suffix_cannot_complete_an_expired_cancelled_frame ... ok
+test sessions::tests::bounds::discovery_recovers_more_than_128_authenticated_sockets ... ok
+
+test result: ok. 33 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.24s
+

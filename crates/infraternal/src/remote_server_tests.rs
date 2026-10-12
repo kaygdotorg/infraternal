@@ -232,7 +232,13 @@ fn failed_restart_endpoint_does_not_prevent_http_serving() {
             let serving = tokio::spawn(serve(config, Options { remote_listen: None, remote_ca_dir: None }));
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                assert!(!serving.is_finished(), "Control::start failure must not prevent server startup");
+                if serving.is_finished() {
+                    let result = serving.await.expect("server task must not panic");
+                    match result {
+                        Err(error) => panic!("HTTP startup failed: {error}"),
+                        Ok(_) => panic!("Control::start failure must not prevent server startup"),
+                    }
+                }
                 if let Ok(mut stream) = tokio::net::TcpStream::connect(address).await {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();

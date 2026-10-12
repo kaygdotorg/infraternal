@@ -344,7 +344,9 @@ impl SshSession for Session {
             }
             // Authentication already succeeded. Never treat remote stderr or
             // a command's exit 255 as permission to try a different credential.
-            Err(classify(&result.stderr, false, MeshEvidence::default()))
+            let mut failure = classify(&result.stderr, false, MeshEvidence::default());
+            failure.exit_status = result.exit_status;
+            Err(failure)
         })
     }
 }

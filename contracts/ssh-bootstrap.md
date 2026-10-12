@@ -372,3 +372,14 @@ fallback to the adjacent locally built architecture payload. Offline, TLS,
 missing payload, wrong-version and signature failures never enable fallback.
 Existing path-based installation adapters remain available through `BinaryPaths`;
 the default server supplies the verified source through the same SSH plugin.
+
+## Classified attempt failures (#169)
+
+Failure adds optional `exit_status` from the authenticated command process (a
+signal or unavailable status omits it). Fixed installer codes 71 and 72 retain
+`failed_step` and identify the approved root/rootless directory with ownership
+or lock/rollback guidance. Other failures name the command boundary and next
+check. Arbitrary stdout/stderr remains withheld. One server log line per failed
+attempt contains only host UUID (unassigned before issuance), target id, step,
+exit status and static mode; cleanup warnings do not replace the original phase.
+The existing dialog Details disclosure shows the trusted failed-step label.

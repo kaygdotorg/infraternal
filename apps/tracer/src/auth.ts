@@ -77,6 +77,20 @@ export async function checkSession(): Promise<AuthSession | undefined> {
   }
 }
 
+/**
+ * Ends this device's session on the server, which also drops its sockets. A session the server no longer knows (401) is
+ * already signed out, so it counts as done; any other failure is thrown, because the cookie would still be valid and
+ * a reload would sign the person straight back in.
+ */
+export async function logout(): Promise<void> {
+  try {
+    await post<void>("logout", {});
+  } catch (error: unknown) {
+    if (error instanceof AuthError && error.status === 401) return;
+    throw error;
+  }
+}
+
 /** Creates the owner, pauses for recovery-key acknowledgement, then commits both wraps. */
 export async function registerOwner(
   token: string,

@@ -1,0 +1,23 @@
+bun test v1.4.2 (744846f84)
+
+src/canvas/sessions/live-inventory.test.ts:
+92 |   // Neither snapshot describes a window ever opened here. Replacing a bounded
+93 |   // sidecar must not accumulate inaccessible history in the device inventory.
+94 |   inventory.reconcile("server", [], earlier);
+95 |   inventory.reconcile("server", [], current);
+96 |   const retained = [...earlier, ...current].filter(({ id }) => inventory.get("server", id));
+97 |   expect(retained.length).toBeLessThanOrEqual(128);
+                               ^
+error: expect(received).toBeLessThanOrEqual(expected)
+
+Expected: <= 128
+Received: 256
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/apps/tracer/src/canvas/sessions/live-inventory.test.ts:97:27)
+(fail) superseded status snapshots release records for sessions this device never opened [154.77ms]
+
+ 0 pass
+ 3 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [211.00ms]

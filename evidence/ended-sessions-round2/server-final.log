@@ -1,0 +1,16 @@
+Running as unit: run-p3565156-i3565456.scope; invocation ID: c53b75ac02264c0b9ea4fa11951ba59b
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-server)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 09s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/infraternal_server-f3b5ce2272ed86ee)
+
+running 6 tests
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ignored, independent scale diagnostic; run in a weighted scope
+test websocket::session_inventory_tests::census_waiting_for_database_does_not_close_a_newly_created_live_session ... ok
+test websocket::session_inventory_tests::restart_reconciliation_keeps_live_rows_and_closes_missing_rows ... ok
+test websocket::session_inventory_tests::pending_agent_inventory_hides_cached_rows_until_the_first_census ... ok
+test websocket::session_inventory_tests::reconciliation_before_saved_exit_keeps_the_authoritative_exit_status ... ok
+test websocket::session_inventory_tests::available_snapshot_reports_live_rows_and_bounded_saved_exit_statuses ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 198 filtered out; finished in 0.22s
+

@@ -1,0 +1,309 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p3638106-i7832004.scope; invocation ID: a00acf0b658a4dc6a638251fcc8b9f49
+   Compiling getrandom v0.4.3
+   Compiling uuid v1.27.0
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-4/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-4/crates/infraternal-agent)
+   Compiling webauthn-rs-core v0.5.5
+   Compiling webauthn-rs v0.5.5
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-prod-4/crates/infraternal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 48s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/infraternal_server-5f7fe06a04ecf3f6)
+
+running 1 test
+test auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap ... fresh_session=denied; mesh.node.delete ok=false, result={"error":"confirm with your passkey again"}; remaining_nodes=1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 206 filtered out; finished in 1.44s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.74s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/infraternal_agent-578584f18a1865a3)
+
+running 49 tests
+test daemon::census_retry_tests::full_control_lane_retries_retirement_census_on_capacity_without_requests ... ok
+test daemon::gone_tests::a_vanished_session_gets_a_final_close_and_the_channel_stays_up ... ok
+test daemon::gone_tests::scale_review::two_hundred_vanished_sessions_preserve_the_same_channel ... ignored, scale measurement; run alone under CPUWeight=10000
+test daemon::readiness_tests::a_saturated_census_queue_cannot_establish_the_open_fence ... ok
+test daemon::readiness_tests::census_and_open_result_share_fifo_order ... ok
+test daemon::readiness_tests::control_precedes_bulk_without_reordering_snapshot_notice ... ok
+test daemon::readiness_tests::fixture_fence_processes_messages_before_the_control_pong ... ok
+test daemon::readiness_tests::replay_complete_preserves_the_full_output_cursor_as_decimal ... ok
+test daemon::readiness_tests::replay_prefix_stops_at_the_shim_hello_head ... ok
+test daemon::readiness_tests::reply_lane_memory_at_1000_channels ... ignored, queue-only scale diagnostic; run alone without build/browser overlap, not whole-daemon memory
+test daemon::readiness_tests::uninstall_handoff_runs_only_after_a_successful_real_socket_write ... ok
+test daemon::session_commands::measurements::command_coordination_cost_against_existing_fifo ... ignored, release command coordination diagnostic, not end-to-end throughput; run without own build overlap
+test daemon::session_commands::tests::credit_above_one_wire_word_is_exact_and_idle_after_drain ... ok
+test daemon::session_commands::tests::credit_allowance_does_not_cross_ordered_command_barriers ... ok
+test daemon::session_commands::tests::credit_bursts_do_not_consume_ordered_input_capacity ... ok
+test daemon::session_commands::tests::input_and_resize_keep_their_shared_fifo_order_around_credit ... ok
+test daemon::session_commands::tests::zero_credit_is_idle_and_overflow_refuses_without_mutating_accounting ... ok
+test daemon::stream_memory_tests::terminal_stream_memory_at_200 ... ignored, weighted release measurement of 200 idle relay tasks
+test lifecycle::tests::directory_inode_changes_do_not_retire_the_same_process ... ok
+test lifecycle::tests::nondumpable_process_keeps_its_authenticated_lifetime ... ok
+test lifecycle::tests::process_birth_parser_handles_command_bytes_and_numeric_bounds ... ok
+test lifecycle::tests::window_ownership_and_process_identity_bound_live_counts ... ok
+test process_exits::platform::tests::resource_failures_do_not_silently_disable_exit_tracking ... ok
+test process_exits::platform::tests::unavailable_kernel_has_no_timer_or_descriptor ... ok
+test process_exits_tests::exited_before_registration_is_not_a_live_registration ... ok
+test process_exits_tests::process_descriptor_is_cloexec_and_rejects_invalid_pid ... ok
+test process_exits_tests::shared_exit_queue_at_200_processes ... ignored, 200 live process lifetimes; run in a weighted benchmark scope
+test process_exits_tests::shared_queue_detects_exit_and_does_not_repeat_or_retain_descriptors ... ok
+test relay::tests::attachment_has_no_implicit_output_or_snapshot_credit ... ok
+test relay::tests::expired_credit_resumes_retained_bytes_at_the_same_cursor ... ok
+test relay::tests::input_overlap_gap_and_restart_from_confirmed_offset ... ok
+test relay::tests::output_partial_credit_and_dedup ... ok
+test relay::tests::output_payload_move_measurement ... ignored, release ownership versus payload-copy measurement
+test relay::tests::overflowing_ranges_never_mutate_cursors ... ok
+test relay::tests::positive_insufficient_credit_arms_a_one_shot_deadline ... ok
+test relay::tests::returned_credit_cancels_starvation_and_state_has_no_payload_buffer ... ok
+test relay::tests::starvation_is_one_shot_and_snapshot_length_does_not_advance_sequence ... ok
+test sessions::tests::borrowed_reader_payload_uses_reusable_cancel_safe_storage ... ok
+test sessions::tests::bounds::discovery_recovers_more_than_128_authenticated_sockets ... ok
+test sessions::tests::cancelled_fragmented_shim_read_retains_header_and_body_progress ... ok
+test sessions::tests::post_listen_chmod_wakes_a_connection_refused_at_bind ... ok
+test sessions::tests::reader_borrow_measurement ... ignored, release borrowed versus owned asynchronous receive measurement
+test sessions::tests::refused_socket_is_removed_but_insecure_directory_is_rejected ... ok
+test sessions::tests::sequenced_attach_intersects_caps_and_legacy_attach_stays_zero ... ok
+test sessions::tests::symlink_state_cannot_redirect_private_runtime_storage ... ok
+test transport::remote_deadline_tests::coalesced_partial_suffix_keeps_its_arrival_deadline ... ok
+test transport::remote_deadline_tests::queued_suffix_cannot_complete_an_expired_cancelled_frame ... ok
+test transport::remote_deadline_tests::remote_partial_frame_deadline_survives_receive_cancellation ... ok
+test transport::remote_deadline_tests::wholly_idle_remote_channel_has_no_frame_expiry ... ok
+
+test result: ok. 42 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+     Running tests/transport.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/transport-6ab2109c465c96d7)
+
+running 2 tests
+test fragmented_headers_coalesced_frames_and_reusable_transmit ... ok
+test oversized_header_and_truncated_frame_are_rejected ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/infraternal_server-f9417bc037862ea0)
+
+running 207 tests
+test auth::cookies::measurement::cookie_latency_at_50_sessions ... ignored, local optimized cookie reader measurement at 50 browser sessions
+test auth::cookies::tests::duplicates_missing_invalid_and_nontext_fail_closed ... ok
+test auth::cookies::tests::joined_split_reordered_and_other_cookies ... ok
+test auth::crypto::verifier_tests::browser_secret_hashing_is_canonical_and_bounded ... ok
+test auth::crypto::verifier_tests::fixture_waits_while_production_hashing_refuses_capacity ... ok
+test auth::crypto::verifier_tests::recovery_capacity_denial_is_not_a_legacy_credential_signal ... ok
+test auth::http::hostname_tests::authenticated_session_response_includes_system_hostname ... ok
+test auth::http::tests::admission_partitions_reset_without_trusting_forwarded_headers ... ok
+test auth::tests::aaguid_migration_preserves_legacy_credentials_and_sessions ... ok
+test auth::tests::aaguid_projection_rejects_malformed_cbor_corpus ... ok
+test auth::tests::account_identity_migration_backfills_legacy_users ... ok
+test auth::tests::account_identity_schema_has_unique_usernames_and_display_names ... ok
+test auth::tests::audit_ceremony_browser_binding ... ok
+test auth::tests::audit_logout_survives_admission_exhaustion ... ok
+test auth::tests::audit_no_public_credential_listing ... ok
+test auth::tests::audit_recovery_after_page_discard_can_resume_at_original_deadline ... ok
+test auth::tests::audit_recovery_pending_is_visible_to_signed_in_device ... ok
+test auth::tests::audit_recovery_session_expiring_during_verification_keeps_delay ... ok
+test auth::tests::authenticated_prf_metadata_preserves_legacy_envelopes ... ok
+test auth::tests::ceremony_prf_wraps_and_optional_second_passkey ... ok
+test auth::tests::concurrent_owner_and_optional_passkey_enrollment_fail_closed ... ok
+test auth::tests::discoverable_latency_at_pending_capacity ... ignored, run --release --ignored --nocapture without concurrent builds
+test auth::tests::discoverable_login_handle_credential_counter_and_replay ... ok
+test auth::tests::enrollment_prf_input_matches_discoverable_login ... ok
+test auth::tests::host_facts_review_tests::pending_host_facts_read_keeps_control_ping_responsive ... ok
+test auth::tests::http_csrf_cookie_flags_body_limit_and_latency_evidence ... ok
+test auth::tests::pending_unlock_expires_without_terminal_authority ... ok
+test auth::tests::provider_labels_cover_the_cited_registry_without_guessing ... ok
+test auth::tests::provider_session_latency_at_50_devices ... ignored, local auth session scale measurement; run without concurrent builds
+test auth::tests::public_status_and_discoverable_http_login ... ok
+test auth::tests::recovery_audit_commits_once_with_start_cancel_and_complete ... ok
+test auth::tests::recovery_delay_cancel_and_replacement_revokes_every_capability ... ok
+test auth::tests::recovery_expiry_revocation_and_cross_user_isolation ... ok
+test auth::tests::recovery_http_live_same_account_is_immediate ... ok
+test auth::tests::recovery_http_other_expired_pending_and_missing_sessions_wait ... ok
+test auth::tests::recovery_live_session_cannot_accelerate_an_active_delayed_request ... ok
+test auth::tests::recovery_live_session_revoked_during_verification_cannot_waive_delay ... ok
+test auth::tests::recovery_session_delay_latency_at_capacity ... ignored, release-only recovery measurement at 50 live sessions; run without concurrent compilation
+test auth::tests::recovery_unknown_identity_pays_the_same_database_and_verifier_work ... ok
+test auth::tests::recovery_username_identity_is_additive_and_ambiguous_forms_fail ... ok
+test auth::tests::recovery_verifier_latency_at_capacity ... ignored, release-only v2 diagnostic at 50 live session rows; record host load separately
+test auth::tests::redacted_unknown_and_failed_registrations_do_not_claim_a_provider ... ok
+test auth::tests::registration_aaguid_survives_none_attestation_and_binds_session_provider ... ok
+test auth::tests::rejected_origin_uv_challenge_signature_prf_and_expired_ceremonies ... ok
+test auth::tests::review3_tests::review3_backend_reply_has_a_deadline ... ok
+test auth::tests::review3_tests::review3_busy_expiry ... ok
+test auth::tests::review3_tests::review3_busy_logout ... ok
+test auth::tests::review3_tests::review3_busy_recovery ... ok
+test auth::tests::review3_tests::review3_completion_and_cleanup_are_transaction_bound ... ok
+test auth::tests::review3_tests::review3_expired_handshake_must_not_welcome ... ok
+test auth::tests::review3_tests::review3_identified_privacy_timing_and_binding_replays ... ok
+test auth::tests::review3_tests::review3_pending_routes_and_idle_expiry_recovery ... ok
+test auth::tests::review3_tests::review3_revoked_handshake_must_not_welcome ... ok
+test auth::tests::review3_tests::review3_revoked_resume_must_not_welcome ... ok
+test auth::tests::review3_tests::review3_unwrap_cannot_be_skipped ... ok
+test auth::tests::review3_tests::review3_waiting_handshake_loses_authority ... ok
+test auth::tests::review3_tests::review4_open_reply_and_revocation_preserve_authority ... ok
+test auth::tests::review3_tests::review4_slow_open_at_user_capacity ... ignored, release-only connect scale measurement; run without concurrent builds
+test auth::tests::review_invalid_device_polling_exhausts_browser_budget ... ok
+test auth::tests::review_old_words_race_rotation ... ok
+test auth::tests::reviewer_tests::reviewer_disk_cancel_complete_races ... ok
+test auth::tests::reviewer_tests::reviewer_disk_restart_and_concurrent_resume ... ok
+test auth::tests::reviewer_tests::reviewer_http_denials_and_recovery_admission ... ok
+test auth::tests::reviewer_tests::reviewer_http_expired_capability_cannot_complete_after_writer_wait ... ok
+test auth::tests::reviewer_tests::reviewer_http_expired_ceremony_cannot_complete_after_writer_wait ... ok
+test auth::tests::reviewer_tests::reviewer_server_clock_rollback_retains_deadline_and_reports_more_than_day ... ok
+test auth::tests::rotation_tests::recovery_phrase_routes_are_removed_and_words_fail_closed ... ok
+test auth::tests::rotation_tests::recovery_rotation_cannot_follow_a_cookie_account_switch ... ok
+test auth::tests::rotation_tests::recovery_rotation_denies_pending_expired_and_stale_sessions ... ok
+test auth::tests::rotation_tests::recovery_rotation_requires_session_and_replaces_legacy_envelope ... ok
+test auth::tests::rotation_tests::reviewer_concurrent_signed_in_rotations_commit_once ... ok
+test auth::tests::server_setup_terminal_echo_and_resume_preserve_offsets_once ... FAILED
+test auth::tests::sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped ... ok
+test auth::tests::setup_check_is_non_consuming_and_closes_after_owner_creation ... ok
+test auth::tests::setup_identity_validation_and_uniqueness ... ok
+test auth::tests::setup_restart_rotation_expiry_and_parallel_redemption ... ok
+test auth::tests::setup_start_accepts_username_and_display_name ... ok
+test auth::tests::socket_tests::authenticated_idle_socket_survives_the_former_read_timeout ... ok
+test auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit ... ok
+test auth::tests::socket_tests::clean_control_close_is_not_an_internal_error ... ok
+test auth::tests::socket_tests::expired_handshake_releases_user_permits ... ok
+test auth::tests::socket_tests::fragmented_wire_frame_has_a_completion_deadline ... ok
+test auth::tests::socket_tests::fresh_delete::review_mesh_delete_requires_fresh_passkey_tap ... ok
+test auth::tests::socket_tests::half_open_sockets_obey_user_limit ... ok
+test auth::tests::socket_tests::incomplete_rfc_message_still_loses_authority_on_revocation ... ok
+test auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory ... ok
+test auth::tests::socket_tests::mesh_latency::mesh_snapshot_keystroke_latency_at_10000_nodes ... ignored, weighted real-binary 300 ms Mesh/PTY measurement
+test auth::tests::socket_tests::non_owner_without_host_configure_permission_is_refused_before_leg_b ... ok
+test auth::tests::socket_tests::plugin_lifecycle::disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_coordinator_requires_an_existing_server_role ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_destructive_metadata_matches_frozen_confirmation_requirements ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_lifecycle_withdrawals_survive_calls_but_never_end_a_replacement ... ok
+test auth::tests::socket_tests::plugin_lifecycle::mesh_plugin_discovery_disable_and_restart_preserve_control_socket ... ok
+test auth::tests::socket_tests::recovery_subscription_updates_every_signed_in_socket ... ok
+test auth::tests::socket_tests::review_control::pending_mesh_writers_preserve_authority_pool_capacity ... ok
+test auth::tests::socket_tests::review_control::review_pending_mesh_write_keeps_control_dispatch_available ... ok
+test auth::tests::socket_tests::review_fresh_wait::review_mesh_delete_refused_when_freshness_expires_during_writer_wait ... ok
+test auth::tests::socket_tests::review_liveness::review_mesh_watch_reports_liveness_expiry_without_another_edit ... ok
+test auth::tests::socket_tests::review_subscription_refusal::oversized_refusal_cannot_reinstall_a_queued_mesh_subscription ... ok
+test auth::tests::socket_tests::review_subscription_refusal::review_oversized_replacement_ends_the_previous_mesh_subscription ... ok
+test auth::tests::socket_tests::review_subscription_refusal::saturated_refusal_cannot_reinstall_a_queued_mesh_subscription ... ok
+test auth::tests::socket_tests::revoked_idle_socket_loses_all_authority ... ok
+test auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket ... ok
+test auth::tests::socket_tests::session_gone::an_ended_or_unknown_session_gets_the_final_close_without_losing_the_socket ... ok
+test auth::tests::socket_tests::session_gone::the_infraternal_agent_saying_gone_reaches_the_browser_as_the_final_close ... ok
+test auth::tests::socket_tests::socket_authority_latency_at_user_capacity ... ignored, release-only measurement without concurrent compilation
+test auth::tests::socket_tests::terminal_exit::retired_exit_preserves_status_without_claiming_final_output_delivery ... ok
+test auth::tests::socket_tests::terminal_exit::terminal_exit_persists_once_under_current_ownership_and_session ... ok
+test auth::tests::stale_counters_recovery_cancellation_and_wrap_tampering ... ok
+test auth::tests::terminal_refusal_tests::memory_refusal_preserves_reason_and_counters_to_browser ... ok
+test auth::tests::tls_tests::proxy_tls_registration_session_split_cookies ... ok
+test auth::tests::tls_tests::standalone_tls_registration_session_split_cookies ... ok
+test auth::tests::verified_passkey_tests::canceled_proof_before_writer_admission_leaves_no_new_session_or_pending_ceremony ... ok
+test auth::tests::verified_passkey_tests::proof_only_ceremony_expiring_during_writer_wait_cannot_commit_a_counter_or_session ... ok
+test auth::tests::verified_passkey_tests::proof_only_verification_preserves_monotone_registered_credential_counter ... ok
+test auth::tests::verified_passkey_tests::proof_only_verification_refuses_missing_uv_or_deleted_credential ... ok
+test auth::tests::verified_passkey_tests::verified_passkey_has_live_registered_identity_and_creates_no_session ... ok
+test bootstrap_api::tests::a_client_request_during_a_pending_confirmation_keeps_the_batch ... ok
+test bootstrap_api::tests::admission_stream_is_ordered_and_logout_retires_an_idle_socket ... ok
+test bootstrap_api::tests::component_off_interrupts_a_stalled_host_key_confirmation_lookup ... ok
+test bootstrap_api::tests::component_off_interrupts_a_stalled_progress_send ... ok
+test bootstrap_api::tests::component_off_retires_idle_sockets_and_refuses_new_admission ... ok
+test bootstrap_api::tests::control_frames_do_not_cancel_bootstrap_or_starve_progress ... ok
+test bootstrap_api::tests::host_key_confirmation_rechecks_the_exact_live_owner_capability ... ok
+test bootstrap_api::tests::logout_interrupts_a_stalled_host_key_confirmation_lookup ... ok
+test bootstrap_api::tests::origin_owner_unlock_and_whole_request_consent_are_required ... ok
+test bootstrap_api::tests::revocation_interrupts_a_stalled_progress_send ... ok
+test bootstrap_api::tests::settings_public_key_requires_exact_origin_and_live_unlocked_owner ... ok
+test bootstrap_api::tests::split_cookie_fields_preserve_bootstrap_owner_authority ... ok
+test bootstrap_runtime::failure_log_tests::one_line_contains_only_classified_public_coordinates ... ok
+test bootstrap_runtime::key_authority_tests::key_export_rechecks_role_session_and_cold_lock ... ok
+test bootstrap_runtime::tests::pending_integration_refuses_enrollment_vault_and_discovery ... ok
+test embedded::exit_latency_tests::shim_sigkill_to_server_inventory_latency ... ignored, real daemon artifact and 200 shim exits; run with INFRATERNAL_BIN in a weighted scope
+test embedded::regressions::agent_link_loss_invalidates_the_last_live_session_snapshot ... ok
+test embedded::regressions::child_spawn_disposes_inherited_stdin ... ok
+test embedded::regressions::credited_bulk_output_survives_forwarder_io_pause ... ok
+test embedded::regressions::credited_output_queue_at_stream_capacity ... ignored, debug actor memory/scheduling measurement; run without concurrent builds
+test embedded::regressions::full_output_queue_must_not_block_shared_actor ... ok
+test embedded::regressions::healthy_receiver_survives_ready_native_output_burst ... ok
+test embedded::regressions::healthy_streams_progress_at_user_attachment_capacity ... ok
+test embedded::regressions::output_and_snapshot_spend_remaining_restart_credit ... ok
+test embedded::regressions::real_agent_canonical_uuid_result_is_accepted ... ok
+test embedded::regressions::real_agent_open_uses_uid_and_character_dimensions ... ok
+test embedded::regressions::reattach_must_restore_output_credit ... ok
+test embedded::regressions::recovery_event_then_snapshot_keeps_embedded_connection_live ... ok
+test embedded::regressions::recovery_notices_preserve_order_credit_and_session_isolation ... ok
+test embedded::regressions::replay_complete_notice_is_accepted_by_embedded_server ... ok
+test embedded::regressions::server_reload_mask_is_not_inherited_by_embedded_children ... ok
+test embedded::regressions::stream_close_must_not_restart_all_sessions ... ok
+test embedded::regressions::uncredited_output_or_repaint_is_rejected_before_queueing ... ok
+test embedded::regressions::unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound ... ok
+test mesh_api_tests::claude_review::claude_review_late_committing_observation_does_not_rewind_last_seen ... ok
+test mesh_api_tests::claude_review::claude_review_scoped_grant_cannot_target_node_in_unscoped_tag ... ok
+test mesh_api_tests::concurrent_tag_edits_serialize_revisions_and_unique_names ... ok
+test mesh_api_tests::identity::identity_migration_preserves_inventory_and_retired_audit_ids ... ok
+test mesh_api_tests::identity::retired_identity_survives_database_reopen_and_exhaustion_is_atomic ... ok
+test mesh_api_tests::identity::review_deleted_node_identity_is_not_reused ... ok
+test mesh_api_tests::invalidation::filtered_view_invalidations_follow_every_affected_host_tag ... ok
+test mesh_api_tests::invalidation::review_membership_change_notifies_other_visible_tag ... ok
+test mesh_api_tests::inventory_lifecycle_preserves_policy_identity_and_audits_every_edit ... ok
+test mesh_api_tests::membership::review_scoped_membership_cannot_claim_hidden_node ... ok
+test mesh_api_tests::membership::scoped_membership_checks_pre_edit_host_scope ... ok
+test mesh_api_tests::mesh_api_scale_benchmark ... ignored, scale measurement; run on infraternal-dev under the weighted user scope
+test mesh_api_tests::pagination::an_unsendable_object_returns_a_sanitized_service_error ... ok
+test mesh_api_tests::pagination::continuation_restarts_on_change_and_rechecks_permissions ... ok
+test mesh_api_tests::parser_rejects_unknown_fields_user_endpoints_and_invalid_bounds ... ok
+test mesh_api_tests::review_filtered::review_global_viewers_do_not_refresh_unrelated_filtered_inventory ... ok
+test mesh_api_tests::review_frame_budget::review_mesh_design_point_frames_fit_shared_socket_budget ... ok
+test mesh_api_tests::review_null_policy::review_null_port_policy_does_not_create_unrestricted_grant ... ok
+test mesh_api_tests::review_null_scope::review_null_role_scopes_preserve_denied_inventory_access ... ok
+test mesh_api_tests::scoped_grant_role_filters_inventory_and_cannot_cross_tags ... ok
+test mesh_api_tests::shared_mesh_vectors_cover_each_production_action_and_wire_shape ... ok
+test mesh_api_tests::watch_deadline::watch_deadline_matches_complete_filtered_snapshots ... ok
+test mesh_api_tests::watch_deadline::watch_deadline_scale_benchmark ... ignored, weighted local scale measurement; run optimized without concurrent compilation
+test runtime::key_runtime_tests::configured_startup_generates_once_and_settings_shares_its_cold_lock ... ok
+test runtime::reviewer_admission::reviewer_recovery_source_limit_covers_all_routes_without_forwarding_bypass ... ok
+test runtime::tests::production_router_exposes_bootstrap_owner_admission ... ok
+test runtime::tests::proxy_mode_requires_an_explicit_peer_allowlist ... ok
+test runtime::tests::proxy_networks_match_only_their_address_family_and_prefix ... ok
+test runtime::tests::restart_serves_fresh_setup_token_and_completes_owner_enrollment ... ok
+test runtime::tests::router_migrates_private_storage_and_serves_health ... ok
+test runtime::tests::setup_socket_cleanup_preserves_symlinks_and_regular_files ... ok
+test runtime::tests::setup_token_socket_is_private_and_requires_explicit_request ... ok
+test runtime::tests::startup_with_owner_unlinks_stale_setup_token_socket ... ok
+test server_tls::tests::standalone_https_disables_nagle_before_application_bytes ... ok
+test ssh_key::tests::concurrent_initialization_retains_one_identity_and_unwrap_cannot_replace_it ... ok
+test ssh_key::tests::first_start_is_wrapped_once_and_every_cold_start_is_locked ... ok
+test ssh_key::tests::lock_during_administrator_unwrap_cannot_reinstall_private_material ... ok
+test ssh_key::tests::lock_generation_exhaustion_never_wraps_into_an_unlocked_source ... ok
+test ssh_key::tests::malformed_existing_storage_is_refused_without_generating_a_replacement ... ok
+test ssh_key::tests::material_refuses_invalid_pem_and_non_ed25519_algorithms ... ok
+test ssh_key::tests::unavailable_or_empty_custody_publishes_no_key ... ok
+test ssh_key::tests::update_handoff_preserves_unlocked_identity_but_cold_restart_does_not ... ok
+test web_assets::tests::encodings_and_identity_have_correct_headers_and_sizes ... ok
+test web_assets::tests::spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip ... ok
+test websocket::cookie_tests::duplicate_cookie_fields_deny_socket_session ... ok
+test websocket::cookie_tests::split_cookie_fields_preserve_socket_session ... ok
+test websocket::recovery_notification_bench::recovery_notification_state_at_socket_capacity ... ignored, notification state sizing diagnostic, not allocator-inclusive RSS certification
+test websocket::session_inventory_tests::available_snapshot_reports_live_rows_and_bounded_saved_exit_statuses ... ok
+test websocket::session_inventory_tests::census_waiting_for_database_does_not_close_a_newly_created_live_session ... ok
+test websocket::session_inventory_tests::inventory_reconciliation_at_200_sessions_and_50_accounts ... ignored, independent scale diagnostic; run in a weighted scope
+test websocket::session_inventory_tests::pending_agent_inventory_hides_cached_rows_until_the_first_census ... ok
+test websocket::session_inventory_tests::reconciliation_before_saved_exit_keeps_the_authoritative_exit_status ... ok
+test websocket::session_inventory_tests::restart_reconciliation_keeps_live_rows_and_closes_missing_rows ... ok
+test websocket::writer_tests::second_device_does_not_inherit_first_device_input_ack ... ok
+test websocket::writer_tests::writer_admission_at_user_capacity ... ignored, release-only scale measurement; run without concurrent builds
+test websocket::writer_tests::writer_ownership_capacity_unsigned_offsets_and_identity_reuse ... ok
+
+failures:
+
+---- auth::tests::server_setup_terminal_echo_and_resume_preserve_offsets_once stdout ----
+
+thread 'auth::tests::server_setup_terminal_echo_and_resume_preserve_offsets_once' (3693979) panicked at crates/infraternal-server/src/auth/tests.rs:1731:17:
+server closed websocket unexpectedly: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    auth::tests::server_setup_terminal_echo_and_resume_preserve_offsets_once
+
+test result: FAILED. 191 passed; 1 failed; 15 ignored; 0 measured; 0 filtered out; finished in 451.91s
+
+error: test failed, to rerun pass `-p infraternal-server --lib`

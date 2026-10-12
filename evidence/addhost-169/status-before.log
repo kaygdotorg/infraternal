@@ -1,0 +1,21 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.35s
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/addhost-fixes/target/debug/deps/install-0f36f33fa55ec148)
+
+running 1 test
+
+thread 'foreign_data_refusal_retains_exit_status_and_actionable_directory' (490957) panicked at crates/plugins/ssh/tests/install.rs:868:5:
+assertion `left == right` failed
+  left: Null
+ right: 71
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test foreign_data_refusal_retains_exit_status_and_actionable_directory ... FAILED
+
+failures:
+
+failures:
+    foreign_data_refusal_retains_exit_status_and_actionable_directory
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test install`

@@ -75,6 +75,8 @@ enum Message {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
+    #[serde(default)]
+    readiness: bool,
     uid: u32,
     cols: u16,
     rows: u16,
@@ -242,6 +244,35 @@ async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
         .map_err(|_| io::ErrorKind::BrokenPipe.into())
 }
 
+/// Publishes the authoritative live-shim set without ever parking terminal dispatch on a slow writer.
+/// True establishes the ordered open fence; false leaves the census pending for retry.
+fn publish_session_snapshot(
+    tx: &mpsc::Sender<Message>,
+    registry: &crate::lifecycle::Registry,
+    published: &mut Option<Vec<[u8; 16]>>,
+) -> io::Result<bool> {
+    let session_ids = registry.session_ids();
+    if published.as_ref() == Some(&session_ids) {
+        return Ok(true);
+    }
+    let ids: Vec<String> = session_ids
+        .iter()
+        .map(|id| uuid::Uuid::from_bytes(*id).to_string())
+        .collect();
+    let json = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.sessions.snapshot",
+        "session_ids": ids,
+    }))?;
+    match tx.try_send(Message::Event(0, json)) {
+        Ok(()) => *published = Some(session_ids),
+        Err(mpsc::error::TrySendError::Full(_)) => return Ok(false),
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+    }
+    Ok(true)
+}
+
 /// Run until the trusted server closes its inherited channel.
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
@@ -378,6 +409,9 @@ async fn run_channel(
     let (tx, rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
     let dispatch = async {
+        let mut published_sessions = None;
+        let mut census_pending =
+            !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
         let mut receive = Receive::default();
         if execution_uid.is_some() {
             // The whole greeting has one deadline, including an entirely silent
@@ -402,7 +436,22 @@ async fn run_channel(
         )> = JoinSet::new();
         loop {
             tokio::select! {
-                changed = retirements.changed() => { changed?; registry.refresh(); }
+                changed = retirements.changed() => {
+                    changed?;
+                    registry.refresh();
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                }
+                exited = registry.changed() => {
+                    registry.exited(&exited?);
+                    registry.refresh();
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                }
+                capacity = control.reserve(), if census_pending => {
+                    // A full queue keeps the latest census pending. Capacity is
+                    // the only retry wakeup; idle channels have no scheduled work.
+                    drop(capacity.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?);
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                }
                 result=results.recv()=> {
                     let (call_id,result)=result.ok_or_else(||sessions::invalid("plugin worker stopped"))?;
                     match result {
@@ -428,6 +477,8 @@ async fn run_channel(
                             reply(&control, Message::Close(stream, "terminal shim disconnected"))?;
                         }
                     }
+                    registry.refresh();
+                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
                 result = renewals.join_next(), if !renewals.is_empty() => {
                     let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
@@ -440,6 +491,13 @@ async fn run_channel(
                         Ok(session) => {
                             let json = serde_json::to_vec(&serde_json::json!({"session_id": uuid::Uuid::from_bytes(session.id)}))?;
                             registry.insert(&session)?;
+                            // The new-ID census must enter the same FIFO before its Result.
+                            // A full queue cannot publish success without this fence, even
+                            // if the writer drains capacity between these two try_sends.
+                            if !publish_session_snapshot(&control, &registry, &mut published_sessions)? {
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, "census reply queue full"));
+                            }
+                            census_pending = false;
                             reply(&control, Message::Result(stream, call_id, true, json))?;
                         }
                         Err(reason) => reply(&control, Message::Result(stream, call_id, false, reason.json()?))?,
@@ -467,6 +525,7 @@ async fn run_channel(
                         Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
                             use infraternal_plugin_api::admission::OpenRefusal;
                             registry.refresh();
+                            census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                             let input = if input_json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON { serde_json::from_slice::<Open>(input_json).ok() } else { None };
                             if let Some(input) = input && execution_uid.is_none_or(|uid| input.uid == uid)
                                 && (nix::unistd::Uid::effective().is_root() || input.uid == nix::unistd::Uid::effective().as_raw())
@@ -478,7 +537,7 @@ async fn run_channel(
                                 opens.spawn(async move {
                                     let result = async {
                                         plugins.admit("terminal.open", context).await?;
-                                        sessions::launch(&exe, &state, manager, input.uid, input.cols, input.rows).await.map_err(|error| match error.kind() {
+                                        sessions::launch_with_readiness(&exe, &state, manager, input.uid, input.cols, input.rows, input.readiness).await.map_err(|error| match error.kind() {
                                             io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
                                             _ => OpenRefusal::ResourceUnavailable,
                                         })
@@ -491,6 +550,7 @@ async fn run_channel(
                         }
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
                             registry.refresh();
+                            census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                             if input_json.len()>infraternal_plugin_api::MAX_ACTION_BYTES || action_id.len()>128 || worker.sender.try_send(crate::plugin_control::Request {call_id,action:action_id.to_owned(),input:input_json.to_vec(),context:registry.context()}).is_err() {
                                 reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?;
                             }
@@ -522,7 +582,12 @@ async fn run_channel(
                                 Frame::Input {in_seq, bytes} => Command::Input(in_seq, bytes.to_vec()),
                                 Frame::Credit {bytes} => Command::Credit(bytes),
                                 Frame::Resize {cols, rows, px_w, px_h} => Command::Resize(cols, rows, px_w, px_h),
-                                Frame::Close {..} => { streams.remove(&stream); continue; }
+                                Frame::Close {..} => {
+                                    streams.remove(&stream);
+                                    registry.refresh();
+                                    census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
+                                    continue;
+                                }
                                 _ => return Err(sessions::invalid("unexpected leg-B request")),
                             };
                             // Never await a session's capacity in shared dispatch.
@@ -699,6 +764,29 @@ async fn input_state(link: &mut Link) -> io::Result<u64> {
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim input state timed out"))?
 }
 
+/// Limits one affordable raw suffix so a shim frame cannot cross the replay boundary.
+fn replay_prefix_len(cursor: u64, available: usize, fence: Option<u64>) -> usize {
+    let Some(fence) = fence else {
+        return available;
+    };
+    usize::try_from(fence.saturating_sub(cursor)).map_or(available, |length| available.min(length))
+}
+
+/// Sends the ordered end of bytes present when this shim link was opened.
+async fn replay_complete(
+    tx: &mpsc::Sender<Message>,
+    stream: u32,
+    id: [u8; 16],
+    out_seq: u64,
+) -> io::Result<()> {
+    let json = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.replay_complete",
+        "session_id": uuid::Uuid::from_bytes(id),
+        "out_seq": out_seq.to_string(),
+    }))?;
+    emit(tx, Message::Event(stream, json)).await
+}
+
 /// Final event is ordered through the writer before ownership can be released.
 async fn exited(
     tx: &mpsc::Sender<Message>,
@@ -830,6 +918,9 @@ async fn terminal_run(
         None
     };
     let mut session = Some(link);
+    // Hello.head is a stable split between bytes already present on this shim
+    // link and output produced while the attach is being established.
+    let mut replay_until = session.as_ref().map(|link| link.session.head.max(cursor));
     if session
         .as_ref()
         .is_none_or(|s| s.session.caps & SEQUENCED_INPUT == 0)
@@ -861,6 +952,10 @@ async fn terminal_run(
     #[cfg(feature = "plugin-host-facts")]
     let _window = crate::lifecycle::windows::Attachment::new(path.clone());
     let mut output = relay::Output::attach(cursor);
+    if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+        replay_complete(&tx, stream, id, output.cursor()).await?;
+        replay_until = None;
+    }
     let mut pending: Option<Shim> = None;
     let mut deadline = None;
     let mut finished_peer = false;
@@ -868,14 +963,18 @@ async fn terminal_run(
         if let Some(frame) = pending.take() {
             match frame {
                 Shim::Output(seq, bytes) => {
+                    let frame_len = bytes.len();
                     let range = output
                         .suffix(seq, bytes.len())
                         .map_err(|_| sessions::invalid("output gap"))?;
-                    let length = range.len();
+                    // Stop an Output exactly at the Hello.head boundary. A shim
+                    // frame may contain both retained history and newer bytes.
+                    let length = replay_prefix_len(output.cursor(), range.len(), replay_until);
+                    let end = range.start + length;
                     if length > 0 {
                         // Whole frames transfer their payload ownership to the
                         // writer. Only partial credit/overlap needs a suffix copy.
-                        if range.start == 0 && range.end == bytes.len() {
+                        if range.start == 0 && end == frame_len {
                             emit(
                                 &tx,
                                 Message::Shim(stream, Shim::Output(output.cursor(), bytes)),
@@ -884,13 +983,17 @@ async fn terminal_run(
                             output
                                 .forward(length)
                                 .map_err(|_| sessions::invalid("output credit invariant"))?;
+                            if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                                replay_complete(&tx, stream, id, output.cursor()).await?;
+                                replay_until = None;
+                            }
                             continue;
                         }
                         emit(
                             &tx,
                             Message::Shim(
                                 stream,
-                                Shim::Output(output.cursor(), bytes[range.clone()].to_vec()),
+                                Shim::Output(output.cursor(), bytes[range.start..end].to_vec()),
                             ),
                         )
                         .await?;
@@ -898,7 +1001,11 @@ async fn terminal_run(
                             .forward(length)
                             .map_err(|_| sessions::invalid("output credit invariant"))?;
                     }
-                    if range.end < bytes.len() {
+                    if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                        replay_complete(&tx, stream, id, output.cursor()).await?;
+                        replay_until = None;
+                    }
+                    if end < frame_len {
                         pending = Some(Shim::Output(seq, bytes));
                         deadline = output
                             .pending(Instant::now())
@@ -925,6 +1032,12 @@ async fn terminal_run(
                             emit(&tx, Message::Event(stream, json)).await?;
                         }
                         emit(&tx, Message::Shim(stream, frame)).await?;
+                        if replay_until.is_some_and(|fence| seq >= fence) {
+                            // Repaint bytes contain state through seq, so the
+                            // ordered completion event uses the repaint cursor.
+                            replay_complete(&tx, stream, id, seq).await?;
+                            replay_until = None;
+                        }
                     } else {
                         pending = Some(frame);
                         // A repaint is indivisible. Positive credit below its
@@ -955,6 +1068,11 @@ async fn terminal_run(
             // first, then faithful or negotiated approximate repaint on a gap.
             next.send(&Shim::ReadFrom(output.cursor())).await?;
             output.resume_replay();
+            replay_until = Some(next.session.head.max(output.cursor()));
+            if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                replay_complete(&tx, stream, id, output.cursor()).await?;
+                replay_until = None;
+            }
             session = Some(next);
         }
         tokio::select! {
@@ -1056,3 +1174,7 @@ mod gone_tests;
 #[cfg(test)]
 #[path = "stream_memory_tests.rs"]
 mod stream_memory_tests;
+
+#[cfg(test)]
+#[path = "daemon_census_retry_tests.rs"]
+mod census_retry_tests;

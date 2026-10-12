@@ -2251,3 +2251,140 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      says so: "zellij start skipped: infraternal keeps this session for you ·
      [Use zellij here]"; the button turns the skip off for that host. After
      that, nothing. A global switch exists as well.
+242. **Removing access cuts open connections at once (owner, 2026-10-12, #173;
+     amends D164 and D216):** when a grant is removed, a peer is revoked, or
+     the default policy tightens, connections that the new policy no longer
+     allows are cut immediately on every node, not only new ones. Allowed
+     connections are untouched. The time from the change to the last node
+     refusing traffic is measured and reported with each mesh change.
+243. **Binary size goes down, not up (owner, 2026-10-12):** the static binary
+     must not keep growing towards the size of a typical Go static binary.
+     The size gate is not raised to match today's build. A size-reduction
+     push starts now: measure where the bytes come from, cut, and ratchet the
+     gate down to each new measured size so growth needs a justified,
+     measured exception.
+244. **CA key memory on static builds (owner, 2026-10-12, #154):** the static
+     musl release builds get OpenSSL's locked, dump-excluded key heap by
+     removing the `OPENSSL_NO_SECURE_MEMORY` define that the OpenSSL build
+     crate adds for musl targets, in our pinned compiler wrapper (D213). The
+     OpenSSL version and sources stay unchanged. The gate starts the real
+     static release binary under an 8 MiB memlock limit and fails unless the
+     key heap is locked and excluded from dumps. Root servers keep failing
+     closed. Rejected: a maintained patch of the build crate, protecting only
+     our own key copies, and warning instead of refusing.
+245. **Sign-out removes everything on the device (owner, 2026-10-12, #171):**
+     signing out deletes all of the account's data stored in that browser,
+     including canvas layout. The canvas layout lives on the server (the
+     control plane holds layout) and the browser keeps only what is needed
+     to draw quickly, so signing back in restores it from the server. Device
+     storage stays lean.
+246. **Browser sessions stay server-trusted for now (owner, 2026-10-12; keeps
+     D8):** end-to-end encryption between browser and host is not added now.
+     Native apps are mesh nodes and get it over WireGuard. A per-session
+     private mode in the browser is measured before it is offered.
+247. **Real logins go through the host's own login path (owner, 2026-10-12,
+     #172; amends D240, keeps D7):** the static binary does not load PAM
+     itself. On systemd hosts, the per-person login (D240) is a long-lived
+     systemd unit with `PAMName=`, and the infraternal agent starts that
+     person's shells inside it. Hosts without systemd fall back to the host's
+     own `su`/`login`. Condition: this is chosen because it is the standard
+     path and expected to be the fastest; it must be measured against the
+     glibc helper option on the perf VM (first terminal, later terminals,
+     opened in advance). If it is clearly slower, the owner decides again.
+     Measured 2026-10-12 (N=200 p50, perf VM): first terminal 44.6 ms vs
+     production 33.8 ms (once per person per host, usually hidden by opening
+     in advance); later terminals 3.3 ms and opened-in-advance 3.3 ms vs the
+     helper's 6.5/6.2 ms. The owner confirmed the systemd path (2026-10-12).
+     Rejected for now: a glibc helper binary next to the static one, and a
+     dynamic glibc build of the whole binary.
+248. **Canvas nodes (owner, 2026-10-12, Q20–Q25, #167; builds on D239):**
+     - **Layout:** the server (control plane) holds every canvas layout and
+       is its source of truth. Layout changes travel as intents ("move
+       window", "open session"), never as whole-layout overwrites.
+     - **Content and credentials:** content lives on the hosts. Credentials
+       are sealed to the infraternal agent that uses them; a canvas only
+       asks for them and never holds them.
+     - **Speed:** both the server canvas and a node's canvas must be very
+       fast ("keep both reaaaaly performant").
+     - **Who:** each person can open only their own canvas. In the community
+       edition the server's own canvas is always on.
+     - **Addresses:** a node serves its canvas at two addresses, shown
+       together: `http://localhost` on the machine itself, which always
+       works (including behind routers with DNS-rebind protection), and a
+       name the person configures for remote use. That name gets HTTPS via
+       HTTP-01 by default; DNS-01 is optional.
+     - **Sign-in:** always on the server's own page, with passkeys or OIDC
+       as today. The server hands the node's canvas a single-use token that
+       becomes an HttpOnly, SameSite=Strict cookie, without `Secure` on
+       loopback only (WebKit drops `Secure` cookies on http://127.0.0.1). A
+       node name under the server's domain may use the passkeys directly;
+       other domains use the handoff, or related origins where supported.
+     - **Browsers:** Chrome asks once for local network access; the handoff
+       works in Chrome, Firefox and WebKit (measured, #167). A node-served
+       canvas answered in 1.2 ms against 151.6 ms across a long link.
+249. **The cursor blinks while you can type (owner, 2026-10-12; amends D112):**
+     when typing will reach the terminal (focused, and on phones the keyboard
+     is up), the cursor blinks. It is drawn as its own small layer above the
+     terminal and blinked by a compositor-only CSS animation, so the terminal
+     renderer stays asleep (D81, D112). The blink stops, leaving a steady
+     cursor, when the tab is hidden, the keyboard goes away, focus leaves, or
+     after about 30 seconds without input; any input restarts it. Its CPU and
+     battery cost is measured on an iPhone and on the idle canary before it
+     ships. When typing cannot reach the terminal, the cursor stays a steady
+     underline (TASTE "A blinking cursor means you can type").
+250. **How changes reach production (owner, 2026-10-12):**
+     - **One line:** `dev` is the only development line. A production
+       deploy is a tag on a `dev` commit that passed its review and gates;
+       `main` is fast-forwarded to whatever production runs, so `main` stays
+       the stable line. The `release-prod-*` branches end once batch 4 and
+       its merge back into `dev` are done. No more ports.
+     - **Deploy each change on its own** as soon as its review passes, not
+       in batches. The owner's own testing in production is the main test;
+       small deploys make each problem easy to find and roll back.
+     - **No CA lock on binary deploys:** deploys use the in-process binary
+       handoff (#154) instead of stop and start, once release pipeline
+       round 4 (signature check, sealed image, recovery) has passed review.
+       This was already decided as D217 (2026-10-10); the orchestrator's
+       deploy script never implemented it, which is why deploys locked the CA.
+     - **Builds within the host's capacity:** only as many build-heavy jobs
+       run as the build host can take; release builds get a reserved CPU
+       share and are built for each `dev` head that passes, so a deploy only
+       copies a binary.
+     - **Timing on the perf VM:** every timing, CPU, memory and frame
+       number, native or browser, is measured on the perf VM; build-host
+       timings are not evidence.
+251. **Production follows edge and updates itself (owner, 2026-10-12;
+     extends D186, D250):**
+     - **Edge is "reasonably stable":** a `dev` commit is published to the
+       edge channel only after its gates pass AND its break-it review has no
+       P0/P1. Gates alone do not publish.
+     - **infraternal.kayg.org follows edge.** Every published edge build
+       reaches it without an orchestrator deploy.
+     - **When it applies:** automatically in a quiet window (the server is
+       idle for a few minutes: no typing, no attach in progress), through
+       the in-process handoff, so the CA stays unlocked (D250). An update
+       never interrupts typing.
+     - **Manual control:** a ready update first appears as a toast, then
+       stays as an Inbox item ("Update ready · <version>") with **Update
+       now**. The same controls live in **Settings → Server → Updates**:
+       current version and channel, the quiet-window setting, Update now,
+       Roll back to the previous version, and the update history. Hosts'
+       infraternal agents follow their server's version.
+252. **Names for access (owner, 2026-10-12; renames terms in D154, D164,
+     D216, D228, D235):** three kinds of access, each a list of **rules**,
+     all in Settings → Access under these headings. The words "grant" and
+     "policy" are no longer used for them in the product, docs or code.
+     - **Roles** (app level; was D154 "grants"): what a person can do in
+       infraternal — Owner, Admin, Operator, Viewer and custom roles, over
+       all hosts or host tags.
+     - **Network access** (mesh level; was "network policy" and the D164
+       arrow "grant"): which machine may reach which machine, on which
+       ports and protocols. The Mesh view's arrows are network access
+       rules; the edition default (D216) is "Machines can reach each other
+       until you add rules".
+     - **Login access** (host and account level; D235): which person may
+       become which account on which host. It covers every way to a shell —
+       `ssh` over the mesh, infraternal terminals through the server, app
+       windows and files — whether or not the mesh is involved.
+     A mesh `ssh` login passes network access and login access; a terminal
+     opened in the app passes roles and login access.

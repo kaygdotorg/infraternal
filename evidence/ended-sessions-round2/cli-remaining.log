@@ -1,0 +1,175 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p3989828-i3990128.scope; invocation ID: 2b718bedaf494f4a9cbf8ed650de2310
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running tests/agent_queues.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/agent_queues-2bd2be8c66c6afd7)
+
+running 1 test
+test saturated_terminal_queues_preserve_every_byte_and_daemon_liveness ... FAILED
+
+failures:
+
+---- saturated_terminal_queues_preserve_every_byte_and_daemon_liveness stdout ----
+
+thread 'saturated_terminal_queues_preserve_every_byte_and_daemon_liveness' (3989987) panicked at crates/infraternal/tests/agent_queues.rs:14:5:
+queue saturation oracle failed:
+
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/verify-agent-queues.py", line 125, in <module>
+    run(parser.parse_args().binary)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/verify-agent-queues.py", line 112, in run
+    assert client.read() == (0, 0x09, struct.pack('<QQ', 789, 101))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    saturated_terminal_queues_preserve_every_byte_and_daemon_liveness
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.65s
+
+error: test failed, to rerun pass `-p infraternal --test agent_queues`
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.00s
+     Running tests/agent_review.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/agent_review-43679ff1cf466941)
+
+running 8 tests
+test reaped_shim_exit_survives_credit_after_starvation_deadline ... ok
+test last_typist_selects_its_own_real_pty_dimensions ... ok
+test stalled_terminal_never_delays_control_or_sibling_dispatch ... ok
+test initial_attach_requires_explicit_credit_before_replay ... ok
+test retained_unwritten_input_survives_interleaved_ack_restart ... ok
+test two_writers_keep_independent_ack_and_exact_input_after_restart ... ok
+test local_session_counts_and_memory_refusals_follow_real_lifecycle ... ok
+test repeated_tiny_credit_pauses_preserve_shell_progress ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.13s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/agent_sessions-0d1cb38f08ca3355)
+
+running 3 tests
+test detached_shim_is_discovered_and_replays_from_the_last_observed_offset ... ok
+test latency_fixture_accepts_the_unsolicited_startup_inventory ... ok
+test restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s
+     Running tests/idle_canary.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/idle_canary-af2a04d38e34ebfa)
+
+running 1 test
+test one_hertz_wakeup_is_detected_past_the_legacy_half_second_window ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.11s
+
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s
+     Running tests/remote_output.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/remote_output-ed04213d681f21d6)
+
+running 3 tests
+test human_remote_refusal_has_sections_and_next_steps_without_color ... ok
+test json_remote_run_refuses_missing_identity_without_reflecting_its_path ... ok
+test json_remote_server_refuses_before_creating_storage_or_binding ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running tests/session_bounds_review.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/session_bounds_review-c0af8f05a09a385d)
+
+running 1 test
+test attached_window_recovers_final_output_and_exit_after_shim_link_detaches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.74s
+     Running tests/session_retention.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/session_retention-345e96e4ef5af15d)
+
+running 1 test
+test bounded_owned_exit_reconnects_as_ended_with_status ... FAILED
+
+failures:
+
+---- bounded_owned_exit_reconnects_as_ended_with_status stdout ----
+
+thread 'bounded_owned_exit_reconnects_as_ended_with_status' (3995641) panicked at crates/infraternal/tests/session_retention.rs:17:5:
+
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/verify-session-retention.py", line 140, in <module>
+    run(args.binary.resolve())
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/verify-session-retention.py", line 81, in run
+    first = ended(client, identity)  # No credit: owner EOF must wake the relay.
+  File "/home/kayg/Developer/infraternal/.worktrees/ended-sessions/scripts/verify-session-retention.py", line 29, in ended
+    assert (stream, kind) == (1, 0x33), (stream, kind, body)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: (0, 51, b'\x00\x00\x00\x00{"session_ids":[],"type":"terminal.sessions.snapshot"}')
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bounded_owned_exit_reconnects_as_ended_with_status
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+error: test failed, to rerun pass `-p infraternal --test session_retention`
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.41s
+     Running tests/shim.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/shim-f071653f05923b8f)
+
+running 13 tests
+test detached_shell_exit_reaps_even_with_a_live_background_descendant ... ok
+test detached_shell_exit_reaps_shim_within_one_second ... ok
+test double_fork_survives_parent_death ... ok
+test unowned_normal_exit_retires_promptly_and_records_status ... ok
+test disallowed_signal_only_disconnects_peer ... ok
+test replacement_connection_and_malformed_limit ... ok
+active
+test user_scope_survives_parent_unit_stop ... ok
+test real_shell_reconnect_resize_and_delivered_exit ... ok
+test delivered_exit_cannot_release_another_owning_window ... ok
+test attached_backpressure_and_detached_progress ... ok
+test owned_exit_releases_promptly_on_window_close ... ok
+test owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer ... ok
+test ring_wrap_snapshot_repaints_real_vim ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.24s
+
+    Blocking waiting for file lock on build directory
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.21s
+     Running tests/ssh_askpass.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/ssh_askpass-c3265f20bdad2c2f)
+
+running 3 tests
+test encrypted_key_without_passphrase_never_prompts_on_a_controlling_terminal ... ignored, run under the disposable controlling-terminal harness
+test real_cli_askpass_refuses_unregistered_parent_and_cleans_helper ... ok
+test real_cli_unlocks_an_encrypted_synthetic_key_on_private_pipes ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running tests/vt_credit.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/vt_credit-0137e5f125e8ff83)
+
+running 1 test
+test unaffordable_repaints_park_until_sufficient_credit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.70s
+
+    Blocking waiting for file lock on build directory
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.36s
+     Running tests/vt_reconnect.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round2/target/debug/deps/vt_reconnect-aefa0c390d809b63)
+
+running 1 test
+test snapshot_limits_never_close_live_reconnect ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.25s
+

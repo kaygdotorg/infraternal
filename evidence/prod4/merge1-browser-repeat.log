@@ -1,0 +1,14 @@
+Running as unit: run-p3117836-i7311735.scope; invocation ID: 19fddc71aa24426cad604b6a229e7026
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-et5r28zg.js, chunk-dpg6mcx9.js, chunk-04683jrs.js, chunk-5wjqz9g6.js, chunk-2ad4ycsn.js, chunk-k63t7nkf.js, chunk-syad2ahf.js, chunk-0mpqz0em.js, chunk-q5t0qm06.js, chunk-qkpcdr8a.js, chunk-aegc6dk4.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-8x9h6cr5.js, chunk-dr3c5pcf.js, chunk-gp3y7fcj.js, chunk-25fd2mbc.js, chunk-t0afx66y.js, chunk-q4za2n40.js, chunk-kz48k9s1.js, chunk-1rb28r6h.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-mxpk281m.js, chunk-z8y62fb2.js, chunk-zm07vkjn.js, chunk-x4n94jgj.js, chunk-jfg2nqev.js, chunk-ety4zyjc.js, chunk-5753zf8s.js, chunk-h1tejbe6.js, chunk-taw6d8ff.js, chunk-cnt7h0hk.js, chunk-hwasbh5z.js, chunk-yr64r6qj.js, chunk-dt7vmheb.js, chunk-8b6cy9xk.js, chunk-ctdw0re9.js, chunk-1hje8sjn.js, chunk-jcd0ykjp.js, chunk-axbkkqp1.js, chunk-vfqzv24x.js, chunk-y05fxn39.js, chunk-m3vj4884.js, chunk-myqjpkbb.js, chunk-gxkdatmp.js, chunk-02eajv0f.js, chunk-gdpwxedj.js, chunk-0s0ry47j.js, chunk-rz0yd317.js, chunk-7xzpq57a.js, chunk-0mc16ebf.js, chunk-cx890dza.js, chunk-n9cn969p.js, chunk-577y921w.js, chunk-7kxjc2qc.js, chunk-9ck5h48a.js, chunk-rr50kmvp.js, chunk-j9ryenvt.js, chunk-71655n8x.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-vt5z8a1s.js, chunk-zx7ps7jy.js, chunk-728ngct0.js, chunk-c244ar3f.js, chunk-1vfxt9ky.js
+[WebServer] latency proxy listening on http://localhost:5254; upstream port=5255
+[WebServer] tracer TEST DOUBLE listening on http://localhost:5255
+
+Running 2 tests using 1 worker
+
+(node:3120667) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/terminal-query-replay.spec.ts:64:1 › live terminal queries answer once; reattach and reload replay reaches no extra input (27.0s)
+  ✓  2 test/terminal-query-replay.spec.ts:109:1 › terminal Snapshot repaint never answers VT queries (8.2s)
+
+  2 passed (51.0s)

@@ -6,7 +6,11 @@ import type { MockWorld } from "./world";
 
 export function createMockSettings(world: MockWorld): SettingsSource {
   return {
-    sections: ["devices", "account", "users", "grants", "discovery"],
+    sections: ["devices", "users", "grants", "discovery"],
+    accountFacts: () => [
+      { title: "Passkeys", rows: [{ key: "iPhone 15", value: "added 2 weeks ago" }, { key: "MacBook Pro", value: "added 3 months ago" }] },
+      { title: "Recovery key", rows: [{ key: "Status", value: "saved" }, { key: "Last checked", value: "6 days ago" }] },
+    ],
     render(section, pane, cx) {
       switch (section) {
         case "devices": return renderDevices(pane, {
@@ -15,10 +19,6 @@ export function createMockSettings(world: MockWorld): SettingsSource {
           signOut: (d) => { world.devices = world.devices.filter((x) => x.id !== d.id); cx.toast.show({ message: `${d.name} signed out` }); },
           rename: (_d, name) => { cx.toast.show({ message: `Renamed to ${name}` }); },
         });
-        case "account": return renderFacts(pane, "Account", [
-          { title: "Passkeys", rows: [{ key: "iPhone 15", value: "added 2 weeks ago" }, { key: "MacBook Pro", value: "added 3 months ago" }] },
-          { title: "Recovery key", rows: [{ key: "Status", value: "saved" }, { key: "Last checked", value: "6 days ago" }] },
-        ]);
         case "users": return renderFacts(pane, "Users", [{ title: "People", rows: [{ key: "kayg", value: "owner" }, { key: "mira", value: "operator" }, { key: "ops", value: "viewer" }] }]);
         case "grants": return renderFacts(pane, "Access", [{ title: "Mesh", rows: [{ key: "Rules", value: String(world.grants.length) }, { key: "Via relay", value: String(world.grants.filter((g) => g.via).length) }] }]);
         case "discovery": return renderFacts(pane, "Found hosts", [{ title: "Sources", rows: [{ key: "NetBird", value: "on" }, { key: "Tailscale", value: "on" }, { key: "known_hosts", value: "on" }, { key: "SSH config", value: "on" }] }]);

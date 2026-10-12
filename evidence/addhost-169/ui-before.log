@@ -1,0 +1,48 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-3vqzfeye.js, chunk-9vqcqpm3.js, chunk-n08m8z3t.js, chunk-y5a7p3bn.js, chunk-z9r5v4cn.js, chunk-2c53cv1j.js, chunk-6zm0vp0r.js, chunk-dmkfsbe8.js, chunk-vgvab2v0.js, chunk-gydvdcj1.js, chunk-kbx595fw.js, chunk-jtmd79cs.js, chunk-6gtm055g.js, chunk-221ah2r9.js, chunk-4v7md10s.js, chunk-qs6fw1yq.js, chunk-3bwancgt.js, chunk-x3azx978.js, chunk-t0afx66y.js, chunk-a7088npz.js, chunk-f5nzd1s6.js, chunk-frr1b1vn.js, chunk-jckpxsf1.js, main.js, chunk-655fs8sb.js, chunk-nswar1xb.js, chunk-rr7f9vf7.js, chunk-cg4mzhj8.js, chunk-s740g62x.js, chunk-9p332900.js, chunk-5753zf8s.js, chunk-2fy1h7r4.js, chunk-3yccs913.js, chunk-yvy84btg.js, chunk-dzyfs8nv.js, chunk-57wkv9m3.js, chunk-x136mpad.js, chunk-b09wgr94.js, chunk-ddyrp9cf.js, chunk-5xnv1qfb.js, chunk-8tmp163j.js, chunk-axbkkqp1.js, chunk-8m90fab6.js, chunk-56e0s0v1.js, chunk-3zc0eaem.js, chunk-93astz9y.js, chunk-ahtn7fgx.js, chunk-8r234kq9.js, chunk-9cwtg30k.js, chunk-vtxnrd0f.js, chunk-sbrrjczp.js, chunk-cy813p09.js, chunk-neh1ffp2.js, chunk-f7pk0xm9.js, chunk-xvx8vdar.js, chunk-mkzef6qk.js, chunk-fa8kxw8f.js, chunk-ffaqh3e3.js, chunk-9nsp3gs5.js, chunk-q7nwde9d.js, chunk-ktxdb329.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-kprp15fn.js, chunk-ef0nm5gt.js, chunk-1wxjsjh3.js, chunk-4e493dhs.js, chunk-jmhetng6.js
+[WebServer] latency proxy listening on http://localhost:4891; upstream port=4892
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4892
+
+Running 1 test using 1 worker
+
+(node:309125) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can (29.6s)
+
+
+  1) test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can 
+
+    Error: expect(locator).toContainText(expected) failed
+
+    Locator: locator('.ah-details pre')
+    Timeout: 5000ms
+    - Expected substring  - 1
+    + Received string     + 3
+
+    - Failed step: Start the host service
+    + The server said: The installation did not finish and was rolled back.
+    + Uploaded the binary.
+    + The unit failed to start.
+
+    Call log:
+      - Expect "toContainText" with timeout 5000ms
+      - waiting for locator('.ah-details pre')
+        13 × locator resolved to <pre>The server said: The installation did not finish …</pre>
+           - unexpected value "The server said: The installation did not finish and was rolled back.
+    Uploaded the binary.
+    The unit failed to start."
+
+
+      260 |   await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toHaveCount(0);
+      261 |   await page.locator(".ah-details summary").click();
+    > 262 |   await expect(page.locator(".ah-details pre")).toContainText("Failed step: Start the host service");
+          |                                                 ^
+      263 |   await page.screenshot({ path: "../../evidence/addhost-169/failure-details.png" });
+      264 |   await inWizard(page, "Retry").click();
+      265 |   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+        at /home/kayg/Developer/infraternal/.worktrees/addhost-fixes/apps/tracer/test/addhost-wizard.spec.ts:262:49
+
+    Error Context: test-results/addhost-wizard-an-unsuppor-c57e4-ried-an-install-failure-can/error-context.md
+
+  1 failed
+    test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can 

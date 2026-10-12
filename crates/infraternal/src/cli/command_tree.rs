@@ -459,6 +459,7 @@ mod backmerge_tests {
                 "1000",
                 "--exit-retention-ms",
                 "700",
+                "--readiness",
             ])
             .unwrap();
         assert_eq!(
@@ -467,5 +468,6 @@ mod backmerge_tests {
                 .get_one::<i64>("exit_retention_ms"),
             Some(&700)
         );
+        assert!(selected(&matches).matches.get_flag("readiness"));
     }
 }

@@ -43,6 +43,8 @@ use inputs::Inputs;
 /// Startup parameters passed only by the local infraternal agent.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// A private fixed non-login readiness command; no caller-supplied shell text.
+    pub readiness: bool,
     pub session: [u8; 16],
     pub uid: u32,
     pub cols: u16,
@@ -56,6 +58,7 @@ impl Config {
     #[must_use]
     pub fn new(session: [u8; 16], uid: u32) -> Self {
         Self {
+            readiness: false,
             session,
             uid,
             cols: 80,
@@ -289,7 +292,8 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
     let (listener, path) = socket(&config)?;
-    let mut pty = Pty::spawn(config.uid, config.cols, config.rows)?;
+    let mut pty =
+        Pty::spawn_with_readiness(config.uid, config.cols, config.rows, config.readiness)?;
     let created = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -305,7 +309,19 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
     let mut exit = None;
     let mut exit_deadline = None;
     let mut drained = false;
+    // A private probe owns no durable terminal. A lost open reply or server
+    // transport cannot leave its read waiting forever; ordinary live PTYs have no timer.
+    let readiness_deadline = config
+        .readiness
+        .then(|| Instant::now() + Duration::from_secs(10));
     loop {
+        if readiness_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if exit.is_none() {
+                pty.child.kill()?;
+                let _ = pty.child.wait()?;
+            }
+            return Ok(());
+        }
         if exit.is_none()
             && let Some(status) = pty.child.try_wait()?
         {
@@ -362,12 +378,25 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
                 }
             }
         }
+        // Private probes are not resumable: retire once confirmed exit delivery
+        // has drained. Ordinary terminal ownership and exit acknowledgment stay unchanged.
+        if config.readiness
+            && exit.is_some()
+            && drained
+            && peers
+                .iter()
+                .filter(|p| p.cursor.is_some())
+                .all(|p| p.exited_sent && p.pending.is_empty())
+        {
+            return Ok(());
+        }
         // Ownership is independent of data peers: an unfunded window releases
         // its data link but retains this small control link until ordered delivery
         // or close. The one-shot deadline cannot be renewed by another attach.
         let expired = exit_deadline.is_some_and(|deadline| Instant::now() >= deadline);
         let owned = peers.iter().any(|p| p.attached && p.caps == SESSION_OWNER);
-        if let Some(status) = exit
+        if !config.readiness
+            && let Some(status) = exit
             && (expired
                 || (drained
                     && !owned
@@ -425,17 +454,23 @@ pub fn run_with_retention(mut config: Config, retention: Duration) -> io::Result
             // Once the owned child exits, a descendant may hold the slave open
             // without producing a readiness event. Probe the nonblocking master
             // immediately, while retaining viewer backpressure during the drain.
+            // Wake at the earliest private-probe or ordinary exit deadline;
+            // no deadline keeps the live PTY fully event-driven.
             let timeout = if exit.is_some() && can_read {
                 nix::poll::PollTimeout::ZERO
             } else {
-                exit_deadline.map_or(nix::poll::PollTimeout::NONE, |deadline| {
-                    // Round upward: a submillisecond remainder must not busy-loop.
-                    nix::poll::PollTimeout::try_from(
-                        deadline.saturating_duration_since(Instant::now())
-                            + Duration::from_millis(1),
-                    )
-                    .unwrap_or(nix::poll::PollTimeout::MAX)
-                })
+                exit_deadline
+                    .into_iter()
+                    .chain(readiness_deadline)
+                    .min()
+                    .map_or(nix::poll::PollTimeout::NONE, |deadline| {
+                        // Round upward: a submillisecond remainder must not busy-loop.
+                        nix::poll::PollTimeout::try_from(
+                            deadline.saturating_duration_since(Instant::now())
+                                + Duration::from_millis(1),
+                        )
+                        .unwrap_or(nix::poll::PollTimeout::MAX)
+                    })
             };
             match poll(&mut fds[..peers.len() + 3], timeout) {
                 Ok(_) => {}

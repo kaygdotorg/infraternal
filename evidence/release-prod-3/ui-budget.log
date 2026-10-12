@@ -1,0 +1,78 @@
+onDemand chunk-wfanzdnk.js: identity=2824 gzip=1386 brotli=1202 bytes
+critical chunk-8t7pe4ht.js: identity=1104 gzip=666 brotli=604 bytes
+critical chunk-28rbcdd5.js: identity=39 gzip=39 brotli=39 bytes
+onDemand chunk-s3zq19g4.js: identity=2420 gzip=1198 brotli=1081 bytes
+critical chunk-4dcv2g8s.js: identity=17627 gzip=6249 brotli=5561 bytes
+deferred chunk-6sgdfahb.js: identity=42967 gzip=16559 brotli=14580 bytes
+critical chunk-hna59wqc.js: identity=8377 gzip=3574 brotli=3181 bytes
+onDemand chunk-2b1yp9aj.js: identity=5760 gzip=1906 brotli=1684 bytes
+critical chunk-rqn6pfk3.js: identity=5443 gzip=2604 brotli=2382 bytes
+onDemand chunk-p3wfa4x0.js: identity=2557 gzip=1180 brotli=1010 bytes
+onDemand chunk-2c34k49n.js: identity=4640 gzip=1930 brotli=1703 bytes
+onDemand chunk-7sz6sx0b.js: identity=1026 gzip=623 brotli=496 bytes
+onDemand chunk-bsn0z85d.js: identity=7662 gzip=3396 brotli=2962 bytes
+onDemand chunk-wkqeh53w.js: identity=10496 gzip=4091 brotli=3740 bytes
+onDemand chunk-nha2ht9a.js: identity=540 gzip=351 brotli=312 bytes
+onDemand chunk-tpndc3s9.js: identity=191 gzip=170 brotli=131 bytes
+onDemand chunk-5ggw43cv.js: identity=11529 gzip=4651 brotli=4249 bytes
+critical faulty-terminal.worker.js: identity=1086 gzip=559 brotli=487 bytes
+critical backdrop.worker.js: identity=243 gzip=212 brotli=158 bytes
+onDemand chunk-z48xb60r.js: identity=1170 gzip=704 brotli=591 bytes
+onDemand chunk-5s6a3m50.js: identity=2108 gzip=1037 brotli=869 bytes
+onDemand chunk-57zpzqck.js: identity=6773 gzip=3176 brotli=2886 bytes
+critical chunk-a895a34j.js: identity=88 gzip=88 brotli=74 bytes
+onDemand chunk-5xef74wk.js: identity=4575 gzip=2013 brotli=1782 bytes
+critical chunk-axbkkqp1.js: identity=90 gzip=90 brotli=78 bytes
+onDemand chunk-gtm292qm.js: identity=228 gzip=178 brotli=165 bytes
+onDemand chunk-a7mvvb1q.js: identity=48002 gzip=15091 brotli=13392 bytes
+onDemand chunk-tkcy10ft.js: identity=2428 gzip=1081 brotli=912 bytes
+critical chunk-f2r0hhqc.js: identity=128 gzip=109 brotli=111 bytes
+critical chunk-9xd3g65e.js: identity=39 gzip=39 brotli=39 bytes
+critical chunk-nm1z0gca.js: identity=162 gzip=150 brotli=148 bytes
+onDemand chunk-vz8669mg.js: identity=5745 gzip=2164 brotli=1917 bytes
+critical chunk-atqxstac.js: identity=2943 gzip=1315 brotli=1126 bytes
+critical chunk-q2nxayqq.js: identity=21235 gzip=6859 brotli=6134 bytes
+onDemand chunk-r6ns11bx.js: identity=3891 gzip=1735 brotli=1516 bytes
+critical chunk-ah5bv03z.js: identity=2519 gzip=1008 brotli=876 bytes
+critical chunk-c6ykg51y.js: identity=15859 gzip=6178 brotli=5477 bytes
+critical chunk-mrjrswdq.js: identity=199 gzip=161 brotli=139 bytes
+critical chunk-yr0r38s4.js: identity=386 gzip=238 brotli=196 bytes
+critical chunk-nc4sspkg.js: identity=9810 gzip=4016 brotli=3452 bytes
+critical chunk-89ccban2.js: identity=707 gzip=367 brotli=307 bytes
+deferred chunk-6459gwr1.js: identity=94999 gzip=32319 brotli=28561 bytes
+onDemand chunk-bsxnzb34.js: identity=1616 gzip=863 brotli=739 bytes
+critical chunk-v9dsyb10.js: identity=42395 gzip=14488 brotli=12959 bytes
+onDemand chunk-b9pyxh6q.js: identity=6198 gzip=2792 brotli=2519 bytes
+critical chunk-mwpfp1a9.js: identity=703957 gzip=203922 brotli=165201 bytes
+critical main.js: identity=110306 gzip=40145 brotli=34881 bytes
+onDemand chunk-2b5t1hvm.js: identity=13384 gzip=5025 brotli=4500 bytes
+critical chunk-61xwpgvs.js: identity=49 gzip=49 brotli=49 bytes
+critical chunk-ybs9dq57.js: identity=590 gzip=327 brotli=321 bytes
+onDemand chunk-svm349a5.js: identity=31922 gzip=12261 brotli=11044 bytes
+onDemand chunk-9nd0far1.js: identity=1063 gzip=652 brotli=519 bytes
+onDemand chunk-1dh2fm1w.js: identity=5359 gzip=2578 brotli=2297 bytes
+JavaScript transfer, critical: identity=945381 gzip=293452/307200 brotli=243980/256000 bytes
+JavaScript transfer, deferred: identity=137966 gzip=48878/51200 brotli=43141/45056 bytes
+JavaScript transfer, onDemand: identity=184107 gzip=72232/20480 brotli=64218/18432 bytes
+JavaScript transfer, onDemand largest chunk chunk-a7mvvb1q.js: gzip=15091/20480 brotli=13392/18432 bytes (class total gzip=72232 brotli=64218, not limited)
+fonts/monaspace-neon/italic.latin.woff2: identity=44324 gzip=44324 brotli=44324 bytes
+fonts/monaspace-neon/roman.latin.woff2: identity=40016 gzip=40016 brotli=40016 bytes
+fonts/jetbrains-mono/italic.latin.woff2: identity=36316 gzip=36316 brotli=36316 bytes
+fonts/jetbrains-mono/roman.latin.woff2: identity=34068 gzip=34068 brotli=34068 bytes
+fonts/source-code-pro/italic.latin.woff2: identity=23612 gzip=23612 brotli=23612 bytes
+fonts/source-code-pro/roman.latin.woff2: identity=22872 gzip=22872 brotli=22872 bytes
+fonts/geist-mono/italic.latin.woff2: identity=21380 gzip=21380 brotli=21380 bytes
+fonts/geist-mono/roman.latin.woff2: identity=19984 gzip=19984 brotli=19981 bytes
+fonts/ibm-plex-mono/italic.latin.woff2: identity=22296 gzip=22296 brotli=22296 bytes
+fonts/ibm-plex-mono/roman.latin.woff2: identity=19048 gzip=19048 brotli=19047 bytes
+fonts/cascadia-code/italic.latin.woff2: identity=44404 gzip=44404 brotli=44404 bytes
+fonts/cascadia-code/roman.latin.woff2: identity=40604 gzip=40604 brotli=40604 bytes
+fonts/maple-mono-nf/italic.latin.woff2: identity=53444 gzip=53444 brotli=53444 bytes
+fonts/maple-mono-nf/roman.latin.woff2: identity=46432 gzip=46432 brotli=46432 bytes
+fonts/nerd-symbols.woff2: identity=223748 gzip=223748 brotli=223748 bytes
+fonts/fira-code/roman.latin.woff2: identity=36756 gzip=36756 brotli=36756 bytes
+fonts/commit-mono/italic-400.latin.woff2: identity=18716 gzip=18716 brotli=18716 bytes
+fonts/commit-mono/italic-700.latin.woff2: identity=18352 gzip=18352 brotli=18352 bytes
+fonts/commit-mono/roman-400.latin.woff2: identity=17484 gzip=17484 brotli=17484 bytes
+fonts/commit-mono/roman-700.latin.woff2: identity=17260 gzip=17260 brotli=17260 bytes
+Font transfer: monaspace-neon=84340/88064 jetbrains-mono=70384/75776 source-code-pro=46484/49152 geist-mono=41364/45056 ibm-plex-mono=41344/45056 cascadia-code=85008/88064 maple-mono-nf=99876/106496 (critical 46432/51200) symbols=223748/235520 fira-code=36756/40960 commit-mono=71812/75776 bytes

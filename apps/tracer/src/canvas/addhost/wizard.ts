@@ -27,7 +27,7 @@
 import { createSpinner, hostIconMarkup, hostSourceIconMarkup, installFocusRing, mountChipInput, mountStepStatus, PaneStepper, Spring, springCheckbox, createKeyValueList } from "../../../../../packages/ui/src/index";
 import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusController, Tick, ToastController } from "../../../../../packages/ui/src/index";
 import { foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
-import type { BootstrapEvent, StartTarget, TargetView } from "../../provisioning-client";
+import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../../provisioning-client";
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
 import { ICON, escapeHtml, svg } from "./icons";
@@ -38,6 +38,13 @@ import { ServiceError } from "./service";
 import { runUnlock } from "./authority-run.on-demand";
 import type { AddHostSink, DiscoveredHost, EnrolledHost, InstallCommand, ProvisioningService, SavedKey, ServerKey } from "./service";
 
+/** Trusted bootstrap boundaries use plain labels in the existing details disclosure. */
+const FAILED_STEP_LABELS: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
+  connect: "Connect to the host",
+  "get-arm64-binary": "Get the arm64 binary", "get-x86-64-binary": "Get the x86_64 binary",
+  upload: "Upload the binary", install: "Install the infraternal agent",
+  join: "Join the host to this server", start: "Start the host service",
+};
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = { netbird: "NetBird", tailscale: "Tailscale", "known-hosts": "Known hosts", "ssh-config": "SSH config", "already-added": "Added" };
 const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -746,7 +753,7 @@ export class Wizard {
   // ── Failure, host key, choose a method, install ────────────────────────────
   private detailsOf(job: Job): string {
     const failure = job.view.failure;
-    const lines = [failure ? `The server said: ${failure.message}` : "", ...(failure?.log_tail ?? [])].filter(Boolean);
+    const lines = [failure?.failed_step ? `Failed step: ${FAILED_STEP_LABELS[failure.failed_step]}` : "", failure ? `The server said: ${failure.message}` : "", ...(failure?.log_tail ?? [])].filter(Boolean);
     return lines.join("\n") || job.view.message;
   }
 

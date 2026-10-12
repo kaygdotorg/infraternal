@@ -1,0 +1,25 @@
+Running as unit: run-p927173-i5121136.scope; invocation ID: 23c28487d7dc49a1aff75aa0096b6c80
+    Blocking waiting for file lock on package cache
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.16s
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round3/target/debug/deps/agent_sessions-1b9e867e8ad6b82f)
+
+running 3 tests
+test detached_shim_is_discovered_and_replays_from_the_last_observed_offset ... ok
+test latency_fixture_accepts_the_unsolicited_startup_inventory ... ok
+test restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill ... restart_inventory_discovery: live_shims=16 elapsed_ms=11
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
+
+     Running tests/session_exit_events.rs (/home/kayg/.cache/codex-scratch/ended-sessions-round3/target/debug/deps/session_exit_events-af10e2b6911d395c)
+
+running 1 test
+test idle_daemon_discovers_unattached_and_adopted_shim_exit_without_requests ... event_idle label='empty infraternal agent' sessions=0 slices=0 seconds=2.201 rss_kib=13828
+event_idle label='unattached adopted shim' sessions=1 slices=0 seconds=2.201 rss_kib=14684
+event_idle label='all watched shims exited' sessions=0 slices=0 seconds=2.201 rss_kib=14708
+event_exit_latency source=real-daemon-leg-B-census signal=SIGKILL attached=false samples=8 p50_us=4320 p99_us=7563 max_us=19394 budget_us=400000 machine=infraternal-dev arch=x86_64 cores=12 load=['47.41', '38.78', '40.87']
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.57s
+

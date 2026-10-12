@@ -5,7 +5,18 @@ use std::{fs, path::PathBuf, process::Command};
 #[test]
 fn unaffordable_repaints_park_until_sufficient_credit() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let evidence = root.join("target/review-vt3-fixes");
+    let target_root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || root.join("target"),
+        |target| {
+            let target = PathBuf::from(target);
+            if target.is_absolute() {
+                target
+            } else {
+                root.join(target)
+            }
+        },
+    );
+    let evidence = target_root.join("review-vt3-fixes");
     fs::create_dir_all(&evidence).unwrap();
     for credit in ["1", "16384"] {
         for mode in ["approximate", "faithful"] {

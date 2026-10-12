@@ -1,0 +1,40 @@
+Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
+Running as unit: run-p3830018-i8023915.scope; invocation ID: 76f495acc8994aaabfe417a9f4693b01
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.05s
+     Running tests/agent_queues.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/agent_queues-f047e37ded934d75)
+
+running 1 test
+test saturated_terminal_queues_preserve_every_byte_and_daemon_liveness ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.92s
+
+     Running tests/agent_review.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/agent_review-dbf7e88d4410272f)
+
+running 8 tests
+test initial_attach_requires_explicit_credit_before_replay ... ok
+test last_typist_selects_its_own_real_pty_dimensions ... ok
+test local_session_counts_and_memory_refusals_follow_real_lifecycle ... ok
+test reaped_shim_exit_survives_credit_after_starvation_deadline ... ok
+test repeated_tiny_credit_pauses_preserve_shell_progress ... ok
+test retained_unwritten_input_survives_interleaved_ack_restart ... ok
+test stalled_terminal_never_delays_control_or_sibling_dispatch ... ok
+test two_writers_keep_independent_ack_and_exact_input_after_restart ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.15s
+
+     Running tests/agent_sessions.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/agent_sessions-1b9e867e8ad6b82f)
+
+running 3 tests
+test detached_shim_is_discovered_and_replays_from_the_last_observed_offset ... ok
+test latency_fixture_accepts_the_unsolicited_startup_inventory ... ok
+test restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.20s
+
+     Running tests/session_exit_events.rs (/home/kayg/.cache/codex-scratch/prod4/target/debug/deps/session_exit_events-af10e2b6911d395c)
+
+running 1 test
+test idle_daemon_discovers_unattached_and_adopted_shim_exit_without_requests ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+

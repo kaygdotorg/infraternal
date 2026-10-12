@@ -16,6 +16,28 @@ import uuid
 from latency_proxy import LatencyConfig, LatencyDuplex
 
 
+def event_object(body):
+    """Decode a mux Event after checking its reserved event id."""
+    assert body[:4] == bytes(4)
+    return json.loads(body[4:])
+
+
+def replay_complete_cursor(event, session_id):
+    """Validate attach metadata without exposing it as a user-visible event."""
+    assert event.get('type') == 'terminal.replay_complete', event
+    assert event.get('session_id') == str(session_id), event
+    cursor = event.get('out_seq')
+    assert (
+        isinstance(cursor, str)
+        and 1 <= len(cursor) <= 20
+        and cursor.isascii()
+        and cursor.isdecimal()
+    ), event
+    value = int(cursor)
+    assert value < 1 << 64, event
+    return value
+
+
 def fixture_state(label):
     """Return a short per-process private state path for real Unix-socket fixtures."""
     root = Path(os.environ.get(
@@ -154,6 +176,7 @@ class Binary:
         self.fence_nonce = 0
         self.cpu_weight = fixture_cpu_weight()
         self.events = []
+        self.inventory = None
         self.snapshots = []
         self.link = None
         self.start()
@@ -192,9 +215,7 @@ class Binary:
         self.send(0, 0, struct.pack('<HQ', 1, 0) + varint(6) + b'tracer')
         # Hello is an inbound startup request. Fence it with a real Pong before
         # the scheduler canary starts; otherwise its wakeup is counted as idle.
-        self.send(0, 0x08, struct.pack('<QQ', 0, 0))
-        stream, kind, _ = self.read()
-        assert (stream, kind) == (0, 0x09)
+        self.ping(0, 0)
 
     def send(self, stream, kind, body=b''):
         self.sock.sendall(varint(stream) + varint(1 + len(body)) + bytes([kind]) + body)
@@ -214,6 +235,35 @@ class Binary:
             # The daemon emits only static protocol/IO errors; shell output
             # travels exclusively over the fixture socket and is never logged.
             raise AssertionError(f'daemon exit {self.child.returncode}: {self.child.stderr.read().decode()}') from error
+
+    def read_without_inventory(self):
+        """Read the next reply while validating censuses within one socket budget."""
+        timeout = self.sock.gettimeout()
+        assert timeout is not None, 'reply requires a bounded socket'
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, 'reply exceeded the socket budget'
+                self.sock.settimeout(remaining)
+                frame = self.read()
+                if frame[:2] != (0, 0x33):
+                    return frame
+                self.process(frame=frame)
+        finally:
+            self.sock.settimeout(timeout)
+
+    def read_ignoring_replay_complete(self, sessions):
+        """Skip only validated attach markers, preserving all other event frames."""
+        while True:
+            frame = self.read_without_inventory()
+            stream, kind, body = frame
+            if kind != 0x33:
+                return frame
+
+            session_id = sessions.get(stream)
+            assert session_id is not None, (stream, kind)
+            replay_complete_cursor(event_object(body), session_id)
 
     def inherit_scope_priority(self, weight=None):
         """Apply this test's CPU weight only to its own transient shim scope."""
@@ -240,7 +290,10 @@ class Binary:
             stream, kind, body = self.read()
             if (stream, kind) == (0, 0x31):
                 break
-            assert stream == 1
+            if stream == 0:
+                self.process(frame=(stream, kind, body))
+            else:
+                assert stream == 1
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
         self.benchmark_scope()
@@ -294,6 +347,12 @@ class Binary:
 
     def process(self, credit=True, frame=None):
         stream, kind, body = self.read() if frame is None else frame
+        if stream == 0 and kind == 0x33:
+            # Full host censuses are unsolicited control frames, independent of
+            # the one terminal writer. Retain only the latest bounded snapshot.
+            assert body[:4] == bytes(4)
+            self.inventory = json.loads(body[4:])
+            return kind
         assert stream == 1, (stream, kind)
         if kind == 0x11:
             seq = struct.unpack('<Q', body[:8])[0]
@@ -319,11 +378,24 @@ class Binary:
             self.snapshots.append((seq, len(body) - 8))
             self.credit_available -= len(body) - 8
         elif kind == 0x33:
-            assert body[:4] == bytes(4)
-            self.events.append(json.loads(body[4:]))
+            event = event_object(body)
+            if event.get('type') == 'terminal.replay_complete':
+                cursor = replay_complete_cursor(event, self.id)
+                # The writer orders this marker after all replay bytes on the stream.
+                assert cursor == self.out, (cursor, self.out)
+            else:
+                self.events.append(event)
         else:
             raise AssertionError((kind, body))
         return kind
+
+    def wait_event(self, event_type):
+        """Wait for the named event; replay completion can precede lifecycle events."""
+        while True:
+            for event in reversed(self.events):
+                if event.get('type') == event_type:
+                    return event
+            self.process()
 
     def drain_credit(self):
         """Consume the exact funded window; socket silence is not an output fence."""
@@ -341,7 +413,29 @@ class Binary:
             if frame[:2] == (0, 0x09):
                 assert frame[2] == body
                 return
+            # The Pong fences earlier writer traffic; keep it in socket order without refunding credit.
             self.process(credit=False, frame=frame)
+
+    def wait_for_starvation_detach(self, cols=80, rows=24, timeout=5):
+        """Prove a zero-credit relay detached by requiring Resize to relink and Ack."""
+        self.send(1, 0x14, struct.pack('<I', 1))
+        deadline = time.monotonic() + timeout
+        while not self.data:
+            self.process(credit=False)
+            assert time.monotonic() < deadline, 'prompt did not produce funded output'
+        assert len(self.data) == 1
+        self.fence()
+        time.sleep(.35)
+
+        prior_ack = self.acked
+        self.send(1, 0x12, struct.pack('<HHHH', cols, rows, 0, 0))
+        deadline = time.monotonic() + timeout
+        while True:
+            frame = self.read()
+            if self.process(credit=False, frame=frame) == 0x13:
+                assert self.acked == prior_ack
+                return
+            assert time.monotonic() < deadline, 'detached relay did not acknowledge its resize'
 
     def until(self, marker, credit=True):
         deadline = time.monotonic() + 20

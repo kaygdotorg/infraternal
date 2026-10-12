@@ -441,7 +441,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   const openSession = (host: string, sessionId: string): WinRec | undefined => {
     const inv = cx.adapters.inventory;
     const c = views.get("console" as ViewId);
-    if (!inv || !c || !inv.get(host, sessionId)) return undefined;
+    if (!inv || !c || !inv.list(host).some((session) => session.id === sessionId)) return undefined;
     const existing = cx.sessionUi?.windowFor(host, sessionId);
     const model = cx.adapters.sessions.open(host, { session: sessionId });
     // The window carries the session's name from the first frame (the inventory knows it).

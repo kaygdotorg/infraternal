@@ -92,3 +92,22 @@ fn consent_and_credential_references_are_the_only_request_authority() {
         .is_err()
     );
 }
+
+#[test]
+fn passwordless_sudo_keeps_default_rootless_without_explicit_consent() {
+    let mut target: Target =
+        serde_json::from_str(r#"{"id":"one","address":{"kind":"manual","value":"user@host"}}"#)
+            .unwrap();
+    let check =
+        Check::parse(b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nyes\nyes\nyes\nno\n")
+            .unwrap();
+    assert_eq!(target.mode, InstallMode::Rootless);
+    assert!(!target.root_consent);
+    assert!(target.validate().is_ok());
+    assert!(check.authorize_mode(target.mode).is_ok());
+    target.mode = InstallMode::Root;
+    assert!(target.validate().is_err());
+    target.root_consent = true;
+    assert!(target.validate().is_ok());
+    assert!(check.authorize_mode(target.mode).is_ok());
+}

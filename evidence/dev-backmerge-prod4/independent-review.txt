@@ -1,0 +1,8 @@
+Independent read-only integration review, dev-backmerge-prod4.
+Initial P2: successful embedded greeting reset accumulated retry delay, undoing production67a423b5/#158.
+Paused-clock actual-actor regression before repair: 0PASS/1FAIL, configured400ms versus expected800ms.
+Repair removes reset and retains capability invalidation.
+Delta verdict: no remaining integration blockers found.
+Production index SQL is byte-identical after renumbering; checksum normalization remains narrow and transactional. Capability notices and census updates retain separate watches. Readiness registration is preserved. Functional mode skips CPU/RSS checks while performance thresholds and static size gate remain unchanged.
+Reviewer ran no duplicate builds or tests. Full native verification belongs to the parent.
+Final wizard delta verdict: no integration defect; both validated architecture labels and HTML escaping preserved, desktop/phone Details coverage extended. No duplicate builds run.

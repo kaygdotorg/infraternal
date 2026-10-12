@@ -258,6 +258,9 @@ test("an unsupported host cannot be retried; an install failure can", async ({ p
   await expect(page.getByRole("heading", { name: "Setting up broken.lab didn't finish" })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("Open the details, restore access to the host if needed, then try again.", { exact: false })).toBeVisible();
   await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toHaveCount(0);
+  await page.locator(".ah-details summary").click();
+  await expect(page.locator(".ah-details pre")).toContainText("Failed step: Start the host service");
+  await page.screenshot({ path: "../../evidence/addhost-169/failure-details.png" });
   await inWizard(page, "Retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
@@ -412,8 +415,8 @@ test("a typed root login requires consent and cannot pretend to install as a use
   await expect.poll(() => mode).toBe("root");
 });
 
-for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
-  test(`signed payload refusal names its step at ${viewport.width}px`, async ({ page }, info) => {
+for (const binary of ["arm64", "x86_64"] as const) for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`signed ${binary} payload refusal names its step at ${viewport.width}px`, async ({ page }, info) => {
     // Keep the real production wizard and decoder; change only the local
     // stand-in's public failure frame to the release resolver's contract.
     await page.routeWebSocket("**/v1/bootstrap/ws", (socket) => {
@@ -422,7 +425,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         if (typeof message !== "string") { socket.send(message); return; }
         const event = JSON.parse(message) as { failure?: { kind: string; message: string; failed_step?: string; log_tail: string[] }; message: string };
         if (event.failure?.kind === "install") {
-          event.failure.failed_step = "get-arm64-binary";
+          event.failure.failed_step = binary === "arm64" ? "get-arm64-binary" : "get-x86-64-binary";
           event.failure.log_tail = [];
           event.failure.message = "the binary does not match the signed checksum.";
           event.message = event.failure.message;
@@ -435,7 +438,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await page.setViewportSize(viewport);
     await openWizard(page);
     await addTyped(page, "broken.lab");
-    await expect(wizard(page)).toContainText("Get the arm64 binary: the binary does not match the signed checksum.", { timeout: 15_000 });
+    await expect(wizard(page)).toContainText(`Get the ${binary} binary: the binary does not match the signed checksum.`, { timeout: 15_000 });
+    await wizard(page).locator(".ah-details summary").click();
+    await expect(wizard(page).locator(".ah-details pre")).toContainText(`Failed step: Get the ${binary} binary`);
     const screenshot = info.outputPath(`release-verification-${viewport.width}.png`);
     await page.screenshot({ path: screenshot });
     await info.attach("release verification refusal", { path: screenshot, contentType: "image/png" });

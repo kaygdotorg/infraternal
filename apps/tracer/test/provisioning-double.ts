@@ -55,7 +55,7 @@ interface BootstrapEvent {
   message: string;
   elapsed_ms: number;
   log_tail: string[];
-  failure?: { kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
+  failure?: { failed_step?: "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -107,7 +107,7 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
   return known;
 }
 
-interface Failure { phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[] }
+interface Failure { failed_step?: "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[] }
 
 /** Host keys the person trusted on the same bootstrap socket, until `reset`. */
 const trusted = new Set<string>();
@@ -139,7 +139,7 @@ function failureOf(target: Target): Failure | undefined {
     return { phase: 0, beforeLogin: true, kind: "auth", message: "No sign-in method was accepted.", evidence: "Network access, the server key and a saved key were not accepted.", choose: true };
   }
   if (/^refused/.test(name)) return { phase: 0, beforeLogin: true, kind: "auth", message: "The host refused the server key.", evidence: "The host answered on port 22 and refused the SSH identity." };
-  if (/^broken/.test(name)) return { phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
+  if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;
 }
 
@@ -200,7 +200,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
     const fail = (): void => {
       if (!failure) return;
       emit(target, "failed", failure.message, {
-        kind: failure.kind, message: failure.message, log_tail: [failure.evidence],
+        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), kind: failure.kind, message: failure.message, log_tail: [failure.evidence],
         ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519" } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });
       target.state = "failed";

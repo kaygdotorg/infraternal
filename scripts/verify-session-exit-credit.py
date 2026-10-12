@@ -10,7 +10,7 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, exact, fixture_state, shim_socket_count
+from agent_fixture import Binary, cleanup, exact, fixture_state
 
 
 def run(binary, exit_after_detach=False):
@@ -42,15 +42,8 @@ def run(binary, exit_after_detach=False):
         children = Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
         assert len(children) == 1
         if exit_after_detach:
-            # Observe data-link detachment: only the listener and, when
-            # negotiated, the independent owner remain. The window is still open.
-            deadline = time.monotonic() + 5
-            while True:
-                sockets = shim_socket_count(pid, path)
-                if sockets == (2 if retained_owner else 1):
-                    break
-                assert time.monotonic() < deadline, 'relay did not detach'
-                time.sleep(.005)
+            # Use the wire to prove starvation detached the local data link.
+            client.wait_for_starvation_detach()
             # Control-only input emits final bytes and a known exit status,
             # without turning the probe into another output viewer.
             with socket.socket(socket.AF_UNIX) as peer:
@@ -71,14 +64,19 @@ def run(binary, exit_after_detach=False):
         time.sleep(.35)
         client.send(1, 0x14, struct.pack('<I', 1048576))
         received = bytearray()
-        while not client.events:
+        terminal_exit = None
+        while terminal_exit is None:
             frame = client.read()
             if frame[1] in (0x11, 0x15):
                 # A funded recovery may carry a repaint rather than raw bytes.
                 received.extend(frame[2][8:])
             client.process(credit=False, frame=frame)
-        assert client.events[-1]['status'] == (7 if exit_after_detach else -signal.SIGKILL)
-        assert client.events[-1]['final_seq'] == client.out
+            terminal_exit = next(
+                (event for event in reversed(client.events) if event.get('type') == 'terminal.exited'),
+                None,
+            )
+        assert terminal_exit['status'] == (7 if exit_after_detach else -signal.SIGKILL)
+        assert terminal_exit['final_seq'] == client.out
         if exit_after_detach:
             assert b'FINAL_OUTPUT' in received, 'final output was not delivered'
         deadline = time.monotonic() + 1

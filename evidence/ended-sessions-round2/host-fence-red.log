@@ -1,0 +1,51 @@
+bun test v1.4.2 (744846f84)
+
+src/canvas/sessions/live-inventory.test.ts:
+147 | for (const event of ["census", "close"] as const) test(`another host's ${event} cannot clear a new shell's census fence`, () => {
+148 |   const inventory = createLiveInventory({ accountId: `host-fence-${event}`, host: "server" });
+149 |   inventory.attach("server", "new-id");
+150 |   if (event === "census") inventory.reconcile("worker", ["new-id"]);
+151 |   else inventory.gone("worker", "new-id");
+152 |   expect(inventory.reconcile("server", [])).toEqual([]);
+                                                  ^
+error: expect(received).toEqual(expected)
+
+- []
++ [
++   {
++     "id": "new-id",
++   },
++ ]
+
+- Expected  - 1
++ Received  + 5
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/apps/tracer/src/canvas/sessions/live-inventory.test.ts:152:45)
+(fail) another host's census cannot clear a new shell's census fence [12.55ms]
+147 | for (const event of ["census", "close"] as const) test(`another host's ${event} cannot clear a new shell's census fence`, () => {
+148 |   const inventory = createLiveInventory({ accountId: `host-fence-${event}`, host: "server" });
+149 |   inventory.attach("server", "new-id");
+150 |   if (event === "census") inventory.reconcile("worker", ["new-id"]);
+151 |   else inventory.gone("worker", "new-id");
+152 |   expect(inventory.reconcile("server", [])).toEqual([]);
+                                                  ^
+error: expect(received).toEqual(expected)
+
+- []
++ [
++   {
++     "id": "new-id",
++   },
++ ]
+
+- Expected  - 1
++ Received  + 5
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/apps/tracer/src/canvas/sessions/live-inventory.test.ts:152:45)
+(fail) another host's close cannot clear a new shell's census fence [1.22ms]
+
+ 0 pass
+ 8 filtered out
+ 2 fail
+ 2 expect() calls
+Ran 2 tests across 1 file. [55.00ms]

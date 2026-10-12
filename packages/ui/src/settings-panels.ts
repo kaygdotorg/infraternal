@@ -11,6 +11,7 @@
  * at once, through the same actions the command palette uses.
  */
 import { createCapsuleTabs } from "./capsule-tabs";
+import { ICONS } from "./icons";
 import { createKeyValueList } from "./kv-list";
 import { enhanceSwitch } from "./switch";
 import { mountConfirmTip } from "./tooltip";
@@ -50,7 +51,39 @@ function heading(text: string): HTMLElement {
 
 export interface ChoiceItem { id: string; label: string; hint?: string; swatch?: { bg: string; accent: string } }
 
-/** A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one. */
+/**
+ * Decides once per list, and again only when its width changes (a ResizeObserver callback, never per frame), whether hints
+ * sit beside the names or under them. Measured in the inline layout, where the hint is `nowrap` and so reports its natural
+ * width: the list stacks when any row's name + gap + hint is wider than the room it has. One decision per list keeps every
+ * row's hint in the same place, and a stacked list does not jump when the selection changes.
+ */
+function fitHints(list: HTMLElement): void {
+  let width = -1;
+  const decide = (): void => {
+    if (!list.isConnected) { observer.disconnect(); return; }
+    if (list.clientWidth === 0) return;
+    list.removeAttribute("data-stacked");
+    const stack = [...list.querySelectorAll<HTMLElement>(".ui-sp-text")].some((t) => {
+      const hint = t.querySelector<HTMLElement>(".ui-sp-hint")!;
+      return hint.textContent !== "" && t.querySelector<HTMLElement>(".ui-sp-label")!.offsetWidth + 10 + hint.scrollWidth > t.clientWidth;
+    });
+    if (stack) list.dataset.stacked = "";
+  };
+  const observer = new ResizeObserver(() => {
+    if (list.clientWidth === width) return;
+    width = list.clientWidth;
+    decide();
+  });
+  observer.observe(list);
+  void document.fonts?.ready.then(decide);
+}
+
+/**
+ * A titled radio list of rows: a label, an optional quiet subtitle (the technical detail) and a tick on the current one.
+ * The name never wraps. A list reads as one: if the widest row cannot hold its name and hint on one line, every row of the
+ * list puts its hint under its name (`data-stacked` on the list, see `fitHints`), so text never collides at any width
+ * (TASTE: "Text never collides").
+ */
 function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void): HTMLElement {
   const block = document.createElement("section");
   block.append(heading(title));
@@ -64,7 +97,7 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
     row.className = "ui-sp-row";
     row.dataset.id = item.id;
     row.setAttribute("role", "radio");
-    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-label"></span><span class="ui-sp-hint"></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
+    row.innerHTML = `${item.swatch ? '<span class="ui-sp-swatch" aria-hidden="true"></span>' : ""}<span class="ui-sp-text"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span><svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true">${CHECK}</svg>`;
     (row.querySelector(".ui-sp-label") as HTMLElement).textContent = item.label;
     (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = item.hint ?? "";
     const sw = row.querySelector<HTMLElement>(".ui-sp-swatch");
@@ -73,6 +106,7 @@ function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: 
     list.append(row);
   }
   block.append(list);
+  fitHints(list);
   block.dataset.kind = kind;
   block.dataset.current = current();
   return block;
@@ -247,7 +281,6 @@ const DEVICE_ICON: Record<DeviceKind, string> = {
 export const deviceIcon = (kind: DeviceKind): string => DEVICE_ICON[kind];
 
 const ICON_JUMP = '<path d="M7 17 17 7M9 7h8v8"/>';
-const ICON_OUT = '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10M14 8l4 4-4 4M18 12H9"/>';
 
 /** The signed-in devices: name, type, last seen, current view, online; jump to its view, sign it out (with the compact confirmation). */
 export function renderDevices(container: HTMLElement, api: DevicesApi): () => void {
@@ -284,7 +317,7 @@ export function renderDevices(container: HTMLElement, api: DevicesApi): () => vo
         actions.append(b);
       };
       button("Jump to its view", ICON_JUMP, () => api.jump(d.view));
-      if (!d.current) button("Sign out this device", ICON_OUT, (b) => mountConfirmTip(b, {
+      if (!d.current) button("Sign out this device", ICONS.signOut, (b) => mountConfirmTip(b, {
         label: `Sign out ${d.name}`, title: `Sign out ${d.name}?`, effect: "That device will be signed out and will need your passkey to sign in again.",
         named: true, confirmLabel: "Sign out device", cancelLabel: "Keep signed in", onConfirm: () => { api.signOut(d); paint(); },
       }));
@@ -295,12 +328,11 @@ export function renderDevices(container: HTMLElement, api: DevicesApi): () => vo
   return () => root.remove();
 }
 
-/** A window of facts (Account, About-like placeholders): a key/value list under a heading. */
-export function renderFacts(container: HTMLElement, label: string, groups: Array<{ title: string; rows: Array<{ key: string; value: string }> }>): () => void {
-  const root = document.createElement("div");
-  root.className = "ui-sp";
-  container.append(root);
-  const lists = groups.map((g) => {
+type FactGroup = { title: string; rows: Array<{ key: string; value: string }> };
+
+/** The titled key/value groups of a facts window, appended to `root`. */
+function factSections(root: HTMLElement, label: string, groups: FactGroup[]): Array<{ dispose(): void }> {
+  return groups.map((g) => {
     const section = document.createElement("section");
     section.append(heading(g.title));
     const list = createKeyValueList(`${label}: ${g.title}`);
@@ -309,5 +341,48 @@ export function renderFacts(container: HTMLElement, label: string, groups: Array
     root.append(section);
     return list;
   });
+}
+
+/** A window of facts (placeholders): a key/value list under a heading. */
+export function renderFacts(container: HTMLElement, label: string, groups: FactGroup[]): () => void {
+  const root = document.createElement("div");
+  root.className = "ui-sp";
+  container.append(root);
+  const lists = factSections(root, label, groups);
+  return () => { for (const l of lists) l.dispose(); root.remove(); };
+}
+
+export interface AccountApi {
+  /** Facts the product knows about the account, shown above the device group. */
+  groups?: FactGroup[];
+  /** Signs this device out. The product asks first (the compact confirmation) at `anchor`, the button that was pressed. */
+  signOut(anchor: HTMLElement): void;
+}
+
+/** Settings, Account (D230): the person's own details, and the way out of this device. */
+export function renderAccount(container: HTMLElement, api: AccountApi): () => void {
+  const root = document.createElement("div");
+  root.className = "ui-sp";
+  container.append(root);
+  const lists = factSections(root, "Account", api.groups ?? []);
+  const block = document.createElement("section");
+  block.dataset.kind = "this-device";
+  block.append(heading("This device"));
+  const row = document.createElement("div");
+  row.className = "ui-sp-row ui-sp-status";
+  row.innerHTML = '<span class="ui-sp-names"><span class="ui-sp-label"></span><span class="ui-sp-hint"></span></span>';
+  (row.querySelector(".ui-sp-label") as HTMLElement).textContent = "Sign out of this device";
+  (row.querySelector(".ui-sp-hint") as HTMLElement).textContent = "You will need your passkey to sign in again";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ui-window-action";
+  button.dataset.action = "sign-out";
+  button.setAttribute("aria-label", "Sign out");
+  button.dataset.tip = "Sign out";
+  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS.signOut}</svg>`;
+  button.addEventListener("click", () => api.signOut(button));
+  row.append(button);
+  block.append(row);
+  root.append(block);
   return () => { for (const l of lists) l.dispose(); root.remove(); };
 }

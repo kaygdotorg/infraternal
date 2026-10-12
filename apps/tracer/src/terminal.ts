@@ -3,6 +3,7 @@ import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { plainCloseReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
 import { pulseActivity } from "./perf-activity";
@@ -138,6 +139,8 @@ export interface TerminalConfig {
   hostId?: string;
   /** Reattach this tab's owned session using a new writer after a page reload. */
   initialSessionId?: string;
+  /** Recheck liveness before opening the stream so a snapshot racing font load cannot attach a retired ID. */
+  getEndedSession?: () => { status?: number } | undefined;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
   /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
@@ -257,6 +260,8 @@ export class TerminalClient {
   private exitReported = false;
   /** The server's final answer that the session is gone: no attach is ever sent for it again. */
   private sessionGone = false;
+  /** A later full census can add a saved exit code after this stream is already final. */
+  private sessionGoneStatus: number | undefined;
   /** Armed only after a transient shared-stream Close; live idle terminals have no retry timer. */
   private streamRetryTimer = 0;
   private streamRetryAttempt = 0;
@@ -264,8 +269,15 @@ export class TerminalClient {
   private inputPaused = false;
   private inputAtCapacityMessageShown = false;
   private connectionIsResume = false;
+  /** Existing-session restores suppress parser replies until the server's replay fence has painted. */
+  private suppressReplayResponses = false;
+  private replayResponseFence: bigint | undefined;
+  /** Scoped only around synchronous renderer writes; keyboard input arrives in later event tasks. */
+  private suppressTerminalResponses = false;
   private renderIdleTimer = 0;
-  private rendererCursorBlinking = false;
+  /** D249: the live cursor, a layer of its own that the compositor blinks; the renderer never draws it while this shows. */
+  private cursorLayer: TerminalCursorLayer | undefined;
+  private rendererCursorHidden = false;
   /**
    * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
    * phone the keyboard needs a tap: until the terminal's input has focus the cursor waits (steady, an underline) and
@@ -281,6 +293,8 @@ export class TerminalClient {
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
   private readonly onViewportChange = (): void => this.syncVisualViewport();
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
+  private readonly onBlinkInput = (): void => this.restartCursorBlink();
+  private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
   private readonly disposeTouch: () => void;
 
   private constructor(private readonly config: TerminalConfig, terminal: Terminal, font: MonoFont) {
@@ -308,7 +322,12 @@ export class TerminalClient {
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
       })
       : undefined;
+    this.cursorLayer = mountTerminalCursorLayer(config.host);
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
+    config.host.addEventListener("pointerdown", this.onBlinkInput, { passive: true });
+    document.addEventListener("visibilitychange", this.onBlinkEnvironment);
+    window.addEventListener("blur", this.onBlinkEnvironment);
+    window.addEventListener("focus", this.onBlinkEnvironment);
     config.host.addEventListener("pointermove", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("wheel", this.onTerminalActivity, { passive: true });
     this.resizeObserver = new ResizeObserver(() => {
@@ -327,7 +346,13 @@ export class TerminalClient {
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
       if (this.attached) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     });
-    this.terminal.onData((data) => { this.wakeTerminal(); this.handleInput(data); });
+    this.terminal.onData((data) => {
+      this.wakeTerminal();
+      // Replayed parser replies are not typing: they neither reach the shell nor restart the blink.
+      if (this.suppressTerminalResponses) return;
+      this.restartCursorBlink();
+      this.handleInput(data);
+    });
     this.terminal.onScroll((offset) => {
       this.wakeTerminal();
       if (offset !== 0) this.prediction?.unsafeScreen();
@@ -338,9 +363,16 @@ export class TerminalClient {
     const known = config.attachSessionId ?? config.initialSessionId;
     if (known && isCanonicalUuid(known)) {
       // A page reload has no pending-input buffer or writer capability. Start
-      // a fresh writer at zero, replay output from zero, and let server-owned
-      // session authorization validate this nonsecret convenience identifier.
+      // a fresh writer at zero. The renderer restores the old screen silently
+      // through the replay fence; server-owned session authorization validates
+      // this nonsecret convenience identifier.
       this.sessionId = uuidBytes(known);
+      this.suppressReplayResponses = true;
+    }
+    const ended = config.getEndedSession?.();
+    if (ended) {
+      this.sessionGone = true;
+      this.sessionGoneStatus = ended.status;
     }
     this.scheduleFit();
     this.ownsConnection = config.connection === undefined;
@@ -355,9 +387,14 @@ export class TerminalClient {
       config.onRoundTrip?.(ms);
     });
     this.streamId = this.conn.openStream(this.streamHandler());
+    if (ended) {
+      if (config.hooks?.onSessionGone) config.hooks.onSessionGone(ended.status);
+      else this.setStatus("This session has ended. Open a new shell to continue.");
+    }
     if (!matchMedia("(pointer: coarse)").matches) this.terminal.focus();
-    config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); });
+    config.host.addEventListener("focusin", () => { if (!this.openingFocus) this.setTypingReady(true); this.restartCursorBlink(); });
     config.host.addEventListener("focusout", (event) => {
+      if (!config.host.contains(event.relatedTarget as Node | null)) this.cursorLayer?.stopBlink();
       // Focus moving between the host's own elements (its input and the host) keeps the terminal ready.
       if (!this.openingFocus && !config.host.contains(event.relatedTarget as Node | null) && matchMedia("(pointer: coarse)").matches) this.setTypingReady(false);
     });
@@ -392,6 +429,7 @@ export class TerminalClient {
     client.installFontWeights();
     client.remeasureFont();
     client.keepLigaturesOff();
+    client.installCursorLayerHook();
     client.loadStyledFaces();
     return client;
   }
@@ -593,6 +631,7 @@ export class TerminalClient {
       window.clearTimeout(this.renderIdleTimer);
       this.pauseTerminal();
       this.releaseSurface();
+      this.cursorLayer?.hide();
       return;
     }
     this.restoreSurface();
@@ -634,7 +673,8 @@ export class TerminalClient {
   private paintTypingState(): void {
     this.config.host.dataset.typing = this.typingReady ? "ready" : "waiting";
     this.terminal.options.cursorStyle = this.typingReady ? "bar" : "underline";
-    if (!this.typingReady) this.ghostty.renderer?.setCursorBlink(false);
+    this.syncCursorLayer();
+    this.restartCursorBlink();
   }
 
   /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
@@ -694,6 +734,12 @@ export class TerminalClient {
     this.disposeTouch();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
+    this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
+    document.removeEventListener("visibilitychange", this.onBlinkEnvironment);
+    window.removeEventListener("blur", this.onBlinkEnvironment);
+    window.removeEventListener("focus", this.onBlinkEnvironment);
+    this.cursorLayer?.dispose();
+    this.cursorLayer = undefined;
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     if (this.attached) this.conn.streamAttached(false);
@@ -783,6 +829,15 @@ export class TerminalClient {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
+          } else if (notice.type === "terminal.replay_complete") {
+            const sequence = requireString(notice.out_seq);
+            if (!/^(0|[1-9][0-9]*)$/.test(sequence)) throw new Error("invalid replay cursor");
+            const fence = BigInt(sequence);
+            // The ordered event follows every replay frame and any Snapshot
+            // repaint, so its cursor must equal the received PTY boundary.
+            if (fence !== this.receivedOutSeq) throw new Error("replay cursor mismatch");
+            this.replayResponseFence = fence;
+            this.releaseReplayResponsesAfterPaint();
           } else if (notice.type === "terminal.exited") {
             if (!Number.isSafeInteger(notice.status) || !Number.isSafeInteger(notice.final_seq) || (notice.final_seq as number) < 0) throw new Error("invalid exit");
             const status = notice.status as number;
@@ -906,6 +961,11 @@ export class TerminalClient {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
+  /** A full host inventory retired this session; stop stream retries and retain any saved exit status. */
+  markSessionGone(status?: number): void {
+    this.endSession(status);
+  }
+
   /** The renderer's canvas, for a caller that keeps a picture of the last screen (the switch's ghost). */
   get canvas(): HTMLCanvasElement | undefined {
     return this.config.host.querySelector<HTMLCanvasElement>("canvas:not(.cl-ghost)") ?? undefined;
@@ -944,6 +1004,7 @@ export class TerminalClient {
     this.pendingExit = undefined;
     this.exitReported = false;
     this.sessionGone = false;
+    this.sessionGoneStatus = undefined;
     this.snapshotWriteInFlight = false;
     this.outputWriteInFlight = false;
     this.sessionId = sessionId;
@@ -959,16 +1020,23 @@ export class TerminalClient {
    * The server's final answer: the host no longer has this session. Stop for good (no reattach on this or any later
    * socket), release the stream, and let the window say so. Typing goes nowhere until a new session starts.
    */
-  private endSession(): void {
-    if (this.sessionGone || this.closed) return;
+  private endSession(status?: number): void {
+    if (this.sessionGone || this.closed) {
+      if (this.sessionGone && status !== undefined && this.sessionGoneStatus !== status) {
+        this.sessionGoneStatus = status;
+        this.config.hooks?.onSessionGone?.(status);
+      }
+      return;
+    }
     this.sessionGone = true;
+    this.sessionGoneStatus = this.pendingExit?.status ?? status;
     this.cancelStreamRetry();
     if (this.attached) this.conn.streamAttached(false);
     this.attached = false;
     this.attachRequested = false;
     // The server keeps absorbing this stream's in-flight frames until this Close (contracts/wire.md §4).
     this.conn.closeStream(this.streamId);
-    if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(this.pendingExit?.status); }
+    if (this.config.hooks?.onSessionGone) { this.setStatus(""); this.config.hooks.onSessionGone(this.sessionGoneStatus); }
     else this.setStatus("This session has ended. Open a new shell to continue.");
   }
 
@@ -981,6 +1049,8 @@ export class TerminalClient {
     this.ackedInSeq = 0n;
     this.inputQueue.clear();
     this.outputQueue.clear();
+    this.replayResponseFence = undefined;
+    this.suppressReplayResponses = this.sessionId !== undefined;
     this.pendingSnapshot?.bytes.fill(0);
     this.pendingSnapshot = undefined;
     this.prediction?.resetForSnapshot();
@@ -1131,13 +1201,14 @@ export class TerminalClient {
       this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
-      this.terminal.write(snapshot.bytes, () => {
+      this.writeSuppressingTerminalResponses(snapshot.bytes, () => {
         if (epoch !== this.cursorEpoch) { this.snapshotWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "writeCallback", callbackAt);
         // Ghostty calls this from the rAF after its render loop draws the write; another rAF adds a full frame.
         const paintedAt = performance.now();
         this.lastOutSeq = snapshot.outSeq;
+        this.releaseReplayResponsesAfterPaint();
         this.snapshotWriteInFlight = false;
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
         this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
@@ -1150,10 +1221,16 @@ export class TerminalClient {
     }
 
     if (this.outputQueue.length > 0) {
-      const region = this.outputQueue.peek();
+      let region = this.outputQueue.peek();
       if (region.byteLength === 0) {
         this.protocolFailure("output queue has no contiguous data");
         return;
+      }
+      if (this.suppressReplayResponses && this.replayResponseFence !== undefined) {
+        // The ring can coalesce replay and live frames while a write awaits paint.
+        // Paint exactly to the fence before parsing live bytes with replies enabled.
+        const remaining = this.replayResponseFence - this.lastOutSeq;
+        if (remaining > 0n && remaining < BigInt(region.byteLength)) region = region.subarray(0, Number(remaining));
       }
       pulseActivity("output", 300);
       this.outputWriteInFlight = true;
@@ -1162,7 +1239,7 @@ export class TerminalClient {
       const writeSequence = this.lastOutSeq;
       this.traceRange(writeSequence, region.byteLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
-      this.terminal.write(region, () => {
+      const onWritten = (): void => {
         if (epoch !== this.cursorEpoch) { this.outputWriteLength = 0; this.outputWriteInFlight = false; this.drainOutput(); this.tryAttach(); return; }
         const callbackAt = performance.now();
         this.traceRange(writeSequence, this.outputWriteLength, "writeCallback", callbackAt);
@@ -1170,6 +1247,7 @@ export class TerminalClient {
         const paintedAt = performance.now();
         const consumed = this.outputWriteLength;
         this.lastOutSeq += BigInt(consumed);
+        this.releaseReplayResponsesAfterPaint();
         this.traceRange(writeSequence, consumed, "paint", paintedAt);
         if (this.predictionScreenUnsafe()) this.prediction?.unsafeScreen();
         else {
@@ -1183,7 +1261,9 @@ export class TerminalClient {
         this.returnCredit(consumed);
         this.drainOutput();
         this.tryAttach();
-      });
+      };
+      if (this.suppressReplayResponses) this.writeSuppressingTerminalResponses(region, onWritten);
+      else this.terminal.write(region, onWritten);
       // The terminal state includes these bytes now; only their paint is a frame away. Reconcile the
       // prediction against them at once, so a key typed in that frame is placed from a consistent cursor.
       if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
@@ -1192,6 +1272,29 @@ export class TerminalClient {
     }
     this.finishExit();
     this.tryAttach();
+  }
+
+  /**
+   * Ghostty emits all parser replies synchronously from write() through the same
+   * onData event used for keyboard input. This scoped gate drops only those
+   * write-time replies; real key events run in a later task and remain enabled.
+   */
+  private writeSuppressingTerminalResponses(bytes: Uint8Array, callback: () => void): void {
+    const previous = this.suppressTerminalResponses;
+    this.suppressTerminalResponses = true;
+    try {
+      this.terminal.write(bytes, callback);
+    } finally {
+      this.suppressTerminalResponses = previous;
+    }
+  }
+
+  /** A replay fence takes effect only after the renderer has parsed and painted every byte before it. */
+  private releaseReplayResponsesAfterPaint(): void {
+    if (this.replayResponseFence !== undefined && this.lastOutSeq >= this.replayResponseFence) {
+      this.suppressReplayResponses = false;
+      this.replayResponseFence = undefined;
+    }
   }
 
   /** Wait for paint callbacks so a clean exit never discards its final bytes. */
@@ -1502,6 +1605,8 @@ export class TerminalClient {
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
     if (!renderer || !buffer) throw new Error("terminal renderer is unavailable for cursor pixel test");
+    this.cursorLayerOffForTest = true;
+    this.syncCursorLayer();
     renderer.setCursorBlink(false);
     renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
   }
@@ -1596,13 +1701,81 @@ export class TerminalClient {
    *
    * There must be exactly one visible cursor: the predicted one. Repainting the
    * row once is not enough, because Ghostty redraws its cursor on every render
-   * pass, so the renderer's renderCursor is wrapped once (installCursorGuard)
+   * pass, so the renderer's renderCursor is wrapped once (installCursorLayerHook)
    * and skips drawing while hidden. Toggling only repaints the single cursor row.
    */
   private setPredictionCursorHidden(hidden: boolean): void {
     if (hidden === this.predictionCursorHidden) return;
-    this.installCursorGuard();
     this.predictionCursorHidden = hidden;
+    this.syncCursorLayer();
+    // A prediction without the layer (the host cursor was drawn by the renderer) still needs the one-row repaint.
+    this.setRendererCursorHidden(this.predictionCursorHidden || this.cursorLayerShown);
+  }
+
+  /**
+   * Whether the live cursor layer owns the cursor now (D249): typing can reach the terminal, the program shows its
+   * cursor, the view is at the live screen, and no prediction draws the cursor instead.
+   */
+  private cursorLayerWanted(): boolean {
+    const buffer = this.terminal.wasmTerm;
+    return !this.closed && !this.suspended && !this.surfaceReleased && !this.cursorLayerOffForTest && this.typingReady && !this.predictionCursorHidden
+      && this.terminal.viewportY === 0 && Boolean(buffer?.getCursor().visible);
+  }
+
+  private cursorLayerShown = false;
+  /** Pixel tests read the renderer's own cursor; they switch the layer off so the canvas draws it. */
+  private cursorLayerOffForTest = false;
+  private renderPasses = 0;
+
+  /** The cursor layer and the renderer's passes, for the browser specs (D249). */
+  get cursorLayerState(): { layer: ReturnType<TerminalCursorLayer["snapshot"]> | undefined; renderPasses: number; rendererCursorHidden: boolean; typing: string | undefined } {
+    return { layer: this.cursorLayer?.snapshot(), renderPasses: this.renderPasses, rendererCursorHidden: this.rendererCursorHidden, typing: this.config.host.dataset.typing };
+  }
+
+  /**
+   * Puts the cursor layer on the cursor cell (or hides it) and keeps exactly one visible cursor: while the layer shows,
+   * the renderer's own cursor draw is skipped and its row repainted once. Called after every renderer pass, so the
+   * layer follows cursor moves, scrolling, resizes and font changes with no frame of its own.
+   */
+  private syncCursorLayer(): void {
+    const layer = this.cursorLayer;
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    const canvas = this.terminal.renderer?.getCanvas();
+    if (!layer || !renderer || !buffer || !canvas) return;
+    const shown = this.cursorLayerWanted();
+    if (shown) {
+      const cursor = buffer.getCursor();
+      const metrics = this.cellMetrics();
+      layer.place({
+        canvas,
+        column: cursor.x,
+        row: cursor.y,
+        cellWidth: metrics.width,
+        cellHeight: metrics.height,
+        style: this.terminal.options.cursorStyle ?? "bar",
+        color: renderer.theme?.cursor ?? (this.terminal.options.theme as ITheme | undefined)?.cursor ?? "#c8ceff",
+      });
+      if (!this.cursorLayerShown) this.restartCursorBlink();
+    } else {
+      layer.hide();
+    }
+    this.cursorLayerShown = shown;
+    this.setRendererCursorHidden(this.predictionCursorHidden || shown);
+  }
+
+  /** Any input, focus or visibility change: blinks again from the visible phase, only while the page is live and focused. */
+  private restartCursorBlink(): void {
+    const layer = this.cursorLayer;
+    if (!layer) return;
+    const focused = document.visibilityState === "visible" && document.hasFocus() && this.config.host.contains(document.activeElement);
+    if (focused) layer.restart(); else layer.stopBlink();
+  }
+
+  /** Skips the renderer's cursor draw, and repaints the cursor row once so the cursor it drew is gone (or back). */
+  private setRendererCursorHidden(hidden: boolean): void {
+    if (hidden === this.rendererCursorHidden) return;
+    this.rendererCursorHidden = hidden;
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
     if (!renderer || !buffer) return;
@@ -1613,17 +1786,20 @@ export class TerminalClient {
     if (!hidden && cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
   }
 
-  private cursorGuardInstalled = false;
-
-  /** Wraps the pinned renderer's cursor draw once so a pending prediction suppresses it on every pass. */
-  private installCursorGuard(): void {
+  /** Wraps the renderer once: the cursor draw honours the hidden flag, and the cursor layer follows every pass. */
+  private installCursorLayerHook(): void {
     const renderer = this.ghostty.renderer;
-    if (this.cursorGuardInstalled || !renderer) return;
+    if (!renderer) return;
     const draw = renderer.renderCursor.bind(renderer);
     renderer.renderCursor = (x, y, line) => {
-      if (!this.predictionCursorHidden) draw(x, y, line);
+      if (!this.rendererCursorHidden) draw(x, y, line);
     };
-    this.cursorGuardInstalled = true;
+    const render = renderer.render.bind(renderer);
+    renderer.render = (...args) => {
+      render(...args);
+      this.renderPasses += 1;
+      this.syncCursorLayer();
+    };
   }
 
   /** Uses the same viewport slice the renderer uses for its cursor row. */
@@ -1701,8 +1877,6 @@ export class TerminalClient {
     if (this.closed || this.suspended || this.frozen) return;
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = window.setTimeout(() => this.pauseTerminal(), RENDER_IDLE_MS);
-    this.rendererCursorBlinking = true;
-    this.ghostty.renderer?.setCursorBlink(this.typingReady);
     this.ghostty.startRenderLoop();
   }
 
@@ -1711,8 +1885,8 @@ export class TerminalClient {
     window.clearTimeout(this.renderIdleTimer);
     this.renderIdleTimer = 0;
     this.ghostty.cancelRenderLoop();
-    this.rendererCursorBlinking = false;
     this.ghostty.renderer?.setCursorBlink(false);
+    this.syncCursorLayer();
   }
 }
 

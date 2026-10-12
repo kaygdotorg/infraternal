@@ -73,6 +73,21 @@ async fn wrong_open_uid_is_rejected_while_control_remains_usable() {
         rx.next(&control).await.unwrap().frame,
         Frame::Hello { version: 1, .. }
     ));
+    // Startup inventory shares the ordered control FIFO. Consume and validate
+    // it before correlating the refusal, without relaxing the UID or Pong checks.
+    let inventory = rx.next(&control).await.unwrap();
+    assert_eq!(inventory.stream_id, 0);
+    let Frame::Event {
+        sub_id: 0,
+        event_json,
+    } = inventory.frame
+    else {
+        panic!("startup inventory required");
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(event_json).unwrap(),
+        serde_json::json!({"type":"terminal.sessions.snapshot","session_ids":[]})
+    );
     let json = serde_json::to_vec(&serde_json::json!({"uid":uid ^ 1,"cols":80,"rows":24})).unwrap();
     tx.send(
         &control,

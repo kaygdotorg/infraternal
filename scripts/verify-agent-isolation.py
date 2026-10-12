@@ -42,7 +42,9 @@ def run(binary):
         pong = closed = False
         output = bytearray()
         while not (pong and closed and b'SIBLING_OK' in output):
-            stream, kind, body = client.read()
+            stream, kind, body = client.read_ignoring_replay_complete(
+                {1: stalled, 3: client.id}
+            )
             if (stream, kind) == (0, 9):
                 assert body == struct.pack('<QQ', 123, 456)
                 pong = True
