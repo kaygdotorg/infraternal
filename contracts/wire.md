@@ -267,9 +267,13 @@ frames are binary, because they carry each keystroke and each output chunk.
   deadline. While detached, the PTY progresses independently; after debt is
   repaid and usable credit returns, obtain a fresh Snapshot. Do not reconnect
   on partial repayments or run an idle catch-up timer.
-- **Command isolation.** Each terminal command queue is bounded (eight slots
-  in the embedded infraternal agent). When full, retire only that attachment
-  with Close, cancel its shim link, and keep dispatching sibling/control frames.
+- **Command isolation.** Each browser attachment has one cancellable Input/Resize
+  FIFO bounded to eight requests and `MAX_FRAME_LEN + 128` wire bytes, counting
+  the currently blocked request as well as queued requests. Admission never
+  waits for durable input Ack. Output Credit bypasses this FIFO; Input and Resize
+  keep their mutual order. When full, retire only that attachment with Close
+  1013, absorb its trailing Input/Resize/Credit until Close or reattach, cancel
+  its pending forwarding worker, and keep dispatching sibling/control frames.
   The viewer reattaches and replays unacknowledged Input using shim-owned
   accepted/written cursors (§5); a refused command never implies acceptance.
 - The embedded actor retains unspent credit, subtracting accepted Output and
