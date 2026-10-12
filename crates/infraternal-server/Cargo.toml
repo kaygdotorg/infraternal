@@ -76,3 +76,7 @@ h2 = "0.4"
 [[example]]
 name = "remote_ca_bench"
 required-features = ["remote"]
+
+[[example]]
+name = "mesh_revocation_fixture"
+required-features = ["remote", "mesh"]
