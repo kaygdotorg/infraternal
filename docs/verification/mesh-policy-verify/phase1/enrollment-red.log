@@ -1,0 +1,20 @@
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/crates/plugins/mesh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.27s
+     Running tests/policy_enrollment_identity.rs (/home/kayg/.cache/codex-scratch/mesh-policy-verify/target/debug/deps/policy_enrollment_identity-53dd5a7877195165)
+
+running 1 test
+claimed_node=3 intended_node=3 rotated_node=3 outbound_policy=Ports({Port { protocol: Udp, number: 5540 }})
+
+thread 'unbound_enrollment_public_key_is_not_host_authority' (3804063) panicked at crates/plugins/mesh/tests/policy_enrollment_identity.rs:90:9:
+public enrollment key conferred another node's Access identity
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test unbound_enrollment_public_key_is_not_host_authority ... FAILED
+
+failures:
+
+failures:
+    unbound_enrollment_public_key_is_not_host_authority
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p infraternal-plugin-mesh --test policy_enrollment_identity`

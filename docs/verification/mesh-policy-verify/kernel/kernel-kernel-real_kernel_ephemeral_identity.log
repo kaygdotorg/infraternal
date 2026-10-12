@@ -1,0 +1,7 @@
+Running as unit: run-p4110230-i4110530.scope; invocation ID: ad6e2432f98e434e9f09f7d148665c3b
+
+running 1 test
+test real_kernel_ephemeral_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.32s
+

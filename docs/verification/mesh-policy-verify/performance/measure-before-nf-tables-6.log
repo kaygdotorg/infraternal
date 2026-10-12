@@ -1,0 +1,12 @@
+Running as unit: run-p111400-i4305434.scope; invocation ID: 44b55f280651489e84b24a3b65a2561f
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/scripts/mesh-policy-proof.py", line 501, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/scripts/mesh-policy-proof.py", line 488, in main
+    campaign.measure()
+    ~~~~~~~~~~~~~~~~^^
+  File "/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/scripts/mesh-policy-proof.py", line 454, in measure
+    assert len(times) == 101
+           ^^^^^^^^^^^^^^^^^
+AssertionError
