@@ -287,3 +287,89 @@ test("the product canvas on the real cookie: sign out from the palette, a reload
   await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
   await expect(page.locator(".ui-window")).toHaveCount(0);
 });
+
+/** Every key of both storage areas, plus whether Cache Storage, IndexedDB and the cookies hold anything. */
+async function storageSnapshot(page: Page): Promise<{ local: Record<string, string>; session: Record<string, string>; caches: string[]; databases: string[]; cookies: string }> {
+  return page.evaluate(async () => {
+    const dump = (area: Storage): Record<string, string> => Object.fromEntries(Object.keys(area).map((k) => [k, area.getItem(k) ?? ""]));
+    return {
+      local: dump(localStorage), session: dump(sessionStorage), caches: await caches.keys(),
+      databases: (await indexedDB.databases()).map((d) => d.name ?? ""), cookies: document.cookie,
+    };
+  });
+}
+
+const ACCOUNT_KEY = /^(infraternal\.canvas\.|tracer\.sessions?\.|tracer\.user-id$)/;
+
+test("D245: signing out removes the account's data from every storage area; signing back in starts clean", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const context = page.context();
+  await context.request.post("/__mock/reset");
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true },
+  });
+  await page.goto("/?mock=1");
+  const token = (await (await context.request.get("/__mock/setup-token")).json() as { setup_token: string }).setup_token;
+  await page.locator("#setup-token").fill(token);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.locator("#setup-username").fill("clear_test");
+  await page.locator("#setup-display-name").fill("Clear test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Create passkey" }).click();
+  await page.locator(".auth-check").click();
+  await page.getByRole("button", { name: "Open infraternal" }).click();
+  await expect(page.getByText("TEST DOUBLE")).toBeVisible();
+  await page.goto("/");
+  await expect(page.locator(".ui-window").first()).toBeVisible({ timeout: 30_000 });
+
+  // A device preference, and another account's data that shares this browser.
+  await page.evaluate(() => {
+    localStorage.setItem("tracer.theme", "mocha");
+    localStorage.setItem("infraternal.canvas.someone-else", "{}");
+    localStorage.setItem("tracer.sessions.someone-else", "[]");
+  });
+  // Make a layout change and let the 300 ms coalescing save land, then see what the account owns.
+  // The product canvas finishes opening its windows a moment after the first one appears.
+  await page.waitForTimeout(3000);
+  const windows = await page.locator(".ui-window").count();
+  await page.locator(".ui-window").first().locator("[data-action='split-right']").click();
+  await expect(page.locator(".ui-window")).toHaveCount(windows + 1);
+  await expect.poll(() => page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("infraternal.canvas.") && !k.endsWith("someone-else")))).toBe(true);
+  const before = await storageSnapshot(page);
+  const own = (snap: typeof before) => [...Object.keys(snap.local), ...Object.keys(snap.session)].filter((k) => ACCOUNT_KEY.test(k) && !k.endsWith("someone-else"));
+  expect(own(before).some((k) => k.startsWith("infraternal.canvas."))).toBe(true);
+  const canvasBytes = Object.entries(before.local).filter(([k]) => k.startsWith("infraternal.canvas.")).reduce((n, [, v]) => n + v.length, 0);
+  console.log(`layout document: ${canvasBytes} bytes; keys: ${own(before).join(", ")}`);
+  // The mock host keeps no session list or tab pointer; seed what a real host's session leaves for this account.
+  const id = own(before).find((k) => k.startsWith("infraternal.canvas."))!.slice("infraternal.canvas.".length);
+  await page.evaluate((account) => {
+    localStorage.setItem(`tracer.sessions.${account}`, JSON.stringify([{ host: "h", id: "s1", name: "build", pinned: false, frecency: 1 }]));
+    sessionStorage.setItem(`tracer.session.${account}`, "s1");
+  }, id);
+
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("sign out");
+  await page.keyboard.press("Enter");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expectSignedOut(page);
+  // Late writes: let every timer, the pagehide flush and the sockets' last messages run, then look again.
+  await page.evaluate(() => { window.dispatchEvent(new Event("pagehide")); document.dispatchEvent(new Event("visibilitychange")); });
+  await page.waitForTimeout(1500);
+  const after = await storageSnapshot(page);
+  expect(own(after)).toEqual([]);
+  expect(after.local["tracer.theme"]).toBe("mocha");
+  expect(after.local["infraternal.canvas.someone-else"]).toBe("{}");
+  expect(after.local["tracer.sessions.someone-else"]).toBe("[]");
+  expect(after.caches).toEqual([]);
+  expect(after.databases).toEqual([]);
+  expect(after.cookies).toBe("");
+  // Nothing mentions the signed-out account id anywhere in what is left.
+  expect(JSON.stringify([after.local, after.session])).not.toContain(id);
+
+  // A reload stays clean, and signing back in starts with a fresh layout (the server restores it later).
+  await reloadStaysSignedOut(page);
+  expect(own(await storageSnapshot(page))).toEqual([]);
+});
