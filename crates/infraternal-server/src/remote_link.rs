@@ -40,14 +40,24 @@ pub(crate) struct QuicLink {
     binding: Mutex<Option<BindingConnection>>,
     streams: Mutex<HashMap<u32, Arc<NativeChannel>>>,
     incoming: Mutex<Incoming>,
-    _control: mpsc::Sender<Bytes>,
-    output: mpsc::Sender<Bytes>,
+    _control: mpsc::Sender<Packet>,
+    output: mpsc::Sender<Packet>,
     pumps: Mutex<JoinSet<()>>,
 }
 
+// Native delivery retains channel identity so queued old frames cannot affect
+// a rebound durable writer. The two existing queues remain bounded.
+struct Packet {
+    bytes: Bytes,
+    source: Arc<NativeChannel>,
+}
+
 struct Incoming {
-    control: mpsc::Receiver<Bytes>,
-    bulk: mpsc::Receiver<Bytes>,
+    control: mpsc::Receiver<Packet>,
+    bulk: mpsc::Receiver<Packet>,
+    // Actor select may cancel while channel-identity validation awaits the map.
+    // Ownership stays here until delivery or explicit stale-frame retirement.
+    pending: Option<Packet>,
 }
 
 impl Drop for QuicLink {
@@ -165,11 +175,15 @@ impl RemoteLink {
         let (output, bulk) = mpsc::channel(32);
         let (control_output, control_input) = mpsc::channel(8);
         control_output
-            .try_send(Bytes::from(prefix))
+            .try_send(Packet {
+                bytes: Bytes::from(prefix),
+                source: control.clone(),
+            })
             .map_err(io::Error::other)?;
         let incoming = Incoming {
             control: control_input,
             bulk,
+            pending: None,
         };
         let mut pumps = JoinSet::new();
         pumps.spawn(pump(
@@ -219,24 +233,45 @@ impl RemoteLink {
                 target.extend_from_slice(&bytes);
                 Ok(count)
             }
-            LinkTransport::Quic(link) => {
-                tokio::select! {
-                    biased;
-                    _ = link.connection.closed() => Ok(0),
-                    message = async {
-                        let mut incoming = link.incoming.lock().await;
-                        let Incoming { control, bulk } = &mut *incoming;
-                        tokio::select! { biased; message = control.recv() => message, message = bulk.recv() => message }
-                    } => {
-                        let Some(message) = message else { return Ok(0); };
-                        if let Ok(decoded) = infraternal_protocol::decode_muxed_frame(&message)
-                            && decoded.stream_id != 0 && matches!(decoded.frame, Frame::Close { .. })
-                            && let Some(channel) = link.streams.lock().await.remove(&decoded.stream_id) { channel.retire(); }
-                        target.extend_from_slice(&message);
-                        Ok(message.len())
-                    }
+            LinkTransport::Quic(link) => loop {
+                let mut incoming = link.incoming.lock().await;
+                if incoming.pending.is_none() {
+                    incoming.pending = tokio::select! {
+                        biased;
+                        _ = link.connection.closed() => return Ok(0),
+                        message = async {
+                            let Incoming { control, bulk, .. } = &mut *incoming;
+                            tokio::select! { biased; message = control.recv() => message, message = bulk.recv() => message }
+                        } => message,
+                    };
                 }
-            }
+                let Some(message) = incoming.pending.as_ref() else {
+                    return Ok(0);
+                };
+                let stream = message.source.native_stream_id().unwrap_or(0);
+                let mut streams = link.streams.lock().await;
+                if !streams
+                    .get(&stream)
+                    .is_some_and(|current| Arc::ptr_eq(current, &message.source))
+                {
+                    incoming.pending = None;
+                    continue;
+                }
+                if stream != 0
+                    && matches!(infraternal_protocol::decode_muxed_frame(&message.bytes), Ok(decoded) if matches!(decoded.frame, Frame::Close { .. }))
+                    && let Some(channel) = streams.remove(&stream)
+                {
+                    channel.retire();
+                }
+                drop(streams);
+                // No await may follow taking pending ownership until the frame
+                // is appended to the actor buffer; cancellation cannot lose it.
+                let Some(message) = incoming.pending.take() else {
+                    return Err(io::ErrorKind::InvalidData.into());
+                };
+                target.extend_from_slice(&message.bytes);
+                return Ok(message.bytes.len());
+            },
         }
     }
 
@@ -273,36 +308,43 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
-                let mut streams = link.streams.lock().await;
-                if let std::collections::hash_map::Entry::Vacant(entry) = streams.entry(stream) {
+                let existing = link.streams.lock().await.get(&stream).cloned();
+                let channel = if let Some(channel) = existing {
+                    channel
+                } else {
                     if !matches!(frame, Frame::AttachTerm { .. }) {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
+                    // Binding serializes channel creation, but never owns the
+                    // delivery map while QUIC flow control can suspend setup.
                     let binding = link.binding.lock().await;
-                    let bound = remote_quic::open_bound(
-                        binding.as_ref().ok_or(io::ErrorKind::PermissionDenied)?,
-                        stream,
-                    )
-                    .await?;
-                    let channel = Arc::new(NativeChannel::terminal(bound)?);
-                    let mut pumps = link.pumps.lock().await;
-                    while pumps.try_join_next().is_some() {}
-                    if pumps.len() >= 129 {
-                        return Err(io::ErrorKind::WouldBlock.into());
+                    let existing = link.streams.lock().await.get(&stream).cloned();
+                    if let Some(channel) = existing {
+                        channel
+                    } else {
+                        let bound = remote_quic::open_bound(
+                            binding.as_ref().ok_or(io::ErrorKind::PermissionDenied)?,
+                            stream,
+                        )
+                        .await?;
+                        let channel = Arc::new(NativeChannel::terminal(bound)?);
+                        let mut pumps = link.pumps.lock().await;
+                        while pumps.try_join_next().is_some() {}
+                        if pumps.len() >= 129 {
+                            return Err(io::ErrorKind::WouldBlock.into());
+                        }
+                        // Publish identity before its reader can deliver an Ack.
+                        let mut streams = link.streams.lock().await;
+                        streams.insert(stream, channel.clone());
+                        pumps.spawn(pump(
+                            channel.clone(),
+                            link.output.clone(),
+                            link.connection.clone(),
+                            Receive::default(),
+                        ));
+                        channel
                     }
-                    pumps.spawn(pump(
-                        channel.clone(),
-                        link.output.clone(),
-                        link.connection.clone(),
-                        Receive::default(),
-                    ));
-                    entry.insert(channel);
-                }
-                let channel = streams
-                    .get(&stream)
-                    .cloned()
-                    .ok_or(io::ErrorKind::BrokenPipe)?;
-                drop(streams);
+                };
                 Transmit::default()
                     .send(channel.as_ref(), stream, frame)
                     .await?;
@@ -382,7 +424,7 @@ async fn greeting<C: Channel>(
 
 async fn pump(
     channel: Arc<NativeChannel>,
-    output: mpsc::Sender<Bytes>,
+    output: mpsc::Sender<Packet>,
     connection: quinn::Connection,
     mut receive: Receive,
 ) {
@@ -404,7 +446,10 @@ async fn pump(
                 )
                 .is_ok()
                 {
-                    let _ = output.try_send(Bytes::from(bytes));
+                    let _ = output.try_send(Packet {
+                        bytes: Bytes::from(bytes),
+                        source: channel.clone(),
+                    });
                 }
             }
             return;
@@ -414,7 +459,14 @@ async fn pump(
             return;
         }
         // One bounded queue for the actor; no unbounded per-host output buffer.
-        if output.send(Bytes::from(bytes)).await.is_err() {
+        if output
+            .send(Packet {
+                bytes: Bytes::from(bytes),
+                source: channel.clone(),
+            })
+            .await
+            .is_err()
+        {
             return;
         }
     }

@@ -403,7 +403,7 @@ enum Peer {
         writer: OwnedWriteHalf,
     },
     #[cfg(feature = "remote")]
-    Remote(Box<RemoteLink>),
+    Remote(Arc<RemoteLink>),
 }
 
 enum Source {
@@ -483,7 +483,7 @@ impl Source {
                     .await
                     .map_err(|_| AgentError::Unavailable)??;
                 Ok(AgentConnection {
-                    peer: Peer::Remote(Box::new(link)),
+                    peer: Peer::Remote(Arc::new(link)),
                     execution_uid: *uid,
                     pid: None,
                     receive,
