@@ -151,7 +151,7 @@ fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
     std::fs::copy("/usr/bin/bash", &binary).unwrap();
     assert_eq!(opened.file.metadata().unwrap().ino(), original);
     assert_ne!(std::fs::metadata(&binary).unwrap().ino(), original);
-    assert!(Replacement::new(opened, None).input.is_none());
+    assert!(Replacement::new(opened, None).unwrap().input.is_none());
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
         std::fs::rename(&binary, directory.join("retained")).unwrap();
         std::fs::copy("/usr/bin/bash", &binary).unwrap();
         // Keep cleanup with the outer process: successful exec replaces Rust destructors.
-        let error = Replacement::new(opened, None).exec();
+        let error = Replacement::new(opened, None).unwrap().exec();
         panic!("fd replacement failed: {}", error.kind());
     }
     let directory = Directory::new();
@@ -454,7 +454,7 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
         let opened = opened
             .take()
             .unwrap_or_else(|| Signed::existing(path).open().unwrap());
-        let error = Replacement::new(opened, None).exec();
+        let error = Replacement::new(opened, None).unwrap().exec();
         panic!(
             "closed stdin must not overwrite the checked executable fd: {}",
             error.kind()

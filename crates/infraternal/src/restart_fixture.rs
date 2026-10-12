@@ -33,14 +33,16 @@ impl Signed {
     }
     pub fn image(path: PathBuf) -> Self {
         std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
-        assert!(
-            std::process::Command::new("strip")
-                .arg("--strip-debug")
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        if std::fs::metadata(&path).unwrap().len() > crate::restart_image::MAX_IMAGE {
+            assert!(
+                std::process::Command::new("strip")
+                    .arg("--strip-debug")
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
         let bytes = std::fs::read(&path).unwrap();
         Self::new(path, &bytes)
     }
@@ -50,6 +52,9 @@ impl Signed {
     }
     pub fn open(&self) -> io::Result<super::Opened> {
         super::Opened::open_with(self.path.clone(), |file, path| self.verify(file, path))
+    }
+    pub fn verify_snapshot(&self, file: &File) -> io::Result<()> {
+        self.verify(file, &self.path)
     }
     fn verify(&self, file: &File, path: &Path) -> io::Result<()> {
         super::verify_metadata(file, path, |file, name, manifest, signature| {

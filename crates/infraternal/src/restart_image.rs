@@ -55,14 +55,7 @@ impl Image {
             c"infraternal-replacement",
             nix::sys::memfd::MFdFlags::MFD_CLOEXEC | nix::sys::memfd::MFdFlags::MFD_ALLOW_SEALING,
         )?;
-        let mut file = File::from(fd);
-        // Closed stdio must never let dup2(stdin) overwrite the execution image.
-        let mut reserved = Vec::new();
-        while file.as_raw_fd() < 3 {
-            let duplicate = file.try_clone()?;
-            reserved.push(file);
-            file = duplicate;
-        }
+        let file = reserve_stdio(File::from(fd))?;
         Ok(Self { file })
     }
     #[cfg(target_os = "linux")]
@@ -91,30 +84,71 @@ impl Image {
             .create_new(true)
             .mode(0o600)
             .open(directory.join("image"))?;
-        Ok(Self { file, directory })
+        Ok(Self {
+            file: reserve_stdio(file)?,
+            directory,
+        })
     }
     #[cfg(not(target_os = "linux"))]
-    fn freeze(&self) -> io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
+    fn freeze(&mut self) -> io::Result<()> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         self.file.sync_all()?;
         self.file
-            .set_permissions(std::fs::Permissions::from_mode(0o500))
+            .set_permissions(std::fs::Permissions::from_mode(0o500))?;
+        // Close the writable descriptor before exec to avoid ETXTBSY. macOS has
+        // no seals: the same owner can still chmod/rewrite this private copy.
+        self.file = reserve_stdio(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+                .open(self.directory.join("image"))?,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn execute(
+        &self,
+        argv: &[std::ffi::CString],
+        environment: &[std::ffi::CString],
+    ) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::fexecve(&self.file, argv, environment)
+                .map(|_| ())
+                .map_err(Into::into)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::ffi::CString::new(self.directory.join("image").as_os_str().as_bytes())
+                .map_err(|_| io::ErrorKind::InvalidInput)?;
+            nix::unistd::execve(&path, argv, environment)
+                .map(|_| ())
+                .map_err(Into::into)
+        }
     }
 
     /// Execute a bounded, secret-free check before listeners or CA custody change.
-    #[allow(dead_code)] // Wired after signature admission in the next logical slice.
     pub(crate) fn probe(&self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()));
         #[cfg(not(target_os = "linux"))]
         let path = self.directory.join("image");
+        // Reserve null handles above stdio. A closed fd0 can otherwise be reused
+        // as a CLOEXEC source, and dup2(0,0) would close it at the probe boundary.
+        let null = reserve_stdio(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")?,
+        )?;
         let mut command = Command::new(path);
         command
             .arg(if cfg!(test) { "--list" } else { "--version" })
             .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdin(Stdio::from(null.try_clone()?))
+            .stdout(Stdio::from(null.try_clone()?))
+            .stderr(Stdio::from(null));
         infraternal_shim::prepare_child(&mut command);
         let mut child = command.spawn()?;
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -134,6 +168,16 @@ impl Image {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+}
+/// Never let stdin redirection close an image descriptor, including private copies.
+fn reserve_stdio(mut file: File) -> io::Result<File> {
+    let mut reserved = Vec::new();
+    while file.as_raw_fd() < 3 {
+        let duplicate = file.try_clone()?;
+        reserved.push(file);
+        file = duplicate;
+    }
+    Ok(file)
 }
 #[cfg(not(target_os = "linux"))]
 impl Drop for Image {

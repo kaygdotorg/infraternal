@@ -19,6 +19,27 @@ impl Opened {
         Self::open_with(path, verify_release_fd)
     }
 
+    /// Retain the current kernel image before shutdown for late-exec recovery.
+    pub(crate) fn running() -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let file = File::open("/proc/self/exe")?;
+            let path = std::env::args_os()
+                .next()
+                .map(PathBuf::from)
+                .ok_or(io::ErrorKind::NotFound)?;
+            let image =
+                crate::restart_image::Image::copy_limit(&file, Path::new("/"), 512 * 1024 * 1024)?;
+            let warm = nix::unistd::Uid::effective().is_root()
+                && infraternal_server::ca_handoff_binary::capable(&image.file).unwrap_or(false);
+            Ok(Self { image, path, warm })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::open(std::env::current_exe()?)
+        }
+    }
+
     /// Reload may reuse the exact running bytes; a changed install image still needs a signature.
     pub(crate) fn open_reload(path: PathBuf) -> io::Result<Self> {
         Self::open_with(path, |file, path| {
@@ -116,6 +137,7 @@ impl Opened {
             limit,
         )?;
         verify(&image.file, &path)?;
+        image.probe()?;
         let warm = owner == 0
             && root_protected
             && infraternal_server::ca_handoff_binary::capable(&image.file).unwrap_or(false);
@@ -207,12 +229,11 @@ fn verify_metadata(
 
 /// The self-reload exception is an exact-byte comparison with the kernel-pinned
 /// running image, after the candidate has been sealed. It cannot admit changed code.
+#[cfg(target_os = "linux")]
 fn same_running_bytes(candidate: &File) -> io::Result<bool> {
     use std::os::unix::fs::FileExt;
     #[cfg(target_os = "linux")]
     let running = File::open("/proc/self/exe")?;
-    #[cfg(not(target_os = "linux"))]
-    let running = File::open(std::env::current_exe()?)?;
     let size = candidate.metadata()?.len();
     if size != running.metadata()?.len() {
         return Ok(false);
@@ -231,6 +252,11 @@ fn same_running_bytes(candidate: &File) -> io::Result<bool> {
         offset += u64::try_from(count).map_err(|_| io::ErrorKind::InvalidData)?;
     }
     Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn same_running_bytes(_candidate: &File) -> io::Result<bool> {
+    Ok(false)
 }
 
 #[cfg(test)]
