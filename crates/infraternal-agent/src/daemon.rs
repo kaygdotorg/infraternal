@@ -1136,5 +1136,6 @@ mod stream_memory_tests;
 #[cfg(test)]
 #[path = "daemon_census_retry_tests.rs"]
 mod census_retry_tests;
+#[cfg(test)]
 #[path = "readiness_exit_tests.rs"]
 mod readiness_exit_tests;

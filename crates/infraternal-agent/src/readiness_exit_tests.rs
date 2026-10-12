@@ -76,6 +76,14 @@ async fn ownership_eof_does_not_discard_private_terminal_output() {
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(0)))
     ));
+    // A zero-head Hello completes replay immediately, before live output gets
+    // credit. Consume and verify that ordered event before checking the drain.
+    let Some(Message::Event(2, notice)) = messages.recv().await else {
+        panic!("missing initial replay completion")
+    };
+    let notice: serde_json::Value = serde_json::from_slice(&notice).unwrap();
+    assert_eq!(notice["type"], "terminal.replay_complete");
+    assert_eq!(notice["out_seq"], "0");
     done.await.unwrap();
     let early = tokio::time::timeout(Duration::from_millis(50), &mut relay).await;
     // EOF cannot certify an exit until queued output has consumed its credit.
