@@ -386,6 +386,15 @@ async fn invalid_application_proof_keeps_the_live_fallback() {
 
 #[tokio::test]
 async fn component_down_replaces_mesh_with_a_proven_fallback() {
+    component_down(false).await;
+}
+
+#[tokio::test]
+async fn component_down_keeps_its_reason_when_mesh_closes_during_replacement() {
+    component_down(true).await;
+}
+
+async fn component_down(close_mesh: bool) {
     let ca = root();
     let server = leaf(&ca, true);
     let mut fallback = Server::new(
@@ -415,12 +424,49 @@ async fn component_down_replaces_mesh_with_a_proven_fallback() {
     preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
     mesh.admitted().await;
     preference(&registry, None).await;
+    if close_mesh {
+        mesh.endpoint.close(0u32.into(), b"");
+    }
     fallback.admitted().await;
     let link = status(&registry).await;
     assert_eq!(link.kind, ServerLinkKind::Fallback);
     assert_eq!(link.reason, ServerLinkReason::MeshDisabled);
     supervisor.abort();
     let _ = supervisor.await;
+}
+
+#[tokio::test]
+async fn healthy_mesh_probes_do_not_inherit_the_previous_paths_rtt() {
+    let ca = root();
+    let server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let address = server.endpoint.local_addr().unwrap();
+    let identity = RemoteIdentity {
+        identity: leaf(&ca, false),
+        roots: vec![ca.certificate],
+        endpoint: address,
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let link = connect(&identity, None, address, ServerLinkKind::Mesh, true)
+        .await
+        .unwrap();
+    let Connected::Quic(connection) = &link.connected else {
+        panic!("mesh proof did not establish native QUIC");
+    };
+    let mut freshness = remote_quic::PeerFreshness::new(connection);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(700),
+            freshness.interrupted_adaptive(connection)
+        )
+        .await
+        .is_err(),
+        "a healthy new mesh path expired before its inherited keepalive could run"
+    );
 }
 
 #[tokio::test]
