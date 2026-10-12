@@ -12,3 +12,11 @@
 - Run fmt, strict touched-crate Clippy, touched tests, shell ownership cases, tracer compiler/source/protocol/build/transfer, static key-memory and final fast gate.
 - Timing self-test runs unchanged on perf VM 208 under its shared lock; functional logs are not performance evidence.
 - Push only dev-backmerge-prod5; leave dev/main, production and owner fixtures untouched.
+
+## Recorded result
+
+Both requested merges are committed and pushed separately. Both upstream tips
+are ancestors. All functional/code gates pass after the documented fixture
+repairs. D243 structural-size checks fail explicitly on both architectures;
+no waiver or threshold/profile/feature change. X86 static key-memory check passes;
+ARM runtime protection is not claimed. Final-head fast output is on #169.

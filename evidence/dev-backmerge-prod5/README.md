@@ -37,7 +37,7 @@ Browser replay: 40/40 functional cases. Initial run: 26 pass/14 fail (whole-test
 30s limits and IPv6 loopback refusal). Replay uses IPv4 and a 120s whole-test
 envelope with every existing per-assertion deadline unchanged. Reproduce from
 apps/tracer with TRACER_TEST_PORT=4967 and the adjacent
-playwright.functional.config.ts, --timeout=120000, and specs addhost-wizard,
+playwright.functional.config.mts, --timeout=120000, and specs addhost-wizard,
 addhost-start-fresh-captures and ended-strip. Captures are from the optimized
 browser build with synthetic provisioning and canvas fixtures; no independent
 visual verdict or physical iPhone proof is claimed.
@@ -61,3 +61,39 @@ retained. The combined ownership shell passes 16/16; strict SSH Clippy, fmt and
 all SSH tests pass. The standalone gate explicitly enables tokio/test-util for
 the inherited dev paused-clock payload fixture (the workspace graph already
 supplies it); production dependencies and profiles are unchanged.
+
+## Source-head milestone
+
+Source head `62b3950aac6bd982fef47ad1ec39abf1d211052e`: scripts/verify fast exits 1
+solely at the unchanged D243 static caps. Workspace tests: 958 pass, 0 fail,
+116 ignored across 95 result rows; compile-out separately 25/0. Fmt, VT fmt,
+strict workspace Clippy and cargo-deny pass. No #118 exemption is used.
+
+| Target | Stripped bytes | Unchanged maximum | Structural/runtime result |
+| --- | ---: | ---: | --- |
+| x86_64 musl | 22,438,672 | 16,404,816 | Static PIE, no PT_INTERP; key initialization=1 under 8 MiB |
+| aarch64 musl | 19,871,968 | 13,817,816 | Static, no PT_INTERP; runtime key memory requires native ARM |
+
+The gate exercises both targets despite the first size failure. Its wrapper
+argument tests and versioned CLI stub checks pass. Release settings, dependencies,
+features and size thresholds are not changed to make this pass. This is an
+unwaived size failure; it is not a claim that the branch is ready to fast-forward.
+Full verbatim transcript: verify-fast-source.log; input/artifact hashes adjacent.
+
+The static failure prevents the dispatcher from reaching TypeScript; the separate
+TypeScript gate already passes on the identical frontend source. The final
+branch-head replay is quoted verbatim on #169 after this evidence-only commit.
+Its RTT runner also records pinned-VM machine, load and exact probe hash while
+holding the shared lock; build-host durations/counters are not performance proof.
+
+Reproduce the functional browser suite from apps/tracer:
+
+```sh
+TRACER_TEST_PORT=4967 bun x playwright test \
+  -c ../../evidence/dev-backmerge-prod5/playwright.functional.config.mts \
+  --timeout=120000 test/addhost-wizard.spec.ts \
+  test/addhost-start-fresh-captures.spec.ts test/ended-strip.spec.ts
+```
+
+The saved harness was moved to ESM .mts and its package-local configuration import
+was retained; listing now resolves all 40 cases. Initial loader failure retained.
