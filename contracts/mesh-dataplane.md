@@ -56,8 +56,9 @@ A preview identifies directed member pairs that lose any new-connection reach
 before a default change applies. After installing the new rules, each node
 removes exactly the connection state no longer permitted, including TCP and UDP
 in both address families. It never flushes unrelated state or resets permitted
-flows. A temporary update fence preserves established state until the final
-rules are installed; it never performs cleanup. Exact tuple checks also refuse
+flows. A temporary update fence validates initiating tuples against accepted
+access, or saved intent during recovery, while refusing new initiation; it never
+performs cleanup. Recovery cannot reopen entries refused by committed intent. Exact tuple checks also refuse
 retired state recreated by loose TCP tracking. Coordinator change to the last
 node refusing the flow is measured at 10 and 1,000 peers on local and 150 ms
 RTT links [242].
