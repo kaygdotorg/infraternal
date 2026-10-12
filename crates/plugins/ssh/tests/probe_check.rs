@@ -29,3 +29,16 @@ fn manager_availability_does_not_request_its_private_environment() {
     );
     assert!(Check::parse(&output.stdout).unwrap().user_systemd);
 }
+
+/// The real Alpine probe is canonical, but unsupported init needs an actionable explanation.
+#[test]
+#[ignore = "#169 desired-contract failure: generic unsupported message hides required init"]
+fn breakit2_no_systemd_names_the_required_manager() {
+    let alpine = b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nother\n1101\nno\nno\nno\nno\n";
+    let refusal = Check::parse(alpine).unwrap_err();
+    assert!(
+        refusal.message.contains("systemd"),
+        "a canonical unsupported-init record must name the required manager: {}",
+        refusal.message
+    );
+}
