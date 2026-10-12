@@ -103,7 +103,7 @@ async function cornerCrops(page: Page, name: string): Promise<void> {
 }
 
 for (const { w, h, kb } of SIZES) for (const theme of THEMES) {
-  test(`phone ${w}x${h} ${theme}: one rounded window shape with the keyboard down and up; neighbours peek ${PEEK} px; a lone window stays 99%`, async ({ browser }) => {
+  test(`phone ${w}x${h} ${theme}: one rounded window shape with the keyboard down and up; neighbours peek ${PEEK} px; a lone window keeps the same width`, async ({ browser }) => {
     test.setTimeout(180_000);
     await mkdir(captures, { recursive: true });
     const { context, page } = await open(browser, w, h, theme);
@@ -156,14 +156,14 @@ for (const { w, h, kb } of SIZES) for (const theme of THEMES) {
       await page.screenshot({ path: `${captures}/phone-${w}x${h}-${theme}-2-windows-first.png` });
       await expectOneRoundedShape(page, "2 windows");
 
-      // A lone window: 99% of the canvas width, nothing peeking.
+      // A lone window: the same width as in a strip (edge to edge, the default), centred, nothing peeking.
       await closeWindow(page, "nix-cache");
       await closeWindow(page, "edge-arm");
       expect(await columns(page)).toBe(1);
       s = await slices();
       const v = await vp();
       expect(s.left + s.right).toBe(0);
-      expect(Math.abs(s.width - 0.99 * v.width), "lone window width").toBeLessThanOrEqual(1.5);
+      expect(Math.abs(s.width - (v.width - 2 * (12 + PEEK))), "lone window width").toBeLessThanOrEqual(1.5);
       expect(Math.abs(s.centre)).toBeLessThanOrEqual(1);
       await page.screenshot({ path: `${captures}/phone-${w}x${h}-${theme}-1-window.png` });
       await expectOneRoundedShape(page, "1 window, keyboard down");
