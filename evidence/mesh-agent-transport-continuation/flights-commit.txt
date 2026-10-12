@@ -1,0 +1,13 @@
+refactor(server): isolate bounded shadow flight ownership
+
+Extract the priming module private flight owner into embedded_shadow_flights
+without changing its compiled behavior. The focused module owns completion
+identity, queued sibling results and cancellation joins; promotion can retain
+only successful completed reservations. Keep it private to priming rather than
+adding a generic public transport or duplicating input retention.
+Decisions D128, D198, D215.
+
+Validation: fmt/strict all-target remote server Clippy pass; embedded suite
+24 passed, 0 failed, 2 ignored. Evidence flights-*.log.
+
+Refs: #129

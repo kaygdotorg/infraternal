@@ -1,0 +1,17 @@
+test(server): prove primed promotion and independent control under backpressure
+
+Restore behavioral fail-first regressions for cached Ack ownership, ordered
+promotion headers, unpolled/failed shadow flights, queued sibling completions,
+clean primary close and native Input/Credit/ControlCall backpressure. Verify
+130 writer retirements on each live QUIC connection without retaining peer
+send halves; full control FIFO must leave primary terminal output readable.
+Use cfg(test) weak probes and real ledger-admitted mTLS QUIC rather than
+shipping instrumentation or relaxed deadlines. Reuse committed cancellation
+and rebinding regressions instead of duplicating them.
+Decisions D64, D128, D198, D215.
+
+Validation: fmt/strict all-target remote server Clippy pass; embedded38,
+runtime38, admission4 tests pass,0failed,2/3/0ignored. Exact current-worktree
+source re-read before compile. Outputs server-regressions-*.log in evidence.
+
+Refs: #129

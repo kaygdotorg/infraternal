@@ -1,0 +1,1 @@
+Committed/pushed c9eb54826433c649091fc7a39b79e62003b4bf10: recovered261 historical evidence files (actual git tree count) byte-for-byte from WIP73aba820, plus SHA256/byte manifest. Old build-host timings are historical diagnostics, not final perf VM acceptance. Server behavior commits remain separate.
