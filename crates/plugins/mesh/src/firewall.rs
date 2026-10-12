@@ -26,6 +26,7 @@ pub struct Firewall {
     previous: Option<Config>,
     previous_aliases: Vec<crate::policy::model::Addresses>,
     backend: Option<Backend>,
+    accepted: Option<Config>,
 }
 impl Firewall {
     /// Select the declared compatibility backend explicitly for real-engine validation.
@@ -116,13 +117,24 @@ impl Firewall {
     /// # Errors
     /// Refuses unavailable nft or a failed transaction; an existing table stays unchanged.
     pub fn apply(&mut self, config: &Config) -> io::Result<()> {
-        self.apply_with_aliases(config, &[])
+        self.install(config, &[], false)?;
+        crate::connection_state::retire(self.accepted.as_ref(), config)?;
+        self.accepted = Some(config.clone());
+        Ok(())
     }
     /// Fence both accepted and proposed addresses during an authorized replacement.
     pub(crate) fn apply_with_aliases(
         &mut self,
         config: &Config,
         aliases: &[crate::policy::model::Addresses],
+    ) -> io::Result<()> {
+        self.install(config, aliases, true)
+    }
+    fn install(
+        &mut self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+        fence: bool,
     ) -> io::Result<()> {
         self.select();
         // A table declaration can extend an existing table. First application
@@ -145,7 +157,7 @@ impl Firewall {
             run(
                 NFT,
                 &["-f", "-"],
-                &render_with_aliases(config, self.installed, aliases),
+                &render_with_aliases(config, self.installed, aliases, fence),
             )?;
         }
         self.previous = self.is_fallback().then(|| config.clone());
@@ -176,6 +188,7 @@ impl Firewall {
             self.installed = false;
             self.fallback_complete = false;
             self.previous = None;
+            self.accepted = None;
             self.previous_aliases.clear();
         }
         Ok(())
@@ -204,12 +217,15 @@ fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
 /// Render constant-time hash-set membership, independent of the peer count on the packet path.
 #[must_use]
 pub fn render(config: &Config, replace: bool) -> String {
-    render_with_aliases(config, replace, &[])
+    render_with_aliases(config, replace, &[], false)
 }
+// Keep the complete owned inet transaction visible as one atomic batch.
+#[allow(clippy::too_many_lines)]
 fn render_with_aliases(
     config: &Config,
     replace: bool,
     aliases: &[crate::policy::model::Addresses],
+    fence: bool,
 ) -> String {
     let mut script = String::new();
     if replace {
@@ -268,7 +284,16 @@ fn render_with_aliases(
             }
         }
         let _ = writeln!(script, " chain {direction} {{");
-        let _ = writeln!(script, "  ct state established,related accept");
+        if fence {
+            // The temporary update fence is not an accepted access revision.
+            // Preserve established state while refusing all new initiation.
+            let _ = writeln!(script, "  ct state established,related accept");
+        } else {
+            let _ = writeln!(
+                script,
+                "  ct state established,related jump {direction}_state"
+            );
+        }
         let field = if inbound { "saddr" } else { "daddr" };
         for (family, suffix) in [("ip", "4"), ("ip6", "6")] {
             let _ = writeln!(script, "  {family} {field} @{direction}{suffix}_all accept");
@@ -281,6 +306,9 @@ fn render_with_aliases(
         }
         // ICMP errors are RELATED; unsolicited ICMP and all other protocols obey All or deny.
         let _ = writeln!(script, "  drop\n }}");
+    }
+    if !fence {
+        render_connection_checks(&mut script, config);
     }
     // Destination NAT has completed at input/forward. Check delivery before
     // policy or conntrack acceptance: an underlay packet has no mesh identity.
@@ -317,6 +345,44 @@ fn render_with_aliases(
         " chain ingress {{ type filter hook prerouting priority -310; policy accept; {delivery} }}\n}}"
     );
     script
+}
+
+// Both packet directions consult the initiating tuple. A reply's ephemeral
+// destination port is never interpreted as permission to initiate [164,242].
+fn render_connection_checks(script: &mut String, config: &Config) {
+    for (chain, incoming) in [("incoming", true), ("outgoing", false)] {
+        let _ = writeln!(script, " chain {chain}_state {{");
+        for (reply, direction, field, local_field) in if incoming {
+            [
+                ("original", "incoming", "saddr", "daddr"),
+                ("reply", "outgoing", "daddr", "saddr"),
+            ]
+        } else {
+            [
+                ("original", "outgoing", "daddr", "saddr"),
+                ("reply", "incoming", "saddr", "daddr"),
+            ]
+        } {
+            for (family, suffix, local) in [
+                ("ip", "4", config.addresses.ipv4.to_string()),
+                ("ip6", "6", config.addresses.ipv6.to_string()),
+            ] {
+                let selector =
+                    format!("ct direction {reply} ct original {family} {local_field} {local}");
+                let _ = writeln!(
+                    script,
+                    "  {selector} ct original {family} {field} @{direction}{suffix}_all accept"
+                );
+                for protocol in ["tcp", "udp"] {
+                    let _ = writeln!(
+                        script,
+                        "  {selector} ct original protocol {protocol} ct original {family} {field} . ct original proto-dst @{direction}{suffix}_{protocol} accept"
+                    );
+                }
+            }
+        }
+        let _ = writeln!(script, "  drop\n }}");
+    }
 }
 
 #[cfg(test)]
@@ -360,8 +426,8 @@ mod tests {
     fn rule_count_is_independent_of_membership_and_policy_data_is_in_sets() {
         let mut config = config();
         let rules = render(&config, false);
-        assert_eq!(rules.matches(" accept").count(), 18);
-        assert_eq!(rules.matches(" drop").count(), 10);
+        assert_eq!(rules.matches(" accept").count(), 40);
+        assert_eq!(rules.matches(" drop").count(), 12);
         let peer = config.peers.get_mut(&NodeId(2)).expect("member");
         peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([
             crate::policy::rules::Port {
