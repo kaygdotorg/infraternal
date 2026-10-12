@@ -25,3 +25,18 @@ test("breakit2 malformed bracketed IPv6 waits for correction", () => {
     expect(parseTarget(input)).toBeUndefined();
   }
 });
+
+const listedUserTest = process.env.ADDHOST_BREAKIT2_RED === "1" ? test : test.skip;
+listedUserTest("listed host plus port retains its saved user in the serialized destination", () => {
+  type Entry = { id: string; user?: string; address: string; port?: number };
+  const known: Entry = { id: "lab", user: "target", address: "lab" };
+  const wizard = Object.assign(Object.create(Wizard.prototype) as {
+    resolve(token: string, delimited: boolean): Entry;
+    addressOf(entry: Entry): { kind: string; value: string };
+  }, {
+    typed: [], matchOf: () => ({ host: known, prefixed: false }),
+    chipFor: (entry: Entry) => entry,
+  });
+  const chip = wizard.resolve("lab:2222", true);
+  expect(wizard.addressOf(chip)).toEqual({ kind: "manual", value: "target@lab:2222" });
+});
