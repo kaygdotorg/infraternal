@@ -142,7 +142,20 @@ pub trait SshSession: Send + Sync {
 /// Shell quote trusted generated values; destinations are passed as SSH arguments separately.
 #[must_use]
 pub fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    // The supported login shells interpret backslashes differently inside
+    // single quotes. Isolate both special characters in double-quoted segments
+    // so each nesting level preserves the exact script bytes and no expansion.
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        match character {
+            '\'' => quoted.push_str("'\"'\"'"),
+            '\\' => quoted.push_str("'\"\\\\\"'"),
+            _ => quoted.push(character),
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 // Input-only private material decoding; no Debug/Display or output serialization.
