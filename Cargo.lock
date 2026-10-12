@@ -1477,6 +1477,7 @@ dependencies = [
 name = "infraternal-plugin-remote"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "infraternal-plugin-api",
  "infraternal-protocol",
  "infraternal-shim",
