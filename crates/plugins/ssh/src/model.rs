@@ -191,6 +191,7 @@ pub enum InstallStep {
     Install,
     Join,
     Start,
+    Readiness,
 }
 
 /// Architecture and expected public path selected by the server's release bundle.
@@ -271,6 +272,9 @@ impl Failure {
                 InstallStep::Join => {
                     "Joining the host to this server failed. Check the host can reach the server and resolve its address, then try again."
                 }
+                InstallStep::Readiness => {
+                    "Checking terminal readiness failed. Check the infraternal agent service and its terminal session, then try again."
+                }
                 InstallStep::Start => {
                     "Starting the infraternal agent service failed. Check the host service status and its configuration, then try again."
                 }
@@ -278,13 +282,15 @@ impl Failure {
         }
         self
     }
-    /// Classify only our own fixed bootstrap exit codes using the approved path.
+    /// Classify fixed installer exit codes using the approved path. Join also
+    /// executes the uploaded payload, whose status is not an ownership receipt.
     #[must_use]
     pub fn in_mode(mut self, mode: InstallMode) -> Self {
         if self.kind != FailureKind::Install {
             return self;
         }
         match (self.exit_status, mode) {
+            (Some(71 | 72), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
                 self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
             }

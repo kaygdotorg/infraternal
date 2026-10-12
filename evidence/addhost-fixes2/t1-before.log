@@ -1,0 +1,33 @@
+Running as unit: run-p2685464-i6879363.scope; invocation ID: 9fd424dd1dda4275bfcce393f713efce
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.51s
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/install-0f36f33fa55ec148)
+
+running 2 tests
+test breakit2_rollback_preserves_foreign_launcher_new ... FAILED
+test breakit2_rollback_preserves_foreign_unit_new ... FAILED
+
+failures:
+
+---- breakit2_rollback_preserves_foreign_launcher_new stdout ----
+
+thread 'breakit2_rollback_preserves_foreign_launcher_new' (2685859) panicked at crates/plugins/ssh/tests/install.rs:163:5:
+assertion `left == right` failed: rollback deleted a file that this attempt never created
+  left: None
+ right: Some("unrelated launcher staging data")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- breakit2_rollback_preserves_foreign_unit_new stdout ----
+
+thread 'breakit2_rollback_preserves_foreign_unit_new' (2685860) panicked at crates/plugins/ssh/tests/install.rs:183:5:
+assertion `left == right` failed: noclobber refused the foreign unit, then rollback deleted it
+  left: None
+ right: Some("unrelated unit staging data")
+
+
+failures:
+    breakit2_rollback_preserves_foreign_launcher_new
+    breakit2_rollback_preserves_foreign_unit_new
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test install`

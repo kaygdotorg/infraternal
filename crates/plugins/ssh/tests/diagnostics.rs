@@ -183,6 +183,15 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
                     "~/.local/share/infraternal"
                 };
                 match status {
+                    71 | 72 if matches!(step, InstallStep::Join) => {
+                        assert!(
+                            failure
+                                .message
+                                .starts_with("Joining the host to this server failed.")
+                        );
+                        assert!(!failure.message.contains("Move it aside"));
+                        assert!(!failure.message.contains("Finish its cleanup"));
+                    }
                     71 => {
                         assert!(failure.message.contains(path));
                         assert!(failure.message.contains("Move it aside"));

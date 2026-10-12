@@ -18,3 +18,19 @@ test("already-added and missing-payload diagnostics reach the wizard through the
     expect(events[0]?.failure?.missing_binary).toEqual({ architecture: "aarch64", path: "/release/infraternal-aarch64-musl" });
   } finally { globalThis.WebSocket = original; }
 });
+
+test("readiness failure retains its trusted step through the socket", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 1, target: "host", attempt: 1, step: "failed", message: "Readiness failed", elapsed_ms: 1,
+      failure: { kind: "install", message: "Check the host service.", log_tail: [], failed_step: "readiness" } }) }));
+    expect(events[0]?.failure?.failed_step).toBe("readiness");
+  } finally { globalThis.WebSocket = original; }
+});

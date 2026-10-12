@@ -120,32 +120,42 @@ impl Installation {
         let digest = binary_digest(binary)
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
-        self.session.run(&self.script(&format!(r#"
-# A retired fresh transaction still owns final cleanup outside the base.
-# Admit no replacement until its receipt is removed after successful cleanup.
-for receipt in "$base".bootstrap-rollback-*; do
-    [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
-done
-if [ -e "$base" ] || [ -L "$base" ]; then
-    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
-else
-    mkdir -p "$base"
-    printf '%s\n' "$host" > "$base/.bootstrap-owner"
-fi
-[ ! -L "$base/bin" ] && [ ! -L "$base/state" ] || exit 71
-mkdir "$base/.bootstrap-lock" || exit 72
-stage="$base/.bootstrap-lock"
-printf '%s\n' "$transaction" > "$stage/transaction"
-if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
-    [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
-    printf 'upgrade\n' > "$stage/kind"
-else
-    printf 'fresh\n' > "$stage/kind"
-fi
-cat > "$stage/payload"
-printf '%s  %s\n' {} "$stage/payload" | sha256sum -c - >/dev/null
-chmod 700 "$stage/payload"
-"#, shell_quote(&digest))), Input::File(binary)).await.map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        let query = format!(
+            "{PAYLOAD_CACHE}\nvalidate_cache\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then printf 'reuse\\n'; fi",
+            shell_quote(&digest)
+        );
+        let cached = self
+            .session
+            .run(&self.script(&query), Input::Empty)
+            .await
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        let reuse = match cached.stdout.as_slice() {
+            b"reuse\n" => true,
+            b"" => false,
+            _ => {
+                return Err(Failure::install("The payload reuse response was invalid.")
+                    .at(InstallStep::Upload));
+            }
+        };
+        let transfer = if reuse {
+            "ln \"$cache/payload\" \"$stage/payload\""
+        } else {
+            "cat > \"$stage/payload\""
+        };
+        let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
+        let body = format!(
+            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}",
+            shell_quote(&digest)
+        );
+        let input = if reuse {
+            Input::Empty
+        } else {
+            Input::File(binary)
+        };
+        self.session
+            .run(&self.script(&body), input)
+            .await
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         Ok(())
     }
 
@@ -230,6 +240,11 @@ if [ -e "$unit" ] || [ -L "$unit" ]; then
 fi
 $manager is-enabled infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-enabled" || :
 $manager is-active infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-active" || :
+# Conventional replacement suffixes may belong to another writer. Refuse them
+# before activation; build all our replacements inside the owned transaction.
+for replacement in "$base/bin/current.new" "$launcher.new" "$unit.new"; do
+    [ ! -e "$replacement" ] && [ ! -L "$replacement" ] || exit 71
+done
 mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
 # Rename the old live binary/state into the transaction, not into a disposable
 # upload file. This makes failures after a service stop explicitly reversible.
@@ -254,13 +269,14 @@ mv "$stage/payload" "$base/bin/live"
 if [ -e "$base/state" ]; then : > "$stage/had-state"; mv "$base/state" "$stage/previous-state"; fi
 : > "$stage/replacing-state"
 mv "$stage/state" "$base/state"
-ln -s "$base/bin/live" "$base/bin/current.new"
-mv -Tf "$base/bin/current.new" "$base/bin/current"
-ln -s "$base/bin/current" "$launcher.new"
-mv -Tf "$launcher.new" "$launcher"
-printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$unit.new"
+ln -s "$base/bin/live" "$stage/current"
+mv -Tf "$stage/current" "$base/bin/current"
+ln -s "$base/bin/current" "$stage/launcher"
+: > "$stage/replacing-launcher"
+mv -Tf "$stage/launcher" "$launcher"
+printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=on-failure\nKillMode=process\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$stage/unit"
 : > "$stage/replacing-unit"
-mv -f "$unit.new" "$unit"
+mv -f "$stage/unit" "$unit"
 "##;
         self.session
             .run(&self.script(start_body), Input::Empty)
@@ -346,7 +362,93 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
     pub async fn rollback(&self) -> Result<(), Failure> {
-        self.session.run(&self.script(&format!("{FRESH_CLEANUP}\n{}", r#"
+        self.session
+            .run(
+                &self.script(&format!("{FRESH_CLEANUP}\n{ROLLBACK_TRANSACTION}")),
+                Input::Empty,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+// Cache records contain only public executable content. Every lookup repeats
+// ownership, link, private-parent and fixed-marker checks before any content read.
+const PAYLOAD_CACHE: &str = r#"
+cache="$base.bootstrap-cache"
+validate_cache() {
+    if [ -e "$cache" ] || [ -L "$cache" ]; then
+        parent=$(dirname "$cache")
+        [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+        mode=$(stat -c '%a' "$parent")
+        [ "$((0$mode & 022))" -eq 0 ] || exit 71
+        [ -d "$cache" ] && [ ! -L "$cache" ] && [ -O "$cache" ] && [ "$(stat -c '%a' "$cache")" = 700 ] || exit 71
+        [ -f "$cache/owner" ] && [ ! -L "$cache/owner" ] && [ -O "$cache/owner" ] && [ "$(stat -c '%a' "$cache/owner")" = 600 ] || exit 71
+        [ "$(stat -c '%s' "$cache/owner")" = 29 ] && [ "$(cat "$cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 71
+        if [ -e "$cache/payload" ] || [ -L "$cache/payload" ]; then
+            [ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] && [ -O "$cache/payload" ] && [ "$(stat -c '%a' "$cache/payload")" = 700 ] || exit 71
+        fi
+    fi
+}
+"#;
+
+// Setup retains its existing attempt lock and ownership proof irrespective of
+// whether the payload arrives through stdin or a verified cache hard link.
+const STAGE_TRANSACTION: &str = r#"
+# Admission and cleanup share the same private-parent rule. Refuse a parent
+# that cannot protect a rollback receipt before creating any installation data.
+parent=$(dirname "$base")
+if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
+[ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+parent_mode=$(stat -c '%a' "$parent")
+[ "$((0$parent_mode & 022))" -eq 0 ] || exit 71
+# A retired fresh transaction still owns final cleanup outside the base.
+# Admit no replacement until its receipt is removed after successful cleanup.
+for receipt in "$base".bootstrap-rollback-*; do
+    [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
+done
+if [ -e "$base" ] || [ -L "$base" ]; then
+    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
+else
+    mkdir -p "$base"
+    printf '%s\n' "$host" > "$base/.bootstrap-owner"
+fi
+[ ! -L "$base/bin" ] && [ ! -L "$base/state" ] || exit 71
+stage="$base/.bootstrap-lock"
+[ ! -e "$stage" ] && [ ! -L "$stage" ] || exit 72
+if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
+    [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
+    kind=upgrade
+else
+    kind=fresh
+fi
+# The private acquisition journal precedes mkdir. It proves this attempt's
+# empty lock if the command stops before the lock's ordinary receipts exist.
+printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
+mkdir "$stage" || exit 72
+printf '%s\n' "$transaction" > "$stage/transaction"
+printf '%s\n' "$kind" > "$stage/kind"
+rm -f "$base/.bootstrap-acquiring"
+"#;
+
+// Publish at most one payload, after the staged hash has passed. Cache creation
+// is a prepared-directory rename that cannot adopt an existing foreign path.
+const PUBLISH_PAYLOAD_CACHE: &str = r#"
+validate_cache
+mkdir "$stage/cache"
+printf 'INFRATERNAL_PAYLOAD_CACHE_V1\n' > "$stage/cache/owner"
+ln "$stage/payload" "$stage/cache/payload"
+if [ -e "$cache" ] || [ -L "$cache" ]; then
+    mv -Tf "$stage/cache/payload" "$cache/payload"
+else
+    mv -Tn "$stage/cache" "$cache"
+    [ ! -e "$stage/cache" ] && [ ! -L "$stage/cache" ] || exit 71
+fi
+"#;
+
+// The rollback journal is a fixed shell program. Keeping it outside the Rust
+// adapter makes its ownership and interruption invariants reviewable together.
+const ROLLBACK_TRANSACTION: &str = r#"
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
     if [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
@@ -357,11 +459,49 @@ fi
 if [ ! -e "$base" ] && [ ! -L "$base" ]; then exit 0; fi
 [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
 stage="$base/.bootstrap-lock"
-if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then exit 0; fi
+acquiring="$base/.bootstrap-acquiring"
+acquired=no
+if [ -e "$acquiring" ] || [ -L "$acquiring" ]; then
+    [ -f "$acquiring" ] && [ ! -L "$acquiring" ] && [ -O "$acquiring" ] && [ "$(stat -c '%a' "$acquiring")" = 600 ] || exit 71
+    size=$(stat -c '%s' "$acquiring")
+    [ "$size" = 39 ] || [ "$size" = 41 ] || exit 71
+    case "$(cat "$acquiring")" in
+        "$transaction fresh") kind=fresh;;
+        "$transaction upgrade") kind=upgrade;;
+        *) exit 72;;
+    esac
+    acquired=yes
+fi
+if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then
+    [ "$acquired" = yes ] || exit 0
+    if [ "$kind" = fresh ]; then
+        printf '%s %s fresh %s\n' "$host" "$transaction" "$(stat -c '%d:%i' "$base")" > "$receipt"
+        rm -f "$acquiring"
+        finish_fresh
+    else
+        rm -f "$acquiring"
+    fi
+    exit 0
+fi
 [ -d "$stage" ] && [ ! -L "$stage" ] || exit 71
-[ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+if [ -e "$stage/transaction" ] || [ -L "$stage/transaction" ]; then
+    [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] || exit 72
+    if [ "$(cat "$stage/transaction")" != "$transaction" ]; then
+        # Creation can succeed before the receipt's bytes fit on disk. Only
+        # the exact acquisition journal owns this private, empty lock; never
+        # treat a different nonempty transaction as an interrupted write.
+        [ "$acquired" = yes ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 72
+        [ -O "$stage/transaction" ] && [ "$(stat -c '%a:%s:%h' "$stage/transaction")" = 600:0:1 ] || exit 72
+        rm "$stage/transaction"
+        rmdir "$stage" || exit 72
+    fi
+else
+    # Only the pre-mkdir journal authorizes an empty, uninitialized lock.
+    [ "$acquired" = yes ] || exit 72
+    rmdir "$stage" || exit 72
+fi
 # Refused stop retains both installation and policy receipts for cleanup retry.
-kind=$(cat "$stage/kind")
+if [ -f "$stage/kind" ] && [ ! -L "$stage/kind" ]; then kind=$(cat "$stage/kind"); else [ "$acquired" = yes ] || exit 72; fi
 case "$kind" in
     fresh) validate_parent;;
     upgrade) :;;
@@ -381,13 +521,14 @@ if [ -f "$stage/activating" ]; then
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
     if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
-    rm -f "$base/bin/current.new" "$launcher.new" "$unit.new"
-    [ -f "$stage/had-launcher" ] || rm -f "$launcher"
+    # Only a journaled final replacement belongs to this attempt. Temporary
+    # files stay in stage; unrelated suffix files are never cleanup targets.
+    if [ -f "$stage/replacing-launcher" ] && [ ! -f "$stage/had-launcher" ]; then rm -f "$launcher"; fi
     [ ! -f "$stage/replacing-unit" ] || rm -f "$unit"
     # Retire replacement markers before restoring backups: a retry must never
     # delete an original already restored by an interrupted rollback. Backups
     # still present remain sufficient evidence to retry interrupted restoration.
-    rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit"
+    rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit" "$stage/replacing-launcher"
     if [ -f "$stage/previous-binary" ]; then
         mv "$stage/previous-binary" "$base/bin/live"
     fi
@@ -409,19 +550,20 @@ if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop
     $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then
+    # An incomplete upload is owned by this transaction. Reclaim it before
+    # allocating the outside receipt, including when the home filesystem is full.
+    rm -f "$stage/payload"
     if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
         printf '%s %s fresh %s\n' "$host" "$transaction" "$(stat -c '%d:%i' "$base")" > "$receipt"
     fi
     validate_receipt
 fi
 rm -rf "$stage"
+[ "$acquired" = no ] || rm -f "$acquiring"
 if [ "$kind" = fresh ]; then
     finish_fresh
 fi
-"#)), Input::Empty).await?;
-        Ok(())
-    }
-}
+"#;
 
 // This public ownership receipt survives removal of the transaction directory,
 // owner marker and base. Noclobber creation, bounded reads, uid/mode and directory
@@ -449,6 +591,16 @@ validate_receipt() {
         [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || exit 71
     fi
 }
+# The outside receipt can outlive an interrupted retirement of the acquisition
+# journal. Remove only its exact fresh binding, after validating the base owner.
+retire_fresh_acquisition() {
+    acquiring="$base/.bootstrap-acquiring"
+    if [ -e "$acquiring" ] || [ -L "$acquiring" ]; then
+        [ -f "$acquiring" ] && [ ! -L "$acquiring" ] && [ -O "$acquiring" ] && [ "$(stat -c '%a' "$acquiring")" = 600 ] || exit 71
+        [ "$(stat -c '%s' "$acquiring")" = 39 ] && [ "$(cat "$acquiring")" = "$transaction fresh" ] || exit 72
+        rm -f "$acquiring"
+    fi
+}
 finish_fresh() {
     validate_receipt
     if [ -e "$base" ] || [ -L "$base" ]; then
@@ -456,6 +608,7 @@ finish_fresh() {
         if [ -e "$base/.bootstrap-owner" ] || [ -L "$base/.bootstrap-owner" ]; then
             [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
         fi
+        retire_fresh_acquisition
         # Never recursively delete unjournaled contents. Unexpected data keeps
         # the receipt and makes cleanup fail rather than claiming success.
         rm -f "$base/.bootstrap-ready"

@@ -41,7 +41,7 @@ import type { AddHostSink, DiscoveredHost, EnrolledHost, InstallCommand, Provisi
 /** Trusted bootstrap boundaries use plain labels in the existing details disclosure. */
 const FAILED_STEP_LABELS: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
   connect: "Connect to the host", upload: "Upload the binary", install: "Install the infraternal agent",
-  join: "Join the host to this server", start: "Start the host service",
+  join: "Join the host to this server", start: "Start the host service", readiness: "Check terminal readiness",
 };
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = { netbird: "NetBird", tailscale: "Tailscale", "known-hosts": "Known hosts", "ssh-config": "SSH config", "already-added": "Added" };
@@ -342,7 +342,8 @@ export class Wizard {
     const { host, prefixed } = this.matchOf(target);
     if (host) {
       if (prefixed && !delimited) return undefined;
-      if (target.user && target.user !== host.user) return this.typedChip(target, host);
+      // An explicit port is part of the typed destination even when its host is listed.
+      if ((target.user && target.user !== host.user) || target.port !== undefined) return this.typedChip(target, host);
       return this.chipFor(host);
     }
     return delimited ? this.typedChip(target) : undefined;
@@ -354,10 +355,13 @@ export class Wizard {
   }
 
   private typedChip(target: ParsedTarget, base?: Entry): Chip {
-    const id = `${target.user ?? ""}@${target.host}${target.port ? `:${target.port}` : ""}`;
+    const user = target.user ?? base?.user;
+    const id = `${user ?? ""}@${target.host}${target.port ? `:${target.port}` : ""}`;
     let entry = this.typed.find((item) => item.id === id);
     if (!entry) {
-      entry = { id, label: target.host, user: target.user, address: target.host, port: target.port, os: base?.os ?? "unknown", discovered: base?.discovered };
+      // An inventory name identifies the saved destination; an explicit port
+      // changes that destination's port without turning its name into DNS.
+      entry = { id, label: target.host, user, address: base?.address ?? target.host, port: target.port, os: base?.os ?? "unknown", discovered: base?.discovered };
       this.typed = [entry, ...this.typed];
     }
     return this.chipFor(entry);

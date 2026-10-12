@@ -15,6 +15,9 @@ use uuid::Uuid;
 #[derive(Default)]
 pub(crate) struct Revocations {
     signals: Mutex<HashMap<Uuid, Weak<Revocation>>>,
+    // Storage refusal must not let the last transport drop the cancellation
+    // signal and permit a reconnect. Successful tombstones release this hold.
+    cuts: Mutex<HashMap<Uuid, Arc<Revocation>>>,
     #[cfg(test)]
     pub(crate) publication_pause: Mutex<Option<Arc<PublicationPause>>>,
 }
@@ -69,10 +72,33 @@ impl Revocations {
         &self,
         host: Uuid,
     ) -> io::Result<(Arc<Revocation>, tokio::sync::OwnedRwLockWriteGuard<()>)> {
-        let signal = self.register(host)?;
-        signal.changed.send_replace(true);
+        let signal = self.cut(host)?;
         let drained = signal.writes.clone().write_owned().await;
         Ok((signal, drained))
+    }
+
+    /// Fence new writes before waiting for SQLite's writer slot. The caller
+    /// retains the signal until the durable tombstone has committed, so a
+    /// reconnect cannot allocate an uncancelled registration in that gap.
+    pub(crate) fn cut(&self, host: Uuid) -> io::Result<Arc<Revocation>> {
+        let signal = self.register(host)?;
+        let mut cuts = self
+            .cuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cuts.len() >= 10_000 && !cuts.contains_key(&host) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        cuts.insert(host, signal.clone());
+        signal.changed.send_replace(true);
+        Ok(signal)
+    }
+
+    pub(crate) fn tombstoned(&self, host: Uuid) {
+        self.cuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&host);
     }
 }
 
@@ -233,4 +259,22 @@ impl AuthorityGuard {
 }
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
+}
+
+#[cfg(test)]
+mod cut_tests {
+    //! A storage refusal cannot make transport retirement disappear on reconnect.
+    use super::*;
+
+    #[test]
+    fn cancellation_survives_last_transport_until_durable_tombstone() {
+        let revocations = Revocations::default();
+        let host = Uuid::new_v4();
+        drop(revocations.cut(host).unwrap());
+        let reconnect = revocations.register(host).unwrap();
+        assert!(*reconnect.changed.borrow());
+        revocations.tombstoned(host);
+        drop(reconnect);
+        assert!(revocations.cuts.lock().unwrap().is_empty());
+    }
 }

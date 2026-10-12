@@ -1,0 +1,11 @@
+Running as unit: run-p2946572-i7140471.scope; invocation ID: bdb55fa331654aa6bcf3b48200a89390
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/probe_check.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/probe_check-de0e2942e8fbdcee)
+
+running 3 tests
+test breakit2_no_systemd_names_the_required_manager ... ignored, #169 desired-contract failure: generic unsupported message hides required init
+test shell_startup_refusal_names_an_interactive_only_remedy ... ignored, #169 H1: startup refusals need actionable shell guidance
+test manager_availability_does_not_request_its_private_environment ... ok
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.12s
+

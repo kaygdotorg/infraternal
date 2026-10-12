@@ -166,6 +166,9 @@ impl EnrollmentStore {
                 ))
             })?;
             let committed = transaction.commit().await;
+            if committed.is_ok() {
+                store.1.tombstoned(host);
+            }
             #[cfg(test)]
             store.1.after_commit().await;
             committed.map_err(EnrollmentError::Storage)
@@ -191,6 +194,12 @@ pub(crate) mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
+        enrolled_with_pool(pool).await
+    }
+
+    pub(crate) async fn enrolled_with_pool(
+        pool: sqlx::SqlitePool,
+    ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         sqlx::query("INSERT INTO users (id, name, owner, recovery_hash, username, display_name) VALUES ('owner', 'owner', 1, 'test', 'owner', 'Owner')").execute(&pool).await.unwrap();
         let host = Uuid::from_u128(42);

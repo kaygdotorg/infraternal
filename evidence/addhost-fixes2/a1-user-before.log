@@ -1,0 +1,30 @@
+bun test v1.4.2 (744846f84)
+
+src/canvas/addhost/wizard.breakit2.test.ts:
+(pass) breakit2 an explicit port on a listed host survives chip resolution [0.72ms]
+(pass) breakit2 malformed bracketed IPv6 waits for correction [1.49ms]
+36 |   }, {
+37 |     typed: [], matchOf: () => ({ host: known, prefixed: false }),
+38 |     chipFor: (entry: Entry) => entry,
+39 |   });
+40 |   const chip = wizard.resolve("lab:2222", true);
+41 |   expect(wizard.addressOf(chip)).toEqual({ kind: "manual", value: "target@lab:2222" });
+                                      ^
+error: expect(received).toEqual(expected)
+
+  {
+    "kind": "manual",
+-   "value": "target@lab:2222",
++   "value": "lab:2222",
+  }
+
+- Expected  - 1
++ Received  + 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/apps/tracer/src/canvas/addhost/wizard.breakit2.test.ts:41:34)
+(fail) listed host plus port retains its saved user in the serialized destination [118.98ms]
+
+ 2 pass
+ 1 fail
+ 5 expect() calls
+Ran 3 tests across 1 file. [961.00ms]

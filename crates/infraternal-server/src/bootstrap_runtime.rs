@@ -241,6 +241,7 @@ fn log_bootstrap_failure(
         Some(InstallStep::Install) => "install",
         Some(InstallStep::Join) => "join",
         Some(InstallStep::Start) => "start",
+        Some(InstallStep::Readiness) => "readiness",
         None => match phase {
             Step::Check => "check",
             Step::Facts => "facts",

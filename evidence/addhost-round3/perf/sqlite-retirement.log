@@ -1,0 +1,6 @@
+
+running 1 test
+test bootstrap_runtime::remote_backend::tests::retirement_contention::cancelled_invitation_retires_after_sqlite_busy_timeout ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 338 filtered out; finished in 5.13s
+

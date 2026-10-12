@@ -9,7 +9,7 @@ use crate::{
 use infraternal_plugin_ssh::{
     bootstrap::{Authority, Backend, Resolved},
     install::JoinMaterial,
-    model::{Failure, InstallMode, Target},
+    model::{Failure, InstallMode, InstallStep, Target},
     probe::Check,
     transport::{Operation, Secret},
 };
@@ -29,7 +29,9 @@ pub(super) struct Attempt {
     owner: String,
     batch: Uuid,
     uid: u32,
+    destination: Option<(String, Option<String>)>,
     canary: Option<(EmbeddedAgent, [u8; 16])>,
+    retirement: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
 }
 // Cancellation before JoinMaterial reaches the installer has no Resources.host
 // to clean up. Release its unpublished ownership synchronously on every exit.
@@ -100,6 +102,120 @@ impl RemoteBackend {
             .remove(&host);
         Ok(())
     }
+    /// Hand off exact cleanup ownership before the first durable write can run.
+    /// Compatibility callers retain the older post-result ownership boundary.
+    fn issue_attempt<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+        register: Option<&'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send)>,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            let address = match &target.address {
+                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
+                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
+                    return Err(unavailable());
+                }
+            };
+            if !self.issuer.ready() {
+                return Err(Failure::install(
+                    "Set up or unlock host connections with an administrator passkey before adding a host.",
+                ));
+            }
+            let host = Uuid::new_v4();
+            let (mode, uid) = match target.mode {
+                InstallMode::Rootless => (Mode::Rootless, check.uid),
+                InstallMode::Root => (Mode::Rootful, 0),
+            };
+            {
+                let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
+                // Reserve before any database await. The bounded attempt map is
+                // also the destination journal, so competing batches cannot
+                // issue distinct host records during the lookup/issue gap.
+                if attempts.values().any(|attempt| {
+                    attempt.owner == authority.owner
+                        && attempt
+                            .destination
+                            .as_ref()
+                            .is_some_and(|(pending, trust)| {
+                                pending == address
+                                    || lookup
+                                        .as_ref()
+                                        .is_some_and(|value| trust.as_ref() == Some(value))
+                            })
+                }) {
+                    return Err(Failure::install(
+                        "This host is already being added. Wait for its setup steps to finish.",
+                    ));
+                }
+                if attempts.len() >= 1600 {
+                    return Err(Failure::install(
+                        "Too many host installations are pending. Try again shortly.",
+                    ));
+                }
+                attempts.insert(
+                    host,
+                    Attempt {
+                        owner: authority.owner.clone(),
+                        batch: authority.batch,
+                        uid,
+                        destination: Some((address.to_owned(), lookup.clone())),
+                        canary: None,
+                        retirement: None,
+                    },
+                );
+            }
+            let mut unpublished = Unpublished {
+                backend: self,
+                host,
+                published: false,
+            };
+            let existing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).fetch_one(&self.issuer.store().0).await.map_err(|_|unavailable())?;
+            if existing {
+                let mut failure =
+                    Failure::install("This host is already added. Open its terminal from Console.");
+                failure.already_added = true;
+                return Err(failure);
+            }
+            if let Some(register) = register {
+                register(host)?;
+                // AttemptResources now owns cleanup even if SQLx commits without
+                // delivering its acknowledgement. Do not discard that journal.
+                unpublished.published = true;
+            }
+            let invitation = self
+                .issuer
+                .issue_bootstrap(
+                    cookie(authority)?,
+                    InvitationRequest {
+                        host_id: host,
+                        mode,
+                        execution_uid: uid,
+                    },
+                    address,
+                    lookup.as_deref(),
+                )
+                .await;
+            let Ok(mut invitation) = invitation else {
+                return Err(Failure::install(
+                    "The host invitation was refused. Unlock your session and try again.",
+                ));
+            };
+            let stdin = serde_json::to_vec(&invitation);
+            invitation.token.zeroize();
+            let stdin = stdin.map_err(|_| unavailable())?;
+            unpublished.published = true;
+            Ok(JoinMaterial {
+                host,
+                url: format!("{}/remote/join", self.issuer.origin()),
+                stdin: Secret::new(stdin),
+            })
+        })
+    }
 }
 impl Backend for RemoteBackend {
     fn resolve<'a>(
@@ -128,95 +244,17 @@ impl Backend for RemoteBackend {
         check: &'a Check,
         lookup: Option<String>,
     ) -> Operation<'a, JoinMaterial> {
-        Box::pin(async move {
-            self.authorize(authority).await?;
-            let address = match &target.address {
-                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
-                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
-                    return Err(unavailable());
-                }
-            };
-            let existing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
-                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).fetch_one(&self.issuer.store().0).await.map_err(|_|unavailable())?;
-            if existing {
-                let mut failure =
-                    Failure::install("This host is already added. Open its terminal from Console.");
-                failure.already_added = true;
-                return Err(failure);
-            }
-            if !self.issuer.ready() {
-                return Err(Failure::install(
-                    "Set up or unlock host connections with an administrator passkey before adding a host.",
-                ));
-            }
-            let host = Uuid::new_v4();
-            let (mode, uid) = match target.mode {
-                InstallMode::Rootless => (Mode::Rootless, check.uid),
-                InstallMode::Root => (Mode::Rootful, 0),
-            };
-            {
-                let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
-                if attempts.len() >= 1600 {
-                    return Err(Failure::install(
-                        "Too many host installations are pending. Try again shortly.",
-                    ));
-                }
-                attempts.insert(
-                    host,
-                    Attempt {
-                        owner: authority.owner.clone(),
-                        batch: authority.batch,
-                        uid,
-                        canary: None,
-                    },
-                );
-            }
-            let mut unpublished = Unpublished {
-                backend: self,
-                host,
-                published: false,
-            };
-            let invitation = self
-                .issuer
-                .issue(
-                    cookie(authority)?,
-                    InvitationRequest {
-                        host_id: host,
-                        mode,
-                        execution_uid: uid,
-                    },
-                )
-                .await;
-            let Ok(mut invitation) = invitation else {
-                return Err(Failure::install(
-                    "The host invitation was refused. Unlock your session and try again.",
-                ));
-            };
-            let address = match &target.address {
-                infraternal_plugin_ssh::model::TargetAddress::Manual(address) => address.as_str(),
-                infraternal_plugin_ssh::model::TargetAddress::Discovered(_) => {
-                    return Err(unavailable());
-                }
-            };
-            sqlx::query(
-                "INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,?)",
-            )
-            .bind(host.as_bytes().as_slice())
-            .bind(address)
-            .bind(lookup)
-            .execute(&self.issuer.store().0)
-            .await
-            .map_err(|_| unavailable())?;
-            let stdin = serde_json::to_vec(&invitation);
-            invitation.token.zeroize();
-            let stdin = stdin.map_err(|_| unavailable())?;
-            unpublished.published = true;
-            Ok(JoinMaterial {
-                host,
-                url: format!("{}/remote/join", self.issuer.origin()),
-                stdin: Secret::new(stdin),
-            })
-        })
+        self.issue_attempt(authority, target, check, lookup, None)
+    }
+    fn invitation_registered<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        self.issue_attempt(authority, target, check, lookup, Some(register))
     }
     fn connected_facts<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
@@ -245,7 +283,10 @@ impl Backend for RemoteBackend {
     }
     fn terminal_canary<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
-            let actor = self.actor(authority, host).await?;
+            let actor = self
+                .actor(authority, host)
+                .await
+                .map_err(|error| error.at(InstallStep::Readiness))?;
             canary_registered(&actor, |session| {
                 self.uid(authority, host)?;
                 let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
@@ -254,7 +295,17 @@ impl Backend for RemoteBackend {
                 Ok(())
             })
             .await?;
-            self.authorize(authority).await
+            // The primary exit proves retirement; cancellation after this point
+            // must not try another writer against the already retired session.
+            self.attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .get_mut(&host)
+                .ok_or_else(unavailable)?
+                .canary = None;
+            self.authorize(authority)
+                .await
+                .map_err(|error| error.at(InstallStep::Readiness))
         })
     }
     fn record_failure(
@@ -282,20 +333,55 @@ impl Backend for RemoteBackend {
             Ok(())
         })
     }
+    fn retire_failed(&self, authority: &Authority, host: Uuid) -> Result<(), Failure> {
+        self.uid(authority, host)?;
+        let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
+        let attempt = attempts.get_mut(&host).ok_or_else(unavailable)?;
+        if attempt.retirement.is_none() {
+            let store = self.issuer.store().clone();
+            let owner = authority.owner.clone();
+            let now = unix_now()?;
+            // Fence synchronously: no SQLite or SSH await may preserve access
+            // after cancellation. The durable intent covers process restart.
+            let fence = store.1.cut(host).map_err(|_| unavailable())?;
+            attempt.retirement = Some(tokio::spawn(async move {
+                let _fence = fence;
+                store
+                    .retire_bootstrap(&owner, host, now)
+                    .await
+                    .map_err(|_| unavailable())
+            }));
+        }
+        Ok(())
+    }
     fn failed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
+            // Compatibility wrappers may not forward the synchronous hook.
+            self.retire_failed(authority, host)?;
+            let retirement = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .get_mut(&host)
+                .and_then(|attempt| attempt.retirement.take())
+                .ok_or_else(unavailable)?;
+            self.completed_record(authority, host)?;
+            // Dropping this acknowledgement detaches, never aborts, the exact
+            // writer. It keeps its queue position after the five-second caller
+            // deadline; tombstone and intent consumption still commit together.
+            retirement.await.map_err(|_| unavailable())?
+        })
+    }
+    fn completed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
+        Box::pin(async move {
             self.uid(authority, host)?;
-            // Logout cannot prevent cleanup of this exact batch's new authority.
             self.issuer
                 .store()
-                .revoke(&authority.owner, host, unix_now()?)
+                .complete_bootstrap(&authority.owner, host)
                 .await
                 .map_err(|_| unavailable())?;
             self.completed_record(authority, host)
         })
-    }
-    fn completed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, ()> {
-        Box::pin(async move { self.completed_record(authority, host) })
     }
 }
 fn cookie(authority: &Authority) -> Result<&str, Failure> {
@@ -324,16 +410,20 @@ async fn canary_registered(
             px_h: 0,
         })
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|_| unavailable().at(InstallStep::Readiness))?;
     // Publish ownership before the next await: cancellation cannot lose this id.
     if let Err(error) = opened(session) {
         let _ = finish_canary(actor, session).await;
-        return Err(error);
+        return Err(error.at(InstallStep::Readiness));
     }
     let result = tokio::time::timeout(Duration::from_secs(10), canary_output(actor, session)).await
         .unwrap_or_else(|_| Err(Failure::install("The host connected, but its terminal did not answer. Check its service and try again.")));
-    let cleanup = finish_canary(actor, session).await;
-    result.and(cleanup)
+    // Success includes the primary stream's exit proof. Reattaching then races
+    // private-session retirement and can turn that proof into a handshake error.
+    if result.is_err() {
+        let _ = finish_canary(actor, session).await;
+    }
+    result.map_err(|error| error.at(InstallStep::Readiness))
 }
 
 async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
@@ -363,6 +453,7 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
             .map_err(|_| unavailable())?;
     }
     let mut received = Vec::new();
+    let mut confirmed = false;
     while let Some(event) = output.recv().await {
         match event {
             // A fast first command may be included in the initial faithful
@@ -372,15 +463,28 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
                     return Err(unavailable());
                 }
                 received.extend_from_slice(&bytes);
-                if received
+                confirmed = received
                     .windows(marker.len())
-                    .any(|window| window == marker.as_bytes())
-                {
-                    return Ok(());
+                    .any(|window| window == marker.as_bytes());
+            }
+            TerminalOutput::Event { event_json } => {
+                let notice: serde_json::Value =
+                    serde_json::from_slice(&event_json).map_err(|_| unavailable())?;
+                if notice["type"] == "terminal.exited" {
+                    // The routed, authenticated exit must name this private session.
+                    let exited = notice["session_id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .is_some_and(|id| id.as_bytes() == &session);
+                    return if confirmed && exited && notice["status"] == 0 {
+                        Ok(())
+                    } else {
+                        Err(unavailable())
+                    };
                 }
             }
             TerminalOutput::Closed { .. } => break,
-            _ => {}
+            TerminalOutput::Ack { .. } => {}
         }
     }
     Err(unavailable())
@@ -457,6 +561,29 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    mod breakit2_live {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_breakit2_tests.rs"
+        ));
+    }
+
+    mod review_cleanup {
+        //! Checks cancellation cleanup against unavailable real SQLite storage.
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_review_cleanup_tests.rs"
+        ));
+    }
+
+    mod retirement_contention {
+        //! A separate SQLite writer can outlive the connection's busy timeout.
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_retirement_contention_tests.rs"
+        ));
+    }
+
     struct Signer(Option<CaMaterial>);
     impl CaKeySource for Signer {
         fn load(&self) -> Result<CaMaterial, CaError> {
@@ -505,6 +632,14 @@ mod tests {
     }
     async fn fixture(unlocked: bool) -> Fixture {
         let (store, pool, prior) = crate::enrollment::authority::tests::enrolled().await;
+        fixture_with_store(unlocked, store, pool, prior).await
+    }
+    async fn fixture_with_store(
+        unlocked: bool,
+        store: crate::enrollment::EnrollmentStore,
+        pool: sqlx::SqlitePool,
+        prior: Uuid,
+    ) -> Fixture {
         let auth = Auth::new(
             pool.clone(),
             "remote.example.test",
@@ -548,9 +683,12 @@ mod tests {
         }
     }
     fn start(f: &Fixture, owner: &str) -> Batch {
+        start_backend(f, owner, f.backend.clone())
+    }
+    fn start_backend(f: &Fixture, owner: &str, backend: Arc<dyn Backend>) -> Batch {
         let runner = Bootstrap::new(
             Arc::new(Sniff(f.opens.clone())),
-            f.backend.clone(),
+            backend,
             BinaryPaths {
                 x86_64: "must-not-read-payload".into(),
                 aarch64: "must-not-read-payload".into(),
@@ -659,7 +797,9 @@ mod tests {
                 owner: "owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1002,
+                destination: None,
                 canary: None,
+                retirement: None,
             },
         );
         f.backend.attempts.lock().unwrap().insert(
@@ -668,7 +808,9 @@ mod tests {
                 owner: "other-owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1003,
+                destination: None,
                 canary: None,
+                retirement: None,
             },
         );
         let guard = Unpublished {
@@ -689,6 +831,239 @@ mod tests {
                 .await
                 .unwrap();
         assert!(prior);
+    }
+
+    /// Holds the committed invitation before its caller receives the result.
+    /// No production hook is needed: the real backend and SQLite commit run
+    /// unchanged, while this adapter models a delayed commit acknowledgement.
+    struct PausedInvitation {
+        inner: Arc<RemoteBackend>,
+        committed: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl PausedInvitation {
+        async fn pause(&self, join: JoinMaterial) -> Result<JoinMaterial, Failure> {
+            self.committed.notify_one();
+            self.release.notified().await;
+            Ok(join)
+        }
+    }
+    impl Backend for PausedInvitation {
+        fn resolve<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: Option<&'a str>,
+        ) -> Operation<'a, Resolved> {
+            self.inner.resolve(a, t, c)
+        }
+        fn invitation<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+        ) -> Operation<'a, JoinMaterial> {
+            self.invitation_with_trust(a, t, c, None)
+        }
+        fn invitation_with_trust<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+            lookup: Option<String>,
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.pause(self.inner.invitation_with_trust(a, t, c, lookup).await?)
+                    .await
+            })
+        }
+        fn invitation_registered<'a>(
+            &'a self,
+            a: &'a Authority,
+            t: &'a Target,
+            c: &'a Check,
+            lookup: Option<String>,
+            register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+        ) -> Operation<'a, JoinMaterial> {
+            Box::pin(async move {
+                self.pause(
+                    self.inner
+                        .invitation_registered(a, t, c, lookup, register)
+                        .await?,
+                )
+                .await
+            })
+        }
+        fn connected_facts<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.connected_facts(a, h)
+        }
+        fn terminal_canary<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.terminal_canary(a, h)
+        }
+        fn cleanup_sessions<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.cleanup_sessions(a, h)
+        }
+        fn failed<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
+            self.inner.failed(a, h)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_invitation_after_commit_retires_its_host_record() {
+        let f = fixture(true).await;
+        let paused = Arc::new(PausedInvitation {
+            inner: f.backend.clone(),
+            committed: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let batch = start_backend(&f, "owner", paused.clone());
+        tokio::time::timeout(Duration::from_secs(5), paused.committed.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL"
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            2
+        );
+        let mut changed = batch.subscribe();
+        drop(batch);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while changed.changed().await.is_ok() {}
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL"
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            1
+        );
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
+    }
+
+    /// Measures real admission with the declared maximum attempt journal held.
+    /// SSH sniffing is read-only synthetic; auth and owner state use real SQLite.
+    #[tokio::test]
+    #[ignore = "#169 local bounded-journal scale evidence under CPUWeight scope"]
+    async fn destination_reservation_admission_at_1600_pending_hosts() {
+        fn rss() -> usize {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("VmRSS:")
+                        .map(|value| value.split_whitespace().next().unwrap().parse().unwrap())
+                })
+                .unwrap()
+        }
+        let f = fixture(true).await;
+        let before = rss();
+        let (capacity, string_bytes) = {
+            let mut attempts = f.backend.attempts.lock().unwrap();
+            for index in 0..1600 {
+                attempts.insert(
+                    Uuid::new_v4(),
+                    Attempt {
+                        owner: "owner".into(),
+                        batch: Uuid::new_v4(),
+                        uid: 1002,
+                        destination: Some((format!("user@host-{index}.example.invalid"), None)),
+                        canary: None,
+                        retirement: None,
+                    },
+                );
+            }
+            let bytes: usize = attempts
+                .values()
+                .map(|attempt| {
+                    attempt.owner.capacity() + attempt.destination.as_ref().unwrap().0.capacity()
+                })
+                .sum();
+            (attempts.capacity(), bytes)
+        };
+        let held = rss();
+        let mut samples = Vec::new();
+        for _ in 0..100 {
+            let started = std::time::Instant::now();
+            let batches: Vec<_> = (0..8).map(|_| start(&f, "owner")).collect();
+            let events = futures_util::future::join_all(batches.iter().map(finished)).await;
+            assert!(events.iter().all(
+                |event| event.message.contains("Too many host installations")
+                    && event.host_id.is_none()
+            ));
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM remote_hosts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        println!(
+            "METRIC destination_admission pending=1600 active_per_sample=8 samples=100 requests=800 refused=800 map_capacity={capacity} attempt_size={} string_capacity_bytes={string_bytes} rss_before_kib={before} rss_held_kib={held} p50_ms={:.3} p99_ms={:.3}",
+            std::mem::size_of::<Attempt>(),
+            samples[50],
+            samples[99]
+        );
+        println!(
+            "ENVIRONMENT machine={} cores={} load={}",
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .unwrap()
+                .trim(),
+            std::thread::available_parallelism().unwrap().get(),
+            std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+        );
+    }
+
+    #[tokio::test]
+    async fn breakit2_unpublished_invitation_retires_durable_authority() {
+        let f = fixture(true).await;
+        // A deterministic SQLite failure after issue() commits tests the exact
+        // unpublished boundary without exposing the memory-only invitation.
+        sqlx::query("CREATE TRIGGER breakit2_refuse_address BEFORE INSERT ON remote_host_bootstrap BEGIN SELECT RAISE(ABORT,'fixture address persistence refusal'); END")
+            .execute(&f.pool).await.unwrap();
+        assert_eq!(finished(&start(&f, "owner")).await.step, Step::Failed);
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
+        let live: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            live, 1,
+            "unpublished cleanup removed memory ownership but leaked durable host authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn breakit2_concurrent_same_destination_issues_only_one_invitation() {
+        let f = fixture(true).await;
+        let batches: Vec<_> = (0..8).map(|_| start(&f, "owner")).collect();
+        let events = futures_util::future::join_all(batches.iter().map(finished)).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.host_id.is_some())
+                .count(),
+            1,
+            "concurrent batches reserved the same destination and issued distinct host identities"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message.contains("already being added"))
+                .count(),
+            7
+        );
     }
 }
 

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /root/infraternal-bench/addhost-round3/lib/ld-linux-x86-64.so.2 --library-path /root/infraternal-bench/addhost-round3/lib /root/infraternal-bench/addhost-round3/server-test "$@"

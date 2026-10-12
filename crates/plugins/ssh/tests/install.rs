@@ -147,6 +147,266 @@ fn executable(path: &std::path::Path, text: &str) {
 }
 
 #[tokio::test]
+async fn review_interrupted_transaction_receipt_allows_owned_cleanup() {
+    let fixture = Fixture::new();
+    // A full filesystem can create the transaction file but refuse its bytes.
+    // The exact pre-mkdir acquisition journal still binds this empty lock.
+    executable(
+        &fixture.root.join("tools/mkdir"),
+        "#!/bin/sh\n/usr/bin/mkdir \"$@\" || exit $?\ncase \"$*\" in *.bootstrap-lock) : > \"$1/transaction\"; exit 42;; esac\n",
+    );
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/mkdir")).unwrap();
+    assert_eq!(
+        std::fs::metadata(fixture.base().join(".bootstrap-lock/transaction"))
+            .unwrap()
+            .len(),
+        0
+    );
+    let cleaned = transaction.rollback().await;
+    assert!(
+        cleaned.is_ok(),
+        "exact acquisition journal did not recover an incomplete transaction receipt: {cleaned:?}"
+    );
+    assert!(!fixture.base().exists());
+}
+
+// These break-it regressions state the desired contract and intentionally stay
+// red until the follow-up fix lane. Explicit opt-in keeps the shared fast gate
+// useful while preserving executable evidence of the reported defects (#169).
+#[tokio::test]
+async fn breakit2_rollback_preserves_foreign_launcher_new() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let foreign = fixture.root.join(".local/bin/infraternal.new");
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    std::fs::write(&foreign, "unrelated launcher staging data").unwrap();
+    assert!(transaction.enroll_and_start(&fixture.join).await.is_err());
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&foreign).ok().as_deref(),
+        Some("unrelated launcher staging data"),
+        "rollback deleted a file that this attempt never created"
+    );
+}
+
+#[tokio::test]
+async fn breakit2_rollback_preserves_foreign_unit_new() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let foreign = fixture
+        .root
+        .join(".config/systemd/user/infraternal-agent.service.new");
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    std::fs::write(&foreign, "unrelated unit staging data").unwrap();
+    assert!(transaction.enroll_and_start(&fixture.join).await.is_err());
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&foreign).ok().as_deref(),
+        Some("unrelated unit staging data"),
+        "noclobber refused the foreign unit, then rollback deleted it"
+    );
+}
+
+#[tokio::test]
+async fn breakit2_stage_refuses_parent_that_cannot_be_rolled_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let parent = fixture.root.join(".local/share");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let transaction = fixture.transaction();
+    let staged = transaction.stage(&fixture.binary).await;
+    let cleanup = transaction.rollback().await;
+    assert!(
+        staged.is_err() || cleanup.is_ok(),
+        "stage accepted mode 0775, then rollback refused the same parent and left its payload/lock"
+    );
+}
+
+#[tokio::test]
+async fn breakit2_interrupted_lock_creation_allows_cleanup_and_retry() {
+    let fixture = Fixture::new();
+    // A real mkdir succeeds, then the command fails before the transaction and
+    // kind records are written. This models an abrupt stop at that boundary.
+    executable(
+        &fixture.root.join("tools/mkdir"),
+        "#!/bin/sh\n/usr/bin/mkdir \"$@\" || exit $?\ncase \"$*\" in *.bootstrap-lock) exit 42;; esac\n",
+    );
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/mkdir")).unwrap();
+    assert!(
+        transaction.rollback().await.is_ok(),
+        "an owned empty lock has no transaction record; rollback cannot recover it"
+    );
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_acquisition_cleanup_receipt_can_resume() {
+    let fixture = Fixture::new();
+    executable(
+        &fixture.root.join("tools/mkdir"),
+        "#!/bin/sh\n/usr/bin/mkdir \"$@\" || exit $?\ncase \"$*\" in *.bootstrap-lock) exit 42;; esac\n",
+    );
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/mkdir")).unwrap();
+    executable(
+        &fixture.root.join("tools/rm"),
+        "#!/bin/sh\ncase \"$*\" in *.bootstrap-acquiring) exit 42;; esac\nexec /usr/bin/rm \"$@\"\n",
+    );
+    assert!(transaction.rollback().await.is_err());
+    assert!(fixture.receipt().exists());
+    assert!(fixture.base().join(".bootstrap-acquiring").exists());
+    assert!(!fixture.base().join(".bootstrap-lock").exists());
+    std::fs::remove_file(fixture.root.join("tools/rm")).unwrap();
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+/// Counts actual file input crossing the session boundary while commands execute locally.
+struct TransferCount {
+    local: Local,
+    bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl SshSession for TransferCount {
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            if let Input::File(path) = input {
+                self.bytes.fetch_add(
+                    usize::try_from(path.metadata().unwrap().len()).unwrap(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            self.local.run(script, input).await
+        })
+    }
+}
+
+fn counted_transaction(
+    fixture: &Fixture,
+    bytes: &Arc<std::sync::atomic::AtomicUsize>,
+) -> Installation {
+    Installation::new(
+        Arc::new(TransferCount {
+            local: Local {
+                root: fixture.root.clone(),
+            },
+            bytes: bytes.clone(),
+        }),
+        &fixture.target,
+        &fixture.join,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn retry_reuses_verified_payload_after_owned_rollback() {
+    let fixture = Fixture::new();
+    let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = counted_transaction(&fixture, &bytes);
+    first.stage(&fixture.binary).await.unwrap();
+    first.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    let second = counted_transaction(&fixture, &bytes);
+    second.stage(&fixture.binary).await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.base().join(".bootstrap-lock/payload")).unwrap(),
+        std::fs::read(&fixture.binary).unwrap()
+    );
+    assert_eq!(
+        bytes.load(std::sync::atomic::Ordering::Relaxed),
+        usize::try_from(fixture.binary.metadata().unwrap().len()).unwrap()
+    );
+    second.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn retry_resends_payload_when_cache_content_changes() {
+    let fixture = Fixture::new();
+    let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = counted_transaction(&fixture, &bytes);
+    first.stage(&fixture.binary).await.unwrap();
+    first.rollback().await.unwrap();
+    let cache = fixture.base().with_file_name("infraternal.bootstrap-cache");
+    assert!(cache.join("payload").exists());
+    std::fs::write(cache.join("payload"), b"changed fixture content").unwrap();
+    let second = counted_transaction(&fixture, &bytes);
+    second.stage(&fixture.binary).await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.base().join(".bootstrap-lock/payload")).unwrap(),
+        std::fs::read(&fixture.binary).unwrap()
+    );
+    assert_eq!(
+        bytes.load(std::sync::atomic::Ordering::Relaxed),
+        2 * usize::try_from(fixture.binary.metadata().unwrap().len()).unwrap()
+    );
+    second.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn payload_reuse_never_adopts_a_foreign_cache_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let cache = fixture.base().with_file_name("infraternal.bootstrap-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(cache.join("owner"), b"foreign data\n").unwrap();
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    assert_eq!(
+        std::fs::read(cache.join("owner")).unwrap(),
+        b"foreign data\n"
+    );
+}
+
+/// Models receipt allocation being unavailable until the owned payload is freed.
+/// The rollback still runs through the real shell and filesystem; the separate
+/// disposable-target test exercises a genuinely full home filesystem.
+struct ReceiptBudget(Local);
+impl SshSession for ReceiptBudget {
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            let guarded = format!(
+                r#"printf() {{
+    if [ "$1" = '%s %s fresh %s\n' ] && [ -e "$base/.bootstrap-lock/payload" ]; then return 1; fi
+    command printf "$@"
+}}
+{script}"#
+            );
+            self.0.run(&guarded, input).await
+        })
+    }
+}
+
+#[tokio::test]
+async fn full_stage_frees_payload_before_allocating_a_cleanup_receipt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let cleanup = Installation::resume_cleanup(
+        Arc::new(ReceiptBudget(Local {
+            root: fixture.root.clone(),
+        })),
+        &fixture.target,
+        transaction.cleanup_coordinates(),
+    )
+    .unwrap();
+    cleanup.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+}
+
+#[tokio::test]
 async fn fresh_runtime_empty_directories_do_not_block_rollback_and_retry() {
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
@@ -877,4 +1137,29 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
     assert_eq!(serde_json::to_value(&failure).unwrap()["exit_status"], 71);
     assert!(failure.message.contains("~/.local/share/infraternal"));
     assert!(failure.message.contains("Move it aside"));
+}
+
+#[tokio::test]
+async fn enrollment_process_exit_71_is_not_reported_as_directory_refusal() {
+    let fixture = Fixture::new();
+    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+
+    let failure = transaction
+        .enroll_and_start(&fixture.join)
+        .await
+        .unwrap_err();
+
+    assert_eq!(failure.exit_status, Some(71));
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap()["failed_step"],
+        "join"
+    );
+    assert!(
+        failure
+            .message
+            .starts_with("Joining the host to this server failed.")
+    );
+    assert!(!failure.message.contains("Move it aside"));
 }

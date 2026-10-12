@@ -1,0 +1,22 @@
+Running as unit: run-p2975143-i7169042.scope; invocation ID: f6b69b7384a44c7587c1e11fc2a85ec4
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.93s
+     Running tests/probe_check.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/probe_check-de0e2942e8fbdcee)
+
+running 1 test
+test breakit2_no_systemd_names_the_required_manager ... FAILED
+
+failures:
+
+---- breakit2_no_systemd_names_the_required_manager stdout ----
+
+thread 'breakit2_no_systemd_names_the_required_manager' (2975456) panicked at crates/plugins/ssh/tests/probe_check.rs:39:5:
+a canonical unsupported-init record must name the required manager: This host did not return a supported Linux system check. Check the SSH shell startup and run startup programs only in interactive shells, then try again.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    breakit2_no_systemd_names_the_required_manager
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test probe_check`

@@ -155,7 +155,13 @@ export function parseTarget(raw: string): ParsedTarget | undefined {
   if (!match) return undefined;
   const port = match[3] ? Number(match[3]) : undefined;
   if (port !== undefined && (port < 1 || port > 65535)) return undefined;
-  return { user: match[1], host: match[2]!.toLowerCase(), port };
+  const host = match[2]!.toLowerCase();
+  if (host.startsWith("[")) {
+    // Validate the complete IPv6 address using the browser's URL parser. A
+    // hexadecimal-looking bracketed string alone is insufficient proof.
+    try { new URL(`http://${host}/`); } catch { return undefined; }
+  }
+  return { user: match[1], host, port };
 }
 
 /**

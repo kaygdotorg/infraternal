@@ -1,0 +1,9 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.67s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/infraternal_agent-1270b1fb73c5a6bb)
+
+running 1 test
+test daemon::readiness_exit_tests::ownership_eof_does_not_discard_private_terminal_output ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 0.07s

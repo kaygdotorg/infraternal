@@ -111,12 +111,15 @@ impl InvitationIssuer {
             sources: Arc::new(crate::remote_admission::SourceSlots::new(2)),
         })
     }
-    pub(crate) async fn issue(
+    /// The setup address is committed with its new host record and invitation.
+    pub(crate) async fn issue_bootstrap(
         &self,
         cookie: &str,
         request: InvitationRequest,
+        address: &str,
+        lookup: Option<&str>,
     ) -> Result<JoinInvitation, StatusCode> {
-        issue_invitation(self.0.clone(), cookie, request).await
+        issue_invitation(self.0.clone(), cookie, request, Some((address, lookup))).await
     }
     pub(crate) fn ready(&self) -> bool {
         self.0.source.load().is_ok()
@@ -314,13 +317,14 @@ async fn invite(
     }
     let cookie =
         crate::auth::session_cookie_from_headers(&headers).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    issue_invitation(api, cookie, request).await.map(Json)
+    issue_invitation(api, cookie, request, None).await.map(Json)
 }
 
 async fn issue_invitation(
     api: Api,
     cookie: &str,
     request: InvitationRequest,
+    destination: Option<(&str, Option<&str>)>,
 ) -> Result<JoinInvitation, StatusCode> {
     let now = now()?;
     let session_hash = crate::auth::hash(cookie);
@@ -339,28 +343,64 @@ async fn issue_invitation(
     if !owner || (request.mode == Mode::Rootless) == (request.execution_uid == 0) {
         return Err(StatusCode::FORBIDDEN);
     }
+    // Drop rolls back every unpublished write on error or cancellation. The
+    // invitation is assembled before commit, so certificate conversion cannot
+    // strand a new host record either.
+    let mut transaction = api
+        .pool
+        .begin()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     // An existing id must have exactly the same authority: collisions cannot move a host.
     sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) SELECT ?,?,?,?,? FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>unixepoch() AND u.owner=1 ON CONFLICT(id) DO NOTHING")
         .bind(request.host_id.as_bytes().as_slice()).bind(&session.user_id).bind(request.mode.as_str())
-        .bind(i64::from(request.execution_uid)).bind(now).bind(&session_hash).bind(&session.user_id).execute(&api.pool).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .bind(i64::from(request.execution_uid)).bind(now).bind(&session_hash).bind(&session.user_id).execute(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let uid: Option<i64> = sqlx::query_scalar("SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? AND revoked_at IS NULL")
         .bind(request.host_id.as_bytes().as_slice()).bind(&session.user_id).bind(request.mode.as_str())
-        .fetch_optional(&api.pool).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .fetch_optional(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if uid != Some(i64::from(request.execution_uid)) {
         return Err(StatusCode::FORBIDDEN);
     }
     let token = api
         .store
-        .issue_for_session(
+        .issue_authorized_in(
             &session.user_id,
             request.host_id,
             request.mode,
             now,
-            &session_hash,
+            Some(&session_hash),
+            &mut transaction,
         )
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    Ok(JoinInvitation {
+    if let Some((address, lookup)) = destination {
+        // The preceding host INSERT owns SQLite's writer slot. Repeat the
+        // destination check here for independently constructed adapters too.
+        let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+            .bind(&session.user_id).bind(address).bind(lookup).bind(lookup)
+            .fetch_one(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if occupied {
+            return Err(StatusCode::CONFLICT);
+        }
+        sqlx::query(
+            "INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,?)",
+        )
+        .bind(request.host_id.as_bytes().as_slice())
+        .bind(address)
+        .bind(lookup)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        // Retire unless proven completion discharges this obligation. The
+        // invitation acknowledgement may be cancelled after SQLite commits;
+        // its retirement ownership must survive in that same transaction.
+        sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
+            .bind(request.host_id.as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    }
+    let invitation = JoinInvitation {
         host_id: request.host_id,
         mode: request.mode,
         execution_uid: request.execution_uid,
@@ -382,7 +422,12 @@ async fn issue_invitation(
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
         endpoint: api.endpoint.endpoint,
         server_name: api.endpoint.server_name,
-    })
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(invitation)
 }
 
 async fn join(

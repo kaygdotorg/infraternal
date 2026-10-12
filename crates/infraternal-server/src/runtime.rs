@@ -394,6 +394,12 @@ async fn remote_router(
         enrollment.as_ref().map(|service| service.source.clone()),
     );
     let enrollment_store = crate::enrollment::EnrollmentStore::new(pool.clone());
+    // No provisioning batch survives a process restart. Consume its durable
+    // retirement intent before any listener can admit the abandoned identity.
+    enrollment_store
+        .retire_unfinished_bootstraps()
+        .await
+        .map_err(ServerError::Storage)?;
     let ca_api = ca_router(
         remote.as_ref(),
         &auth,

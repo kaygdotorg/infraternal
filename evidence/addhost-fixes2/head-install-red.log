@@ -1,0 +1,39 @@
+Running as unit: run-p2392600-i6586499.scope; invocation ID: 25efd06ee7884970aba924e01af41f85
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.84s
+     Running tests/install.rs (/home/kayg/.cache/codex-scratch/addhost-fixes2/target/debug/deps/install-0f36f33fa55ec148)
+
+running 4 tests
+
+thread 'breakit2_interrupted_lock_creation_allows_cleanup_and_retry' (2393775) panicked at crates/plugins/ssh/tests/install.rs:220:5:
+an owned empty lock has no transaction record; rollback cannot recover it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test breakit2_interrupted_lock_creation_allows_cleanup_and_retry ... FAILED
+
+thread 'breakit2_stage_refuses_parent_that_cannot_be_rolled_back' (2393778) panicked at crates/plugins/ssh/tests/install.rs:201:5:
+stage accepted mode 0775, then rollback refused the same parent and left its payload/lock
+test breakit2_stage_refuses_parent_that_cannot_be_rolled_back ... FAILED
+
+thread 'breakit2_rollback_preserves_foreign_launcher_new' (2393776) panicked at crates/plugins/ssh/tests/install.rs:163:5:
+assertion `left == right` failed: rollback deleted a file that this attempt never created
+  left: None
+ right: Some("unrelated launcher staging data")
+test breakit2_rollback_preserves_foreign_launcher_new ... FAILED
+
+thread 'breakit2_rollback_preserves_foreign_unit_new' (2393777) panicked at crates/plugins/ssh/tests/install.rs:183:5:
+assertion `left == right` failed: noclobber refused the foreign unit, then rollback deleted it
+  left: None
+ right: Some("unrelated unit staging data")
+test breakit2_rollback_preserves_foreign_unit_new ... FAILED
+
+failures:
+
+failures:
+    breakit2_interrupted_lock_creation_allows_cleanup_and_retry
+    breakit2_rollback_preserves_foreign_launcher_new
+    breakit2_rollback_preserves_foreign_unit_new
+    breakit2_stage_refuses_parent_that_cannot_be_rolled_back
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `-p infraternal-plugin-ssh --test install`
