@@ -2293,3 +2293,28 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      opened in advance). If it is clearly slower, the owner decides again.
      Rejected for now: a glibc helper binary next to the static one, and a
      dynamic glibc build of the whole binary.
+248. **Canvas nodes (owner, 2026-10-12, Q20–Q25, #167; builds on D239):**
+     - **Layout:** the server (control plane) holds every canvas layout and
+       is its source of truth. Layout changes travel as intents ("move
+       window", "open session"), never as whole-layout overwrites.
+     - **Content and credentials:** content lives on the hosts. Credentials
+       are sealed to the infraternal agent that uses them; a canvas only
+       asks for them and never holds them.
+     - **Speed:** both the server canvas and a node's canvas must be very
+       fast ("keep both reaaaaly performant").
+     - **Who:** each person can open only their own canvas. In the community
+       edition the server's own canvas is always on.
+     - **Addresses:** a node serves its canvas at two addresses, shown
+       together: `http://localhost` on the machine itself, which always
+       works (including behind routers with DNS-rebind protection), and a
+       name the person configures for remote use. That name gets HTTPS via
+       HTTP-01 by default; DNS-01 is optional.
+     - **Sign-in:** always on the server's own page, with passkeys or OIDC
+       as today. The server hands the node's canvas a single-use token that
+       becomes an HttpOnly, SameSite=Strict cookie, without `Secure` on
+       loopback only (WebKit drops `Secure` cookies on http://127.0.0.1). A
+       node name under the server's domain may use the passkeys directly;
+       other domains use the handoff, or related origins where supported.
+     - **Browsers:** Chrome asks once for local network access; the handoff
+       works in Chrome, Firefox and WebKit (measured, #167). A node-served
+       canvas answered in 1.2 ms against 151.6 ms across a long link.
