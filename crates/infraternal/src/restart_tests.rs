@@ -748,3 +748,7 @@ fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "restart_path_review_tests.rs"]
+mod path_review;
