@@ -1,5 +1,5 @@
-# Decoder fuzzing harness for both parsers of untrusted bytes [12][40]:
-# the frozen shim framing (contracts/shim.md) and the wire codec (contracts/wire.md).
+# Fuzzes bounded untrusted binary framing and transport/plugin JSON [12][40][215].
+# Framing contracts remain frozen; each target calls its production decoder.
 [package]
 name = "infraternal-fuzz"
 version.workspace = true
@@ -146,6 +146,13 @@ mesh-node = ["infraternal-plugin-mesh/agent"]
 name = "mesh_node_json"
 path = "fuzz_targets/mesh_node_json.rs"
 required-features = ["mesh-node"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "remote_cursor_decode"
+path = "fuzz_targets/remote_cursor_decode.rs"
 test = false
 doc = false
 bench = false
