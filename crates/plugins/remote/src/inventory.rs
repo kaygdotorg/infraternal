@@ -155,7 +155,7 @@ impl Plugin for InventoryPlugin {
                                     } else { Err(()) };
                                     let ok = output.is_ok();
                                     let json = serde_json::to_vec(&output.unwrap_or_else(|()| json!({"error":"inventory unavailable"}))).map_err(|_| ())?;
-                                    send(&replies, Frame::Result { call_id, ok, json: &json }).await
+                                    send(&replies, 0, Frame::Result { call_id, ok, json: &json }).await
                                 })).await
                             }
                             Frame::Subscribe { sub_id, .. } => {
@@ -163,7 +163,7 @@ impl Plugin for InventoryPlugin {
                                 if subscription_current(&registry, sub_id, generation) {
                                     subscriptions.retain(|(id, _)| *id != sub_id);
                                     subscriptions.push((sub_id, generation));
-                                    host.authorized(Box::pin(send(&replies, Frame::Event { sub_id, event_json: br#"{"type":"changed"}"# }))).await
+                                    host.authorized(Box::pin(send(&replies, generation << 1, Frame::Event { sub_id, event_json: br#"{"type":"changed"}"# }))).await
                                 } else { Ok(()) }
                             }
                             _ => Ok(()),
@@ -174,7 +174,7 @@ impl Plugin for InventoryPlugin {
                         host.authorized(Box::pin(async {
                             for (id, generation) in &subscriptions {
                                 if subscription_current(&registry, *id, *generation) {
-                                    send(&replies, Frame::Event { sub_id: *id, event_json: br#"{"type":"changed"}"# }).await?;
+                                    send(&replies, *generation << 1, Frame::Event { sub_id: *id, event_json: br#"{"type":"changed"}"# }).await?;
                                 }
                             }
                             Ok(())
@@ -188,9 +188,9 @@ impl Plugin for InventoryPlugin {
         })
     }
 }
-async fn send(replies: &ReplySender, frame: Frame<'_>) -> Result<(), ()> {
+async fn send(replies: &ReplySender, stream_id: u32, frame: Frame<'_>) -> Result<(), ()> {
     let mut wire = Vec::new();
-    encode_muxed_frame_into(0, &frame, &mut wire).map_err(|_| ())?;
+    encode_muxed_frame_into(stream_id, &frame, &mut wire).map_err(|_| ())?;
     if wire.len() > DESCRIPTOR.max_frame_len {
         return Err(());
     }
@@ -274,6 +274,42 @@ mod authority_tests {
         ) -> Operation<'_, ()> {
             Box::pin(async {})
         }
+    }
+    #[tokio::test]
+    async fn inventory_events_keep_the_subscription_generation() {
+        let (_live, authority) = watch::channel(true);
+        let source = Arc::new(Source {
+            read: tokio::sync::Notify::new(),
+            changes: Changes::default(),
+        });
+        let plugin = InventoryPlugin(source);
+        let (requests, receiver) = mpsc::channel(1);
+        let (outbound, mut answers) = mpsc::channel(1);
+        let registry = Arc::new(std::array::from_fn(|_| {
+            std::sync::atomic::AtomicU64::new(0)
+        }));
+        registry[0].store((2_u64 << 32) | 9, std::sync::atomic::Ordering::Release);
+        let worker = tokio::spawn(plugin.run(
+            Arc::new(Host(authority)),
+            receiver,
+            ReplySender::new(outbound, DESCRIPTOR.id, 1),
+            registry,
+        ));
+        let mut request = Vec::new();
+        encode_muxed_frame_into(
+            4,
+            &Frame::Subscribe {
+                sub_id: 9,
+                filter_json: br#"{"topic":"remote.hosts"}"#,
+            },
+            &mut request,
+        )
+        .unwrap();
+        requests.send(Bytes::from(request)).await.unwrap();
+        let answer = answers.recv().await.unwrap();
+        assert_eq!(decode_muxed_frame(&answer.wire).unwrap().stream_id, 4);
+        drop(requests);
+        worker.await.unwrap();
     }
     #[tokio::test]
     async fn revocation_cancels_a_result_waiting_for_socket_credit() {
