@@ -106,3 +106,7 @@ pub(crate) fn reset_test_opens() {
 pub(crate) fn test_opens() -> usize {
     TEST_OPENS.with(std::cell::Cell::get)
 }
+
+#[cfg(test)]
+#[path = "restart_signature_audit_tests.rs"]
+mod audit_tests;
