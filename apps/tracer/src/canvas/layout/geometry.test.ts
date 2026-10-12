@@ -1,7 +1,7 @@
 /** Placement rules of the clusters mockup: grid snapping, pushing and grant reach (src/canvas/layout/geometry.ts). */
 import { expect, test } from "bun:test";
 import { CELL, COLUMN_GAP, defaultWidth, isDefaultWidth, metricsFor, resolve, snapToGrid, type Box } from "./geometry";
-import { PEEK } from "../window-sizes";
+import { DEFAULT_SIZES, PEEK } from "../window-sizes";
 import { reach } from "../mesh/grants";
 import { INITIAL_GRANTS, TAGS } from "../mock/data";
 
@@ -49,14 +49,22 @@ test("reach follows grants through tags and keeps the relay", () => {
   expect(reach("db-never", INITIAL_GRANTS, TAGS)).toEqual([]);
 });
 
-test("a phone column in a strip leaves PEEK px of each neighbour at the edge; a lone window keeps 99%", () => {
-  const m = metricsFor(361, 700, true);
-  expect(m.colW).toBe(Math.round(361 * 0.99));
-  expect(defaultWidth(m, 1)).toBe(m.colW);
+test("phone edge to edge: a lone window is the whole area, in a strip it leaves the gap and PEEK px of each neighbour; full width is the whole area always", () => {
+  const edge = metricsFor(393, 700, true);
+  expect(defaultWidth(edge, 1)).toBe(393);
+  expect(defaultWidth(edge, 3)).toBe(393 - 2 * (COLUMN_GAP + PEEK));
+  const full = metricsFor(393, 700, true, { ...DEFAULT_SIZES, phone: "full" });
+  expect(full.colW).toBe(393);
+  expect(defaultWidth(full, 3)).toBe(393);
+  expect(defaultWidth(edge, 3)).toBeLessThan(defaultWidth(full, 3));
+  expect(isDefaultWidth(edge.colW, edge) && isDefaultWidth(edge.peekW, edge) && isDefaultWidth(full.colW, full) && !isDefaultWidth(300, edge)).toBe(true);
+});
+
+test("comfortable phones: a column in a strip leaves PEEK px of each neighbour; a lone one keeps the screen less the margins", () => {
+  const m = metricsFor(361, 700, true, { ...DEFAULT_SIZES, phone: "comfortable" });
+  expect(m.colW).toBe(333);
   expect(defaultWidth(m, 3)).toBe(m.peekW);
-  // Centred, the window leaves (width - peekW) / 2 on each side: the gap between columns plus the slice.
   expect((361 - m.peekW) / 2).toBe(COLUMN_GAP + PEEK);
-  expect(isDefaultWidth(m.colW, m) && isDefaultWidth(m.peekW, m) && !isDefaultWidth(300, m)).toBe(true);
 });
 
 test("a desktop column is the same alone and in a strip", () => {
