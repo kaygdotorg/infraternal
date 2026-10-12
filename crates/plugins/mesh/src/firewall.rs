@@ -118,7 +118,14 @@ impl Firewall {
     /// # Errors
     /// Refuses unavailable nft or a failed transaction; an existing table stays unchanged.
     pub fn apply(&mut self, config: &Config) -> io::Result<()> {
-        self.install(config, &[], false)?;
+        self.install_pending(config)?;
+        self.complete(config)
+    }
+    // The node persists public intent between installation and irreversible retirement.
+    pub(crate) fn install_pending(&mut self, config: &Config) -> io::Result<()> {
+        self.install(config, &[], false)
+    }
+    pub(crate) fn complete(&mut self, config: &Config) -> io::Result<()> {
         crate::connection_state::retire(self.accepted.as_ref(), config)?;
         self.accepted = Some(config.clone());
         Ok(())
