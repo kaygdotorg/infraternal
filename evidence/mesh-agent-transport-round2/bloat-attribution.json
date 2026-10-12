@@ -1,0 +1,3608 @@
+{
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "bloat_version": "0.12.1",
+  "strip_version": "GNU strip (GNU Binutils) 2.46",
+  "baseline_text": 15778604,
+  "original515_text": 15855340,
+  "text_delta": 76736,
+  "symbol_sum_delta": 75950,
+  "stripped_sizes": {
+    "a5f744fb": 20616408,
+    "515d3712": 20706840
+  },
+  "unstripped_sizes": {
+    "a5f744fb": 58212936,
+    "515d3712": 58331616
+  },
+  "sha256": {
+    "a5f744fb": "1a0a1c0138d69941a33434b30177605f9a6b681bf1ba96237eb524dc1a2d7fde",
+    "515d3712": "7c91d876411188bc2f02ffca9371f9e09d535325995c44b9d7d2c5089085730b"
+  },
+  "crates": [
+    {
+      "crate": "infraternal_agent",
+      "baseline": 324438,
+      "original515": 349534,
+      "delta": 25096
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "baseline": 46892,
+      "original515": 60654,
+      "delta": 13762
+    },
+    {
+      "crate": "infraternal_server",
+      "baseline": 2352436,
+      "original515": 2362126,
+      "delta": 9690
+    },
+    {
+      "crate": "std",
+      "baseline": 1664622,
+      "original515": 1673446,
+      "delta": 8824
+    },
+    {
+      "crate": "serde_json",
+      "baseline": 186276,
+      "original515": 190334,
+      "delta": 4058
+    },
+    {
+      "crate": "quinn",
+      "baseline": 71646,
+      "original515": 75265,
+      "delta": 3619
+    },
+    {
+      "crate": "serde_core",
+      "baseline": 97672,
+      "original515": 100933,
+      "delta": 3261
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "baseline": 466374,
+      "original515": 468888,
+      "delta": 2514
+    },
+    {
+      "crate": "infraternal_plugin_api",
+      "baseline": 12819,
+      "original515": 14849,
+      "delta": 2030
+    },
+    {
+      "crate": "quinn_proto",
+      "baseline": 441718,
+      "original515": 443131,
+      "delta": 1413
+    },
+    {
+      "crate": "tokio",
+      "baseline": 317619,
+      "original515": 318702,
+      "delta": 1083
+    },
+    {
+      "crate": "infraternal_protocol",
+      "baseline": 9458,
+      "original515": 9933,
+      "delta": 475
+    },
+    {
+      "crate": "bytes",
+      "baseline": 9835,
+      "original515": 9954,
+      "delta": 119
+    },
+    {
+      "crate": "sqlx_core",
+      "baseline": 179558,
+      "original515": 179573,
+      "delta": 15
+    },
+    {
+      "crate": "infraternal_plugin_host_facts",
+      "baseline": 27868,
+      "original515": 27876,
+      "delta": 8
+    },
+    {
+      "crate": "anstyle",
+      "baseline": 1790,
+      "original515": 1790,
+      "delta": 0
+    },
+    {
+      "crate": "arc_swap",
+      "baseline": 2626,
+      "original515": 2626,
+      "delta": 0
+    },
+    {
+      "crate": "infraternal_shim",
+      "baseline": 213721,
+      "original515": 213721,
+      "delta": 0
+    },
+    {
+      "crate": "http_body_util",
+      "baseline": 7998,
+      "original515": 7998,
+      "delta": 0
+    },
+    {
+      "crate": "sharded_slab",
+      "baseline": 685,
+      "original515": 685,
+      "delta": 0
+    },
+    {
+      "crate": "sha1",
+      "baseline": 5358,
+      "original515": 5358,
+      "delta": 0
+    },
+    {
+      "crate": "rand_core",
+      "baseline": 543,
+      "original515": 543,
+      "delta": 0
+    },
+    {
+      "crate": "flume",
+      "baseline": 8984,
+      "original515": 8984,
+      "delta": 0
+    },
+    {
+      "crate": "regex_automata",
+      "baseline": 123879,
+      "original515": 123879,
+      "delta": 0
+    },
+    {
+      "crate": "hashlink",
+      "baseline": 1504,
+      "original515": 1504,
+      "delta": 0
+    },
+    {
+      "crate": "once_cell",
+      "baseline": 1842,
+      "original515": 1842,
+      "delta": 0
+    },
+    {
+      "crate": "chacha20",
+      "baseline": 2763,
+      "original515": 2763,
+      "delta": 0
+    },
+    {
+      "crate": "argon2",
+      "baseline": 20244,
+      "original515": 20244,
+      "delta": 0
+    },
+    {
+      "crate": "indexmap",
+      "baseline": 2025,
+      "original515": 2025,
+      "delta": 0
+    },
+    {
+      "crate": "tracing_subscriber",
+      "baseline": 66362,
+      "original515": 66362,
+      "delta": 0
+    },
+    {
+      "crate": "der_parser",
+      "baseline": 8682,
+      "original515": 8682,
+      "delta": 0
+    },
+    {
+      "crate": "tinyvec",
+      "baseline": 753,
+      "original515": 753,
+      "delta": 0
+    },
+    {
+      "crate": "ring",
+      "baseline": 249722,
+      "original515": 249722,
+      "delta": 0
+    },
+    {
+      "crate": "foldhash",
+      "baseline": 941,
+      "original515": 941,
+      "delta": 0
+    },
+    {
+      "crate": "http_range_header",
+      "baseline": 186,
+      "original515": 186,
+      "delta": 0
+    },
+    {
+      "crate": "serde",
+      "baseline": 13110,
+      "original515": 13110,
+      "delta": 0
+    },
+    {
+      "crate": "strsim",
+      "baseline": 2734,
+      "original515": 2734,
+      "delta": 0
+    },
+    {
+      "crate": "tracing",
+      "baseline": 19283,
+      "original515": 19283,
+      "delta": 0
+    },
+    {
+      "crate": "infraternal_mesh",
+      "baseline": 106955,
+      "original515": 106955,
+      "delta": 0
+    },
+    {
+      "crate": "futures_executor",
+      "baseline": 70,
+      "original515": 70,
+      "delta": 0
+    },
+    {
+      "crate": "unicase",
+      "baseline": 4429,
+      "original515": 4429,
+      "delta": 0
+    },
+    {
+      "crate": "url",
+      "baseline": 50971,
+      "original515": 50971,
+      "delta": 0
+    },
+    {
+      "crate": "futures_task",
+      "baseline": 215,
+      "original515": 215,
+      "delta": 0
+    },
+    {
+      "crate": "tracing_log",
+      "baseline": 3727,
+      "original515": 3727,
+      "delta": 0
+    },
+    {
+      "crate": "h2",
+      "baseline": 254457,
+      "original515": 254457,
+      "delta": 0
+    },
+    {
+      "crate": "cc",
+      "baseline": 2738,
+      "original515": 2738,
+      "delta": 0
+    },
+    {
+      "crate": "idna",
+      "baseline": 22833,
+      "original515": 22833,
+      "delta": 0
+    },
+    {
+      "crate": "anstream",
+      "baseline": 3465,
+      "original515": 3465,
+      "delta": 0
+    },
+    {
+      "crate": "clap_lex",
+      "baseline": 1958,
+      "original515": 1958,
+      "delta": 0
+    },
+    {
+      "crate": "webauthn_rs_core",
+      "baseline": 145054,
+      "original515": 145054,
+      "delta": 0
+    },
+    {
+      "crate": "signal_hook_registry",
+      "baseline": 1237,
+      "original515": 1237,
+      "delta": 0
+    },
+    {
+      "crate": "infraternal_plugin_ssh",
+      "baseline": 201336,
+      "original515": 201336,
+      "delta": 0
+    },
+    {
+      "crate": "futures_util",
+      "baseline": 5680,
+      "original515": 5680,
+      "delta": 0
+    },
+    {
+      "crate": "axum_server",
+      "baseline": 9269,
+      "original515": 9269,
+      "delta": 0
+    },
+    {
+      "crate": "quinn_udp",
+      "baseline": 1277,
+      "original515": 1277,
+      "delta": 0
+    },
+    {
+      "crate": "libsqlite3_sys",
+      "baseline": 83927,
+      "original515": 83927,
+      "delta": 0
+    },
+    {
+      "crate": "password_hash",
+      "baseline": 11930,
+      "original515": 11930,
+      "delta": 0
+    },
+    {
+      "crate": "pkg_config",
+      "baseline": 2492,
+      "original515": 2492,
+      "delta": 0
+    },
+    {
+      "crate": "webauthn_rs_proto",
+      "baseline": 17304,
+      "original515": 17304,
+      "delta": 0
+    },
+    {
+      "crate": "sqlx_sqlite",
+      "baseline": 144839,
+      "original515": 144839,
+      "delta": 0
+    },
+    {
+      "crate": "sha2",
+      "baseline": 12611,
+      "original515": 12611,
+      "delta": 0
+    },
+    {
+      "crate": "percent_encoding",
+      "baseline": 917,
+      "original515": 917,
+      "delta": 0
+    },
+    {
+      "crate": "serde_path_to_error",
+      "baseline": 3000,
+      "original515": 3000,
+      "delta": 0
+    },
+    {
+      "crate": "want",
+      "baseline": 65,
+      "original515": 65,
+      "delta": 0
+    },
+    {
+      "crate": "asn1_rs",
+      "baseline": 12450,
+      "original515": 12450,
+      "delta": 0
+    },
+    {
+      "crate": "tokio_util",
+      "baseline": 1398,
+      "original515": 1398,
+      "delta": 0
+    },
+    {
+      "crate": "tracing_core",
+      "baseline": 8922,
+      "original515": 8922,
+      "delta": 0
+    },
+    {
+      "crate": "nom",
+      "baseline": 4803,
+      "original515": 4803,
+      "delta": 0
+    },
+    {
+      "crate": "memchr",
+      "baseline": 6345,
+      "original515": 6345,
+      "delta": 0
+    },
+    {
+      "crate": "http",
+      "baseline": 69894,
+      "original515": 69894,
+      "delta": 0
+    },
+    {
+      "crate": "num_bigint",
+      "baseline": 492,
+      "original515": 492,
+      "delta": 0
+    },
+    {
+      "crate": "slab",
+      "baseline": 628,
+      "original515": 628,
+      "delta": 0
+    },
+    {
+      "crate": "digest",
+      "baseline": 1324,
+      "original515": 1324,
+      "delta": 0
+    },
+    {
+      "crate": "form_urlencoded",
+      "baseline": 516,
+      "original515": 516,
+      "delta": 0
+    },
+    {
+      "crate": "zmij",
+      "baseline": 1201,
+      "original515": 1201,
+      "delta": 0
+    },
+    {
+      "crate": "uuid",
+      "baseline": 4904,
+      "original515": 4904,
+      "delta": 0
+    },
+    {
+      "crate": "mime_guess",
+      "baseline": 991,
+      "original515": 991,
+      "delta": 0
+    },
+    {
+      "crate": "socket2",
+      "baseline": 216,
+      "original515": 216,
+      "delta": 0
+    },
+    {
+      "crate": "openssl",
+      "baseline": 55725,
+      "original515": 55725,
+      "delta": 0
+    },
+    {
+      "crate": "parking_lot_core",
+      "baseline": 1864,
+      "original515": 1864,
+      "delta": 0
+    },
+    {
+      "crate": "webpki",
+      "baseline": 45465,
+      "original515": 45465,
+      "delta": 0
+    },
+    {
+      "crate": "hyper",
+      "baseline": 97641,
+      "original515": 97641,
+      "delta": 0
+    },
+    {
+      "crate": "icu_normalizer",
+      "baseline": 11042,
+      "original515": 11042,
+      "delta": 0
+    },
+    {
+      "crate": "tokio_tungstenite",
+      "baseline": 1962,
+      "original515": 1962,
+      "delta": 0
+    },
+    {
+      "crate": "lru_slab",
+      "baseline": 459,
+      "original515": 459,
+      "delta": 0
+    },
+    {
+      "crate": "base64urlsafedata",
+      "baseline": 586,
+      "original515": 586,
+      "delta": 0
+    },
+    {
+      "crate": "parking_lot",
+      "baseline": 1536,
+      "original515": 1536,
+      "delta": 0
+    },
+    {
+      "crate": "rustls",
+      "baseline": 361023,
+      "original515": 361023,
+      "delta": 0
+    },
+    {
+      "crate": "atoi",
+      "baseline": 373,
+      "original515": 373,
+      "delta": 0
+    },
+    {
+      "crate": "mio",
+      "baseline": 1841,
+      "original515": 1841,
+      "delta": 0
+    },
+    {
+      "crate": "futures_core",
+      "baseline": 180,
+      "original515": 180,
+      "delta": 0
+    },
+    {
+      "crate": "getrandom",
+      "baseline": 3976,
+      "original515": 3976,
+      "delta": 0
+    },
+    {
+      "crate": "blake2",
+      "baseline": 7105,
+      "original515": 7105,
+      "delta": 0
+    },
+    {
+      "crate": "nix",
+      "baseline": 5543,
+      "original515": 5543,
+      "delta": 0
+    },
+    {
+      "crate": "tower_http",
+      "baseline": 33881,
+      "original515": 33881,
+      "delta": 0
+    },
+    {
+      "crate": "clap_builder",
+      "baseline": 272408,
+      "original515": 272408,
+      "delta": 0
+    },
+    {
+      "crate": "base64",
+      "baseline": 9378,
+      "original515": 9378,
+      "delta": 0
+    },
+    {
+      "crate": "nu_ansi_term",
+      "baseline": 2839,
+      "original515": 2839,
+      "delta": 0
+    },
+    {
+      "crate": "httpdate",
+      "baseline": 7001,
+      "original515": 7001,
+      "delta": 0
+    },
+    {
+      "crate": "serde_cbor_2",
+      "baseline": 81616,
+      "original515": 81616,
+      "delta": 0
+    },
+    {
+      "crate": "icu_collections",
+      "baseline": 1247,
+      "original515": 1247,
+      "delta": 0
+    },
+    {
+      "crate": "rand",
+      "baseline": 735,
+      "original515": 735,
+      "delta": 0
+    },
+    {
+      "crate": "axum",
+      "baseline": 194397,
+      "original515": 194397,
+      "delta": 0
+    },
+    {
+      "crate": "matchers",
+      "baseline": 320,
+      "original515": 320,
+      "delta": 0
+    },
+    {
+      "crate": "hyper_util",
+      "baseline": 1824,
+      "original515": 1824,
+      "delta": 0
+    },
+    {
+      "crate": "regex_syntax",
+      "baseline": 150097,
+      "original515": 150097,
+      "delta": 0
+    },
+    {
+      "crate": "autocfg",
+      "baseline": 1875,
+      "original515": 1875,
+      "delta": 0
+    },
+    {
+      "crate": "rand_chacha",
+      "baseline": 7241,
+      "original515": 7241,
+      "delta": 0
+    },
+    {
+      "crate": "itoa",
+      "baseline": 1072,
+      "original515": 1072,
+      "delta": 0
+    },
+    {
+      "crate": "generic_array",
+      "baseline": 214,
+      "original515": 214,
+      "delta": 0
+    },
+    {
+      "crate": "webauthn_rs",
+      "baseline": 6474,
+      "original515": 6474,
+      "delta": 0
+    },
+    {
+      "crate": "mime",
+      "baseline": 5165,
+      "original515": 5165,
+      "delta": 0
+    },
+    {
+      "crate": "event_listener",
+      "baseline": 476,
+      "original515": 476,
+      "delta": 0
+    },
+    {
+      "crate": "utf8_iter",
+      "baseline": 296,
+      "original515": 296,
+      "delta": 0
+    },
+    {
+      "crate": "__rustc",
+      "baseline": 341,
+      "original515": 341,
+      "delta": 0
+    },
+    {
+      "crate": "thread_local",
+      "baseline": 1275,
+      "original515": 1275,
+      "delta": 0
+    },
+    {
+      "crate": "hashbrown",
+      "baseline": 17235,
+      "original515": 17235,
+      "delta": 0
+    },
+    {
+      "crate": "smallvec",
+      "baseline": 6687,
+      "original515": 6687,
+      "delta": 0
+    },
+    {
+      "crate": "[unattributed]",
+      "baseline": 3651106,
+      "original515": 3651106,
+      "delta": 0
+    },
+    {
+      "crate": "x509_parser",
+      "baseline": 64227,
+      "original515": 64227,
+      "delta": 0
+    },
+    {
+      "crate": "openssl_sys",
+      "baseline": 1972540,
+      "original515": 1972540,
+      "delta": 0
+    },
+    {
+      "crate": "matchit",
+      "baseline": 8055,
+      "original515": 8055,
+      "delta": 0
+    },
+    {
+      "crate": "base64ct",
+      "baseline": 6889,
+      "original515": 6889,
+      "delta": 0
+    },
+    {
+      "crate": "tungstenite",
+      "baseline": 21123,
+      "original515": 21123,
+      "delta": 0
+    },
+    {
+      "crate": "futures_intrusive",
+      "baseline": 789,
+      "original515": 789,
+      "delta": 0
+    },
+    {
+      "crate": "tokio_openssl",
+      "baseline": 505,
+      "original515": 505,
+      "delta": 0
+    },
+    {
+      "crate": "untrusted",
+      "baseline": 44,
+      "original515": 44,
+      "delta": 0
+    },
+    {
+      "crate": "httparse",
+      "baseline": 5360,
+      "original515": 5360,
+      "delta": 0
+    },
+    {
+      "crate": "futures_channel",
+      "baseline": 1720,
+      "original515": 1720,
+      "delta": 0
+    },
+    {
+      "crate": "rustls_pki_types",
+      "baseline": 7074,
+      "original515": 7074,
+      "delta": 0
+    },
+    {
+      "crate": "vte",
+      "baseline": 6228,
+      "original515": 6228,
+      "delta": 0
+    },
+    {
+      "crate": "axum_core",
+      "baseline": 3767,
+      "original515": 3767,
+      "delta": 0
+    },
+    {
+      "crate": "log",
+      "baseline": 325,
+      "original515": 325,
+      "delta": 0
+    },
+    {
+      "crate": "infraternal",
+      "baseline": 242518,
+      "original515": 242501,
+      "delta": -17
+    }
+  ],
+  "functions": [
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::runtime::remote_router::{closure#0}",
+      "baseline": 0,
+      "original515": 33044,
+      "delta": 33044
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}",
+      "baseline": 0,
+      "original515": 23012,
+      "delta": 23012
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::server_path::run::{closure#0}::{closure#1}",
+      "baseline": 0,
+      "original515": 18245,
+      "delta": 18245
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::quic_session_on::{closure#0}",
+      "baseline": 0,
+      "original515": 13741,
+      "delta": 13741
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::server_path::connect::{closure#0}",
+      "baseline": 0,
+      "original515": 11277,
+      "delta": 11277
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}",
+      "baseline": 0,
+      "original515": 9894,
+      "delta": 9894
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::daemon::run_authenticated_with_plugins::<infraternal_agent::remote_client::PrefixedControl>::{closure#0}",
+      "baseline": 0,
+      "original515": 7745,
+      "delta": 7745
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::quic_connect::{closure#0}",
+      "baseline": 0,
+      "original515": 7196,
+      "delta": 7196
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "name": "<infraternal_plugin_remote::remote_tls::TcpTls as infraternal_plugin_api::channel::Channel>::write::{closure#0}",
+      "baseline": 0,
+      "original515": 7030,
+      "delta": 7030
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "name": "infraternal_plugin_remote::remote_quic::client_config_with_liveness",
+      "baseline": 0,
+      "original515": 5847,
+      "delta": 5847
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node_actions::Owner>::node",
+      "baseline": 0,
+      "original515": 3973,
+      "delta": 3973
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_runtime::RemoteListeners>::start_with_limits::{closure#0}",
+      "baseline": 0,
+      "original515": 3523,
+      "delta": 3523
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::transport::Transmit>::send::<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}",
+      "baseline": 432,
+      "original515": 3447,
+      "delta": 3015
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::node_bridge::NodeBridge as infraternal_plugin_api::node_channel::NodeChannel>::listen_server::{closure#0}",
+      "baseline": 0,
+      "original515": 2627,
+      "delta": 2627
+    },
+    {
+      "crate": "serde_json",
+      "name": "<serde_json::value::Value as serde_core::de::Deserializer>::deserialize_struct::<<infraternal_plugin_api::server_path::ServerLink as serde_core::de::Deserialize>::deserialize::__Visitor>",
+      "baseline": 0,
+      "original515": 2586,
+      "delta": 2586
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::remote_accept::quic::{closure#0}::{closure#0}",
+      "baseline": 16361,
+      "original515": 18799,
+      "delta": 2438
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}>",
+      "baseline": 0,
+      "original515": 2344,
+      "delta": 2344
+    },
+    {
+      "crate": "std",
+      "name": "<alloc::collections::btree::map::BTreeMap<_, _, _> as core::clone::Clone>::clone::clone_subtree::<alloc::string::String, serde_json::value::Value, alloc::alloc::Global>",
+      "baseline": 2279,
+      "original515": 4558,
+      "delta": 2279
+    },
+    {
+      "crate": "quinn",
+      "name": "<quinn::connection::Connection>::closed::{closure#0}",
+      "baseline": 0,
+      "original515": 2224,
+      "delta": 2224
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::remote_accept::tcp::{closure#0}",
+      "baseline": 12961,
+      "original515": 14838,
+      "delta": 1877
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 1807,
+      "delta": 1807
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 1787,
+      "delta": 1787
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::task::join_set::JoinSet<()>>::spawn::<infraternal_server::remote_link::pump::{closure#0}>",
+      "baseline": 0,
+      "original515": 1719,
+      "delta": 1719
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "std::sys::backtrace::__rust_begin_short_backtrace::<<infraternal_agent::plugin_control::Registry>::start::{closure#1}, ()>",
+      "baseline": 8661,
+      "original515": 10346,
+      "delta": 1685
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::transport::Receive>::next::<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}",
+      "baseline": 1724,
+      "original515": 3279,
+      "delta": 1555
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::remote_client::PrefixedControl as infraternal_plugin_api::channel::Channel>::read::{closure#0}",
+      "baseline": 2872,
+      "original515": 4402,
+      "delta": 1530
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::server_path::current",
+      "baseline": 0,
+      "original515": 1427,
+      "delta": 1427
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 1235,
+      "delta": 1235
+    },
+    {
+      "crate": "infraternal_plugin_api",
+      "name": "<<infraternal_plugin_api::server_path::ServerLinkReason as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Visitor>::visit_enum::<serde_json::value::de::EnumDeserializer>",
+      "baseline": 0,
+      "original515": 1229,
+      "delta": 1229
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 1225,
+      "delta": 1225
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::watch::Receiver<core::option::Option<core::net::ip_addr::IpAddr>>>::changed::{closure#0}",
+      "baseline": 0,
+      "original515": 1205,
+      "delta": 1205
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "infraternal_plugin_mesh::wireguard::send",
+      "baseline": 0,
+      "original515": 1179,
+      "delta": 1179
+    },
+    {
+      "crate": "quinn_proto",
+      "name": "<quinn_proto::config::ClientConfig>::new",
+      "baseline": 0,
+      "original515": 1126,
+      "delta": 1126
+    },
+    {
+      "crate": "std",
+      "name": "<alloc::collections::btree::map::BTreeMap<infraternal_mesh::model::NodeId, infraternal_plugin_mesh::dataplane::PeerPolicy>>::remove::<infraternal_mesh::model::NodeId>",
+      "baseline": 0,
+      "original515": 1120,
+      "delta": 1120
+    },
+    {
+      "crate": "serde_core",
+      "name": "<core::marker::PhantomData<infraternal_plugin_api::server_path::ServerLinkReason> as serde_core::de::DeserializeSeed>::deserialize::<serde_json::value::Value>",
+      "baseline": 0,
+      "original515": 1064,
+      "delta": 1064
+    },
+    {
+      "crate": "serde_core",
+      "name": "<core::marker::PhantomData<infraternal_plugin_api::server_path::ServerLinkKind> as serde_core::de::DeserializeSeed>::deserialize::<serde_json::value::Value>",
+      "baseline": 0,
+      "original515": 1064,
+      "delta": 1064
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}>",
+      "baseline": 0,
+      "original515": 1039,
+      "delta": 1039
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "infraternal_plugin_mesh::node_coordination::run::{closure#0}",
+      "baseline": 30799,
+      "original515": 31829,
+      "delta": 1030
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::remote_accept::quic::{closure#0}",
+      "baseline": 7777,
+      "original515": 8769,
+      "delta": 992
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_runtime::RemoteHosts>::for_local",
+      "baseline": 0,
+      "original515": 990,
+      "delta": 990
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_server::remote_runtime::RemoteListeners>::start_with_limits::{closure#0}>",
+      "baseline": 0,
+      "original515": 884,
+      "delta": 884
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::connect::{closure#0}>",
+      "baseline": 0,
+      "original515": 882,
+      "delta": 882
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::session::{closure#0}>",
+      "baseline": 0,
+      "original515": 861,
+      "delta": 861
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::complete",
+      "baseline": 0,
+      "original515": 850,
+      "delta": 850
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>::complete",
+      "baseline": 0,
+      "original515": 850,
+      "delta": 850
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_runtime::RemoteHosts>::admit_observed::{closure#0}",
+      "baseline": 12771,
+      "original515": 13616,
+      "delta": 845
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "name": "infraternal_plugin_remote::remote_tls::client_config",
+      "baseline": 0,
+      "original515": 804,
+      "delta": 804
+    },
+    {
+      "crate": "infraternal_plugin_api",
+      "name": "<<infraternal_plugin_api::server_path::ServerLinkKind as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Visitor>::visit_enum::<serde_json::value::de::EnumDeserializer>",
+      "baseline": 0,
+      "original515": 801,
+      "delta": 801
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::embedded::run_actor::{closure#0}",
+      "baseline": 35363,
+      "original515": 36151,
+      "delta": 788
+    },
+    {
+      "crate": "serde_json",
+      "name": "<serde_json::value::ser::SerializeMap as serde_core::ser::SerializeStruct>::serialize_field::<core::option::Option<core::net::socket_addr::SocketAddr>>",
+      "baseline": 0,
+      "original515": 734,
+      "delta": 734
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<std::collections::hash::map::HashMap<u32, alloc::sync::Arc<infraternal_plugin_remote::remote_native::NativeChannel>> as core::convert::From<[(u32, alloc::sync::Arc<infraternal_plugin_remote::remote_native::NativeChannel>); 1: usize]>>::from",
+      "baseline": 0,
+      "original515": 720,
+      "delta": 720
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::oneshot::Receiver<core::result::Result<alloc::vec::Vec<u8>, infraternal_plugin_api::PluginError>> as core::future::future::Future>::poll",
+      "baseline": 0,
+      "original515": 698,
+      "delta": 698
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_runtime::AdditionalListener>",
+      "baseline": 0,
+      "original515": 696,
+      "delta": 696
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node::Node>::up",
+      "baseline": 4443,
+      "original515": 5118,
+      "delta": 675
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<std::collections::hash::map::HashMap<u32, alloc::sync::Arc<infraternal_plugin_remote::remote_native::NativeChannel>> as core::iter::traits::collect::FromIterator<(u32, alloc::sync::Arc<infraternal_plugin_remote::remote_native::NativeChannel>)>>::from_iter::<[(u32, alloc::sync::Arc<infraternal_plugin_remote::remote_native::NativeChannel>); 1: usize]>",
+      "baseline": 0,
+      "original515": 663,
+      "delta": 663
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::run::{closure#0}>",
+      "baseline": 0,
+      "original515": 654,
+      "delta": 654
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::available::{closure#0}>",
+      "baseline": 0,
+      "original515": 623,
+      "delta": 623
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::plugin_control::Registry>::for_mode",
+      "baseline": 1383,
+      "original515": 2004,
+      "delta": 621
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>::complete",
+      "baseline": 0,
+      "original515": 596,
+      "delta": 596
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::complete",
+      "baseline": 0,
+      "original515": 596,
+      "delta": 596
+    },
+    {
+      "crate": "std",
+      "name": "<serde_json::value::Value as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global>",
+      "baseline": 594,
+      "original515": 1188,
+      "delta": 594
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::mutex::Mutex<core::option::Option<infraternal_agent::remote_client::server_path::Proof>>>::lock::{closure#0}",
+      "baseline": 0,
+      "original515": 576,
+      "delta": 576
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "name": "infraternal_plugin_remote::remote_quic::transport_with_liveness",
+      "baseline": 0,
+      "original515": 564,
+      "delta": 564
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::replacement::{closure#0}>",
+      "baseline": 0,
+      "original515": 557,
+      "delta": 557
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::Link>",
+      "baseline": 0,
+      "original515": 555,
+      "delta": 555
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 548,
+      "delta": 548
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 548,
+      "delta": 548
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::core::Core<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::set_stage",
+      "baseline": 0,
+      "original515": 543,
+      "delta": 543
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::try_read_output::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 542,
+      "delta": 542
+    },
+    {
+      "crate": "std",
+      "name": "<core::pin::Pin<&mut infraternal_agent::remote_client::server_path::available::{closure#0}::{closure#1}> as core::future::future::Future>::poll",
+      "baseline": 0,
+      "original515": 524,
+      "delta": 524
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::wireguard::Device>::allocate_port",
+      "baseline": 0,
+      "original515": 489,
+      "delta": 489
+    },
+    {
+      "crate": "infraternal_protocol",
+      "name": "<infraternal_protocol::Frame as core::cmp::PartialEq>::ne",
+      "baseline": 0,
+      "original515": 475,
+      "delta": 475
+    },
+    {
+      "crate": "serde_core",
+      "name": "<core::marker::PhantomData<core::option::Option<infraternal_plugin_mesh::dataplane::Config>> as serde_core::de::DeserializeSeed>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::IoRead<std::fs::File>>>",
+      "baseline": 4142,
+      "original515": 4605,
+      "delta": 463
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session_on::{closure#0}>",
+      "baseline": 0,
+      "original515": 456,
+      "delta": 456
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node_actions::MeshNodePlugin as infraternal_plugin_api::AgentPlugin>::preferred_server",
+      "baseline": 0,
+      "original515": 452,
+      "delta": 452
+    },
+    {
+      "crate": "quinn",
+      "name": "<quinn::connection::Connection>::stats",
+      "baseline": 0,
+      "original515": 446,
+      "delta": 446
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_link::greeting<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}::{closure#0}>",
+      "baseline": 0,
+      "original515": 420,
+      "delta": 420
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_link::greeting<infraternal_plugin_remote::remote_tls::TcpTls>::{closure#0}::{closure#0}>",
+      "baseline": 0,
+      "original515": 420,
+      "delta": 420
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>",
+      "baseline": 0,
+      "original515": 412,
+      "delta": 412
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>",
+      "baseline": 0,
+      "original515": 412,
+      "delta": 412
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node_actions::MeshNodePlugin as infraternal_plugin_api::AgentPlugin>::format_human",
+      "baseline": 6165,
+      "original515": 6554,
+      "delta": 389
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::net::tcp::stream::TcpStream>::local_addr",
+      "baseline": 0,
+      "original515": 382,
+      "delta": 382
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 381,
+      "delta": 381
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 381,
+      "delta": 381
+    },
+    {
+      "crate": "quinn",
+      "name": "<quinn::endpoint::Endpoint>::local_addr",
+      "baseline": 0,
+      "original515": 366,
+      "delta": 366
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::__tokio_select_util::Out<core::result::Result<(), core::io::error::Error>, quinn_proto::connection::ConnectionError, core::result::Result<infraternal_plugin_remote::remote_quic::BoundStream, core::io::error::Error>, core::option::Option<core::result::Result<(), tokio::runtime::task::error::JoinError>>>>",
+      "baseline": 0,
+      "original515": 360,
+      "delta": 360
+    },
+    {
+      "crate": "quinn",
+      "name": "<quinn::connection::Connection>::rtt",
+      "baseline": 0,
+      "original515": 357,
+      "delta": 357
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::runtime::task::core::Core<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::set_stage",
+      "baseline": 0,
+      "original515": 356,
+      "delta": 356
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 354,
+      "delta": 354
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 354,
+      "delta": 354
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::time::timeout::timeout::<infraternal_agent::remote_client::quic_connect::{closure#0}>",
+      "baseline": 0,
+      "original515": 349,
+      "delta": 349
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::sync::mpsc::bounded::Sender<bytes::bytes::Bytes>>::try_send",
+      "baseline": 173,
+      "original515": 514,
+      "delta": 341
+    },
+    {
+      "crate": "serde_json",
+      "name": "<serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeStruct>::serialize_field::<core::option::Option<infraternal_mesh::model::NodeId>>",
+      "baseline": 0,
+      "original515": 335,
+      "delta": 335
+    },
+    {
+      "crate": "serde_core",
+      "name": "<core::marker::PhantomData<core::option::Option<core::net::socket_addr::SocketAddr>> as serde_core::de::DeserializeSeed>::deserialize::<serde_json::value::Value>",
+      "baseline": 0,
+      "original515": 325,
+      "delta": 325
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::connect::{closure#0}::{closure#1}>",
+      "baseline": 0,
+      "original515": 325,
+      "delta": 325
+    },
+    {
+      "crate": "serde_core",
+      "name": "<core::marker::PhantomData<core::option::Option<infraternal_mesh::model::NodeId>> as serde_core::de::DeserializeSeed>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::IoRead<std::fs::File>>>",
+      "baseline": 0,
+      "original515": 323,
+      "delta": 323
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::time::interval::internal_interval_at",
+      "baseline": 0,
+      "original515": 307,
+      "delta": 307
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 306,
+      "delta": 306
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 306,
+      "delta": 306
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>",
+      "baseline": 0,
+      "original515": 305,
+      "delta": 305
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>",
+      "baseline": 0,
+      "original515": 305,
+      "delta": 305
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<alloc::sync::ArcInner<infraternal_server::remote_runtime::ListenerFactory>>",
+      "baseline": 0,
+      "original515": 299,
+      "delta": 299
+    },
+    {
+      "crate": "serde_json",
+      "name": "<serde_json::value::Value as core::clone::Clone>::clone",
+      "baseline": 0,
+      "original515": 298,
+      "delta": 298
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::try_read_output::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 294,
+      "delta": 294
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_plugin_mesh::node_coordination::run::{closure#0}>",
+      "baseline": 2385,
+      "original515": 2679,
+      "delta": 294
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::remote_client::ControlChannel as infraternal_plugin_api::channel::Channel>::read::{closure#0}",
+      "baseline": 0,
+      "original515": 293,
+      "delta": 293
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<(tokio::time::sleep::Sleep, <tokio::sync::watch::Receiver<core::option::Option<core::net::ip_addr::IpAddr>>>::changed::{closure#0})>",
+      "baseline": 0,
+      "original515": 287,
+      "delta": 287
+    },
+    {
+      "crate": "quinn_proto",
+      "name": "<quinn_proto::crypto::rustls::QuicClientConfig as core::convert::TryFrom<rustls::client::client_conn::ClientConfig>>::try_from",
+      "baseline": 0,
+      "original515": 287,
+      "delta": 287
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::plugin_control::Registry>::set_server_link",
+      "baseline": 0,
+      "original515": 261,
+      "delta": 261
+    },
+    {
+      "crate": "serde_core",
+      "name": "<core::marker::PhantomData<core::option::Option<infraternal_mesh::model::NodeId>> as serde_core::de::DeserializeSeed>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::SliceRead>>",
+      "baseline": 0,
+      "original515": 259,
+      "delta": 259
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_server::remote_link::RemoteLink>::quic::{closure#0}>",
+      "baseline": 326,
+      "original515": 582,
+      "delta": 256
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>>",
+      "baseline": 239,
+      "original515": 478,
+      "delta": 239
+    },
+    {
+      "crate": "quinn",
+      "name": "<quinn::endpoint::Endpoint>::new",
+      "baseline": 0,
+      "original515": 226,
+      "delta": 226
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::plugin_control::Registry>",
+      "baseline": 526,
+      "original515": 744,
+      "delta": 218
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<serde_json::value::de::MapDeserializer>",
+      "baseline": 79,
+      "original515": 294,
+      "delta": 215
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<(infraternal_agent::remote_client::server_path::connect::{closure#0}, <tokio::sync::watch::Receiver<core::option::Option<core::net::ip_addr::IpAddr>>>::changed::{closure#0})>",
+      "baseline": 0,
+      "original515": 209,
+      "delta": 209
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::transport::Transmit>::send::<infraternal_agent::remote_client::PrefixedControl>::{closure#0}",
+      "baseline": 2056,
+      "original515": 2261,
+      "delta": 205
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::daemon::run::{closure#0}",
+      "baseline": 5551,
+      "original515": 5750,
+      "delta": 199
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::sync::watch::Receiver<core::option::Option<core::net::ip_addr::IpAddr>>>",
+      "baseline": 0,
+      "original515": 199,
+      "delta": 199
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::transport::Receive>::next::<infraternal_agent::remote_client::PrefixedControl>::{closure#0}",
+      "baseline": 1708,
+      "original515": 1905,
+      "delta": 197
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_runtime::RemoteListeners>",
+      "baseline": 0,
+      "original515": 192,
+      "delta": 192
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_plugin_remote::remote_quic::PeerFreshness>::interrupted::{closure#0}>",
+      "baseline": 0,
+      "original515": 183,
+      "delta": 183
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::timeout::Timeout<infraternal_server::remote_link::greeting<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}::{closure#0}>>",
+      "baseline": 0,
+      "original515": 181,
+      "delta": 181
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::timeout::Timeout<infraternal_server::remote_link::greeting<infraternal_plugin_remote::remote_tls::TcpTls>::{closure#0}::{closure#0}>>",
+      "baseline": 0,
+      "original515": 181,
+      "delta": 181
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Stage<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}>>",
+      "baseline": 0,
+      "original515": 166,
+      "delta": 166
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_runtime::ListenerFactory>",
+      "baseline": 0,
+      "original515": 164,
+      "delta": 164
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::timeout::Timeout<<infraternal_agent::remote_client::ControlChannel as infraternal_plugin_api::channel::Channel>::read::{closure#0}>>",
+      "baseline": 0,
+      "original515": 160,
+      "delta": 160
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::timeout::Timeout<<infraternal_agent::transport::Receive>::next<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}>>",
+      "baseline": 0,
+      "original515": 160,
+      "delta": 160
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<serde_json::map::IntoIter>",
+      "baseline": 0,
+      "original515": 156,
+      "delta": 156
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::prove_channel<infraternal_plugin_remote::remote_tls::TcpTls>::{closure#0}>",
+      "baseline": 0,
+      "original515": 154,
+      "delta": 154
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::prove_channel<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}>",
+      "baseline": 0,
+      "original515": 154,
+      "delta": 154
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<(&mut core::pin::Pin<&mut infraternal_agent::remote_client::server_path::connect::{closure#0}>, &mut core::pin::Pin<&mut infraternal_agent::remote_client::server_path::available::{closure#0}::{closure#1}>, <tokio::sync::watch::Receiver<core::option::Option<core::net::ip_addr::IpAddr>>>::changed::{closure#0})>",
+      "baseline": 0,
+      "original515": 150,
+      "delta": 150
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}>",
+      "baseline": 0,
+      "original515": 149,
+      "delta": 149
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<serde_json::value::de::SeqDeserializer>",
+      "baseline": 0,
+      "original515": 147,
+      "delta": 147
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<tokio::sync::watch::Receiver<core::option::Option<core::net::ip_addr::IpAddr>>>::changed::{closure#0}>",
+      "baseline": 0,
+      "original515": 147,
+      "delta": 147
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::available::{closure#0}::{closure#1}>",
+      "baseline": 0,
+      "original515": 141,
+      "delta": 141
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::task::coop::Coop<tokio::sync::watch::changed_impl<core::option::Option<core::net::ip_addr::IpAddr>>::{closure#0}>>",
+      "baseline": 0,
+      "original515": 141,
+      "delta": 141
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::timeout::Timeout<infraternal_agent::remote_client::quic_connect::{closure#0}>>",
+      "baseline": 0,
+      "original515": 138,
+      "delta": 138
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<core::io::error::Error>::new::<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes>>",
+      "baseline": 0,
+      "original515": 128,
+      "delta": 128
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::plugin_control::Registry>::start::{closure#1}>",
+      "baseline": 134,
+      "original515": 261,
+      "delta": 127
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::timeout::Timeout<infraternal_agent::remote_client::server_path::connect::{closure#0}::{closure#1}>>",
+      "baseline": 0,
+      "original515": 126,
+      "delta": 126
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<(<quinn::connection::Connection>::closed::{closure#0}, <tokio::time::interval::Interval>::tick::{closure#0})>",
+      "baseline": 0,
+      "original515": 125,
+      "delta": 125
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::Proof>",
+      "baseline": 0,
+      "original515": 125,
+      "delta": 125
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::plugin_control::Registry>::start",
+      "baseline": 2223,
+      "original515": 2347,
+      "delta": 124
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_server::remote_runtime::RemoteHosts>::listen::{closure#0}>",
+      "baseline": 0,
+      "original515": 124,
+      "delta": 124
+    },
+    {
+      "crate": "bytes",
+      "name": "<bytes::bytes_mut::BytesMut>::extend_from_slice",
+      "baseline": 240,
+      "original515": 359,
+      "delta": 119
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Stage<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}>>",
+      "baseline": 0,
+      "original515": 117,
+      "delta": 117
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<core::io::error::Error>::new::<core::array::TryFromSliceError>",
+      "baseline": 0,
+      "original515": 116,
+      "delta": 116
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_runtime::reserve_transports<<infraternal_server::remote_runtime::RemoteListeners>::start_with_limits::{closure#0}::{closure#0}>::{closure#0}>",
+      "baseline": 0,
+      "original515": 116,
+      "delta": 116
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::interval::Interval>",
+      "baseline": 0,
+      "original515": 116,
+      "delta": 116
+    },
+    {
+      "crate": "std",
+      "name": "<alloc::collections::btree::map::BTreeMap<infraternal_mesh::model::NodeId, infraternal_plugin_mesh::dataplane::PeerPolicy>>::get::<infraternal_mesh::model::NodeId>",
+      "baseline": 0,
+      "original515": 114,
+      "delta": 114
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 112,
+      "delta": 112
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 112,
+      "delta": 112
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_link::pump::{closure#0}>",
+      "baseline": 1244,
+      "original515": 1355,
+      "delta": 111
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::harness::cancel_task::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 110,
+      "delta": 110
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 107,
+      "delta": 107
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 107,
+      "delta": 107
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::option::Option<(infraternal_plugin_remote::remote_native::NativeChannel, infraternal_agent::transport::Receive)>>",
+      "baseline": 0,
+      "original515": 107,
+      "delta": 107
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_plugin_remote::remote_quic::PeerFreshness>::interrupted::{closure#0}::__tokio_select_util::Out<quinn_proto::connection::ConnectionError, tokio::time::instant::Instant>>",
+      "baseline": 0,
+      "original515": 102,
+      "delta": 102
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<alloc::sync::Arc<std::sync::poison::mutex::Mutex<core::option::Option<alloc::sync::Arc<infraternal_server::remote_runtime::ListenerFactory>>>>>::drop_slow",
+      "baseline": 0,
+      "original515": 101,
+      "delta": 101
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::option::Option<infraternal_plugin_mesh::dataplane::PeerPolicy>>",
+      "baseline": 0,
+      "original515": 97,
+      "delta": 97
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::firewall::Firewall>::apply",
+      "baseline": 7336,
+      "original515": 7432,
+      "delta": 96
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::server_path::run::{closure#0}::__tokio_select_util::Out<core::result::Result<(infraternal_agent::remote_client::server_path::Link, infraternal_plugin_api::server_path::ServerLinkReason), core::io::error::Error>, core::result::Result<(), core::io::error::Error>>>",
+      "baseline": 0,
+      "original515": 96,
+      "delta": 96
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes> as core::fmt::Display>::fmt",
+      "baseline": 0,
+      "original515": 94,
+      "delta": 94
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::Connected>",
+      "baseline": 0,
+      "original515": 93,
+      "delta": 93
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::node_bridge::NodeBridge as infraternal_plugin_api::node_channel::NodeChannel>::listen_server",
+      "baseline": 0,
+      "original515": 89,
+      "delta": 89
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::node_bridge::NodeBridge>",
+      "baseline": 194,
+      "original515": 282,
+      "delta": 88
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<alloc::sync::Arc<infraternal_server::remote_runtime::ListenerFactory>>::drop_slow",
+      "baseline": 0,
+      "original515": 86,
+      "delta": 86
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_plugin_mesh::node_coordination::update_listener::{closure#0}>",
+      "baseline": 0,
+      "original515": 85,
+      "delta": 85
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::option::Option<(core::net::ip_addr::IpAddr, alloc::boxed::Box<dyn infraternal_plugin_api::server_path::ListenerLease>)>>",
+      "baseline": 0,
+      "original515": 85,
+      "delta": 85
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::daemon::run_channel::<infraternal_agent::remote_client::PrefixedControl>::{closure#0}::{closure#0}",
+      "baseline": 14819,
+      "original515": 14900,
+      "delta": 81
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<serde_json::error::Error as serde_core::de::Error>::custom::<&str>",
+      "baseline": 95,
+      "original515": 175,
+      "delta": 80
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::task::join_set::JoinSet<()>>::new",
+      "baseline": 0,
+      "original515": 79,
+      "delta": 79
+    },
+    {
+      "crate": "serde_json",
+      "name": "serde_json::de::from_reader::<std::fs::File, infraternal_plugin_mesh::node_state::State>",
+      "baseline": 4246,
+      "original515": 4323,
+      "delta": 77
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::option::Option<infraternal_agent::remote_client::dial_runtime::DialRuntime>>",
+      "baseline": 0,
+      "original515": 76,
+      "delta": 76
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "name": "infraternal_plugin_remote::remote_quic::client_config_with_liveness::{closure#1}",
+      "baseline": 0,
+      "original515": 75,
+      "delta": 75
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<(infraternal_agent::remote_client::quic_session_on::{closure#0}, <infraternal_plugin_remote::remote_quic::PeerFreshness>::interrupted::{closure#0})>",
+      "baseline": 0,
+      "original515": 65,
+      "delta": 65
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<(infraternal_agent::remote_client::server_path::replacement::{closure#0}, infraternal_agent::remote_client::server_path::session::{closure#0})>",
+      "baseline": 0,
+      "original515": 65,
+      "delta": 65
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node::Node>::apply",
+      "baseline": 22598,
+      "original515": 22661,
+      "delta": 63
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_runtime::RemoteHosts>",
+      "baseline": 270,
+      "original515": 330,
+      "delta": 60
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>::drop_reference",
+      "baseline": 0,
+      "original515": 57,
+      "delta": 57
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::drop_reference",
+      "baseline": 0,
+      "original515": 57,
+      "delta": 57
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<serde_json::value::Value>::invalid_type::<serde_json::error::Error>",
+      "baseline": 105,
+      "original515": 160,
+      "delta": 55
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 53,
+      "delta": 53
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 53,
+      "delta": 53
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::daemon::run_channel::<infraternal_agent::transport::Socket>::{closure#0}",
+      "baseline": 17617,
+      "original515": 17668,
+      "delta": 51
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<alloc::boxed::Box<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>>",
+      "baseline": 0,
+      "original515": 48,
+      "delta": 48
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 0,
+      "original515": 48,
+      "delta": 48
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<alloc::boxed::Box<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>>",
+      "baseline": 0,
+      "original515": 48,
+      "delta": 48
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_agent::remote_client::quic_session_on::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 0,
+      "original515": 48,
+      "delta": 48
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::wireguard::Client>::peers",
+      "baseline": 1715,
+      "original515": 1762,
+      "delta": 47
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::transport::Receive>::next<infraternal_agent::remote_client::ControlChannel>::{closure#0}>",
+      "baseline": 0,
+      "original515": 47,
+      "delta": 47
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes> as core::fmt::Debug>::fmt",
+      "baseline": 0,
+      "original515": 46,
+      "delta": 46
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::dataplane::Chunk as core::clone::Clone>::clone",
+      "baseline": 509,
+      "original515": 552,
+      "delta": 43
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node::Node>::save",
+      "baseline": 368,
+      "original515": 409,
+      "delta": 41
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::plugin_control::Registry>::initialize_paths::{closure#0}>",
+      "baseline": 0,
+      "original515": 40,
+      "delta": 40
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::result::Result<infraternal_agent::remote_client::server_path::Link, core::io::error::Error>>",
+      "baseline": 0,
+      "original515": 40,
+      "delta": 40
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<hashbrown::raw::RawTableInner>::drop_inner_table::<(core::net::ip_addr::IpAddr, usize), alloc::alloc::Global>",
+      "baseline": 0,
+      "original515": 39,
+      "delta": 39
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node_state::Store>::save",
+      "baseline": 2863,
+      "original515": 2901,
+      "delta": 38
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::bootstrap_runtime::default_runner",
+      "baseline": 4157,
+      "original515": 4195,
+      "delta": 38
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::websocket::WebSocketState>",
+      "baseline": 490,
+      "original515": 526,
+      "delta": 36
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<<tokio::sync::mpsc::chan::Rx<_, _> as core::ops::drop::Drop>::drop::{closure#0}::Guard<infraternal_server::remote_link::RemoteLink, tokio::sync::mpsc::bounded::Semaphore>>::drain",
+      "baseline": 113,
+      "original515": 148,
+      "delta": 35
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::remote_client::PrefixedControl as infraternal_plugin_api::channel::Channel>::read::{closure#0}>",
+      "baseline": 526,
+      "original515": 560,
+      "delta": 34
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::remote_client::PrefixedControl as infraternal_plugin_api::channel::Channel>::retire",
+      "baseline": 0,
+      "original515": 34,
+      "delta": 34
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::ca_bootstrap::BootstrapRuntime>",
+      "baseline": 117,
+      "original515": 151,
+      "delta": 34
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::embedded::process_incoming::{closure#0}>",
+      "baseline": 404,
+      "original515": 437,
+      "delta": 33
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::remote_client::ControlChannel as infraternal_plugin_api::channel::Channel>::write::{closure#0}>",
+      "baseline": 0,
+      "original515": 33,
+      "delta": 33
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::plugin_control::Worker>::start::{closure#0}",
+      "baseline": 3757,
+      "original515": 3789,
+      "delta": 32
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node::Node>::up::{closure#0}",
+      "baseline": 1128,
+      "original515": 1160,
+      "delta": 32
+    },
+    {
+      "crate": "std",
+      "name": "alloc::boxed::box_new_uninit",
+      "baseline": 200,
+      "original515": 230,
+      "delta": 30
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::remote_client::PrefixedControl as infraternal_plugin_api::channel::Channel>::write::{closure#0}>",
+      "baseline": 133,
+      "original515": 163,
+      "delta": 30
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::dataplane::Config as core::cmp::PartialEq>::eq",
+      "baseline": 76,
+      "original515": 106,
+      "delta": 30
+    },
+    {
+      "crate": "serde_json",
+      "name": "serde_json::ser::to_vec::<infraternal_plugin_mesh::dataplane::Chunk>",
+      "baseline": 1160,
+      "original515": 1188,
+      "delta": 28
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_runtime::RemoteHosts>::attach::{closure#0}",
+      "baseline": 1149,
+      "original515": 1177,
+      "delta": 28
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node::Node>::down",
+      "baseline": 621,
+      "original515": 649,
+      "delta": 28
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::embedded::process_command::{closure#0}>",
+      "baseline": 811,
+      "original515": 835,
+      "delta": 24
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::dataplane::Config as core::clone::Clone>::clone",
+      "baseline": 152,
+      "original515": 176,
+      "delta": 24
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::remote_client::ControlChannel as infraternal_plugin_api::channel::Channel>::read::{closure#0}>",
+      "baseline": 0,
+      "original515": 24,
+      "delta": 24
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "infraternal_plugin_mesh::configuration::compile",
+      "baseline": 2554,
+      "original515": 2578,
+      "delta": 24
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::transport::Receive>::next::<infraternal_plugin_remote::remote_tls::TcpTls>::{closure#0}",
+      "baseline": 3115,
+      "original515": 3138,
+      "delta": 23
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node_actions::MeshNodePlugin as infraternal_plugin_api::AgentPlugin>::set_server_link",
+      "baseline": 0,
+      "original515": 22,
+      "delta": 22
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes>>",
+      "baseline": 0,
+      "original515": 22,
+      "delta": 22
+    },
+    {
+      "crate": "serde_core",
+      "name": "<<infraternal_plugin_api::server_path::ServerLink as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Expected>::fmt",
+      "baseline": 0,
+      "original515": 22,
+      "delta": 22
+    },
+    {
+      "crate": "std",
+      "name": "<core::array::TryFromSliceError as core::fmt::Display>::fmt",
+      "baseline": 0,
+      "original515": 20,
+      "delta": 20
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::plugins::registry_at",
+      "baseline": 1130,
+      "original515": 1150,
+      "delta": 20
+    },
+    {
+      "crate": "std",
+      "name": "<std::thread::lifecycle::spawn_unchecked<<infraternal_agent::plugin_control::Registry>::start::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+      "baseline": 374,
+      "original515": 394,
+      "delta": 20
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<hashbrown::raw::RawTableInner>::drop_inner_table::<(u64, infraternal_server::embedded::AttachmentState), alloc::alloc::Global>",
+      "baseline": 186,
+      "original515": 204,
+      "delta": 18
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::option::Option<infraternal_plugin_mesh::node::Node>>",
+      "baseline": 445,
+      "original515": 461,
+      "delta": 16
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::daemon::run_authenticated_with_plugins<infraternal_agent::remote_client::PrefixedControl>::{closure#0}>",
+      "baseline": 153,
+      "original515": 169,
+      "delta": 16
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::node_bridge::NodeBridge as infraternal_plugin_api::node_channel::NodeChannel>::supports_server_paths",
+      "baseline": 0,
+      "original515": 15,
+      "delta": 15
+    },
+    {
+      "crate": "sqlx_core",
+      "name": "<sqlx_core::pool::inner::PoolInner<sqlx_sqlite::database::Sqlite>>::connect::{closure#0}",
+      "baseline": 16821,
+      "original515": 16836,
+      "delta": 15
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::websocket::terminal_agent::{closure#0}",
+      "baseline": 1003,
+      "original515": 1018,
+      "delta": 15
+    },
+    {
+      "crate": "infraternal",
+      "name": "infraternal::remote_server::serve::{closure#0}",
+      "baseline": 4876,
+      "original515": 4891,
+      "delta": 15
+    },
+    {
+      "crate": "std",
+      "name": "<core::array::TryFromSliceError as core::error::Error>::type_id",
+      "baseline": 0,
+      "original515": 14,
+      "delta": 14
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes> as core::error::Error>::type_id",
+      "baseline": 0,
+      "original515": 14,
+      "delta": 14
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::plugin_control::Worker>::start",
+      "baseline": 2234,
+      "original515": 2248,
+      "delta": 14
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_server::node_bridge::NodeBridge as infraternal_plugin_api::node_channel::NodeChannel>::listen_server::{closure#0}>",
+      "baseline": 0,
+      "original515": 14,
+      "delta": 14
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::embedded::retire_slow_stream::{closure#0}",
+      "baseline": 291,
+      "original515": 304,
+      "delta": 13
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes> as core::error::Error>::description",
+      "baseline": 0,
+      "original515": 13,
+      "delta": 13
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::sync::mpsc::list::Rx<infraternal_server::remote_link::RemoteLink>>::pop",
+      "baseline": 324,
+      "original515": 337,
+      "delta": 13
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::websocket::upgrade::{closure#0}::{closure#1}::{closure#0}",
+      "baseline": 32004,
+      "original515": 32015,
+      "delta": 11
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::sync::mpsc::chan::Chan<infraternal_server::remote_link::RemoteLink, tokio::sync::mpsc::bounded::Semaphore>>",
+      "baseline": 176,
+      "original515": 186,
+      "delta": 10
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::transport::Receive>::next::<infraternal_agent::transport::Socket>::{closure#0}",
+      "baseline": 1511,
+      "original515": 1521,
+      "delta": 10
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_link::RemoteLink>::read_transport::{closure#0}",
+      "baseline": 6255,
+      "original515": 6263,
+      "delta": 8
+    },
+    {
+      "crate": "infraternal_plugin_host_facts",
+      "name": "<infraternal_plugin_host_facts::facts::HostFactsPlugin as infraternal_plugin_api::AgentPlugin>::preferred_server",
+      "baseline": 0,
+      "original515": 7,
+      "delta": 7
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "name": "infraternal_plugin_remote::remote_quic::server_config",
+      "baseline": 6698,
+      "original515": 6705,
+      "delta": 7
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::result::Result<infraternal_plugin_mesh::node_state::State, serde_json::error::Error>>",
+      "baseline": 220,
+      "original515": 227,
+      "delta": 7
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::node_bridge::NodeBridge as infraternal_plugin_api::node_channel::NodeChannel>::observed_ip",
+      "baseline": 41,
+      "original515": 47,
+      "delta": 6
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<alloc::sync::Arc<std::sync::poison::mutex::Mutex<infraternal_plugin_mesh::node_actions::Owner>>>::drop_slow",
+      "baseline": 282,
+      "original515": 288,
+      "delta": 6
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::websocket::handshake::<futures_util::stream::stream::split::SplitStream<axum::extract::ws::WebSocket>, futures_util::stream::stream::split::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>>::{closure#0}",
+      "baseline": 12303,
+      "original515": 12309,
+      "delta": 6
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::firewall::Firewall>::remove",
+      "baseline": 341,
+      "original515": 346,
+      "delta": 5
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::node_bridge::NodeBridge as infraternal_plugin_api::node_channel::NodeChannel>::call::{closure#0}",
+      "baseline": 627,
+      "original515": 632,
+      "delta": 5
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::websocket::while_authorized_operation::<()>::{closure#0}",
+      "baseline": 2716,
+      "original515": 2721,
+      "delta": 5
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::socket::MeshPlugin as infraternal_plugin_api::Plugin>::node_connected",
+      "baseline": 511,
+      "original515": 515,
+      "delta": 4
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes> as core::error::Error>::cause",
+      "baseline": 0,
+      "original515": 3,
+      "delta": 3
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::node_bridge::NodeBridge as infraternal_plugin_api::node_channel::NodeChannel>::changes",
+      "baseline": 154,
+      "original515": 157,
+      "delta": 3
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::websocket::PluginHost as infraternal_plugin_api::SocketHost>::may_configure::{closure#0}",
+      "baseline": 1173,
+      "original515": 1174,
+      "delta": 1
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::mpsc::error::TrySendError<bytes::bytes::Bytes> as core::error::Error>::provide",
+      "baseline": 0,
+      "original515": 1,
+      "delta": 1
+    },
+    {
+      "crate": "infraternal_plugin_host_facts",
+      "name": "<infraternal_plugin_host_facts::facts::HostFactsPlugin as infraternal_plugin_api::AgentPlugin>::set_server_link",
+      "baseline": 0,
+      "original515": 1,
+      "delta": 1
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_link::RemoteLink>::retire",
+      "baseline": 25,
+      "original515": 26,
+      "delta": 1
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::websocket::handle_client_frame::<futures_util::stream::stream::split::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>>::{closure#0}",
+      "baseline": 18253,
+      "original515": 18254,
+      "delta": 1
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::option::Option<infraternal_plugin_mesh::dataplane::Config>>",
+      "baseline": 103,
+      "original515": 102,
+      "delta": -1
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_plugin_mesh::node_state::State>",
+      "baseline": 103,
+      "original515": 102,
+      "delta": -1
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<core::io::error::Error>::new::<infraternal_protocol::DecodeError>",
+      "baseline": 171,
+      "original515": 170,
+      "delta": -1
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<hashbrown::map::HashMap<u64, infraternal_server::embedded::AttachmentState, std::hash::random::RandomState>>::get_mut::<u64>",
+      "baseline": 193,
+      "original515": 190,
+      "delta": -3
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::sync::mpsc::chan::Rx<infraternal_server::remote_link::RemoteLink, tokio::sync::mpsc::bounded::Semaphore>>::recv",
+      "baseline": 600,
+      "original515": 596,
+      "delta": -4
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::configuration::Chunks>::flush",
+      "baseline": 395,
+      "original515": 391,
+      "delta": -4
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::PrefixedControl>",
+      "baseline": 191,
+      "original515": 184,
+      "delta": -7
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_link::RemoteLink>::write::{closure#0}",
+      "baseline": 1598,
+      "original515": 1588,
+      "delta": -10
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_link::RemoteLink>::read::{closure#0}",
+      "baseline": 716,
+      "original515": 706,
+      "delta": -10
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_server::remote_runtime::RemoteHosts>::admit_observed::{closure#0}>",
+      "baseline": 1515,
+      "original515": 1498,
+      "delta": -17
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_link::RemoteLink>",
+      "baseline": 508,
+      "original515": 486,
+      "delta": -22
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::plugin_control::Registry>::execute::{closure#0}",
+      "baseline": 1717,
+      "original515": 1694,
+      "delta": -23
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_server::remote_link::RemoteLink>::tcp::{closure#0}>",
+      "baseline": 363,
+      "original515": 339,
+      "delta": -24
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::sync::mpsc::error::TrySendError<infraternal_server::remote_link::RemoteLink>>",
+      "baseline": 141,
+      "original515": 116,
+      "delta": -25
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_link::RemoteLink>::authorize",
+      "baseline": 169,
+      "original515": 142,
+      "delta": -27
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_server::remote_runtime::RemoteListeners>::start::{closure#0}>",
+      "baseline": 653,
+      "original515": 624,
+      "delta": -29
+    },
+    {
+      "crate": "infraternal",
+      "name": "infraternal::run_remote_agent",
+      "baseline": 14813,
+      "original515": 14781,
+      "delta": -32
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<hashbrown::map::HashMap<u64, infraternal_server::embedded::AttachmentState, std::hash::random::RandomState>>::remove::<u64>",
+      "baseline": 417,
+      "original515": 383,
+      "delta": -34
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<hashbrown::raw::RawTable<(u64, infraternal_server::embedded::AttachmentState)>>::reserve_rehash::<hashbrown::map::make_hasher<u64, infraternal_server::embedded::AttachmentState, std::hash::random::RandomState>::{closure#0}>",
+      "baseline": 1404,
+      "original515": 1360,
+      "delta": -44
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 48,
+      "original515": 0,
+      "delta": -48
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<alloc::boxed::Box<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>>",
+      "baseline": 48,
+      "original515": 0,
+      "delta": -48
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<alloc::boxed::Box<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>>",
+      "baseline": 48,
+      "original515": 0,
+      "delta": -48
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 48,
+      "original515": 0,
+      "delta": -48
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 53,
+      "original515": 0,
+      "delta": -53
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::dealloc::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 53,
+      "original515": 0,
+      "delta": -53
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::drop_reference",
+      "baseline": 57,
+      "original515": 0,
+      "delta": -57
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>::drop_reference",
+      "baseline": 57,
+      "original515": 0,
+      "delta": -57
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_accept::quic::{closure#0}>",
+      "baseline": 962,
+      "original515": 900,
+      "delta": -62
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::runtime::ca_router",
+      "baseline": 14428,
+      "original515": 14363,
+      "delta": -65
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_runtime::RemoteHosts>::retirement::{closure#0}",
+      "baseline": 3502,
+      "original515": 3430,
+      "delta": -72
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<alloc::sync::ArcInner<infraternal_server::node_bridge::NodeBridge>>",
+      "baseline": 100,
+      "original515": 0,
+      "delta": -100
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 107,
+      "original515": 0,
+      "delta": -107
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 107,
+      "original515": 0,
+      "delta": -107
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::option::Option<infraternal_server::remote_runtime::RemoteListeners>>",
+      "baseline": 218,
+      "original515": 109,
+      "delta": -109
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::harness::cancel_task::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 110,
+      "original515": 0,
+      "delta": -110
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 112,
+      "original515": 0,
+      "delta": -112
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_abort_handle::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 112,
+      "original515": 0,
+      "delta": -112
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_runtime::reserve_transports<<infraternal_server::remote_runtime::RemoteListeners>::start::{closure#0}::{closure#0}>::{closure#0}>",
+      "baseline": 116,
+      "original515": 0,
+      "delta": -116
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Stage<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}>>",
+      "baseline": 117,
+      "original515": 0,
+      "delta": -117
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::time::timeout::timeout::<<quinn::send_stream::SendStream>::write_all::{closure#0}>",
+      "baseline": 119,
+      "original515": 0,
+      "delta": -119
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<core::result::Result<infraternal_agent::remote_client::Connected, core::io::error::Error>>",
+      "baseline": 137,
+      "original515": 0,
+      "delta": -137
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::task::coop::Coop<tokio::sync::watch::changed_impl<bool>::{closure#0}>>",
+      "baseline": 141,
+      "original515": 0,
+      "delta": -141
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<tokio::sync::watch::Receiver<bool>>::changed::{closure#0}>",
+      "baseline": 147,
+      "original515": 0,
+      "delta": -147
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}>",
+      "baseline": 149,
+      "original515": 0,
+      "delta": -149
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<<infraternal_agent::transport::Transmit>::send<infraternal_agent::remote_client::PrefixedControl>::{closure#0}>",
+      "baseline": 154,
+      "original515": 0,
+      "delta": -154
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "serde_json::de::from_trait::<serde_json::read::SliceRead, infraternal_server::embedded::TerminalNotice>",
+      "baseline": 165,
+      "original515": 0,
+      "delta": -165
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Stage<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}>>",
+      "baseline": 166,
+      "original515": 0,
+      "delta": -166
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::sync::watch::Receiver<bool>>",
+      "baseline": 282,
+      "original515": 83,
+      "delta": -199
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::time::timeout::Timeout<<infraternal_agent::transport::Receive>::next<infraternal_plugin_remote::remote_tls::TcpTls>::{closure#0}>>",
+      "baseline": 215,
+      "original515": 0,
+      "delta": -215
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::remote_http::unavailable_router",
+      "baseline": 217,
+      "original515": 0,
+      "delta": -217
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<serde_json::map::Map<alloc::string::String, serde_json::value::Value>>",
+      "baseline": 1195,
+      "original515": 956,
+      "delta": -239
+    },
+    {
+      "crate": "serde_core",
+      "name": "<core::marker::PhantomData<core::option::Option<u64>> as serde_core::de::DeserializeSeed>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::SliceRead>>",
+      "baseline": 259,
+      "original515": 0,
+      "delta": -259
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session::{closure#0}>",
+      "baseline": 288,
+      "original515": 0,
+      "delta": -288
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::try_read_output::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 294,
+      "original515": 0,
+      "delta": -294
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::time::interval::interval_at",
+      "baseline": 299,
+      "original515": 0,
+      "delta": -299
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>",
+      "baseline": 305,
+      "original515": 0,
+      "delta": -305
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>",
+      "baseline": 305,
+      "original515": 0,
+      "delta": -305
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 306,
+      "original515": 0,
+      "delta": -306
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 306,
+      "original515": 0,
+      "delta": -306
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_runtime::RemoteListeners>::local_addr",
+      "baseline": 310,
+      "original515": 0,
+      "delta": -310
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 354,
+      "original515": 0,
+      "delta": -354
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::shutdown::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 354,
+      "original515": 0,
+      "delta": -354
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::runtime::task::core::Core<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::set_stage",
+      "baseline": 356,
+      "original515": 0,
+      "delta": -356
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::__tokio_select_util::Out<core::result::Result<(), core::io::error::Error>, quinn_proto::connection::ConnectionError, core::result::Result<infraternal_plugin_remote::remote_quic::BoundStream, core::io::error::Error>, core::option::Option<core::result::Result<(), tokio::runtime::task::error::JoinError>>>>",
+      "baseline": 360,
+      "original515": 0,
+      "delta": -360
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 381,
+      "original515": 0,
+      "delta": -381
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 381,
+      "original515": 0,
+      "delta": -381
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::net::tcp::listener::TcpListener>::local_addr",
+      "baseline": 382,
+      "original515": 0,
+      "delta": -382
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>",
+      "baseline": 412,
+      "original515": 0,
+      "delta": -412
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<tokio::runtime::task::core::Cell<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>",
+      "baseline": 412,
+      "original515": 0,
+      "delta": -412
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::plugin_control::Local>::bind::{closure#0}::{closure#0}",
+      "baseline": 14124,
+      "original515": 13622,
+      "delta": -502
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::wireguard::Device>::counters",
+      "baseline": 7871,
+      "original515": 7345,
+      "delta": -526
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::try_read_output::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 542,
+      "original515": 0,
+      "delta": -542
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::core::Core<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::set_stage",
+      "baseline": 543,
+      "original515": 0,
+      "delta": -543
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 548,
+      "original515": 0,
+      "delta": -548
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::drop_join_handle_slow::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 548,
+      "original515": 0,
+      "delta": -548
+    },
+    {
+      "crate": "infraternal_plugin_remote",
+      "name": "infraternal_plugin_remote::remote_quic::transport",
+      "baseline": 565,
+      "original515": 0,
+      "delta": -565
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::mutex::Mutex<std::collections::hash::map::HashMap<uuid::Uuid, infraternal_server::remote_runtime::Host>>>::lock::{closure#0}",
+      "baseline": 576,
+      "original515": 0,
+      "delta": -576
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>::complete",
+      "baseline": 596,
+      "original515": 0,
+      "delta": -596
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::complete",
+      "baseline": 596,
+      "original515": 0,
+      "delta": -596
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::run_inner::{closure#0}>",
+      "baseline": 1007,
+      "original515": 369,
+      "delta": -638
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_http::InvitationIssuer>::new",
+      "baseline": 745,
+      "original515": 0,
+      "delta": -745
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>>::complete",
+      "baseline": 850,
+      "original515": 0,
+      "delta": -850
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<tokio::runtime::task::harness::Harness<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>>::complete",
+      "baseline": 850,
+      "original515": 0,
+      "delta": -850
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node::Node>::chunk",
+      "baseline": 3591,
+      "original515": 2737,
+      "delta": -854
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::daemon::writer<infraternal_agent::remote_client::PrefixedControl>::{closure#0}>",
+      "baseline": 1348,
+      "original515": 489,
+      "delta": -859
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}>",
+      "baseline": 944,
+      "original515": 0,
+      "delta": -944
+    },
+    {
+      "crate": "tokio",
+      "name": "<tokio::sync::watch::Receiver<bool>>::changed::{closure#0}",
+      "baseline": 2410,
+      "original515": 1205,
+      "delta": -1205
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 1225,
+      "original515": 0,
+      "delta": -1225
+    },
+    {
+      "crate": "tokio",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 1235,
+      "original515": 0,
+      "delta": -1235
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::ca_bootstrap::BootstrapRuntime>::activate::{closure#0}",
+      "baseline": 6205,
+      "original515": 4815,
+      "delta": -1390
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::wireguard::Device>::configure",
+      "baseline": 1767,
+      "original515": 0,
+      "delta": -1767
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>",
+      "baseline": 1787,
+      "original515": 0,
+      "delta": -1787
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "tokio::runtime::task::raw::poll::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}, alloc::sync::Arc<tokio::runtime::scheduler::multi_thread::handle::Handle>>",
+      "baseline": 1807,
+      "original515": 0,
+      "delta": -1807
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::remote_link::pump::{closure#0}",
+      "baseline": 6564,
+      "original515": 4574,
+      "delta": -1990
+    },
+    {
+      "crate": "std",
+      "name": "core::ptr::drop_glue::<infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}>",
+      "baseline": 2151,
+      "original515": 0,
+      "delta": -2151
+    },
+    {
+      "crate": "infraternal_plugin_mesh",
+      "name": "<infraternal_plugin_mesh::node_actions::MeshNodePlugin as infraternal_plugin_api::AgentPlugin>::call",
+      "baseline": 30959,
+      "original515": 27824,
+      "delta": -3135
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "<infraternal_agent::transport::Transmit>::send::<infraternal_plugin_remote::remote_tls::TcpTls>::{closure#0}",
+      "baseline": 4234,
+      "original515": 258,
+      "delta": -3976
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "<infraternal_server::remote_link::RemoteLink>::write_transport::{closure#0}",
+      "baseline": 12793,
+      "original515": 6403,
+      "delta": -6390
+    },
+    {
+      "crate": "std",
+      "name": "<core::pin::Pin<&mut infraternal_agent::remote_client::quic_connect::{closure#0}> as core::future::future::Future>::poll",
+      "baseline": 7196,
+      "original515": 0,
+      "delta": -7196
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#2}",
+      "baseline": 9894,
+      "original515": 0,
+      "delta": -9894
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::quic_session::{closure#0}::{closure#0}::{closure#1}",
+      "baseline": 15928,
+      "original515": 0,
+      "delta": -15928
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::remote_accept::tcp::{closure#0}::{closure#1}",
+      "baseline": 20631,
+      "original515": 0,
+      "delta": -20631
+    },
+    {
+      "crate": "infraternal_agent",
+      "name": "infraternal_agent::remote_client::run_inner::{closure#0}",
+      "baseline": 39418,
+      "original515": 15357,
+      "delta": -24061
+    },
+    {
+      "crate": "infraternal_server",
+      "name": "infraternal_server::runtime::build_router_core::{closure#0}",
+      "baseline": 121046,
+      "original515": 88361,
+      "delta": -32685
+    }
+  ],
+  "sections": [
+    {
+      "section": ".text",
+      "baseline": 15778604,
+      "original515": 15855340,
+      "delta": 76736
+    },
+    {
+      "section": ".gnu.hash",
+      "baseline": 28,
+      "original515": 28,
+      "delta": 0
+    },
+    {
+      "section": ".dynamic",
+      "baseline": 304,
+      "original515": 304,
+      "delta": 0
+    },
+    {
+      "section": ".debug_ranges",
+      "baseline": 1704800,
+      "original515": 1704800,
+      "delta": 0
+    },
+    {
+      "section": ".got.plt",
+      "baseline": 24,
+      "original515": 24,
+      "delta": 0
+    },
+    {
+      "section": ".fini_array",
+      "baseline": 8,
+      "original515": 8,
+      "delta": 0
+    },
+    {
+      "section": ".bss",
+      "baseline": 20624,
+      "original515": 20624,
+      "delta": 0
+    },
+    {
+      "section": ".got",
+      "baseline": 4784,
+      "original515": 4784,
+      "delta": 0
+    },
+    {
+      "section": ".shstrtab",
+      "baseline": 379,
+      "original515": 379,
+      "delta": 0
+    },
+    {
+      "section": ".eh_frame_hdr",
+      "baseline": 216844,
+      "original515": 217812,
+      "delta": 968
+    },
+    {
+      "section": ".hash",
+      "baseline": 16,
+      "original515": 16,
+      "delta": 0
+    },
+    {
+      "section": ".data.rel.ro",
+      "baseline": 870424,
+      "original515": 871832,
+      "delta": 1408
+    },
+    {
+      "section": ".gcc_except_table",
+      "baseline": 484712,
+      "original515": 490472,
+      "delta": 5760
+    },
+    {
+      "section": ".comment",
+      "baseline": 261,
+      "original515": 261,
+      "delta": 0
+    },
+    {
+      "section": ".relr.dyn",
+      "baseline": 14760,
+      "original515": 14784,
+      "delta": 24
+    },
+    {
+      "section": ".eh_frame",
+      "baseline": 1357220,
+      "original515": 1364460,
+      "delta": 7240
+    },
+    {
+      "section": ".tbss",
+      "baseline": 389,
+      "original515": 389,
+      "delta": 0
+    },
+    {
+      "section": ".fini",
+      "baseline": 3,
+      "original515": 3,
+      "delta": 0
+    },
+    {
+      "section": ".rodata",
+      "baseline": 1826288,
+      "original515": 1826288,
+      "delta": 0
+    },
+    {
+      "section": ".debug_frame",
+      "baseline": 32272,
+      "original515": 32272,
+      "delta": 0
+    },
+    {
+      "section": ".init_array",
+      "baseline": 8,
+      "original515": 8,
+      "delta": 0
+    },
+    {
+      "section": ".debug_line",
+      "baseline": 4310240,
+      "original515": 4310240,
+      "delta": 0
+    },
+    {
+      "section": ".symtab",
+      "baseline": 1022256,
+      "original515": 1027200,
+      "delta": 4944
+    },
+    {
+      "section": ".init",
+      "baseline": 8,
+      "original515": 8,
+      "delta": 0
+    },
+    {
+      "section": ".debug_abbrev",
+      "baseline": 589404,
+      "original515": 589404,
+      "delta": 0
+    },
+    {
+      "section": ".relro_padding",
+      "baseline": 3344,
+      "original515": 3024,
+      "delta": -320
+    },
+    {
+      "section": ".debug_loc",
+      "baseline": 13129154,
+      "original515": 13129154,
+      "delta": 0
+    },
+    {
+      "section": ".debug_aranges",
+      "baseline": 34688,
+      "original515": 34688,
+      "delta": 0
+    },
+    {
+      "section": ".debug_str",
+      "baseline": 2751442,
+      "original515": 2751442,
+      "delta": 0
+    },
+    {
+      "section": ".strtab",
+      "baseline": 3051872,
+      "original515": 3075180,
+      "delta": 23308
+    },
+    {
+      "section": ".dynsym",
+      "baseline": 24,
+      "original515": 24,
+      "delta": 0
+    },
+    {
+      "section": ".debug_pubnames",
+      "baseline": 138860,
+      "original515": 138860,
+      "delta": 0
+    },
+    {
+      "section": ".debug_pubtypes",
+      "baseline": 86992,
+      "original515": 86992,
+      "delta": 0
+    },
+    {
+      "section": ".debug_info",
+      "baseline": 10743612,
+      "original515": 10743612,
+      "delta": 0
+    },
+    {
+      "section": ".data",
+      "baseline": 55664,
+      "original515": 55664,
+      "delta": 0
+    },
+    {
+      "section": ".tdata",
+      "baseline": 208,
+      "original515": 208,
+      "delta": 0
+    },
+    {
+      "section": ".dynstr",
+      "baseline": 1,
+      "original515": 1,
+      "delta": 0
+    }
+  ]
+}
