@@ -162,6 +162,22 @@ impl EnrollmentStore {
         now: i64,
         session_hash: Option<&str>,
     ) -> Result<JoinToken, EnrollmentError> {
+        let mut connection = self.0.acquire().await?;
+        self.issue_authorized_in(owner, host, mode, now, session_hash, &mut connection)
+            .await
+    }
+
+    /// Issue on the caller's transaction so host metadata and its invitation
+    /// either publish together or roll back together, including cancellation.
+    pub(crate) async fn issue_authorized_in(
+        &self,
+        owner: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+        session_hash: Option<&str>,
+        connection: &mut sqlx::SqliteConnection,
+    ) -> Result<JoinToken, EnrollmentError> {
         let expires = now
             .checked_add(900)
             .filter(|_| now >= 0)
@@ -188,7 +204,7 @@ impl EnrollmentStore {
         .bind(mode.as_str())
         .bind(session_hash)
         .bind(session_hash)
-        .execute(&self.0)
+        .execute(connection)
         .await?
         .rows_affected();
         if changed != 1 {
