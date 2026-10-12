@@ -1138,3 +1138,28 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
     assert!(failure.message.contains("~/.local/share/infraternal"));
     assert!(failure.message.contains("Move it aside"));
 }
+
+#[tokio::test]
+async fn enrollment_process_exit_71_is_not_reported_as_directory_refusal() {
+    let fixture = Fixture::new();
+    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+
+    let failure = transaction
+        .enroll_and_start(&fixture.join)
+        .await
+        .unwrap_err();
+
+    assert_eq!(failure.exit_status, Some(71));
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap()["failed_step"],
+        "join"
+    );
+    assert!(
+        failure
+            .message
+            .starts_with("Joining the host to this server failed.")
+    );
+    assert!(!failure.message.contains("Move it aside"));
+}

@@ -282,13 +282,15 @@ impl Failure {
         }
         self
     }
-    /// Classify only our own fixed bootstrap exit codes using the approved path.
+    /// Classify fixed installer exit codes using the approved path. Join also
+    /// executes the uploaded payload, whose status is not an ownership receipt.
     #[must_use]
     pub fn in_mode(mut self, mode: InstallMode) -> Self {
         if self.kind != FailureKind::Install {
             return self;
         }
         match (self.exit_status, mode) {
+            (Some(71 | 72), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
                 self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
             }
