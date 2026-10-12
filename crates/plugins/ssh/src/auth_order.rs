@@ -2,7 +2,7 @@
 
 use crate::probe::CHECK_SCRIPT;
 use crate::{
-    model::{Destination, Failure, FailureKind, MeshEvidence},
+    model::{Destination, Failure, FailureKind, InstallMode, MeshEvidence},
     transport::{CommandOutput, Credentials, Input, Operation, SshSession, SshTransport},
 };
 use serde::Serialize;
@@ -61,14 +61,15 @@ impl AutoAuth {
         destination: &Destination,
         credentials: Credentials,
         mesh: MeshEvidence,
+        script: &str,
     ) -> Result<(Arc<dyn SshSession>, CommandOutput), Failure> {
         let session = self
             .transport
             .open(destination.clone(), credentials, mesh)
             .await?;
-        // OpenSsh::open prepares helpers; the fixed read-only check proves auth.
+        // Only an allowlisted read-only check reaches this method; it proves auth.
         // Command-status failures do not qualify as SSH authentication refusals.
-        let output = session.run(CHECK_SCRIPT, Input::Empty).await?;
+        let output = session.run(script, Input::Empty).await?;
         Ok((session, output))
     }
 
@@ -77,9 +78,10 @@ impl AutoAuth {
         destination: Destination,
         provider: Arc<dyn AuthProvider>,
         mesh: MeshEvidence,
+        script: &str,
     ) -> Result<(Arc<dyn SshSession>, CommandOutput, Authentication), Failure> {
         let network = self
-            .authenticate(&destination, Credentials::Network, mesh)
+            .authenticate(&destination, Credentials::Network, mesh, script)
             .await;
         match network {
             Ok((session, output)) => {
@@ -125,7 +127,10 @@ impl AutoAuth {
                     "The SSH credential provider returned the wrong method.",
                 ));
             }
-            match self.authenticate(&destination, credentials, mesh).await {
+            match self
+                .authenticate(&destination, credentials, mesh, script)
+                .await
+            {
                 Ok((session, output)) => {
                     return Ok((
                         session,
@@ -214,7 +219,7 @@ impl SshSession for Pending {
             }
             // Authentication fallback can repeat only the fixed read-only check.
             // Never replay an upload, join capability or mutating command.
-            if script != CHECK_SCRIPT || !matches!(input, Input::Empty) {
+            if !authentication_check(script) || !matches!(input, Input::Empty) {
                 return Err(Failure::install(
                     "SSH authentication requires the read-only system check.",
                 ));
@@ -229,7 +234,7 @@ impl SshSession for Pending {
                 })?;
             let adapter = AutoAuth::new(self.transport.clone());
             let (session, output, authentication) = adapter
-                .automatic(self.destination.clone(), provider, self.mesh)
+                .automatic(self.destination.clone(), provider, self.mesh, script)
                 .await?;
             *self
                 .authentication
@@ -246,5 +251,37 @@ impl SshSession for Pending {
             *selected = Some(session);
             Ok(output)
         })
+    }
+}
+
+// Exact generation, not prefix matching: an appended write or arbitrary input
+// must never be replayed while choosing a credential. The ownership inspection
+// only reads existing paths and locks existing directories; it creates no files.
+fn authentication_check(script: &str) -> bool {
+    script == CHECK_SCRIPT
+        || script == format!("{CHECK_SCRIPT}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'")
+        || [InstallMode::Rootless, InstallMode::Root]
+            .into_iter()
+            .any(|mode| script == crate::previous_attempt::check_script(mode))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_generated_read_only_checks_can_choose_credentials() {
+        let mut checks = vec![
+            CHECK_SCRIPT.to_owned(),
+            format!("{CHECK_SCRIPT}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'"),
+        ];
+        checks.extend(
+            [InstallMode::Rootless, InstallMode::Root].map(crate::previous_attempt::check_script),
+        );
+        for check in checks {
+            assert!(authentication_check(&check));
+            assert!(!authentication_check(&format!("{check}\ntouch unexpected")));
+        }
+        assert!(!authentication_check("true"));
     }
 }
