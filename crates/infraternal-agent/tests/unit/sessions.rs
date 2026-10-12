@@ -139,6 +139,66 @@ async fn sequenced_attach_intersects_caps_and_legacy_attach_stays_zero() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn shared_writer_helper_negotiates_before_sending_its_selector() {
+    use infraternal_shim::frame::Frame;
+    use tokio::io::AsyncReadExt as _;
+    for advertised in [0, 3, 8, 9, 10, 11, 15] {
+        let directory = Directory::new();
+        let path = state(Some(directory.0.clone()))
+            .unwrap()
+            .join("sessions/shared.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            super::send(
+                &mut peer,
+                &Frame::Hello {
+                    version: 1,
+                    caps: advertised,
+                    session: [1; 16],
+                    pid: 1,
+                    cols: 80,
+                    rows: 24,
+                    created: 0,
+                    head: 0,
+                    start: 0,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                super::Reader::default().read(&mut peer).await.unwrap(),
+                Frame::Attach(advertised)
+            );
+            if advertised == 11 || advertised == 15 {
+                assert_eq!(
+                    super::Reader::default().read(&mut peer).await.unwrap(),
+                    Frame::SelectSharedWriter(7)
+                );
+            } else {
+                assert_eq!(
+                    peer.read(&mut [0; 1]).await.unwrap(),
+                    0,
+                    "unnegotiated selector must never be sent"
+                );
+            }
+        });
+        let session = super::connect_shared_writer(path, [1; 16], 7).await;
+        assert_eq!(session.is_ok(), advertised == 11 || advertised == 15);
+        drop(session);
+        server.await.unwrap();
+    }
+    assert_eq!(
+        super::connect_shared_writer(PathBuf::from("missing-shim.sock"), [1; 16], 0)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn post_listen_chmod_wakes_a_connection_refused_at_bind() {
     use nix::sys::socket::{
         AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket,
