@@ -27,15 +27,24 @@ not_live() {
             case "$path" in "${entry##*/}"|*/"${entry##*/}") exit 73;; esac
         done
     done < /proc/net/unix
+    # no_redirect has already permitted only the home alias and symlinks above
+    # it. Resolve that alias so /proc descriptor links under the real home are
+    # still recognized as live setup state.
+    if base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P); then
+        :
+    else
+        exit 75
+    fi
     # Inspect executable and open-descriptor links in one native traversal,
     # never argv or environments. Per-link shell subprocesses grow with every
     # other workload's open files. Bound the process table and refuse paths
     # that cannot be represented literally by find's link-pattern predicate.
     case "$base" in *[\*\?\[]*) exit 75;; esac
+    case "$base_real" in *[\*\?\[]*) exit 75;; esac
     set -- /proc/[0-9]*/exe /proc/[0-9]*/fd
     [ "$#" -le 8192 ] || exit 75
     command -v find >/dev/null 2>&1 || exit 75
-    if live=$(find "$@" -maxdepth 1 -lname "$base/*" -print -quit 2>/dev/null); then
+    if live=$(find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>/dev/null); then
         :
     else
         # Processes can exit or belong to another uid during traversal. Other
