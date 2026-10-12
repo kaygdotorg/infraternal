@@ -166,6 +166,9 @@ impl EnrollmentStore {
                 ))
             })?;
             let committed = transaction.commit().await;
+            if committed.is_ok() {
+                store.1.tombstoned(host);
+            }
             #[cfg(test)]
             store.1.after_commit().await;
             committed.map_err(EnrollmentError::Storage)
