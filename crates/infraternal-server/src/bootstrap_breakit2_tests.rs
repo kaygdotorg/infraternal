@@ -79,8 +79,15 @@ impl SshSession for TimedSession {
             } else {
                 None
             };
+            // Refuse activation only after the real staged enrollment has run.
+            // A compound command's outer transport receipt remains successful;
+            // its fixed FAIL receipt is classified by the production decoder.
+            let refused = (step == "setup"
+                && std::env::var_os("BREAKIT2_RETRY").is_some()
+                && FIRST_INSTALL.swap(false, Ordering::SeqCst))
+                .then(|| script.replacen("if sh -c \"$2\"; then", "if [ \"$1\" != install ] && sh -c \"$2\"; then", 1));
             let started = Instant::now();
-            let result = self.inner.run(script, input).await;
+            let result = self.inner.run(refused.as_deref().unwrap_or(script), input).await;
             if let Some(bytes) = file_bytes {
                 println!(
                     "METRIC breakit2 file_input_bytes={bytes} accepted={}",
@@ -594,4 +601,33 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     } else {
         assert_eq!(result, Step::Done, "real SSH bootstrap did not complete");
     }
+}
+
+/// Observe only whether the test fixture reaches the intended fixed failure step.
+struct RetryObservation(std::sync::atomic::AtomicBool);
+impl SshSession for RetryObservation {
+    fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            self.0.store(script.contains("if [ \"$1\" != install ] && sh -c"), Ordering::SeqCst);
+            Ok(CommandOutput { stdout: b"STEP join\nSTEP install\nFAIL install 1\n".to_vec() })
+        })
+    }
+}
+
+#[tokio::test]
+async fn compound_retry_fixture_reaches_install_boundary() {
+    // Environment changes belong to a fresh child, never to concurrent tests.
+    if std::env::var_os("ADDHOST_FAST_RETRY_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["bootstrap_runtime::remote_backend::tests::breakit2_live::compound_retry_fixture_reaches_install_boundary", "--exact"])
+            .env("ADDHOST_FAST_RETRY_CHILD", "1")
+            .env("BREAKIT2_RETRY", "1")
+            .output().unwrap();
+        assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("running 1 test"), "compound retry fixture did not inject at install");
+        return;
+    }
+    let observation = Arc::new(RetryObservation(std::sync::atomic::AtomicBool::new(false)));
+    let session = TimedSession { inner: observation.clone() };
+    session.run("# INFRATERNAL_SETUP_STEPS_V1\nif sh -c \"$2\"; then :; fi\n", Input::Bytes(b"public-fixture")).await.unwrap();
+    assert!(observation.0.load(Ordering::SeqCst));
 }
