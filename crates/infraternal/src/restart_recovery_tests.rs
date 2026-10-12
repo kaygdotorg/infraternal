@@ -138,7 +138,6 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
                 }
             });
         });
-        std::fs::write(directory.join("ready"), std::process::id().to_string()).unwrap();
         let signed = crate::restart_binary::fixture::Signed::image(directory.join("candidate"));
         let admitted = signed.open().unwrap();
         let mut replacement = Replacement::new(admitted, Some(source.as_ref())).unwrap();
@@ -149,6 +148,10 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
             // real probe. The retained recovery image and second CA frame stay intact.
             replacement.binary.image.file = std::fs::File::open("/dev/null").unwrap();
         }
+        // The admission/fixture phase may hash a large unoptimized debug image.
+        // Start the bounded recovery observation only after that work, while the
+        // old listener is still live; the production shutdown bound is unchanged.
+        std::fs::write(directory.join("ready"), std::process::id().to_string()).unwrap();
         let outcome = replace(runtime, replacement, true);
         panic!("verified replacement or recovery returned: {outcome:?}");
     }
@@ -178,9 +181,16 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let preparation_deadline = std::time::Instant::now() + Duration::from_secs(300);
+        let mut recovery_deadline = None;
         while !directory.join("ready").exists() || !directory.join("recovered").exists() {
-            if child.try_wait().unwrap().is_some() || std::time::Instant::now() >= deadline {
+            if directory.join("ready").exists() {
+                recovery_deadline
+                    .get_or_insert_with(|| std::time::Instant::now() + Duration::from_secs(30));
+            }
+            if child.try_wait().unwrap().is_some()
+                || std::time::Instant::now() >= recovery_deadline.unwrap_or(preparation_deadline)
+            {
                 let _ = child.kill();
                 let output = child.wait_with_output().unwrap();
                 let _ = std::fs::remove_dir_all(&directory);
