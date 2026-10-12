@@ -138,6 +138,11 @@ export interface ConfirmTipOptions {
   effectNode?: Node;
   confirmLabel: string;
   cancelLabel: string;
+  /**
+   * Inner SVG markup (24 px grid, stroked) for the confirming button instead of the tick. The tick means "yes, do it";
+   * an action that is not a yes (try again) names itself with its own glyph.
+   */
+  confirmIcon?: string;
   onConfirm(): void;
   onCancel?(): void;
   /** A card the confirmation must stay inside (a window), with the same 9 px inset the window's own overlays keep. */
@@ -194,7 +199,7 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   confirm.className = "ui-confirm-yes";
   confirm.setAttribute("aria-label", options.confirmLabel);
   confirm.dataset.tip = options.confirmLabel;
-  confirm.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>`;
+  confirm.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true">${options.confirmIcon ?? '<path d="m5.5 12.5 4 4 9-9"/>'}</svg>`;
   if (options.named) confirm.querySelector("span")!.textContent = options.confirmLabel;
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
