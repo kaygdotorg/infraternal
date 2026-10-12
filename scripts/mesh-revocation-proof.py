@@ -37,7 +37,10 @@ while time.monotonic()<deadline:
    while b'\\n' in pending:
     payload,pending=pending.split(b'\\n',1);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
   else:
-   payload,address=s.recvfrom(4096);s.sendto(payload,address);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
+   payload,address=s.recvfrom(4096);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
+   # A restrictive update may refuse the echo after receive; retain the arrival.
+   try: s.sendto(payload,address)
+   except PermissionError: pass
  except TimeoutError: pass
 print(json.dumps(arrivals),flush=True)
 """
