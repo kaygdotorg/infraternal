@@ -1,0 +1,19 @@
+Running as unit: run-p2422305-i19197165.scope; invocation ID: 8c9338f33c284428b3ae6a1c43010d3e
+LITERAL_SUFFIX inode=linked exit=0
+
+running 1 test
+test restart::tests::path_review::late_recovery_from_path_invocation_keeps_install_target ... 
+running 1 test
+test restart::tests::path_review::late_recovery_from_path_invocation_keeps_install_target ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+LITERAL_SUFFIX inode=unlinked exit=0
+
+running 1 test
+test restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path ... 
+running 1 test
+test restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+

@@ -1,0 +1,40 @@
+Running as unit: run-p2237990-i19012859.scope; invocation ID: 9ab54a2d1bf84408b307a0b129b1fe3e
+   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-deploy-pipeline/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.11s
+     Running unittests src/main.rs (/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/debug/deps/infraternal-443d0763057d26a9)
+
+running 1 test
+test restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path ... 
+thread 'restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path' (2238358) panicked at crates/infraternal/src/restart_deleted_path_review_tests.rs:80:5:
+relative recovery lost the live install path: 
+running 1 test
+test restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path ... 
+running 1 test
+test restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path ... FAILED
+
+failures:
+
+failures:
+    restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+
+
+thread 'restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path' (2238406) panicked at crates/infraternal/src/restart_deleted_path_review_tests.rs:16:13:
+assertion `left == right` failed: recovery must retain the live install pathname rather than a deleted inode label
+  left: "/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/review-replaced-path-7fbf3297-c09d-4ff9-bac5-0af6535a8e49/infraternal (deleted)"
+ right: "/home/kayg/.cache/codex-scratch/dev-merge-deploy-pipeline/target/review-replaced-path-7fbf3297-c09d-4ff9-bac5-0af6535a8e49/infraternal"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 1.76s
+
+error: test failed, to rerun pass `-p infraternal --bin infraternal`
