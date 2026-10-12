@@ -47,8 +47,9 @@ def run(binary, state, samples):
             assert time.monotonic() < deadline, "server startup deadline"
             time.sleep(0.01)
         with sqlite3.connect(state / "infraternal.sqlite") as database:
+            host_mode = "rootful" if os.geteuid() == 0 else "rootless"
             database.executemany("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES(?, 'Fixture', ?, 'Fixture', ?, 'unused')", [(f"fixture-{i}", f"fixture-{i}", int(i == 0)) for i in range(50)])
-            database.executemany("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?, 'fixture-0', 'rootless', ?, unixepoch())", [(uuid.uuid4().bytes, os.geteuid()) for _ in range(10000)])
+            database.executemany("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?, 'fixture-0', ?, ?, unixepoch())", [(uuid.uuid4().bytes, host_mode, os.geteuid()) for _ in range(10000)])
         for _ in range(samples):
             active, ready = threading.Event(), threading.Event()
             active.set()
@@ -71,30 +72,33 @@ def run(binary, state, samples):
                 observed.append(((recovered or time.monotonic()) - first if first else 0, count))
             thread = threading.Thread(target=probe)
             thread.start()
-            ready.wait()
-            old = endpoint.stat()
-            started = time.monotonic()
-            with socket.socket(socket.AF_UNIX) as peer:
-                peer.settimeout(10)
-                peer.connect(str(endpoint))
-                peer.sendall(struct.pack("!H", 1) + b".")
-                reply = peer.recv(64)
-                assert reply.startswith(b"RESTARTING"), "replacement refused"
-            deadline = time.monotonic() + 30
-            while True:
-                try:
-                    new = endpoint.stat()
-                    changed = (old.st_ino, old.st_ctime_ns) != (new.st_ino, new.st_ctime_ns)
-                except FileNotFoundError:
-                    changed = False
-                if changed and healthy(address):
-                    break
-                assert child.poll() is None, "server stopped during replacement"
-                assert time.monotonic() < deadline, "replacement health deadline"
-                time.sleep(0.001)
-            totals.append((time.monotonic() - started) * 1000)
-            active.clear()
-            thread.join()
+            try:
+                ready.wait()
+                old = endpoint.stat()
+                started = time.monotonic()
+                with socket.socket(socket.AF_UNIX) as peer:
+                    peer.settimeout(10)
+                    peer.connect(str(endpoint))
+                    peer.sendall(struct.pack("!H", 1) + b".")
+                    reply = peer.recv(64)
+                    assert reply.startswith(b"RESTARTING"), f"replacement refused: {reply!r}"
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        new = endpoint.stat()
+                        changed = (old.st_ino, old.st_ctime_ns) != (new.st_ino, new.st_ctime_ns)
+                    except FileNotFoundError:
+                        changed = False
+                    if changed and healthy(address):
+                        break
+                    assert child.poll() is None, "server stopped during replacement"
+                    assert time.monotonic() < deadline, "replacement health deadline"
+                    time.sleep(0.001)
+                totals.append((time.monotonic() - started) * 1000)
+            finally:
+                # A refused restart must stop the TCP sampler before outer cleanup.
+                active.clear()
+                thread.join()
             gaps.append(observed[0][0] * 1000)
             refusals.append(observed[0][1])
         return {"binary": str(binary), "samples": samples, "gap_p50_ms": statistics.median(gaps), "gap_max_ms": max(gaps), "total_p50_ms": statistics.median(totals), "total_max_ms": max(totals), "refusal_samples": sum(refusals), "sampling_interval_ms": 1, "same_pid": child.poll() is None, "users": 50, "retained_hosts": 10000, "live_ptys": 0, "load_end": os.getloadavg()}
