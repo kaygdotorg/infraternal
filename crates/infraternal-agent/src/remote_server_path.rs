@@ -67,7 +67,6 @@ async fn connect(
     address: SocketAddr,
     kind: ServerLinkKind,
     prove: bool,
-    rtt: Duration,
 ) -> io::Result<Link> {
     let identity = current(identity, renewal, address)?;
     let driver = DialRuntime::new();
@@ -85,7 +84,9 @@ async fn connect(
         remote_quic::client_config_with_liveness(
             &identity.identity,
             &identity.roots,
-            (rtt / 2).max(Duration::from_millis(100)),
+            // A probe belongs to the new mesh path. Inheriting the old path
+            // RTT can delay its first keepalive beyond the freshness budget.
+            Duration::from_millis(100),
             Duration::from_secs(60),
         )?
     } else {
@@ -274,7 +275,6 @@ async fn warming(
             identity.endpoint,
             ServerLinkKind::Fallback,
             true,
-            Duration::ZERO,
         )
         .await
         {
@@ -403,10 +403,7 @@ async fn replacement(
         // A changed preference cancels only this candidate's owned socket. In
         // particular, an explicit component down cannot leave a probe running.
         tokio::select! {
-            result = connect(identity, renewal, destination, kind, true, match &live.connected {
-                Connected::Quic(connection) => connection.rtt().min(Duration::from_secs(5)),
-                Connected::Tcp(_) => Duration::from_millis(100),
-            }) => {
+            result = connect(identity, renewal, destination, kind, true) => {
                 if let Ok(link) = result { return Ok((link, reason)); }
                 if live.kind == ServerLinkKind::Fallback {
                     report(registry, Some(live), ServerLinkReason::MeshRefused);
@@ -444,7 +441,6 @@ async fn available(
             identity.endpoint,
             ServerLinkKind::Fallback,
             false,
-            Duration::ZERO,
         )
         .await;
     };
@@ -454,7 +450,6 @@ async fn available(
         SocketAddr::new(ip, identity.endpoint.port()),
         ServerLinkKind::Mesh,
         true,
-        Duration::from_millis(100),
     );
     let fallback = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -464,7 +459,6 @@ async fn available(
             identity.endpoint,
             ServerLinkKind::Fallback,
             false,
-            Duration::ZERO,
         )
         .await
     };
