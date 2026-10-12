@@ -222,6 +222,105 @@ async fn breakit2_interrupted_lock_creation_allows_cleanup_and_retry() {
     retry.rollback().await.unwrap();
 }
 
+/// Counts actual file input crossing the session boundary while commands execute locally.
+struct TransferCount {
+    local: Local,
+    bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl SshSession for TransferCount {
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            if let Input::File(path) = input {
+                self.bytes.fetch_add(
+                    usize::try_from(path.metadata().unwrap().len()).unwrap(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            self.local.run(script, input).await
+        })
+    }
+}
+
+fn counted_transaction(
+    fixture: &Fixture,
+    bytes: &Arc<std::sync::atomic::AtomicUsize>,
+) -> Installation {
+    Installation::new(
+        Arc::new(TransferCount {
+            local: Local {
+                root: fixture.root.clone(),
+            },
+            bytes: bytes.clone(),
+        }),
+        &fixture.target,
+        &fixture.join,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "#169 retry: verified payload should cross SSH only once"]
+async fn retry_reuses_verified_payload_after_owned_rollback() {
+    let fixture = Fixture::new();
+    let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = counted_transaction(&fixture, &bytes);
+    first.stage(&fixture.binary).await.unwrap();
+    first.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    let second = counted_transaction(&fixture, &bytes);
+    second.stage(&fixture.binary).await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.base().join(".bootstrap-lock/payload")).unwrap(),
+        std::fs::read(&fixture.binary).unwrap()
+    );
+    assert_eq!(
+        bytes.load(std::sync::atomic::Ordering::Relaxed),
+        usize::try_from(fixture.binary.metadata().unwrap().len()).unwrap()
+    );
+    second.rollback().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "#169 retry: cached content must be hash checked again"]
+async fn retry_resends_payload_when_cache_content_changes() {
+    let fixture = Fixture::new();
+    let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = counted_transaction(&fixture, &bytes);
+    first.stage(&fixture.binary).await.unwrap();
+    first.rollback().await.unwrap();
+    let cache = fixture.base().with_file_name("infraternal.bootstrap-cache");
+    assert!(cache.join("payload").exists());
+    std::fs::write(cache.join("payload"), b"changed fixture content").unwrap();
+    let second = counted_transaction(&fixture, &bytes);
+    second.stage(&fixture.binary).await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.base().join(".bootstrap-lock/payload")).unwrap(),
+        std::fs::read(&fixture.binary).unwrap()
+    );
+    assert_eq!(
+        bytes.load(std::sync::atomic::Ordering::Relaxed),
+        2 * usize::try_from(fixture.binary.metadata().unwrap().len()).unwrap()
+    );
+    second.rollback().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "#169 retry: foreign cache paths must be refused"]
+async fn payload_reuse_never_adopts_a_foreign_cache_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let cache = fixture.base().with_file_name("infraternal.bootstrap-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(cache.join("owner"), b"foreign data\n").unwrap();
+    let transaction = fixture.transaction();
+    assert!(transaction.stage(&fixture.binary).await.is_err());
+    assert_eq!(
+        std::fs::read(cache.join("owner")).unwrap(),
+        b"foreign data\n"
+    );
+}
+
 /// Models receipt allocation being unavailable until the owned payload is freed.
 /// The rollback still runs through the real shell and filesystem; the separate
 /// disposable-target test exercises a genuinely full home filesystem.
