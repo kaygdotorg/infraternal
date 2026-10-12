@@ -1,0 +1,8 @@
+Running as unit: run-p1020402-i17795361.scope; invocation ID: 0884253562ed442bbc0df37b56bf60c4
+    Checking infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-shim)
+    Checking infraternal-plugin-host-facts v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/host-facts)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-server)
+    Checking infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/remote)
+    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/ssh)
+    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.79s

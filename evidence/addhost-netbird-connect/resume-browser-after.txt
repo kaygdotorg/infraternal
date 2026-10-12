@@ -1,0 +1,15 @@
+Running as unit: run-p1085824-i17860782.scope; invocation ID: 06432c44e19f473eaf5dc096dd724055
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-becb14es.js, chunk-px28wsnv.js, chunk-scvkz6g6.js, chunk-zgts83wx.js, chunk-qdzv2yy8.js, chunk-hmw2knvz.js, chunk-5zw4jgc6.js, chunk-j7yf75ng.js, chunk-hrx77h2e.js, chunk-x69nmr1x.js, chunk-b354sg8t.js, chunk-53ka8tp5.js, chunk-6gtm055g.js, chunk-k899h4n5.js, chunk-caryt9qe.js, chunk-vkmws4v9.js, chunk-w1gfkmhm.js, chunk-csbc9b3b.js, chunk-xvej1n5c.js, chunk-6gqrzq2n.js, chunk-skbe87x5.js, chunk-na49xj9e.js, main.js, chunk-8n70sfjx.js, chunk-mqfdvw2d.js, chunk-a0p5t716.js, chunk-gth5125d.js, chunk-mqfz24h5.js, chunk-cwwqa7ke.js, chunk-fnwcev06.js, chunk-8gqdshxw.js, chunk-fs84h5dd.js, chunk-jx4g4vyn.js, chunk-s07315jh.js, chunk-whqvzd3b.js, chunk-7vzd17js.js, chunk-fk0a1k1y.js, chunk-bphkzwg1.js, chunk-2vk0tmda.js, chunk-021wn3fz.js, chunk-tr1tq395.js, chunk-axbkkqp1.js, chunk-jr2sreg3.js, chunk-fate9r53.js, chunk-9wa3qpkd.js, chunk-dzrn6kk2.js, chunk-m01ye7d0.js, chunk-r5hwtkjm.js, chunk-7e7jpemf.js, chunk-x9s0q1b5.js, chunk-shk4f6kf.js, chunk-xq9x1b9f.js, chunk-61rn09qn.js, chunk-039esk76.js, chunk-beakc5jx.js, chunk-f19e41y6.js, chunk-d6et9x2c.js, chunk-z4ar86vk.js, chunk-ncka9b2k.js, chunk-8m1rk8dk.js, chunk-ha979zcd.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-t87zrm46.js, chunk-ng3mzaf8.js, chunk-0qmaxw8n.js, chunk-07d0fb5q.js, chunk-dtz4vpb4.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4396
+[WebServer] latency proxy listening on http://localhost:4395; upstream port=4396
+
+Running 3 tests using 1 worker
+
+(node:1088200) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/addhost-wizard.spec.ts:474:3 › connect failure has one summary and distinct Details at 1440 (14.0s)
+  ✓  2 test/addhost-wizard.spec.ts:474:3 › connect failure has one summary and distinct Details at 393 (13.7s)
+  ✓  3 test/addhost-wizard.spec.ts:491:1 › empty failure Details do not fall back to the visible summary (13.6s)
+
+  3 passed (50.1s)

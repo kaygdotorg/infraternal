@@ -1,0 +1,18 @@
+Running as unit: run-p1023370-i17798329.scope; invocation ID: 92f2d51ec0ec4b57aefb04db821fa60f
+   Compiling uuid v1.27.0
+   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-shim)
+   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-server)
+   Compiling webauthn-attestation-ca v0.5.5
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/ssh)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-agent)
+   Compiling webauthn-rs-core v0.5.5
+   Compiling webauthn-rs v0.5.5
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 06s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/n195/target/debug/deps/infraternal_server-5f7fe06a04ecf3f6)
+
+running 2 tests
+test bootstrap_runtime::failure_log_tests::start_fresh_logs_only_the_exact_public_ownership_journal_and_outcome ... ok
+test bootstrap_runtime::failure_log_tests::one_line_contains_only_classified_public_coordinates ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 0.00s
+
