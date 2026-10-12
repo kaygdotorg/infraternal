@@ -29,6 +29,7 @@ pub(super) struct Attempt {
     owner: String,
     batch: Uuid,
     uid: u32,
+    destination: Option<(String, Option<String>)>,
     canary: Option<(EmbeddedAgent, [u8; 16])>,
 }
 // Cancellation before JoinMaterial reaches the installer has no Resources.host
@@ -136,14 +137,6 @@ impl Backend for RemoteBackend {
                     return Err(unavailable());
                 }
             };
-            let existing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
-                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).fetch_one(&self.issuer.store().0).await.map_err(|_|unavailable())?;
-            if existing {
-                let mut failure =
-                    Failure::install("This host is already added. Open its terminal from Console.");
-                failure.already_added = true;
-                return Err(failure);
-            }
             if !self.issuer.ready() {
                 return Err(Failure::install(
                     "Set up or unlock host connections with an administrator passkey before adding a host.",
@@ -156,6 +149,25 @@ impl Backend for RemoteBackend {
             };
             {
                 let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
+                // Reserve before any database await. The bounded attempt map is
+                // also the destination journal, so competing batches cannot
+                // issue distinct host records during the lookup/issue gap.
+                if attempts.values().any(|attempt| {
+                    attempt.owner == authority.owner
+                        && attempt
+                            .destination
+                            .as_ref()
+                            .is_some_and(|(pending, trust)| {
+                                pending == address
+                                    || lookup
+                                        .as_ref()
+                                        .is_some_and(|value| trust.as_ref() == Some(value))
+                            })
+                }) {
+                    return Err(Failure::install(
+                        "This host is already being added. Wait for its setup steps to finish.",
+                    ));
+                }
                 if attempts.len() >= 1600 {
                     return Err(Failure::install(
                         "Too many host installations are pending. Try again shortly.",
@@ -167,6 +179,7 @@ impl Backend for RemoteBackend {
                         owner: authority.owner.clone(),
                         batch: authority.batch,
                         uid,
+                        destination: Some((address.to_owned(), lookup.clone())),
                         canary: None,
                     },
                 );
@@ -176,6 +189,14 @@ impl Backend for RemoteBackend {
                 host,
                 published: false,
             };
+            let existing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).fetch_one(&self.issuer.store().0).await.map_err(|_|unavailable())?;
+            if existing {
+                let mut failure =
+                    Failure::install("This host is already added. Open its terminal from Console.");
+                failure.already_added = true;
+                return Err(failure);
+            }
             let invitation = self
                 .issuer
                 .issue_bootstrap(
@@ -660,6 +681,7 @@ mod tests {
                 owner: "owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1002,
+                destination: None,
                 canary: None,
             },
         );
@@ -669,6 +691,7 @@ mod tests {
                 owner: "other-owner".into(),
                 batch: Uuid::new_v4(),
                 uid: 1003,
+                destination: None,
                 canary: None,
             },
         );
@@ -713,7 +736,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "#169 breakit2: concurrent destination checks are not an atomic reservation"]
     async fn breakit2_concurrent_same_destination_issues_only_one_invitation() {
         let f = fixture(true).await;
         let batches: Vec<_> = (0..8).map(|_| start(&f, "owner")).collect();
@@ -725,6 +747,13 @@ mod tests {
                 .count(),
             1,
             "concurrent batches reserved the same destination and issued distinct host identities"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message.contains("already being added"))
+                .count(),
+            7
         );
     }
 }

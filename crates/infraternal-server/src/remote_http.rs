@@ -374,6 +374,14 @@ async fn issue_invitation(
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
     if let Some((address, lookup)) = destination {
+        // The preceding host INSERT owns SQLite's writer slot. Repeat the
+        // destination check here for independently constructed adapters too.
+        let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+            .bind(&session.user_id).bind(address).bind(lookup).bind(lookup)
+            .fetch_one(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if occupied {
+            return Err(StatusCode::CONFLICT);
+        }
         sqlx::query(
             "INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,?)",
         )
