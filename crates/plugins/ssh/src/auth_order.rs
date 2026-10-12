@@ -80,35 +80,34 @@ impl AutoAuth {
         mesh: MeshEvidence,
         script: &str,
     ) -> Result<(Arc<dyn SshSession>, CommandOutput, Authentication), Failure> {
-        let network = self
-            .authenticate(&destination, Credentials::Network, mesh, script)
-            .await;
-        match network {
-            Ok((session, output)) => {
-                return Ok((
-                    session,
-                    output,
-                    Authentication {
-                        method: AuthMethod::Network,
-                        network: provider.network(),
-                    },
-                ));
-            }
-            Err(error) if error.kind == FailureKind::Auth => {}
-            Err(error) => return Err(error),
-        }
-        for method in [
-            AuthMethod::ServerKey,
-            AuthMethod::UserKey,
-            AuthMethod::Password,
-        ] {
+        // OpenSSH performs its protocol none exchange inside a local-method
+        // connection too. Unknown/manual hosts need no separate refusal login.
+        // Trusted known network providers keep the earlier lazy network path;
+        // credentialless manual hosts still reach the final network fallback.
+        let network = provider.network();
+        let methods = if network.is_some() {
+            [
+                AuthMethod::Network,
+                AuthMethod::ServerKey,
+                AuthMethod::UserKey,
+                AuthMethod::Password,
+            ]
+        } else {
+            [
+                AuthMethod::ServerKey,
+                AuthMethod::UserKey,
+                AuthMethod::Password,
+                AuthMethod::Network,
+            ]
+        };
+        for method in methods {
             // The future is created inside the loop: successful earlier auth must
             // not request the next browser secret or read the locked server key.
             let credentials = match method {
                 AuthMethod::ServerKey => provider.server_key().await,
                 AuthMethod::UserKey => provider.user_key().await,
                 AuthMethod::Password => provider.password().await,
-                AuthMethod::Network => unreachable!(),
+                AuthMethod::Network => Ok(Some(Credentials::Network)),
             };
             let credentials = match credentials {
                 Ok(Some(credentials)) => credentials,
@@ -122,6 +121,7 @@ impl AutoAuth {
                     Credentials::PrivateKey { .. },
                     AuthMethod::ServerKey | AuthMethod::UserKey
                 ) | (Credentials::Password(_), AuthMethod::Password)
+                    | (Credentials::Network, AuthMethod::Network)
             ) {
                 return Err(Failure::install(
                     "The SSH credential provider returned the wrong method.",
@@ -132,12 +132,26 @@ impl AutoAuth {
                 .await
             {
                 Ok((session, output)) => {
+                    let evidence = session.authentication();
                     return Ok((
                         session,
                         output,
                         Authentication {
-                            method,
-                            network: None,
+                            method: if evidence
+                                .is_some_and(|receipt| receipt.method == AuthMethod::Network)
+                            {
+                                AuthMethod::Network
+                            } else {
+                                method
+                            },
+                            network: if method == AuthMethod::Network
+                                || evidence
+                                    .is_some_and(|receipt| receipt.method == AuthMethod::Network)
+                            {
+                                network
+                            } else {
+                                None
+                            },
                         },
                     ));
                 }

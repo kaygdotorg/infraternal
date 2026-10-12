@@ -11,6 +11,21 @@ use std::sync::{Arc, Mutex};
 struct Provider {
     requested: Mutex<Vec<AuthMethod>>,
 }
+struct ManualProvider(Provider);
+impl AuthProvider for ManualProvider {
+    fn network(&self) -> Option<NetworkProvider> {
+        None
+    }
+    fn server_key(&self) -> Operation<'_, Option<Credentials>> {
+        self.0.server_key()
+    }
+    fn user_key(&self) -> Operation<'_, Option<Credentials>> {
+        self.0.user_key()
+    }
+    fn password(&self) -> Operation<'_, Option<Credentials>> {
+        self.0.password()
+    }
+}
 impl Provider {
     fn key(&self, method: AuthMethod) -> Operation<'_, Option<Credentials>> {
         self.requested.lock().unwrap().push(method);
@@ -146,6 +161,81 @@ async fn successful_authentication_is_reported_and_later_secrets_are_never_reque
             } else {
                 None
             }
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_hosts_try_available_methods_without_a_separate_none_refusal() {
+    for (index, method) in [
+        (1, AuthMethod::ServerKey),
+        (2, AuthMethod::UserKey),
+        (3, AuthMethod::Password),
+        (4, AuthMethod::Network),
+    ] {
+        let transport = Arc::new(Transport {
+            succeed_at: index,
+            failure: FailureKind::Auth,
+            opens: Mutex::new(0),
+        });
+        let provider = Arc::new(ManualProvider(Provider {
+            requested: Mutex::new(Vec::new()),
+        }));
+        let session = AutoAuth::new(transport.clone())
+            .open(
+                Destination::parse("user@fixture").unwrap(),
+                Credentials::Automatic(provider.clone()),
+                MeshEvidence::default(),
+            )
+            .await
+            .unwrap();
+        session
+            .run(infraternal_plugin_ssh::probe::CHECK_SCRIPT, Input::Empty)
+            .await
+            .unwrap();
+        assert_eq!(*transport.opens.lock().unwrap(), index);
+        assert_eq!(session.authentication().unwrap().method, method);
+        assert_eq!(provider.0.requested.lock().unwrap().len(), index.min(3));
+    }
+}
+
+#[tokio::test]
+async fn manual_method_trust_refusal_never_loads_later_credentials() {
+    for kind in [
+        FailureKind::HostKey,
+        FailureKind::Unreachable,
+        FailureKind::MeshPolicy,
+        FailureKind::Install,
+    ] {
+        let transport = Arc::new(Transport {
+            succeed_at: 0,
+            failure: kind,
+            opens: Mutex::new(0),
+        });
+        let provider = Arc::new(ManualProvider(Provider {
+            requested: Mutex::new(Vec::new()),
+        }));
+        let session = AutoAuth::new(transport.clone())
+            .open(
+                Destination::parse("user@fixture").unwrap(),
+                Credentials::Automatic(provider.clone()),
+                MeshEvidence::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session
+                .run(infraternal_plugin_ssh::probe::CHECK_SCRIPT, Input::Empty)
+                .await
+                .err()
+                .unwrap()
+                .kind,
+            kind
+        );
+        assert_eq!(*transport.opens.lock().unwrap(), 1);
+        assert_eq!(
+            *provider.0.requested.lock().unwrap(),
+            vec![AuthMethod::ServerKey]
         );
     }
 }
