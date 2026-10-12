@@ -166,7 +166,7 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
             InstallStep::Join,
             InstallStep::Start,
         ] {
-            for status in [71, 72, 1, 126, 255] {
+            for status in [71, 72, 73, 1, 126, 255] {
                 let mut failure = Failure::install("The remote bootstrap command failed.");
                 failure.exit_status = Some(status);
                 failure
@@ -183,7 +183,7 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
                     "~/.local/share/infraternal"
                 };
                 match status {
-                    71 | 72 if matches!(step, InstallStep::Join) => {
+                    71..=73 if matches!(step, InstallStep::Join) => {
                         assert!(
                             failure
                                 .message
@@ -197,8 +197,18 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
                         assert!(failure.message.contains("Move it aside"));
                     }
                     72 => {
-                        assert!(failure.message.contains(path));
-                        assert!(failure.message.contains("Finish its cleanup"));
+                        assert!(failure.message.contains("Retry the host check"));
+                        assert!(!failure.message.contains(path));
+                        assert!(!failure.message.contains("Finish its cleanup"));
+                    }
+                    73 => {
+                        assert_eq!(failure.kind, FailureKind::SetupRunning);
+                        assert!(
+                            failure
+                                .message
+                                .starts_with("Setup is already running on this host")
+                        );
+                        assert!(failure.message.contains("Wait"));
                     }
                     _ => assert!(failure.message.contains("Check")),
                 }

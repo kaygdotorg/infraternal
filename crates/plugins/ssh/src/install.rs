@@ -160,8 +160,18 @@ impl Installation {
     }
 
     fn script(&self, body: &str) -> String {
-        let host = self.host.simple().to_string();
-        let (base, launcher, unit, manager) = match self.mode {
+        let guarded = format!("{}\nsetup_guard\n{body}", include_str!("setup_lock.sh"));
+        Self::script_for(self.mode, self.host, self.transaction, &guarded)
+    }
+
+    pub(crate) fn script_for(
+        mode: InstallMode,
+        host: uuid::Uuid,
+        transaction: uuid::Uuid,
+        body: &str,
+    ) -> String {
+        let host = host.simple().to_string();
+        let (base, launcher, unit, manager) = match mode {
             InstallMode::Rootless => (
                 "$HOME/.local/share/infraternal",
                 "$HOME/.local/bin/infraternal",
@@ -175,7 +185,7 @@ impl Installation {
                 "systemctl",
             ),
         };
-        let wanted = if self.mode == InstallMode::Root {
+        let wanted = if mode == InstallMode::Root {
             "multi-user.target"
         } else {
             "default.target"
@@ -183,10 +193,10 @@ impl Installation {
         let script = format!(
             "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\n# Existing data must be private to the execution uid before any read or write.\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
             shell_quote(&host),
-            shell_quote(&self.transaction.simple().to_string()),
+            shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
         );
-        if self.mode == InstallMode::Root {
+        if mode == InstallMode::Root {
             format!(
                 "if [ \"$(id -u)\" = 0 ]; then exec sh -c {}; else exec sudo -n sh -c {}; fi",
                 shell_quote(&script),
@@ -337,7 +347,9 @@ esac
     /// Reports failed cleanup without claiming that installation is complete.
     pub async fn commit(&self) -> Result<(), Failure> {
         self.session.run(&self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
-rm -rf "$base/.bootstrap-lock"
+stage="$base/.bootstrap-lock"
+retire_setup_lease
+rm -rf "$stage"
 "#), Input::Empty).await.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         Ok(())
     }
@@ -364,7 +376,7 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     pub async fn rollback(&self) -> Result<(), Failure> {
         self.session
             .run(
-                &self.script(&format!("{FRESH_CLEANUP}\n{ROLLBACK_TRANSACTION}")),
+                &self.script(&format!("{FRESH_CLEANUP}\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}")),
                 Input::Empty,
             )
             .await?;
@@ -402,6 +414,7 @@ if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
 [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
 parent_mode=$(stat -c '%a' "$parent")
 [ "$((0$parent_mode & 022))" -eq 0 ] || exit 71
+setup_guard
 # A retired fresh transaction still owns final cleanup outside the base.
 # Admit no replacement until its receipt is removed after successful cleanup.
 for receipt in "$base".bootstrap-rollback-*; do
@@ -429,6 +442,7 @@ mkdir "$stage" || exit 72
 printf '%s\n' "$transaction" > "$stage/transaction"
 printf '%s\n' "$kind" > "$stage/kind"
 rm -f "$base/.bootstrap-acquiring"
+start_setup_lease
 "#;
 
 // Publish at most one payload, after the staged hash has passed. Cache creation
@@ -448,7 +462,7 @@ fi
 
 // The rollback journal is a fixed shell program. Keeping it outside the Rust
 // adapter makes its ownership and interruption invariants reviewable together.
-const ROLLBACK_TRANSACTION: &str = r#"
+pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
     if [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
@@ -569,7 +583,7 @@ fi
 // owner marker and base. Noclobber creation, bounded reads, uid/mode and directory
 // identity checks preserve exact binding
 // prevent stale or foreign cleanup from being mistaken for this fresh attempt.
-const FRESH_CLEANUP: &str = r#"
+pub(crate) const FRESH_CLEANUP: &str = r#"
 receipt="$base.bootstrap-rollback-$transaction"
 validate_parent() {
     parent=$(dirname "$base")
