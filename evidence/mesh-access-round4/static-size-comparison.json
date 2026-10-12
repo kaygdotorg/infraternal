@@ -9,5 +9,8 @@
   "change_bytes": 38240,
   "change_pct": 0.1747664966044844,
   "baseline_sha256": "06d8fed78f9cbdb9b2a82c947df31c15419af1a40a5c3176e9910775722ae04c",
-  "head_sha256": "de04c365e98c5471c8c2d587643e844bade2ba85ce17049dddc68835e1c25877"
+  "head_sha256": "de04c365e98c5471c8c2d587643e844bade2ba85ce17049dddc68835e1c25877",
+  "refreshed_head_bytes": 21918864,
+  "refreshed_head_sha256": "de04c365e98c5471c8c2d587643e844bade2ba85ce17049dddc68835e1c25877",
+  "refreshed_matches_saved_head": true
 }

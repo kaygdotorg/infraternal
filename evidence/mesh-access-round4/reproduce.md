@@ -50,3 +50,10 @@ output and is not final head artifact evidence. The affected four static crates
 were cleaned before the final gate rebuilt them. `static-size-comparison.json`
 includes independent baseline and saved-head hashes. No source-code change or
 size waiver was used to repair this build setup.
+
+The final serial native gate also places `gate-cargo.sh` at
+`<scratch>/gate-bin/cargo`. It selects the already documented
+`docs/verification/mesh-policy-verify/gates/gate-profile.toml`: dev opt-level 1
+for infraternal-agent/server/shim only, with dependency and release profiles
+unchanged. `RUST_TEST_THREADS=1` avoids own test overlap. The default-profile
+failed deadline attempt remains retained; no timeout is increased.

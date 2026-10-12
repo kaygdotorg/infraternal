@@ -49,3 +49,12 @@ The full fast milestone passes every Rust row except static builds. The baseline
 16,404,816-byte ceiling. `static-size-comparison.json` records the comparison.
 This is a D243 integration blocker, not a passing gate. The script stops before
 ARM static and TypeScript checks; this lane makes no claim about those stages.
+
+The completed qualified native gate is `fast-qualified-a3b83c04.log`: every Rust
+row passes except static builds. Its exact RTT setup runs on the authorized
+locked VM; the existing dev opt-level-1 profile applies only to the three
+previously qualified native crates, and tests run serially. Dependencies,
+release profiles and all limits are unchanged. Earlier failed/interrupted
+attempts remain explicit in their own logs. The refreshed head static binary
+is byte-for-byte identical to the independently saved head artifact. Final
+branch-head rerun output is recorded verbatim on #173 after this evidence commit.
