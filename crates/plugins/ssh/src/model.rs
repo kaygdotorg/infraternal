@@ -186,6 +186,10 @@ pub enum FailureKind {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstallStep {
+    /// Trusted server-side payload selection, before the remote upload.
+    GetArm64Binary,
+    #[serde(rename = "get-x86-64-binary")]
+    GetX86_64Binary,
     Connect,
     Upload,
     Install,
@@ -251,6 +255,7 @@ impl Failure {
         self.failed_step = Some(step);
         if self.kind == FailureKind::Install && self.missing_binary.is_none() {
             self.message = match step {
+                InstallStep::GetArm64Binary | InstallStep::GetX86_64Binary => self.message,
                 InstallStep::Connect => "Connecting to the host failed.",
                 InstallStep::Upload => "Uploading the infraternal binary failed.",
                 InstallStep::Install => "Installing the infraternal agent failed.",
@@ -279,6 +284,11 @@ fn is_false(value: &bool) -> bool {
 
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.failed_step {
+            Some(InstallStep::GetArm64Binary) => f.write_str("Get the arm64 binary: ")?,
+            Some(InstallStep::GetX86_64Binary) => f.write_str("Get the x86_64 binary: ")?,
+            _ => (),
+        }
         f.write_str(self.message)
     }
 }

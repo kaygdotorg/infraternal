@@ -214,3 +214,8 @@ test("an already added host says so and offers opening its existing terminal", (
   expect(guideFor("worker", failure).happened).toContain("already added");
   expect(guideFor("worker", failure).fix).toBe("none");
 });
+
+test("release payload verification names the architecture step and plain reason", () => {
+  const failure = { kind: "install" as const, message: "the binary does not match the signed checksum.", failed_step: "get-arm64-binary" as const, log_tail: [] };
+  expect(failureLine(failure)).toBe("Get the arm64 binary: the binary does not match the signed checksum.");
+});

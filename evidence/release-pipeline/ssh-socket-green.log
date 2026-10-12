@@ -1,0 +1,11 @@
+Running as unit: run-p3723976-i41430697.scope; invocation ID: 6fc8546baa9f49a1848d7b4542622769
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.32s
+     Running tests/config_isolation.rs (/home/kayg/.cache/codex-scratch/release-pipeline/target/debug/deps/config_isolation-0f58032bf1cc50cb)
+
+running 2 tests
+test synthetic_master_socket_is_private_at_creation ... ok
+test configured_identity_paths_are_not_inherited_by_the_command_child ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+

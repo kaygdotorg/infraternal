@@ -1,0 +1,38 @@
+   Compiling parking_lot_core v0.9.12
+   Compiling tokio v1.53.2
+   Compiling infraternal-plugin-api v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal-plugin-api)
+   Compiling getrandom v0.4.3
+   Compiling nix v0.30.1
+   Compiling uuid v1.28.0
+   Compiling parking_lot v0.12.5
+   Compiling futures-intrusive v0.5.0
+   Compiling sqlx-core v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling tokio-stream v0.1.19
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/draft-plugin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 45.38s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/infraternal_plugin_release-cd785ea863e95ca4)
+
+running 1 test
+test service::tests::authority_is_rechecked_after_the_setting_write_before_commit ... FAILED
+
+failures:
+
+---- service::tests::authority_is_rechecked_after_the_setting_write_before_commit stdout ----
+
+thread 'service::tests::authority_is_rechecked_after_the_setting_write_before_commit' (3904267) panicked at src/service_tests.rs:217:5:
+assertion `left == right` failed
+  left: Ok(Object {"channel": String("edge")})
+ right: Err("not permitted")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    service::tests::authority_is_rechecked_after_the_setting_write_before_commit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--lib`

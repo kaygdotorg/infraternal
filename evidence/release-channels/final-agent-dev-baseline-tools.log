@@ -1,0 +1,59 @@
+Running as unit: run-p2228133-i48319521.scope; invocation ID: 005cdceb2e194cc69ae03c168934b9e0
+   Compiling hyper-util v0.1.21
+   Compiling infraternal-shim v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/infraternal-shim)
+   Compiling infraternal-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/infraternal-mesh)
+   Compiling infraternal-plugin-host-facts v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/plugins/host-facts)
+   Compiling infraternal-plugin-relay v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/plugins/relay)
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/plugins/ssh)
+   Compiling infraternal-plugin-backup v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/plugins/backup)
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/plugins/mesh)
+   Compiling axum-server v0.8.0
+   Compiling axum v0.8.9
+   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/infraternal-server)
+   Compiling infraternal-agent v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/infraternal-agent)
+   Compiling infraternal v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/baseline/crates/infraternal)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 34s
+     Running tests/agent_review.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/agent_review-62a5115f613b03a6)
+
+running 6 tests
+test initial_attach_requires_explicit_credit_before_replay ... 
+thread 'initial_attach_requires_explicit_credit_before_replay' (2252740) panicked at crates/infraternal/tests/agent_review.rs:13:5:
+scripts/verify-agent-attach-credit.py:
+
+Traceback (most recent call last):
+  File "/home/kayg/.cache/codex-scratch/release-channels/baseline/scripts/verify-agent-attach-credit.py", line 54, in <module>
+    run(parser.parse_args().binary)
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/kayg/.cache/codex-scratch/release-channels/baseline/scripts/verify-agent-attach-credit.py", line 17, in run
+    state.mkdir(mode=0o700)
+    ~~~~~~~~~~~^^^^^^^^^^^^
+  File "/nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'target/ac2252741'
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test last_typist_selects_its_own_real_pty_dimensions ... last typist real PTY: PASS; device A reports 24x80, device B reports 40x120 in both viewers
+ok
+test repeated_tiny_credit_pauses_preserve_shell_progress ... catch-up 0: 12 MiB shell completed; 1-byte credit paused; funded Snapshot=372 bytes seq=12583538: PASS
+catch-up 1: 12 MiB shell completed; 1-byte credit paused; funded Snapshot=372 bytes seq=25166709: PASS
+catch-up 2: 12 MiB shell completed; 1-byte credit paused; funded Snapshot=372 bytes seq=37749880: PASS
+initial ring-wrap attachment: Snapshot=372 bytes seq=50333045: PASS
+four 12 MiB floods completed; three tiny-credit pauses and funded Snapshots; no Close needed: PASS
+ok
+test retained_unwritten_input_survives_interleaved_ack_restart ... abrupt stop/restart: accepted=524599, written=15671, surviving unwritten=508928; real Ack before State; 524288 replay bytes exactly once: PASS
+ok
+test stalled_terminal_never_delays_control_or_sibling_dispatch ... held shim State + 9 commands: overloaded stream Close, sibling input/output, control Pong before barrier release in 301.105 ms: PASS
+ok
+test two_writers_keep_independent_ack_and_exact_input_after_restart ... multi-device real PTY: PASS; second writer starts Ack0 after first Ack45; both viewers receive exactly 37 bytes; independent Acks and full-range crash replay
+ok
+
+failures:
+
+failures:
+    initial_attach_requires_explicit_credit_before_replay
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.82s
+
+error: test failed, to rerun pass `-p infraternal --test agent_review`

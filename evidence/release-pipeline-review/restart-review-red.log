@@ -1,0 +1,18 @@
+
+running 1 test
+RELEASE_CACHE_RESTART abrupt_stops=2 retained_before_bytes=2097152 retained_after_bytes=2097152
+
+thread 'release_payload::tests::restarted_resolution_reclaims_partial_downloads_after_process_stop' (619061) panicked at src/../crates/infraternal-server/src/release_payload_tests.rs:449:5:
+assertion `left == right` failed: completed restart resolution must reclaim abandoned partial release downloads
+  left: 2097152
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test release_payload::tests::restarted_resolution_reclaims_partial_downloads_after_process_stop ... FAILED
+
+failures:
+
+failures:
+    release_payload::tests::restarted_resolution_reclaims_partial_downloads_after_process_stop
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.52s
+

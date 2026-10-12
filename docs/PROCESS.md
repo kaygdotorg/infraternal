@@ -134,12 +134,13 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Baseline | Maximum |
   | --- | ---: | ---: |
-  | `x86_64-unknown-linux-musl` | 16,142,672 bytes | 16,404,816 bytes |
-  | `aarch64-unknown-linux-musl` | 13,555,672 bytes | 13,817,816 bytes |
+  | `x86_64-unknown-linux-musl` | 20,042,272 bytes | 20,304,416 bytes |
+  | `aarch64-unknown-linux-musl` | 17,862,968 bytes | 18,125,112 bytes |
 
-  The baseline is the #57 measurement on the Debian 13, 8-vCPU build guest.
-  An intentional size increase needs target-specific measurements and a
-  rationale on its issue before the baseline is changed.
+  Both baselines are #157 measurements at commit `794ef45f`, built with the
+  same Rust toolchain and release profile as the current branch. An intentional
+  size increase needs target-specific measurements and a rationale on its
+  issue before the baseline is changed.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.

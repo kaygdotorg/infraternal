@@ -1,0 +1,14 @@
+F
+======================================================================
+FAIL: test_existing_server_channel_and_skill (__main__.ChannelCli.test_existing_server_channel_and_skill)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/kayg/Developer/infraternal/.worktrees/dev-merge-rp/scripts/release/channel_cli_test.py", line 33, in test_existing_server_channel_and_skill
+    self.assertRegex(human.stdout,r'(?m)^'+section+r'$')
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Regex didn't match: '(?m)^Details$' not found in 'Infraternal server channel\n\nOverview\n  State      Ready\n  Summary    Release channel: stable\n\nRelease\n  Channel  stable\n\nNext step\n  Read the selected channel with infraternal server release latest.\n'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.732s
+
+FAILED (failures=1)

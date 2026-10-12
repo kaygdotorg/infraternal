@@ -1,0 +1,218 @@
+Running as unit: run-p3640039-i41346787.scope; invocation ID: b12f68bc64724d81a01d4b6c92d57031
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-0xwf01n8.js, chunk-2e58m4yr.js, chunk-2v89jqr3.js, chunk-9n6x4dkt.js, chunk-a895a34j.js, chunk-rgsqcn28.js, chunk-kjxhpfe0.js, chunk-0th2e7qk.js, chunk-h8pgtgnt.js, chunk-cqjxczw9.js, chunk-zfrs8pte.js, chunk-6vpwy8t0.js, chunk-0pj9vwkr.js, chunk-yvhhqffe.js, chunk-6v55rj4f.js, chunk-abh6jf3b.js, chunk-4617j4z0.js, chunk-065hdb1d.js, chunk-hqn2xntz.js, main.js, chunk-4qw8adyp.js, chunk-rqzw75kv.js, chunk-95a1a3r9.js, chunk-yp6apzkg.js, chunk-b5ph3xc0.js, chunk-5hzmfqwy.js, chunk-fzgzns7k.js, chunk-zpatga97.js, chunk-rr4m0ahe.js, chunk-gxk8gck7.js, chunk-1qqgctc9.js, chunk-1g76513w.js, chunk-axbkkqp1.js, chunk-ppt2ngce.js, chunk-rxdbb334.js, chunk-b9nznmrf.js, chunk-3qyf9mnb.js, chunk-trypwp08.js, chunk-hmce00mt.js, chunk-1fd0e42k.js, chunk-m1rmme73.js, chunk-5n1wq1fn.js, chunk-k4xar3ar.js, chunk-akbzj23t.js, chunk-rghz6mdj.js, chunk-ctsn0n3q.js, chunk-z6h8pmd1.js, chunk-87veqgtt.js, chunk-6vzsht5e.js, chunk-7p84bkgp.js, chunk-rhxp4jpy.js, chunk-6wm5t6e3.js, chunk-56xcmy4v.js, chunk-mwbrd9t5.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-qefms45w.js, chunk-tfcngnq9.js, chunk-ssm15f13.js, chunk-1aayade5.js, chunk-caxk7167.js
+[WebServer] latency proxy listening on http://localhost:4817; upstream port=4818
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4818
+
+Running 43 tests using 1 worker
+
+(node:3640838) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/addhost-chips.spec.ts:43:1 › typing kayg@o2 and clicking Continue proceeds with that host, with no tick (9.3s)
+  ✓   2 test/addhost-chips.spec.ts:57:1 › a@h1 b@h2,c@h3 gives chips for the ended targets; the last one waits as text until it is ended (8.4s)
+  ✓   3 test/addhost-chips.spec.ts:72:1 › pasting three lines gives three chips (9.0s)
+  ✓   4 test/addhost-chips.spec.ts:82:1 › an invalid token shows the hint and never blocks the chips beside it (9.9s)
+  ✓   5 test/addhost-chips.spec.ts:101:1 › with only an invalid token the hint shows once it is ended, and Continue stays disabled (9.6s)
+  ✓   6 test/addhost-chips.spec.ts:114:1 › a token that names a discovered host chips at once and is ticked in the list (9.8s)
+  ✓   7 test/addhost-chips.spec.ts:125:1 › Backspace on an empty field turns the last chip back into text (14.1s)
+  ✓   8 test/addhost-chips.spec.ts:137:1 › Tab ends a typed token (12.8s)
+  ✓   9 test/addhost-chips.spec.ts:148:1 › a listed host ticked in the list becomes a chip, and removing the chip unticks it (14.3s)
+  -  10 test/addhost-chips.spec.ts:159:5 › captures 1440x900 ink
+  -  11 test/addhost-chips.spec.ts:159:5 › captures 1440x900 paper
+  -  12 test/addhost-chips.spec.ts:159:5 › captures 393x852 ink
+  -  13 test/addhost-chips.spec.ts:159:5 › captures 393x852 paper
+  ✓  14 test/addhost-chips.spec.ts:179:1 › a token typed while the host list is still loading chips when the list arrives (15.3s)
+  ✓  15 test/addhost-wizard.spec.ts:46:1 › the toolbar button and the palette open the wizard (14.3s)
+  ✓  16 test/addhost-wizard.spec.ts:60:1 › network access: detected, shown by name, and the host lands in Console and the sidebar (22.1s)
+  ✓  17 test/addhost-wizard.spec.ts:81:1 › closing the flow window from its own frame ends the wizard (13.4s)
+  ✓  18 test/addhost-wizard.spec.ts:90:1 › the server's own key is the fallback when the network does not sign in (18.7s)
+  ✓  19 test/addhost-wizard.spec.ts:99:1 › a batch shows every host's own progress and opens every host (21.4s)
+  ✓  20 test/addhost-wizard.spec.ts:110:1 › all automatic methods refused: asked to choose, and a password is sent once and never kept (25.1s)
+  ✓  21 test/addhost-wizard.spec.ts:136:1 › a pasted private key signs in as the user's key (27.0s)
+  ✓  22 test/addhost-wizard.spec.ts:149:1 › a saved key (unlocked with the passkey) is offered only when the browser holds one (20.6s)
+  ✓  23 test/addhost-wizard.spec.ts:162:1 › without a saved key the choice does not offer one (17.2s)
+  ✓  24 test/addhost-wizard.spec.ts:170:1 › the server key is shown to copy; adding it and trying again signs in (20.1s)
+  ✓  25 test/addhost-wizard.spec.ts:185:1 › a locked server key is still shown, with the reason (15.6s)
+  ✓  26 test/addhost-wizard.spec.ts:193:1 › no server key to show: the choice is paste or password only (16.5s)
+  ✓  27 test/addhost-wizard.spec.ts:202:1 › an unknown host key shows its fingerprint and is never trusted without a click (23.4s)
+  ✓  28 test/addhost-wizard.spec.ts:219:1 › a host that does not answer: what happened, Retry, and the one-line install from the host (20.1s)
+  ✓  29 test/addhost-wizard.spec.ts:235:1 › a mesh policy block says possible, not certain (13.3s)
+  ✓  30 test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can (23.4s)
+  ✓  31 test/addhost-wizard.spec.ts:265:1 › one refusal without choose_method still offers another way to sign in (12.2s)
+  ✓  32 test/addhost-wizard.spec.ts:272:1 › empty, loading and error states of discovery (16.5s)
+  ✓  33 test/addhost-wizard.spec.ts:297:1 › an SSH config pasted into the field becomes chips (8.5s)
+  ✓  34 test/addhost-wizard.spec.ts:311:1 › closing mid-install asks first, and cancelling ends the run (15.8s)
+  ✓  35 test/addhost-wizard.spec.ts:326:1 › the wizard works on a phone and keeps the footer on screen (9.0s)
+  ✓  36 test/addhost-wizard.spec.ts:350:3 › fresh CA explains passkey confirmation before starting SSH (11.9s)
+  ✓  37 test/addhost-wizard.spec.ts:350:3 › locked CA explains passkey confirmation before starting SSH (10.6s)
+  ✓  38 test/addhost-wizard.spec.ts:368:1 › a canvas flow remains nonmodal (6.9s)
+  ✓  39 test/addhost-wizard.spec.ts:374:1 › Escape in the palette leaves the add-host flow open (11.1s)
+  ✓  40 test/addhost-wizard.spec.ts:388:1 › Tab can leave a canvas flow (7.6s)
+  ✓  41 test/addhost-wizard.spec.ts:397:1 › a typed root login requires consent and cannot pretend to install as a user (11.5s)
+  ✓  42 test/addhost-wizard.spec.ts:416:3 › signed payload refusal names its step at 1440px (11.7s)
+  ✘  43 test/addhost-wizard.spec.ts:416:3 › signed payload refusal names its step at 393px (1.5m)
+
+
+  1) test/addhost-wizard.spec.ts:416:3 › signed payload refusal names its step at 393px ────────────
+
+    Test timeout of 90000ms exceeded.
+
+    Error: locator.click: Test timeout of 90000ms exceeded.
+    Call log:
+      - waiting for locator('.ah-float').getByRole('button', { name: 'Continue', exact: true })
+        - locator resolved to <button type="button" data-ah="continue" data-button="primary" class="ui-button ah-primary">…</button>
+      - attempting click action
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+        - retrying click action
+        - waiting 20ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 100ms
+        9 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 500ms
+        61 × waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+        3 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 500ms
+        26 × waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 500ms
+        11 × waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+         - retrying click action
+           - waiting 500ms
+        2 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 500ms
+          - waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 500ms
+          - waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 500ms
+        5 × waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+        - retrying click action
+          - waiting 500ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+      - retrying click action
+        - waiting 500ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+      4 × retrying click action
+          - waiting 500ms
+          - waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+      3 × retrying click action
+          - waiting 500ms
+          - waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+      - retrying click action
+        - waiting 500ms
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+      2 × retrying click action
+          - waiting 500ms
+          - waiting for element to be visible, enabled and stable
+          - element is visible, enabled and stable
+          - scrolling into view if needed
+          - done scrolling
+          - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud">…</div> subtree intercepts pointer events
+      12 × retrying click action
+           - waiting 500ms
+           - waiting for element to be visible, enabled and stable
+           - element is visible, enabled and stable
+           - scrolling into view if needed
+           - done scrolling
+           - <button type="button" class="perf-hud-row" aria-pressed="false" aria-label="Frame meter details">…</button> from <div class="perf-hud" data-state="slow">…</div> subtree intercepts pointer events
+      - retrying click action
+        - waiting 500ms
+        - waiting for element to be visible, enabled and stable
+
+
+      40 |   await page.locator(".ui-chip-text").click();
+      41 |   await page.keyboard.type(`${host} `, { delay: 5 });
+    > 42 |   await inWizard(page, "Continue").click();
+         |                                    ^
+      43 | }
+      44 | const consoleWindows = (page: Page) => probe(page, (p) => p.views().find((v) => v.id === "console")?.windows ?? []);
+      45 |
+        at addTyped (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/apps/tracer/test/addhost-wizard.spec.ts:42:36)
+        at /home/kayg/Developer/infraternal/.worktrees/release-pipeline/apps/tracer/test/addhost-wizard.spec.ts:435:5
+
+    Error Context: test-results/addhost-wizard-signed-payl-74228-sal-names-its-step-at-393px/error-context.md
+
+  Slow test file: test/addhost-wizard.spec.ts (8.9m)
+  Consider running tests from slow files in parallel. See: https://playwright.dev/docs/test-parallel
+  1 failed
+    test/addhost-wizard.spec.ts:416:3 › signed payload refusal names its step at 393px ─────────────
+  4 skipped
+  38 passed (11.0m)

@@ -912,15 +912,12 @@ impl SocketPlugins {
 /// # Errors
 /// Refuses unavailable or inconsistent persisted feature settings.
 pub async fn compiled(pool: &sqlx::SqlitePool) -> Result<PluginRuntime, PluginError> {
-    #[cfg(feature = "mesh")]
-    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(infraternal_plugin_mesh::MeshPlugin::new(
-        pool.clone(),
-    ))];
-    #[cfg(not(feature = "mesh"))]
-    let plugins = {
-        let _ = pool;
-        Vec::new()
-    };
+    let plugins: Vec<Arc<dyn Plugin>> = vec![
+        #[cfg(feature = "mesh")]
+        Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone())),
+        #[cfg(feature = "release")]
+        Arc::new(crate::release_latest::plugin(pool.clone()).await?),
+    ];
     PluginRuntime::new(plugins, "server")
         .with_store(pool.clone())
         .await

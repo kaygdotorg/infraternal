@@ -12,6 +12,11 @@ pub use action::{
 pub mod admission;
 pub mod channel;
 pub mod node_channel;
+pub mod release_version;
+/// One pipeline-stamped identity shared by reported versions and lockstep downloads [225,226].
+pub const VERSION: &str = env!("INFRATERNAL_VERSION");
+/// Static header avoids a per-download formatting allocation [226].
+pub const RELEASE_USER_AGENT: &str = concat!("infraternal/", env!("INFRATERNAL_VERSION"));
 pub mod routing;
 
 #[cfg(feature = "socket-host")]

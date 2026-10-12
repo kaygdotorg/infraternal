@@ -175,6 +175,7 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     );
     assert_eq!(
         store
+            // Admission observes the time after issuance, including a slow test host.
             .admit(&openssl::sha::sha256(&der), now().unwrap())
             .await
             .unwrap()

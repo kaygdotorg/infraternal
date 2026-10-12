@@ -1,0 +1,11 @@
+Static receipts: release profile, INFRATERNAL_RELEASE_BUILD default (0).
+Baseline 087d2a70 x86_64: 20028096 bytes (independent review receipt).
+x86_64 ceiling: 16404816 bytes; known pre-existing overrun [D205].
+x86_64 fixed bytes: 20042272
+/home/kayg/.cache/codex-scratch/release-pipeline-round2/target/x86_64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent
+delta vs 087d2a70: +14176 bytes
+aarch64 fixed bytes: 17862888
+/home/kayg/.cache/codex-scratch/release-pipeline-round2/target/aarch64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+PT_INTERP: absent
+ARM independently builds; original ARM review used production marker 1, so no matched-marker ARM delta is claimed.

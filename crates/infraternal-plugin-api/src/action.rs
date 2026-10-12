@@ -335,6 +335,8 @@ pub enum CliHandler {
     ServerInstallCompatibility,
     /// Read the one-time server setup capability.
     ServerSetupToken,
+    /// Execute a declared plugin action against an existing private server.
+    ServerPlugin,
     /// Run the agent process inherited by the server.
     EmbeddedAgent,
     /// Run the internal session shim process.

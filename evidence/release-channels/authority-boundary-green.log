@@ -1,0 +1,20 @@
+   Compiling infraternal-plugin-release v0.1.0 (/home/kayg/.cache/codex-scratch/release-channels/draft-plugin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.72s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/release-channels/target/debug/deps/infraternal_plugin_release-cd785ea863e95ca4)
+
+running 6 tests
+test service::tests::channel_reads_at_fifty_concurrent_callers ... ignored, run alone under CPUWeight=10000; measures SQLite action overhead, not terminal or full authenticated socket latency
+test service::tests::object_input_rejects_duplicates_unknown_fields_and_alternate_representations ... ok
+test service::tests::authority_is_rechecked_after_the_setting_write_before_commit ... ok
+test service::tests::disabled_feature_starts_no_lookup_and_rejects_settings ... ok
+test service::tests::default_stable_refuses_silent_edge_and_persists_explicit_opt_in ... ok
+test service::tests::api_setting_requires_owner_and_current_fresh_session ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests infraternal_plugin_release
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

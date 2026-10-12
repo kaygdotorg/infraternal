@@ -8,6 +8,8 @@ mod component_cli;
 mod embedded_cli;
 #[cfg(feature = "remote")]
 mod host_remove;
+#[cfg(feature = "release")]
+mod release_cli;
 
 #[cfg(any(feature = "remote", all(feature = "plugin-agent", target_os = "linux")))]
 mod output;
@@ -183,6 +185,16 @@ fn dispatch_action(
         CliHandler::Unavailable => run_unavailable(action, json_output),
         CliHandler::Status => run_status(registry, json_output),
         CliHandler::Skill => run_skill(registry, matches, json_output),
+        CliHandler::ServerPlugin => {
+            #[cfg(feature = "release")]
+            {
+                release_cli::run(action, matches, json_output)
+            }
+            #[cfg(not(feature = "release"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::ServerRun => {
             #[cfg(feature = "plugin-server")]
             {
@@ -303,11 +315,12 @@ fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
 }
 
 fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {
+    // Preserve hosted dotted action IDs alongside generated command paths.
     let command = matches
         .get_many::<String>("command")
         .into_iter()
         .flatten()
-        .map(String::as_str)
+        .flat_map(|part| part.split('.'))
         .collect::<Vec<_>>();
     let write_directory = matches.get_one::<String>("write");
     if write_directory.is_some() && !command.is_empty() {

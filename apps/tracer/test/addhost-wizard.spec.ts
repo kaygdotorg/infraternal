@@ -411,3 +411,33 @@ test("a typed root login requires consent and cannot pretend to install as a use
   await inWizard(page, "Install as root").click();
   await expect.poll(() => mode).toBe("root");
 });
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`signed payload refusal names its step at ${viewport.width}px`, async ({ page }, info) => {
+    // Keep the real production wizard and decoder; change only the local
+    // stand-in's public failure frame to the release resolver's contract.
+    await page.routeWebSocket("**/v1/bootstrap/ws", (socket) => {
+      const server = socket.connectToServer();
+      server.onMessage((message) => {
+        if (typeof message !== "string") { socket.send(message); return; }
+        const event = JSON.parse(message) as { failure?: { kind: string; message: string; failed_step?: string; log_tail: string[] }; message: string };
+        if (event.failure?.kind === "install") {
+          event.failure.failed_step = "get-arm64-binary";
+          event.failure.log_tail = [];
+          event.failure.message = "the binary does not match the signed checksum.";
+          event.message = event.failure.message;
+        }
+        socket.send(JSON.stringify(event));
+      });
+    });
+    // Preview-only diagnostics must not cover the product Continue button.
+    await open(page, "&fps=0");
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "broken.lab");
+    await expect(wizard(page)).toContainText("Get the arm64 binary: the binary does not match the signed checksum.", { timeout: 15_000 });
+    const screenshot = info.outputPath(`release-verification-${viewport.width}.png`);
+    await page.screenshot({ path: screenshot });
+    await info.attach("release verification refusal", { path: screenshot, contentType: "image/png" });
+  });
+}

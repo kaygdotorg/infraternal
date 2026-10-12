@@ -47,12 +47,12 @@ test("one chip field: typed hosts become chips, checkboxes and chips stay in syn
     await expect(page.locator(".ui-chip")).toHaveCount(4);
     await page.locator(".ui-chip[data-chip='o1'] .ui-chip-remove").click();
     await expect(page.locator(".ah-row[data-host='o1'] input")).not.toBeChecked();
-    // Backspace in an empty field arms, then removes, the last chip.
+    // Backspace in an empty field returns the last chip to editable text.
     await input.focus();
     await input.press("Backspace");
-    await expect(page.locator(".ui-chip[data-armed]")).toHaveCount(1);
-    await input.press("Backspace");
+    await expect(input).toHaveValue("edge-arm");
     await expect(page.locator(".ui-chip")).toHaveCount(2);
+    await input.fill("");
     // An unknown user@host becomes a typed-host chip on a delimiter.
     await page.keyboard.type("root@pve02 ", { delay: 10 });
     await expect(page.locator(".ui-chip[data-chip='pve02']")).toHaveCount(1);

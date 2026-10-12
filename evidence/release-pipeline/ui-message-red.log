@@ -1,0 +1,54 @@
+bun test v1.4.2 (744846f84)
+
+src/canvas/addhost/model.test.ts:
+(pass) stagesOf > a host with no event is waiting everywhere [9.61ms]
+(pass) stagesOf > check before sign-in is detecting how to sign in [2.18ms]
+(pass) stagesOf > the sign-in report finishes detect and starts the system check [0.22ms]
+(pass) stagesOf > install, facts and connect map to install, enrol and first session [0.35ms]
+(pass) stagesOf > an auth failure before sign-in fails detect and says it in plain words, not the server's [30.20ms]
+(pass) stagesOf > an unsupported host fails the system check, after sign-in [0.24ms]
+(pass) stagesOf > an install failure fails the install stage and keeps the earlier ones done [0.09ms]
+(pass) stagesOf > a new attempt starts over and forgets the old sign-in [0.13ms]
+(pass) authLabel > names the method and a trusted network provider only [0.06ms]
+(pass) guideFor > installation failures never claim that incomplete cleanup succeeded [0.14ms]
+(pass) guideFor > each failure kind names its fix [0.10ms]
+(pass) guideFor > mesh-policy words say possible, not certain [0.02ms]
+(pass) parseTarget > reads user, host and port [2.88ms]
+(pass) parseTarget > refuses what cannot name a host [0.08ms]
+(pass) parseSshConfig > reads aliases with HostName, User and Port, skipping wildcards and Match [11.64ms]
+(pass) parseSshConfig > recognises config text [0.30ms]
+(pass) parseSshConfig > a hostname that is an option is dropped [0.14ms]
+(pass) plain words > an unknown or missing failure gets the generic sentence, never the server's text [0.12ms]
+(pass) plain words > no headline carries an arrow, an id or an API noun [11.29ms]
+(pass) only a completed canonical host identity becomes terminal authority [0.29ms]
+(pass) parseTarget > accepts user@host, host, user@host:port, IPv4 and bracketed IPv6 with an optional port [0.08ms]
+(pass) parseTarget > rejects partial and malformed tokens, so they wait or show the hint [0.07ms]
+(pass) matchListed > a name that is exactly one host's id or address names that host [0.26ms]
+(pass) matchListed > a name that is also the start of another host's name is named but still prefixed [0.04ms]
+(pass) matchListed > a partial name that starts several hosts names none and waits [0.03ms]
+(pass) matchListed > a new name that starts no host is neither named nor waiting [0.04ms]
+(pass) install diagnostics name the failed step and public host error [6.38ms]
+(pass) missing payload tells the operator the architecture and expected server path [0.20ms]
+(pass) an already added host says so and offers opening its existing terminal [0.05ms]
+215 |   expect(guideFor("worker", failure).fix).toBe("none");
+216 | });
+217 | 
+218 | test("release payload verification names the architecture step and plain reason", () => {
+219 |   const failure = { kind: "install" as const, message: "the binary does not match the signed checksum.", failed_step: "get-arm64-binary" as const, log_tail: [] };
+220 |   expect(failureLine(failure)).toBe("Get the arm64 binary: the binary does not match the signed checksum.");
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: "Get the arm64 binary: the binary does not match the signed checksum."
+Received: "the binary does not match the signed checksum."
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/apps/tracer/src/canvas/addhost/model.test.ts:220:32)
+(fail) release payload verification names the architecture step and plain reason [7.87ms]
+
+1 tests failed:
+(fail) release payload verification names the architecture step and plain reason [7.87ms]
+
+ 29 pass
+ 1 fail
+ 99 expect() calls
+Ran 30 tests across 1 file. [2.76s]

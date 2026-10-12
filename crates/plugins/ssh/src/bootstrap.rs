@@ -3,7 +3,7 @@
 use crate::{
     auth_once::{OneUseAuth, TargetAuth},
     auth_order::Authentication,
-    install::{BinaryPaths, Cleanup, Installation, JoinMaterial},
+    install::{BinaryPaths, Cleanup, Installation, JoinMaterial, PayloadSource},
     lifecycle::Lifecycle,
     model::{Destination, Event, Failure, MeshEvidence, Step, Target, identifier},
     probe::{CHECK_SCRIPT, Check},
@@ -92,6 +92,7 @@ pub struct Bootstrap {
     transport: Arc<dyn SshTransport>,
     backend: Arc<dyn Backend>,
     binaries: BinaryPaths,
+    payloads: Option<Arc<dyn PayloadSource>>,
     concurrency: Arc<Semaphore>,
     batches: Arc<Semaphore>,
     deadline: Duration,
@@ -110,11 +111,19 @@ impl Bootstrap {
             transport,
             backend,
             binaries,
+            payloads: None,
             concurrency: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_HOSTS)),
             batches: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_BATCHES)),
             deadline: Duration::from_secs(crate::manifest::ATTEMPT_SECONDS),
             lifecycle: Lifecycle::new(),
         }
+    }
+
+    /// Resolve signed production payloads through the existing installation transaction [225].
+    #[must_use]
+    pub fn with_payload_source(mut self, source: Arc<dyn PayloadSource>) -> Self {
+        self.payloads = Some(source);
+        self
     }
 
     /// Validate the whole batch before admitting any host, then schedule independent attempts.
@@ -455,6 +464,49 @@ impl Bootstrap {
         Ok(resolved)
     }
 
+    /// Resolve before the transaction exists, so a failed trust check cannot upload.
+    async fn payload(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        architecture: crate::probe::Architecture,
+    ) -> Result<std::path::PathBuf, Failure> {
+        if let Some(source) = &self.payloads {
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Install,
+                match architecture {
+                    crate::probe::Architecture::Aarch64 => "Get the arm64 binary",
+                    crate::probe::Architecture::X86_64 => "Get the x86_64 binary",
+                },
+                started,
+                None,
+            );
+            // Preserve the named step before the enclosing attempt deadline;
+            // stalled buckets must not become a generic installation failure.
+            let budget = self
+                .deadline
+                .saturating_sub(started.elapsed())
+                .saturating_sub(Duration::from_secs(1))
+                .min(Duration::from_secs(60));
+            let step = match architecture {
+                crate::probe::Architecture::Aarch64 => crate::model::InstallStep::GetArm64Binary,
+                crate::probe::Architecture::X86_64 => crate::model::InstallStep::GetX86_64Binary,
+            };
+            tokio::time::timeout(budget, source.get(architecture))
+                .await
+                .map_err(|_| {
+                    Failure::install("the builds host did not respond in time.").at(step)
+                })?
+        } else {
+            Ok(self.binaries.get(architecture).to_owned())
+        }
+    }
+
     async fn run(
         &self,
         batch: &BatchInner,
@@ -496,6 +548,9 @@ impl Bootstrap {
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
             metadata.host_id = Some(join.host);
         }
+        let payload = self
+            .payload(batch, target, attempt, started, check.architecture)
+            .await?;
         resources.installation = Some(Installation::new(session, target, &join)?);
         let transaction = resources
             .installation
@@ -510,21 +565,18 @@ impl Bootstrap {
             started,
             None,
         );
-        transaction
-            .stage(self.binaries.get(check.architecture))
-            .await
-            .map_err(|mut error| {
-                if error.message == "The matching static infraternal binary is unavailable." {
-                    error.missing_binary = Some(Box::new(crate::model::MissingBinary {
-                        architecture: match check.architecture {
-                            crate::probe::Architecture::X86_64 => "x86_64",
-                            crate::probe::Architecture::Aarch64 => "aarch64",
-                        },
-                        path: self.binaries.get(check.architecture).display().to_string(),
-                    }));
-                }
-                error
-            })?;
+        transaction.stage(&payload).await.map_err(|mut error| {
+            if error.message == "The matching static infraternal binary is unavailable." {
+                error.missing_binary = Some(Box::new(crate::model::MissingBinary {
+                    architecture: match check.architecture {
+                        crate::probe::Architecture::X86_64 => "x86_64",
+                        crate::probe::Architecture::Aarch64 => "aarch64",
+                    },
+                    path: payload.display().to_string(),
+                }));
+            }
+            error
+        })?;
         transaction.enroll_and_start(&join).await?;
         drop(join); // Capability plaintext is erased immediately after its stdin handoff.
         if !transaction.enable_linger().await? {
