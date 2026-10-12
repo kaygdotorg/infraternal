@@ -1,0 +1,4 @@
+   Compiling openssl-sys v0.9.117
+   Compiling openssl v0.10.81
+   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/mesh-access-round4/baseline/crates/plugins/mesh)
+    Finished `release` profile [optimized] target(s) in 7m 58s

@@ -1,0 +1,31 @@
+Traceback (most recent call last):
+  File "<string>", line 16, in <module>
+    payload,address=s.recvfrom(4096);s.sendto(payload,address);arrivals.append({'sent_ns':int(payload),'received_ns':time.monotonic_ns()})
+                                     ~~~~~~~~^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 1] Operation not permitted
+Traceback (most recent call last):
+  File "/root/infraternal-bench/mesh-policy/round4-173/mesh-revocation-proof.py", line 244, in <module>
+    if __name__=='__main__': main()
+                             ~~~~^^
+  File "/root/infraternal-bench/mesh-policy/round4-173/mesh-revocation-proof.py", line 241, in main
+    summary=asyncio.run(campaign(args))
+  File "/usr/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/root/infraternal-bench/mesh-policy/round4-173/mesh-revocation-proof.py", line 196, in campaign
+    arrivals=json.loads(await asyncio.wait_for(asyncio.to_thread(receiver.stdout.readline), 12))
+  File "/usr/lib/python3.13/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)

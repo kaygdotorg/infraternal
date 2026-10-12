@@ -21,7 +21,8 @@ executions; see `parser-fuzz.log`.
 require their separate real-engine harnesses. `recovery-repair-clippy.log` is the
 clean touched-crate lint gate. `retained-alias-tests.log` and
 `authorized-reenrollment-tests.log` each record two real-kernel passes.
-`reviewer-checklist.md` records author review and
+`final/direct-final-*.jsonl` and `direct-final-campaign.log` record two
+updated direct-path proofs on the perf VM. `reviewer-checklist.md` records author review and
 qualifies the independent review.
 
 ## Measurements
@@ -41,3 +42,10 @@ packaging pass and must not identify the final artifact.
 `commits.txt` records the atomic steps after merging dev. The contract is
 `contracts/mesh-dataplane.md`. No size budget was changed. The complete final
 `scripts/verify fast` output and branch head are recorded on #173.
+
+The full fast milestone passes every Rust row except static builds. The baseline
+023aee89 static x86_64 binary is 21,880,624 bytes; final runtime a707640f is
+21,918,864 bytes (+38,240 bytes, +0.175%). Both exceed the unchanged
+16,404,816-byte ceiling. `static-size-comparison.json` records the comparison.
+This is a D243 integration blocker, not a passing gate. The script stops before
+ARM static and TypeScript checks; this lane makes no claim about those stages.

@@ -31,3 +31,13 @@ The VM campaign uses only its own disposable network namespaces.
 The final static gate uses `scripts/verify fast`, a private scratch target,
 `TRACER_TEST_PORT=4373`, and a short disposable test-state root. The complete
 output is retained on #173. No gate threshold is relaxed.
+
+The final gate places `gate-python3.sh` at `<scratch>/gate-bin/python3` on PATH.
+Only the exact fast setup call (`latency_proxy.py self-test --samples 3`) is
+routed to the authorized locked VM to satisfy the owner timing rule; the current
+repository script is copied there first. Every other Python call uses the same
+installed Python as the original gate. No argument or limit is changed. Set
+`CARGO_BUILD_JOBS=4`, `RUST_TEST_THREADS=4`, `TRACER_TEST_PORT=4373`, the private
+`CARGO_TARGET_DIR`, and the short disposable `INFRATERNAL_TEST_STATE_ROOT`.
+The original shared-host setup failures remain retained and qualified as setup
+attempts, not performance evidence.

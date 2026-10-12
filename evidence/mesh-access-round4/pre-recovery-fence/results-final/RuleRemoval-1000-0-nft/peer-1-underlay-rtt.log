@@ -1,0 +1,8 @@
+PING 10.220.0.2 (10.220.0.2) 56(84) bytes of data.
+64 bytes from 10.220.0.2: icmp_seq=1 ttl=64 time=0.044 ms
+64 bytes from 10.220.0.2: icmp_seq=2 ttl=64 time=0.043 ms
+64 bytes from 10.220.0.2: icmp_seq=3 ttl=64 time=0.075 ms
+
+--- 10.220.0.2 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 406ms
+rtt min/avg/max/mdev = 0.043/0.054/0.075/0.014 ms

@@ -1,0 +1,11 @@
+{
+  "baseline_revision": "023aee89",
+  "head_runtime_revision": "a707640f",
+  "target": "x86_64-unknown-linux-musl",
+  "profile": "release",
+  "baseline_bytes": 21880624,
+  "head_bytes": 21918864,
+  "ceiling_bytes": 16404816,
+  "change_bytes": 38240,
+  "change_pct": 0.1747664966044844
+}
