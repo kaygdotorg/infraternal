@@ -150,13 +150,13 @@ export function createWindows(cx: Ctx): WindowsModule {
 
   const close = (rec: WinRec, instant = false): void => {
     const c = rec.owner;
-    // Closing never ends the session (D178): it keeps running, detached, and the toast says so.
+    // Closing never ends the session (D178): it keeps running, detached. The toast says so once, early on (TASTE: teach once).
     const inv = cx.adapters.inventory;
     const sess = inv && isTerminal(rec) && rec.model.sessionId ? inv.get(rec.model.host, rec.model.sessionId) : undefined;
     const placed = sess ? placeOf(rec) : undefined;
     const wasRunning = sess?.state === "open";
     if (sess && wasRunning) inv!.detach(rec.model.host, sess.id);
-    if (placed && wasRunning) cx.toast.show({ message: "Session keeps running", action: { label: "Undo", onSelect: () => reopen(placed) }, duration: 6000 });
+    if (placed && wasRunning && cx.adapters.teach?.("close-keeps-running")) cx.toast.show({ message: "Session keeps running", action: { label: "Reopen", onSelect: () => reopen(placed) }, duration: 6000 });
     if (cx.inputLock.state?.win === rec) cx.inputLock.toggle();
     if (state.activeWin === rec) setActive(cx, undefined);
     const root = rec.card.root;

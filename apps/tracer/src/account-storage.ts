@@ -14,6 +14,7 @@ const CANVAS = "infraternal.canvas.";
 const INVENTORY = "tracer.sessions.";
 const TAB_SESSION = "tracer.session.";
 const LAST_ACCOUNT = "tracer.user-id";
+const HINTS = "tracer.hints.";
 
 /** localStorage: the canvas document (windows, columns, views) of one account. */
 export const canvasKey = (account: string): string => CANVAS + account;
@@ -21,6 +22,12 @@ export const canvasKey = (account: string): string => CANVAS + account;
 export const inventoryKey = (account: string): string => INVENTORY + account;
 /** sessionStorage: the public id of the terminal this tab last had open for one account. */
 export const tabSessionKey = (account: string): string => TAB_SESSION + account;
+/**
+ * localStorage: how often one account has signed in on this device and which explanatory hints it was already
+ * shown (`hints.ts`). It is deliberately not swept by `clearAccountStorage`: a sign-out followed by a sign-in is
+ * the next sign-in, not a fresh start, and the hint rule counts sign-ins. It holds two small numbers per hint.
+ */
+export const hintsKey = (account: string): string => HINTS + account;
 /** localStorage: the public id of the account that last signed in on this device. */
 export const lastAccountKey = LAST_ACCOUNT;
 

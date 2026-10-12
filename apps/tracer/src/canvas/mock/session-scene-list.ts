@@ -3,7 +3,7 @@ export const SESSION_SCENES: Array<{ title: string; hint: string }> = [
   { title: "Session manager", hint: "grouped by state, by frecency" },
   { title: "Sidebar inventory", hint: "open, detached, exited · markers" },
   { title: "Exited session", hint: "final screen · Run again · Dismiss" },
-  { title: "Close keeps it running", hint: "detached · toast · Undo" },
+  { title: "Close keeps it running", hint: "detached · toast · Reopen" },
   { title: "End a session", hint: "names what is running" },
   { title: "Splits", hint: "right, then down · the droplet" },
   { title: "Sized for another device", hint: "scaled to fit · type to take over" },

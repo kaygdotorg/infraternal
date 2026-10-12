@@ -33,6 +33,7 @@ import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
 import { createLiveInventory } from "./sessions/live-inventory";
+import { teachOnce } from "../hints";
 import type { DetailsSourceLoader } from "./windows/details-source";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
@@ -143,7 +144,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // fetch in createCanvas and does not wait for it.
   if (saved && docHasGroups(saved)) await loadGroups();
   const canvas = createCanvas(core, {
-    adapters: { sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => addHost.open(), authority },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => addHost.open(), authority },
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
