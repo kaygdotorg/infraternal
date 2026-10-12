@@ -1,5 +1,9 @@
 //! Tests private control endpoints and replacement-path trust before any key is exported [217], #154.
 
+#[cfg(target_os = "linux")]
+#[path = "restart_deleted_path_review_tests.rs"]
+mod deleted_path_review;
+
 use super::*;
 use crate::restart_binary::fixture::Signed;
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
