@@ -275,11 +275,25 @@ async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() 
     .unwrap();
     let killed_session_id = killed.id;
     let killed_process_id = i32::try_from(killed.pid).unwrap();
+    let death = tokio::io::unix::AsyncFd::new(
+        infraternal_shim::process_exit_descriptor(killed.pid).unwrap(),
+    )
+    .unwrap();
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(killed_process_id),
         nix::sys::signal::Signal::SIGKILL,
     )
     .unwrap();
+    // Signal submission is not process death. Await kernel readiness before
+    // testing a restart census so an in-flight listener teardown cannot reset
+    // the discovery handshake. The separate exit-latency probe starts at kill.
+    drop(
+        timeout(Duration::from_secs(5), death.readable())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    drop(death);
     cleanup.pids.retain(|pid| *pid != killed.pid);
     drop(killed);
 
