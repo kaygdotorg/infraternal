@@ -49,3 +49,18 @@ fn remote_refusal_matches_its_declared_cli_output() {
         }
     }
 }
+
+#[cfg(not(feature = "server"))]
+#[test]
+fn node_build_refuses_server_creation() {
+    let output = Command::new(binary())
+        .args(["server", "--json"])
+        .output()
+        .unwrap();
+    refusal(&output, "server");
+    let creation = Command::new(binary())
+        .args(["server", "init", "--json"])
+        .output()
+        .unwrap();
+    assert!(!creation.status.success());
+}
