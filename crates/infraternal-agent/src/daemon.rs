@@ -917,8 +917,16 @@ async fn terminal_run(
                 } else { std::future::pending().await }
             } => {
                 if result? != 0 { return Err(sessions::invalid("unexpected ownership data")); }
-                // At the bound the shim writes the exit record before closing
-                // either link. Do not wait for more credit to report ended state.
+                // Ownership and data are separate sockets: EOF on the owner
+                // can arrive while final output/Exited remains queued on data.
+                // Private probes deliberately have no durable ended record.
+                // Drain the existing data link in order before consulting one;
+                // a parked attachment still needs its saved-record fallback.
+                owner = None;
+                if session.is_some() {
+                    finished_peer = true;
+                    continue;
+                }
                 if recorded_end(&path, id, stream, &tx).await? {
                     return Ok(());
                 }
@@ -1008,3 +1016,7 @@ mod gone_tests;
 #[cfg(test)]
 #[path = "stream_memory_tests.rs"]
 mod stream_memory_tests;
+
+#[cfg(test)]
+#[path = "readiness_exit_tests.rs"]
+mod readiness_exit_tests;
