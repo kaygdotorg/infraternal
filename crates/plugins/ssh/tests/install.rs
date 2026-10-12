@@ -259,7 +259,6 @@ fn counted_transaction(
 }
 
 #[tokio::test]
-#[ignore = "#169 retry: verified payload should cross SSH only once"]
 async fn retry_reuses_verified_payload_after_owned_rollback() {
     let fixture = Fixture::new();
     let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -281,7 +280,6 @@ async fn retry_reuses_verified_payload_after_owned_rollback() {
 }
 
 #[tokio::test]
-#[ignore = "#169 retry: cached content must be hash checked again"]
 async fn retry_resends_payload_when_cache_content_changes() {
     let fixture = Fixture::new();
     let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -305,7 +303,6 @@ async fn retry_resends_payload_when_cache_content_changes() {
 }
 
 #[tokio::test]
-#[ignore = "#169 retry: foreign cache paths must be refused"]
 async fn payload_reuse_never_adopts_a_foreign_cache_directory() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();

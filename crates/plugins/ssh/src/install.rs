@@ -120,45 +120,42 @@ impl Installation {
         let digest = binary_digest(binary)
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
-        self.session.run(&self.script(&format!(r#"
-# Admission and cleanup share the same private-parent rule. Refuse a parent
-# that cannot protect a rollback receipt before creating any installation data.
-parent=$(dirname "$base")
-if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
-[ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
-parent_mode=$(stat -c '%a' "$parent")
-[ "$((0$parent_mode & 022))" -eq 0 ] || exit 71
-# A retired fresh transaction still owns final cleanup outside the base.
-# Admit no replacement until its receipt is removed after successful cleanup.
-for receipt in "$base".bootstrap-rollback-*; do
-    [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
-done
-if [ -e "$base" ] || [ -L "$base" ]; then
-    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
-else
-    mkdir -p "$base"
-    printf '%s\n' "$host" > "$base/.bootstrap-owner"
-fi
-[ ! -L "$base/bin" ] && [ ! -L "$base/state" ] || exit 71
-stage="$base/.bootstrap-lock"
-[ ! -e "$stage" ] && [ ! -L "$stage" ] || exit 72
-if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
-    [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
-    kind=upgrade
-else
-    kind=fresh
-fi
-# The private acquisition journal precedes mkdir. It proves this attempt's
-# empty lock if the command stops before the lock's ordinary receipts exist.
-printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
-mkdir "$stage" || exit 72
-printf '%s\n' "$transaction" > "$stage/transaction"
-printf '%s\n' "$kind" > "$stage/kind"
-rm -f "$base/.bootstrap-acquiring"
-cat > "$stage/payload"
-printf '%s  %s\n' {} "$stage/payload" | sha256sum -c - >/dev/null
-chmod 700 "$stage/payload"
-"#, shell_quote(&digest))), Input::File(binary)).await.map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        let query = format!(
+            "{PAYLOAD_CACHE}\nvalidate_cache\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then printf 'reuse\\n'; fi",
+            shell_quote(&digest)
+        );
+        let cached = self
+            .session
+            .run(&self.script(&query), Input::Empty)
+            .await
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        let reuse = match cached.stdout.as_slice() {
+            b"reuse\n" => true,
+            b"" => false,
+            _ => {
+                return Err(Failure::install("The payload reuse response was invalid.")
+                    .at(InstallStep::Upload));
+            }
+        };
+        let transfer = if reuse {
+            "ln \"$cache/payload\" \"$stage/payload\""
+        } else {
+            "cat > \"$stage/payload\""
+        };
+        let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
+        let body = format!(
+            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}",
+            shell_quote(&digest)
+        );
+        let input = if reuse {
+            Input::Empty
+        } else {
+            Input::File(binary)
+        };
+        self.session
+            .run(&self.script(&body), input)
+            .await
+            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
         Ok(())
     }
 
@@ -374,6 +371,80 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
         Ok(())
     }
 }
+
+// Cache records contain only public executable content. Every lookup repeats
+// ownership, link, private-parent and fixed-marker checks before any content read.
+const PAYLOAD_CACHE: &str = r#"
+cache="$base.bootstrap-cache"
+validate_cache() {
+    if [ -e "$cache" ] || [ -L "$cache" ]; then
+        parent=$(dirname "$cache")
+        [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+        mode=$(stat -c '%a' "$parent")
+        [ "$((0$mode & 022))" -eq 0 ] || exit 71
+        [ -d "$cache" ] && [ ! -L "$cache" ] && [ -O "$cache" ] && [ "$(stat -c '%a' "$cache")" = 700 ] || exit 71
+        [ -f "$cache/owner" ] && [ ! -L "$cache/owner" ] && [ -O "$cache/owner" ] && [ "$(stat -c '%a' "$cache/owner")" = 600 ] || exit 71
+        [ "$(stat -c '%s' "$cache/owner")" = 29 ] && [ "$(cat "$cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 71
+        if [ -e "$cache/payload" ] || [ -L "$cache/payload" ]; then
+            [ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] && [ -O "$cache/payload" ] && [ "$(stat -c '%a' "$cache/payload")" = 700 ] || exit 71
+        fi
+    fi
+}
+"#;
+
+// Setup retains its existing attempt lock and ownership proof irrespective of
+// whether the payload arrives through stdin or a verified cache hard link.
+const STAGE_TRANSACTION: &str = r#"
+# Admission and cleanup share the same private-parent rule. Refuse a parent
+# that cannot protect a rollback receipt before creating any installation data.
+parent=$(dirname "$base")
+if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
+[ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+parent_mode=$(stat -c '%a' "$parent")
+[ "$((0$parent_mode & 022))" -eq 0 ] || exit 71
+# A retired fresh transaction still owns final cleanup outside the base.
+# Admit no replacement until its receipt is removed after successful cleanup.
+for receipt in "$base".bootstrap-rollback-*; do
+    [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
+done
+if [ -e "$base" ] || [ -L "$base" ]; then
+    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
+else
+    mkdir -p "$base"
+    printf '%s\n' "$host" > "$base/.bootstrap-owner"
+fi
+[ ! -L "$base/bin" ] && [ ! -L "$base/state" ] || exit 71
+stage="$base/.bootstrap-lock"
+[ ! -e "$stage" ] && [ ! -L "$stage" ] || exit 72
+if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
+    [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
+    kind=upgrade
+else
+    kind=fresh
+fi
+# The private acquisition journal precedes mkdir. It proves this attempt's
+# empty lock if the command stops before the lock's ordinary receipts exist.
+printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
+mkdir "$stage" || exit 72
+printf '%s\n' "$transaction" > "$stage/transaction"
+printf '%s\n' "$kind" > "$stage/kind"
+rm -f "$base/.bootstrap-acquiring"
+"#;
+
+// Publish at most one payload, after the staged hash has passed. Cache creation
+// is a prepared-directory rename that cannot adopt an existing foreign path.
+const PUBLISH_PAYLOAD_CACHE: &str = r#"
+validate_cache
+mkdir "$stage/cache"
+printf 'INFRATERNAL_PAYLOAD_CACHE_V1\n' > "$stage/cache/owner"
+ln "$stage/payload" "$stage/cache/payload"
+if [ -e "$cache" ] || [ -L "$cache" ]; then
+    mv -Tf "$stage/cache/payload" "$cache/payload"
+else
+    mv -Tn "$stage/cache" "$cache"
+    [ ! -e "$stage/cache" ] && [ ! -L "$stage/cache" ] || exit 71
+fi
+"#;
 
 // The rollback journal is a fixed shell program. Keeping it outside the Rust
 // adapter makes its ownership and interruption invariants reviewable together.
