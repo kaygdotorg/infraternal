@@ -37,7 +37,7 @@ export interface Bridge {
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
-  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number }>;
+  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
   cookie: string;
 }
 
@@ -60,6 +60,8 @@ const text = new TextDecoder();
  */
 export async function startRealServer(options: {
   latencyMs?: number;
+  /** Record public control timestamps only for an explicitly enabled VM measurement. */
+  timedControls?: boolean;
   /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
   lean?: boolean;
   address?: string;
@@ -149,7 +151,7 @@ export async function startRealServer(options: {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Input" && f.type !== "Credit" && f.type !== "Pong") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}`);
           if (f.type === "AttachTerm") bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
           if (f.type === "Close" && stream !== 0) bridge.detached.push(stream);
-          if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId });
+          if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
           if (f.type === "Subscribe") bridge.control.push({ dir: "up", type: "Subscribe", detail: (() => { try { return String((JSON.parse(text.decode(f.filterJson)) as { topic?: unknown }).topic); } catch { return "?"; } })() });
         });
         later(() => { if (bridge.closed) return; if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes, { binary }); else queued.push({ bytes, binary }); });

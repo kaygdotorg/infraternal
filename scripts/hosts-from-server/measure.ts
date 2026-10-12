@@ -1,0 +1,85 @@
+/** Measures returning sign-in through real PTYs at 1,000 admitted hosts; run only on the locked perf VM [D256], #194. */
+import { chromium } from "../../apps/tracer/node_modules/playwright";
+import { spawnSync } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { startRealServer } from "../../apps/tracer/real/server";
+
+const job = process.env.HOST_INVENTORY_JOB_ROOT;
+if (!job || !process.env.PERF_VM || !process.env.BASELINE_DIST || !process.env.CANDIDATE_DIST) throw new Error("Run with prepared builds on the perf VM");
+const results: Record<string, unknown> = { machine: (await readFile("/proc/sys/kernel/hostname", "utf8")).trim(), loadBefore: (await readFile("/proc/loadavg", "utf8")).trim(), hosts: 1000, samples: 12, rttMs: 300, tracerTestPort: process.env.TRACER_TEST_PORT, firstFrameDefinition: "first glyph draw on the visible terminal canvas" };
+const browser = await chromium.launch({ headless: true, args: ["--disable-renderer-backgrounding"] });
+try {
+  for (const [variant, dist] of [["baseline", process.env.BASELINE_DIST], ["candidate", process.env.CANDIDATE_DIST]] as const) {
+    process.env.TRACER_DIST = dist;
+    const server = await startRealServer({ latencyMs: 150, timedControls: true, stateRoot: resolve(job, "state") });
+    try {
+      const setup = await browser.newContext({ ignoreHTTPSErrors: true });
+      const page = await setup.newPage();
+      const auth = await setup.newCDPSession(page);
+      await auth.send("WebAuthn.enable");
+      await auth.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true } });
+      await page.goto(server.origin);
+      try { await page.locator("#setup-token").fill(server.token); } catch { throw new Error("Fixture setup token field unavailable"); }
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      await page.locator("#setup-username").fill("host_inventory_perf");
+      await page.locator("#setup-display-name").fill("Inventory perf");
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      await page.getByRole("button", { name: "Create passkey" }).click();
+      await page.getByRole("heading", { name: "Save your recovery key" }).waitFor();
+      await page.locator(".auth-check").click();
+      await page.getByRole("button", { name: "Open infraternal" }).click();
+      await page.locator(".cl-viewport").waitFor();
+      const cookies = await setup.cookies();
+      // Public fixture records only. Browser ceremony and session capabilities remain in memory.
+      const seeded = spawnSync("python3", ["-c", `import sqlite3,sys,uuid,pathlib
+p=next(pathlib.Path(sys.argv[1]).glob('infraternal.sqlite'))
+c=sqlite3.connect(p);owner=c.execute("SELECT id FROM users WHERE owner=1").fetchone()[0]
+for n in range(1,1001):
+ h=uuid.UUID(int=n).bytes
+ c.execute("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,100)",(h,owner))
+ c.execute("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,zeroblob(32),zeroblob(32),100,604900)",(h+h,h))
+ c.execute("INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,?)",(h,'operator@worker-%04d'%n))
+c.commit()`, server.dataDir], { stdio: ["ignore", "ignore", "ignore"] });
+      if (seeded.status !== 0) throw new Error("Public admitted-host fixture failed");
+      await setup.close();
+      const samples: number[] = [], inventoryBeforeFrame: boolean[] = [];
+      for (let trial = 0; trial < 12; trial++) {
+        const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 } });
+        await context.addCookies(cookies);
+        await context.addInitScript(() => {
+          const record = (): void => {
+            const w = window as unknown as { __hostFrame?: number };
+            if (w.__hostFrame === undefined) w.__hostFrame = performance.now();
+          };
+          for (const name of ["fillText", "drawImage"] as const) {
+            const original = CanvasRenderingContext2D.prototype[name];
+            Reflect.set(CanvasRenderingContext2D.prototype, name, function(this: CanvasRenderingContext2D, ...args: unknown[]) {
+              const result = Reflect.apply(original, this, args);
+              if (this.canvas.closest("#terminal-host") && this.canvas.isConnected) record();
+              return result;
+            });
+          }
+        });
+        const returning = await context.newPage();
+        await returning.goto(server.origin);
+        await returning.waitForFunction(() => (window as unknown as { __hostFrame?: number }).__hostFrame !== undefined);
+        const first = await returning.evaluate(() => ({ relative: (window as unknown as { __hostFrame: number }).__hostFrame, origin: performance.timeOrigin }));
+        samples.push(first.relative);
+        const bridge = server.bridges.at(-1);
+        inventoryBeforeFrame.push(bridge?.control.some((row) => row.dir === "up" && row.detail === "remote.host.list" && row.at !== undefined && row.at <= first.origin + first.relative) ?? false);
+        if (variant === "candidate") {
+          await returning.keyboard.press("Control+Shift+K");
+          await returning.locator("#palette-input").fill("Open shell on worker-1000");
+          await returning.locator("#palette-results [role=option]").filter({ hasText: "Open shell on worker-1000" }).waitFor({ timeout: 20000 });
+        }
+        await context.close();
+      }
+      const sorted = [...samples].sort((a,b) => a-b);
+      results[variant] = { firstFrameMs: samples, p50Ms: sorted[5], p99Ms: sorted[11], inventoryAskedBeforeFirstFrame: inventoryBeforeFrame };
+    } finally { await server.dispose(); }
+  }
+} finally { await browser.close(); }
+results.loadAfter = (await readFile("/proc/loadavg", "utf8")).trim();
+await writeFile(resolve(job, "sign-in.json"), JSON.stringify(results, null, 2));
+console.log(JSON.stringify(results));
