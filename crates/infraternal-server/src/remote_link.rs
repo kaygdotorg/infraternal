@@ -275,6 +275,26 @@ impl RemoteLink {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn hold_writer_map(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        if let LinkTransport::Quic(link) = &self.transport {
+            let _guard = link.streams.lock().await;
+            let _ = ready.send(());
+            let _ = release.await;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) async fn control_packet_ready(&self) -> bool {
+        match &self.transport {
+            LinkTransport::Quic(link) => !link.incoming.lock().await.control.is_empty(),
+            LinkTransport::Tcp { .. } => false,
+        }
+    }
+
     pub(crate) fn supports_server_paths(&self) -> bool {
         self.server_paths
     }
