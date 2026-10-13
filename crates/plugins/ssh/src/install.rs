@@ -522,9 +522,10 @@ impl Installation {
         };
         let start = "stage=\"$base/.bootstrap-lock\"\n[ \"$(cat \"$stage/transaction\")\" = \"$transaction\" ] || exit 72\nexec 9<&-\nexec \"$stage/payload\" __ssh-session --state \"$base/sessions\"";
         let script = format!(
-            "{SETUP_HEADER}setup_step upload {}\nsetup_step start {}\n",
-            shell_quote(&self.script(&upload)),
-            shell_quote(&self.script(start))
+            "{}setup_step upload {}\nsetup_step start {}\n",
+            self.step_header()?,
+            self.step_argument(&upload),
+            self.step_argument(start)
         );
         let channel = if let Some(checked) = checked {
             let script = compact(&script);
@@ -769,23 +770,30 @@ impl Installation {
         parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
     }
 
-    fn setup_script(&self, join: &JoinMaterial, upload: Option<&str>) -> Result<String, Failure> {
+    /// Each step still runs a fresh errexit child with the full ownership
+    /// prelude. Only its representation is shared before crossing SSH, so
+    /// early session startup and enrollment carry that prelude once (D255).
+    fn step_header(&self) -> Result<String, Failure> {
         let mut script = SETUP_HEADER.to_owned();
-        // Share only representation: each fresh child still executes the full
-        // immutable prelude, ownership checks and its own body with errexit.
-        // Root steps retain their existing independent privilege wrapper.
-        let shared = matches!(self.mode, InstallMode::Rootless);
-        if shared {
+        if self.mode == InstallMode::Rootless {
             writeln!(script, "setup_common={}", shell_quote(&self.script("")))
                 .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
         }
-        let argument = |body: &str| {
-            if shared {
-                format!("\"$setup_common\"{}", shell_quote(body))
-            } else {
-                shell_quote(&self.script(body))
-            }
-        };
+        Ok(script)
+    }
+
+    fn step_argument(&self, body: &str) -> String {
+        if self.mode == InstallMode::Rootless {
+            format!("\"$setup_common\"{}", shell_quote(body))
+        } else {
+            // Preserve each root step's independent privilege wrapper.
+            shell_quote(&self.script(body))
+        }
+    }
+
+    fn setup_script(&self, join: &JoinMaterial, upload: Option<&str>) -> Result<String, Failure> {
+        let mut script = self.step_header()?;
+        let argument = |body: &str| self.step_argument(body);
         if let Some(upload) = upload {
             script = script.replace(
                 "# INFRATERNAL_SETUP_STEPS_V1",
