@@ -20,7 +20,7 @@ async fn credit_bursts_do_not_consume_ordered_input_capacity() {
         match receiver.next().await.unwrap() {
             Command::Input(seq, _) => inputs.push(seq),
             Command::Credit(bytes) => granted += bytes,
-            Command::Resize(..) => panic!("unexpected resize"),
+            Command::Resize(..) | Command::Ping(..) => panic!("unexpected command"),
         }
     }
     assert_eq!(inputs, (0..8).collect::<Vec<_>>());
@@ -81,7 +81,7 @@ async fn input_and_resize_keep_their_shared_fifo_order_around_credit() {
             Command::Input(seq, _) => ordered.push(seq),
             Command::Resize(80, 24, 0, 0) => ordered.push(100),
             Command::Credit(bytes) => credit += bytes,
-            Command::Resize(..) => panic!("unexpected resize"),
+            Command::Resize(..) | Command::Ping(..) => panic!("unexpected command"),
         }
     }
     assert_eq!(ordered, [7, 100, 8]);

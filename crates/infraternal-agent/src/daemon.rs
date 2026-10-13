@@ -49,6 +49,7 @@ enum Command {
     Input(u64, Vec<u8>),
     Credit(u32),
     Resize(u16, u16, u16, u16),
+    Ping(u64, u64),
 }
 // Dropping cancellation retires a stalled handshake as well as queued commands.
 struct Stream {
@@ -67,7 +68,7 @@ enum Message {
     Deferred(u32, u32, infraternal_plugin_api::ActionReply),
     Event(u32, Vec<u8>),
     Exited(u32, Vec<u8>, oneshot::Sender<()>),
-    Pong(u64, u64),
+    Pong(u32, u64, u64),
     Close(u32, &'static str),
     /// The session's shim is gone: a final stream close, never retried (wire §4).
     Ended(u32),
@@ -187,8 +188,9 @@ async fn writer(
                 write_event(&mut tx, socket, stream, &json).await?;
                 let _ = delivered.send(());
             }
-            Message::Pong(nonce, sent_us) => {
-                tx.send(socket, 0, &Frame::Pong { nonce, sent_us }).await?;
+            Message::Pong(stream, nonce, sent_us) => {
+                tx.send(socket, stream, &Frame::Pong { nonce, sent_us })
+                    .await?;
             }
             Message::Ended(stream) => {
                 tx.send(
@@ -466,7 +468,7 @@ async fn run_channel(
                     }
                     match decoded.frame {
                         Frame::Hello {version: 1, ..} if stream == 0 => {}
-                        Frame::Ping {nonce, sent_us} if stream == 0 => reply(&control, Message::Pong(nonce, sent_us))?,
+                        Frame::Ping {nonce, sent_us} if stream == 0 => reply(&control, Message::Pong(0, nonce, sent_us))?,
                         #[cfg(feature = "remote")]
                         Frame::Call {call_id, action_id, input_json} if stream == 0 && matches!(action_id, "transport.csr" | "transport.certificate") && renewal.is_some() => {
                             if !renewals.is_empty() || input_json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
@@ -530,6 +532,7 @@ async fn run_channel(
                         frame => {
                             let command = match frame {
                                 Frame::Input {in_seq, bytes} => Command::Input(in_seq, bytes.to_vec()),
+                                Frame::Ping {nonce, sent_us} => Command::Ping(nonce, sent_us),
                                 Frame::Credit {bytes} => Command::Credit(bytes),
                                 Frame::Resize {cols, rows, px_w, px_h} => Command::Resize(cols, rows, px_w, px_h),
                                 Frame::Close {..} => {
@@ -606,6 +609,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) 
             let decoded = receive.next(channel).await?;
             let command = match decoded.frame {
                 Frame::Input { in_seq, bytes } => Command::Input(in_seq, bytes.to_vec()),
+                Frame::Ping { nonce, sent_us } => Command::Ping(nonce, sent_us),
                 Frame::Credit { bytes } => Command::Credit(bytes),
                 Frame::Resize {
                     cols,
@@ -909,6 +913,8 @@ async fn terminal_run(
     let mut pending: Option<Shim> = None;
     let mut deadline = None;
     let mut finished_peer = false;
+    // One state fence in flight bounds shim work even if probes are pipelined over the network.
+    let mut probe = None;
     loop {
         if let Some(frame) = pending.take() {
             match frame {
@@ -1064,6 +1070,18 @@ async fn terminal_run(
                         match other {
                             Command::Input(seq, bytes) => peer.send(&Shim::SequencedInput(seq, bytes)).await?,
                             Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
+                            Command::Ping(nonce, sent_us) => {
+                                if detached {
+                                    // The preceding relink/state exchange crossed this shim, even when output is parked.
+                                    emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
+                                    session = None;
+                                    continue;
+                                }
+                                if probe.is_none() {
+                                    peer.send(&Shim::InputStateRequest).await?;
+                                    probe = Some((nonce, sent_us));
+                                }
+                            }
                             Command::Credit(_) => return Err(sessions::invalid("unexpected credit dispatch")),
                         }
                         if detached {
@@ -1097,6 +1115,10 @@ async fn terminal_run(
                 match frame? {
                     frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
                     Shim::InputAck(seq) => emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?,
+                    Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
+                        let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
+                        emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
+                    }
                     Shim::Exited(status, final_seq) => {
                         exited(&tx, stream, id, status, final_seq, false).await?;
                         return Ok(());
@@ -1139,3 +1161,7 @@ mod census_retry_tests;
 #[cfg(test)]
 #[path = "readiness_exit_tests.rs"]
 mod readiness_exit_tests;
+
+#[cfg(test)]
+#[path = "daemon_liveness_tests.rs"]
+mod liveness_tests;
