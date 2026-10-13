@@ -1,5 +1,5 @@
 /** Synchronizes admitted terminal hosts from bounded account-scoped mux pages; storage never supplies admission. */
-import { hostPlatformFromOs } from "../../../../../packages/ui/src/host-icons";
+import { ensureHostMarks, hostPlatformFromOs } from "../../../../../packages/ui/src/host-icons";
 import { ActionRefused } from "../../connection";
 import { isCanonicalUuid } from "../../identifiers";
 import type { HostEntry } from "./adapter";
@@ -49,6 +49,9 @@ export function syncAdmittedHosts(connection: Transport, sink: { replaceHosts(ho
         if (result.next && (result.next === after || !ids.has(result.next) || !result.hosts.length)) throw new Error("Invalid host cursor");
         after = result.next;
       } while (after);
+      // The marks start loading with the list but never hold it back (hosts matter more than their logos): a mark drawn
+      // before its artwork arrives is the machine glyph and takes the real path in place (host-icons.ts).
+      void ensureHostMarks(hosts.map((host) => host.os));
       sink.replaceHosts(hosts);
       // Older servers refuse the read; subscribing only after success avoids closing their socket.
       if (!offEvents) offEvents = connection.subscribe({ topic: "remote.hosts" }, (event) => {
