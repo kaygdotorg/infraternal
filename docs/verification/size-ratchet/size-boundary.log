@@ -1,0 +1,3 @@
+x86_64-unknown-linux-musl: exact 22204304-byte cap PASS; 22204305 bytes rejected PASS; smaller artifact requires ratchet PASS
+aarch64-unknown-linux-musl: exact 19638744-byte cap PASS; 19638745 bytes rejected PASS; smaller artifact requires ratchet PASS
+unsupported target: rejected PASS

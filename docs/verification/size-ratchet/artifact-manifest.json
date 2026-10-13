@@ -1,0 +1,53 @@
+{
+  "role": "Stripped shipping endpoint artifact identities for #198/D243; binaries retained only during verification.",
+  "artifacts": [
+    {
+      "phase": "prod",
+      "arch": "x86_64",
+      "bytes": 20333104,
+      "sha256": "d0da6613208bb8c91041290c402f6d803cbd48c88656ff932738e3d95ea4afa5"
+    },
+    {
+      "phase": "prod",
+      "arch": "aarch64",
+      "bytes": 18112240,
+      "sha256": "d50c4fb8e051c9a0bacd43caf2ada59115b19d0993ee72f3127d1663446cd48c"
+    },
+    {
+      "phase": "dev",
+      "arch": "x86_64",
+      "bytes": 22580816,
+      "sha256": "4f0fba2d7d5d36d6c055f3ad9964e7ff0b4e49f96e153c8a23967648313c7322"
+    },
+    {
+      "phase": "dev",
+      "arch": "aarch64",
+      "bytes": 19986840,
+      "sha256": "cde9d2d34d48c1ad02184b480da80ef9c511b52fad0b4a8ab35a71725e0b10bd"
+    },
+    {
+      "phase": "sections",
+      "arch": "x86_64",
+      "bytes": 22263504,
+      "sha256": "d8b43e1db16ba15cdec1fabf321f3943e854da74724840a9c6a5c03700fdb66d"
+    },
+    {
+      "phase": "sections",
+      "arch": "aarch64",
+      "bytes": 19681112,
+      "sha256": "c024158b61778043066c07ac3d3ed820b4b0dd28f75b9ea465c8d4e2b60f7de1"
+    },
+    {
+      "phase": "metadata",
+      "arch": "x86_64",
+      "bytes": 22204304,
+      "sha256": "39cb2b70a793ae0736b5dce45189c006b6f75497011756eaa8d0a9a4b29cd6c5"
+    },
+    {
+      "phase": "metadata",
+      "arch": "aarch64",
+      "bytes": 19638744,
+      "sha256": "987dd22ae577a2ca181287e1edf9e17d2d822ed406b947f00c95f55931a9de13"
+    }
+  ]
+}

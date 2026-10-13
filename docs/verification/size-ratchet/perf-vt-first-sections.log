@@ -1,0 +1,2 @@
+{"binary": "bin/sections", "machine": "infraternal-perf-test", "cores": 4, "load": [0.35986328125, 0.86572265625, 1.470703125], "echo_samples": 1000, "echo_p50_ns": 190348.0, "echo_p99_ns": 471217}
+{"binary": "bin/sections", "credited_flood": [{"bytes": 52428820, "elapsed_ns": 2814550804, "mib_per_s": 17.764830893237743}, {"bytes": 52428896, "elapsed_ns": 2907920986, "mib_per_s": 17.194446408089018}, {"bytes": 52428858, "elapsed_ns": 2827413643, "mib_per_s": 17.684025624230305}], "load": [0.45849609375, 0.87060546875, 1.46484375]}

@@ -1,0 +1,2 @@
+{"binary": "bin/baseline", "machine": "infraternal-perf-test", "cores": 4, "load": [0.388671875, 0.93994140625, 1.5263671875], "echo_samples": 1000, "echo_p50_ns": 228598.0, "echo_p99_ns": 619941}
+{"binary": "bin/baseline", "credited_flood": [{"bytes": 52428858, "elapsed_ns": 3231877379, "mib_per_s": 15.470901104726087}, {"bytes": 52428858, "elapsed_ns": 3039999746, "mib_per_s": 16.44738799037727}, {"bytes": 52428858, "elapsed_ns": 2984236449, "mib_per_s": 16.75472308163285}], "load": [0.7041015625, 0.99169921875, 1.537109375]}

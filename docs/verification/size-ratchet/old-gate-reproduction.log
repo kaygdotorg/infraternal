@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "/home/kayg/.cache/codex-scratch/size-ratchet/test-static-size.py", line 51, in <module>
+    main()
+    ~~~~^^
+  File "/home/kayg/.cache/codex-scratch/size-ratchet/test-static-size.py", line 30, in main
+    assert result.returncode == 0, f"shipping {target} rejected:\n{result.stdout}{result.stderr}"
+           ^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: shipping x86_64-unknown-linux-musl rejected:
+production trust: PASS (staging-trust authority absent)
+/home/kayg/.cache/codex-scratch/size-ratchet/size-boundary-ruf0rssh/x86_64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
+PT_INTERP: absent; size: 22580816 bytes (baseline 16142672 + allowance 262144 = max 16404816)
+binary exceeds the 16404816-byte size budget: 22580816 bytes
+
