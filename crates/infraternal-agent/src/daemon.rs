@@ -109,6 +109,24 @@ async fn deferred_reply(
     Ok(())
 }
 
+/// The pre-sent QUIC greeting and daemon greeting must serialize identically:
+/// the control adapter consumes the daemon's greeting only after exact comparison.
+pub(crate) fn hello_capabilities(native: bool, renewal: bool) -> u64 {
+    infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+        | if native {
+            infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
+                | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
+                | infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+        } else {
+            0
+        }
+        | if renewal {
+            infraternal_plugin_api::channel::LIVE_RENEWAL
+        } else {
+            0
+        }
+}
+
 async fn writer(
     socket: &impl Channel,
     mut messages: mpsc::Receiver<Message>,
@@ -123,18 +141,7 @@ async fn writer(
             0,
             &Frame::Hello {
                 version: 1,
-                caps: infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
-                    | (if socket.native_stream_id().is_some() {
-                        infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
-                            | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
-                    } else {
-                        0
-                    })
-                    | (if renewal {
-                        infraternal_plugin_api::channel::LIVE_RENEWAL
-                    } else {
-                        0
-                    }),
+                caps: hello_capabilities(socket.native_stream_id().is_some(), renewal),
                 client_info: "infraternal agent",
             },
         )

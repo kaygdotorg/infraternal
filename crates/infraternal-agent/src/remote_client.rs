@@ -251,14 +251,7 @@ async fn quic_connect(
 fn client_greeting(renewal: bool) -> infraternal_protocol::Frame<'static> {
     infraternal_protocol::Frame::Hello {
         version: 1,
-        caps: remote_quic::REMOTE_WRITER_BINDING
-            | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
-            | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
-            | if renewal {
-                crate::remote_renewal::LIVE_RENEWAL
-            } else {
-                0
-            },
+        caps: daemon::hello_capabilities(true, renewal),
         client_info: "infraternal agent",
     }
 }

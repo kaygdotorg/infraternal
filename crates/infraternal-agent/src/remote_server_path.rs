@@ -30,6 +30,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MESH_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 /// Beyond one RTT: the server's 25 ms maximum ACK delay plus scheduling jitter.
 const MESH_PROBE_MARGIN: Duration = Duration::from_millis(50);
+/// Negotiated copies carry data during detection. Allocate 15 ms for the
+/// next existing probe and 30 ms for ACK delay/scheduling in the RTT+50 ms target.
+const BACKUP_PROBE_INTERVAL: Duration = Duration::from_millis(15);
+const BACKUP_PROBE_MARGIN: Duration = Duration::from_millis(30);
 /// A switched path must answer within this much beyond two RTTs (a possible
 /// `WireGuard` handshake, then the server's reply) before it is used.
 const SWITCH_MARGIN: Duration = Duration::from_millis(200);
@@ -396,6 +400,7 @@ async fn steer(
     );
     tokio::pin!(active);
     let mut proposals = registry.server_paths();
+    let mut capabilities = link.standby.subscribe();
     let mut retry = Duration::from_secs(1);
     let mut not_before = tokio::time::Instant::now() + if cooling { retry } else { Duration::ZERO };
     loop {
@@ -420,6 +425,11 @@ async fn steer(
                 }
                 let since = tokio::time::Instant::now();
                 path.use_mesh(mesh);
+                path.set_backup(
+                    *capabilities.borrow_and_update()
+                        & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                        != 0,
+                );
                 announce(endpoint, path);
                 remote_quic::probe_liveness(connection);
                 let moved = tokio::select! {
@@ -440,6 +450,15 @@ async fn steer(
                 report(registry, Some(link), *reason);
             }
             Path::Mesh(current) => {
+                let backup = *capabilities.borrow_and_update()
+                    & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                    != 0;
+                path.set_backup(backup);
+                let (interval, margin) = if backup {
+                    (BACKUP_PROBE_INTERVAL, BACKUP_PROBE_MARGIN)
+                } else {
+                    (MESH_PROBE_INTERVAL, MESH_PROBE_MARGIN)
+                };
                 if proposed.is_some_and(|proposed| {
                     proposed.ip().to_canonical() == current.ip().to_canonical()
                 }) {
@@ -449,7 +468,11 @@ async fn steer(
                             if changed.is_err() { return Steered::Ended }
                             false
                         }
-                        result = remote_quic::path_interrupted(connection, path, MESH_PROBE_INTERVAL, MESH_PROBE_MARGIN) => result.is_err(),
+                        changed = capabilities.changed() => {
+                            if changed.is_err() { return Steered::Ended }
+                            false
+                        }
+                        result = remote_quic::path_interrupted(connection, path, interval, margin) => result.is_err(),
                     };
                     if !interrupted {
                         continue;
