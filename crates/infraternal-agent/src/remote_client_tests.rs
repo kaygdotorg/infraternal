@@ -162,9 +162,18 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
         "127.0.0.1:0".parse().unwrap(),
     )
     .unwrap();
+    // TCP and UDP allocate ephemeral ports independently. Reserve both before
+    // publishing the address; a UDP allocation alone cannot reserve TCP.
+    let (tcp, socket) = loop {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        match tokio::net::UdpSocket::bind(tcp.local_addr().unwrap()).await {
+            Ok(socket) => break (tcp, std::sync::Arc::new(socket)),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("cannot reserve the fixture UDP socket: {error}"),
+        }
+    };
     let (proxy_address, proxy) =
-        crate::transport_diagnostics::udp_proxy(server.local_addr().unwrap()).await;
-    let tcp = tokio::net::TcpListener::bind(proxy_address).await.unwrap();
+        crate::transport_diagnostics::udp_proxy_on(socket, server.local_addr().unwrap());
     let identity = RemoteIdentity {
         identity: client_identity,
         roots: vec![ca.certificate],

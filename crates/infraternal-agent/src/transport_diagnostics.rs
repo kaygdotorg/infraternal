@@ -155,6 +155,15 @@ async fn udp_replies(
 }
 pub(crate) async fn udp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    udp_proxy_on(socket, upstream)
+}
+
+/// Start a relay on an already reserved socket so a fixture can own both
+/// transport ports before any dial races begin.
+pub(crate) fn udp_proxy_on(
+    socket: Arc<UdpSocket>,
+    upstream: SocketAddr,
+) -> (SocketAddr, JoinHandle<()>) {
     let address = socket.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let mut bytes = vec![0; 65535];
