@@ -212,8 +212,7 @@ impl PluginRuntime {
         let Some(pool) = &self.inner.store else {
             return Ok(());
         };
-        let mut tx = pool
-            .begin_with("BEGIN IMMEDIATE")
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(pool)
             .await
             .map_err(|_| PluginError::Storage)?;
         sqlx::query("INSERT INTO plugin_settings(role,plugin,enabled) VALUES (?,?,?) ON CONFLICT(role,plugin) DO UPDATE SET enabled=excluded.enabled")

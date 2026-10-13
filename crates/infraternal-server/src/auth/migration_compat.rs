@@ -9,7 +9,7 @@ pub(super) static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrat
 /// The immediate writer transaction makes concurrent startup and interruption safe. A committed
 /// retag leaves the already-existing index at version 22; missing dev migrations then run normally.
 pub(super) async fn normalize_production_index(pool: &SqlitePool) -> Result<()> {
-    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut transaction = infraternal_plugin_api::storage::begin_immediate(pool).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
     )

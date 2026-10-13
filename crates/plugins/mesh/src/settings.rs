@@ -129,8 +129,7 @@ async fn set_default(
     now: i64,
     fresh: Option<&str>,
 ) -> Result<Value, MeshApiError> {
-    let mut tx = pool
-        .begin_with("BEGIN IMMEDIATE")
+    let mut tx = infraternal_plugin_api::storage::begin_immediate(pool)
         .await
         .map_err(|_| MeshApiError::Storage)?;
     // Recheck after the writer wait, where rollback still fences authority.

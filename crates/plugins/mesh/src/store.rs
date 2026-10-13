@@ -78,9 +78,7 @@ impl Store {
             return Err("Mesh host identity invalid.");
         }
         let endpoint = endpoint.map(|endpoint| endpoint.to_string());
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await
             .map_err(|_| "Mesh storage unavailable.")?;
         // Public enrollment keys identify inventory, never authorize host binding.
@@ -257,9 +255,7 @@ impl Store {
     // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
     #[allow(clippy::too_many_lines)]
     async fn load_uncached(&self) -> Result<Loaded, &'static str> {
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await
             .map_err(|_| "Mesh storage unavailable.")?;
         let serialized: Option<String> = sqlx::query_scalar::<_, Option<String>>(

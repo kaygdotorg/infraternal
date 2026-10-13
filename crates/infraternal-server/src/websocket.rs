@@ -263,7 +263,7 @@ async fn reconcile_embedded_inventory(
     pool: &SqlitePool,
     inventory: &watch::Receiver<SessionInventoryState>,
 ) -> Result<(), sqlx::Error> {
-    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut transaction = infraternal_plugin_api::storage::begin_immediate(pool).await?;
     // The ordered leg-B census precedes its open Result. Read the current watch
     // only after the writer lock: a newly persisted row then has a known live ID,
     // even if an earlier census caused this task to wait for the connection.

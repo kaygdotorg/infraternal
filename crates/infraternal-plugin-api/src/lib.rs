@@ -19,6 +19,8 @@ pub const VERSION: &str = env!("INFRATERNAL_VERSION");
 pub const RELEASE_USER_AGENT: &str = concat!("infraternal/", env!("INFRATERNAL_VERSION"));
 pub mod routing;
 pub mod server_path;
+#[cfg(feature = "socket-host")]
+pub mod storage;
 
 #[cfg(feature = "socket-host")]
 use bytes::Bytes;
