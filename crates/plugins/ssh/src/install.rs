@@ -252,14 +252,22 @@ impl Installation {
     ) -> Result<(uuid::Uuid, crate::duplex::Duplex), Failure> {
         use tokio::io::AsyncReadExt;
         let transfer = Self::negotiated_payload(binary).await?;
-        let body = format!(
-            "{}\nexec 9<&-\nexec \"$stage/payload\" __ssh-session --state \"$base/sessions\"",
-            transfer.body
+        let start = "stage=\"$base/.bootstrap-lock\"\n[ \"$(cat \"$stage/transaction\")\" = \"$transaction\" ] || exit 72\nexec 9<&-\nexec \"$stage/payload\" __ssh-session --state \"$base/sessions\"";
+        let script = format!(
+            "{SETUP_HEADER}setup_step upload {}\nsetup_step start {}\n",
+            shell_quote(&self.script(&transfer.body)),
+            shell_quote(&self.script(start))
         );
-        let channel = self.session.stream(&self.script(&body)).await?;
-        let receipt = channel.line(32).await?;
+        let channel = self.session.stream(&script).await?;
+        if channel.line(32).await? != b"STEP upload\n" {
+            return Err(invalid_setup().at(InstallStep::Upload));
+        }
+        let receipt = channel.line(64).await?;
+        if let Some(failure) = refusal(&receipt, InstallStep::Upload) {
+            return Err(failure.in_mode(self.mode));
+        }
         let choice = crate::transport::TransferChoice::parse(&receipt)
-            .ok_or_else(|| Failure::install("The payload transfer response was invalid."))?;
+            .ok_or_else(|| invalid_setup().at(InstallStep::Upload))?;
         let bytes = match choice {
             crate::transport::TransferChoice::Reuse => None,
             crate::transport::TransferChoice::Gzip => {
@@ -297,6 +305,16 @@ impl Installation {
             channel.write(bytes).await.map_err(|_| invalid_setup())?;
         }
         let receipt = channel.line(64).await?;
+        if let Some(failure) = refusal(&receipt, InstallStep::Upload) {
+            return Err(failure.in_mode(self.mode));
+        }
+        if receipt != b"STEP start\n" {
+            return Err(invalid_setup().at(InstallStep::Start));
+        }
+        let receipt = channel.line(64).await?;
+        if let Some(failure) = refusal(&receipt, InstallStep::Start) {
+            return Err(failure.in_mode(self.mode));
+        }
         let id = std::str::from_utf8(&receipt)
             .ok()
             .and_then(|s| s.strip_prefix("SESSION "))
@@ -465,9 +483,7 @@ impl Installation {
     }
 
     fn setup_script(&self, join: &JoinMaterial, upload: Option<&str>) -> Result<String, Failure> {
-        let mut script = String::from(
-            "# INFRATERNAL_SETUP_STEPS_V1\nset -u\nsetup_step() {\n    printf 'STEP %s\\n' \"$1\"\n    if sh -c \"$2\"; then :; else status=$?; printf 'FAIL %s %s\\n' \"$1\" \"$status\"; exit 0; fi\n}\n",
-        );
+        let mut script = SETUP_HEADER.to_owned();
         // Share only representation: each fresh child still executes the full
         // immutable prelude, ownership checks and its own body with errexit.
         // Root steps retain their existing independent privilege wrapper.
@@ -626,6 +642,28 @@ fi
             .await?;
         Ok(())
     }
+}
+
+// Every compound operation observes a fresh errexit child and emits only this
+// canonical receipt. The duplex bridge shares the existing refusal decoder.
+const SETUP_HEADER: &str = "# INFRATERNAL_SETUP_STEPS_V1\nset -u\nsetup_step() {\n    printf 'STEP %s\\n' \"$1\"\n    if sh -c \"$2\"; then :; else status=$?; printf 'FAIL %s %s\\n' \"$1\" \"$status\"; exit 0; fi\n}\n";
+
+fn refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
+    // Prefixes supply the frozen decoder's context; they are never published
+    // as completed setup stages or copied from remote diagnostics.
+    let (prefix, transfer) = match step {
+        InstallStep::Upload => (b"STEP upload\n".as_slice(), true),
+        InstallStep::Start => (b"STEP join\nSTEP install\nSTEP start\n".as_slice(), false),
+        _ => return None,
+    };
+    let mut bytes = prefix.to_vec();
+    bytes.extend_from_slice(receipt);
+    let result = if transfer {
+        parse_transfer_setup(&bytes)
+    } else {
+        parse_setup(&bytes)
+    };
+    result.err().filter(|failure| failure.exit_status.is_some())
 }
 
 // Cache records contain only public executable content. Every lookup repeats
