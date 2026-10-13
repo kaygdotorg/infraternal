@@ -5,6 +5,7 @@ enum Observation {
     Warm,
     Opened,
     ProbeAfterOpen,
+    ResponsiveWhileOpening,
     Closed,
 }
 
@@ -86,11 +87,13 @@ async fn responsive_backend(
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Independent #199 regression: run explicitly with --ignored"]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)]
 async fn responsive_socket_survives_a_held_terminal_open_with_an_existing_attachment() {
     let _guard = SERIAL.lock().await;
+    // Freeze deadlines during real SQLite/socket I/O, using the shared #118 fixture.
+    // Only the final explicit tick advances time; this is an ordering oracle.
+    let _clock = FrozenSocketTime::new().await;
     let f = fixture().await;
     let existing = [1; 16];
     sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,1,1)")
@@ -143,7 +146,7 @@ async fn responsive_socket_survives_a_held_terminal_open_with_an_existing_attach
         },
     )
     .await;
-    let (commands, mut command_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let (commands, mut command_rx) = tokio::sync::mpsc::channel::<bool>(1);
     let (observations, mut observation_rx) = tokio::sync::mpsc::channel(8);
     let client = tokio::spawn(async move {
         let mut sampled = false;
@@ -151,7 +154,11 @@ async fn responsive_socket_survives_a_held_terminal_open_with_an_existing_attach
         loop {
             tokio::select! {
                 command = command_rx.recv() => {
-                    if command.is_none() { return; }
+                    let Some(open) = command else { return; };
+                    if !open {
+                        client_ws_send(&mut socket, 0, &Frame::Ping { nonce: 992, sent_us: 0 }).await;
+                        continue;
+                    }
                     client_ws_send(&mut socket, 0, &Frame::Call {
                         call_id: 901, action_id: "terminal.open", input_json: br#"{"cols":80,"rows":24,"px_w":0,"px_h":0}"#,
                     }).await;
@@ -173,6 +180,7 @@ async fn responsive_socket_survives_a_held_terminal_open_with_an_existing_attach
                                 client_ws_send(&mut socket, 0, &Frame::Ping { nonce: 991, sent_us: 0 }).await;
                             }
                         }
+                        Frame::Pong { nonce: 992, .. } => { let _ = observations.send(Observation::ResponsiveWhileOpening).await; }
                         Frame::Pong { nonce: 991, .. } => { let _ = observations.send(Observation::Warm).await; }
                         Frame::Result { call_id: 901, ok: true, .. } => {
                             opened = true;
@@ -195,18 +203,27 @@ async fn responsive_socket_survives_a_held_terminal_open_with_an_existing_attach
         matches!(warm, Some(Observation::Warm)),
         "fixture must establish a sampled healthy route"
     );
-    commands.send(()).await.unwrap();
+    commands.send(true).await.unwrap();
     tokio::time::timeout(Duration::from_secs(20), held)
         .await
         .unwrap()
         .unwrap();
-    // Hold the operation rather than either transport. No latency is measured;
-    // both peers keep answering every probe while the action remains pending.
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    // An ordering barrier replaces a host-dependent timed hold: receive dispatch
+    // must progress while the open reply is still held. The former inline await
+    // cannot answer this request until release, so the regression stays causal.
+    commands.send(false).await.unwrap();
+    let responsive = tokio::time::timeout(Duration::from_secs(20), observation_rx.recv())
+        .await
+        .unwrap();
+    assert!(
+        matches!(responsive, Some(Observation::ResponsiveWhileOpening)),
+        "pending open must leave the existing receive route responsive"
+    );
     release.send(()).unwrap();
     let opened = tokio::time::timeout(Duration::from_secs(20), observation_rx.recv())
         .await
         .unwrap();
+    tokio::time::advance(Duration::from_millis(25)).await;
     let next = tokio::time::timeout(Duration::from_secs(20), observation_rx.recv())
         .await
         .unwrap();

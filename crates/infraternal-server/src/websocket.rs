@@ -64,7 +64,7 @@ const MAX_RESUME_ROWS: i64 = 4096;
 const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
 const MAX_ENDED_SESSION_STATUSES: i64 = 128;
-// One slow host-facts poll per second can queue only a small bounded number per socket.
+// Bound unfinished host-facts and terminal-open calls on each socket.
 const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
@@ -585,6 +585,10 @@ async fn run_socket(
                 let Some((call_id, result)) = plugin_call else { continue; };
                 let (ok, json) = match result {
                     Ok(json) => (true, json),
+                    Err(AgentError::OpenRefused(reason)) => {
+                        let Ok(json) = reason.json() else { break; };
+                        (false, json)
+                    }
                     Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
                 };
                 if while_authorized(&state, &user_id, &session_token, true,
@@ -1300,57 +1304,60 @@ where
                     .ok()
                     .map(|size| (size, None))
             };
-            let result = match request {
-                Some((size, host)) if size.valid() => {
-                    open_terminal(state, user_id, session_token, size, host).await
-                }
-                _ => Err(crate::embedded::AgentError::OpenRefused(
-                    infraternal_plugin_api::admission::OpenRefusal::Invalid,
-                )),
+            let valid = request.as_ref().is_some_and(|(size, _)| size.valid());
+            if let Some((size, host)) = request.filter(|(size, _)| size.valid())
+                && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS
+            {
+                let state = state.clone();
+                let user = user_id.to_owned();
+                let token = session_token.to_owned();
+                let browser_action = action_id == "ssh.session.open";
+                // Opening a PTY may wait for a remote login. Poll it alongside route
+                // proofs, input and revocation; never suspend the multiplexed receive loop.
+                // The existing bounded call queue owns cancellation on socket teardown.
+                pending_plugin_calls.push(Box::pin(async move {
+                    let result = while_authorized(&state, &user, &token, false, async {
+                        Ok(open_terminal(&state, &user, &token, size, host).await)
+                    })
+                    .await
+                    .unwrap_or(Err(AgentError::Unavailable));
+                    let result = result
+                        .map_err(|error| match error {
+                            AgentError::OpenRefused(_) => error,
+                            _ => AgentError::OpenRefused(
+                                infraternal_plugin_api::admission::OpenRefusal::Unavailable,
+                            ),
+                        })
+                        .and_then(|session| {
+                            let session_id = if browser_action {
+                                uuid::Uuid::from_bytes(session).to_string()
+                            } else {
+                                encode_session_id(&session)
+                            };
+                            serde_json::to_vec(&json!({"session_id": session_id}))
+                                .map_err(|_| AgentError::Unavailable)
+                        });
+                    (call_id, result)
+                }));
+                return Ok(());
+            }
+            let refusal = if valid {
+                infraternal_plugin_api::admission::OpenRefusal::Unavailable
+            } else {
+                infraternal_plugin_api::admission::OpenRefusal::Invalid
             };
-            if !session_is_live(state, user_id, session_token).await {
-                return Err(());
-            }
-            match result {
-                Ok(session_id) => {
-                    let session_id = if action_id == "ssh.session.open" {
-                        uuid::Uuid::from_bytes(session_id).to_string()
-                    } else {
-                        encode_session_id(&session_id)
-                    };
-                    let json =
-                        serde_json::to_vec(&json!({"session_id": session_id})).map_err(|_| ())?;
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: true,
-                            json: &json,
-                        },
-                        encode,
-                    )
-                    .await
-                }
-                Err(error) => {
-                    let refusal = match error {
-                        crate::embedded::AgentError::OpenRefused(reason) => reason,
-                        _ => infraternal_plugin_api::admission::OpenRefusal::Unavailable,
-                    };
-                    let json = refusal.json().map_err(|_| ())?;
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: false,
-                            json: &json,
-                        },
-                        encode,
-                    )
-                    .await
-                }
-            }
+            let json = refusal.json().map_err(|_| ())?;
+            send_frame(
+                sink,
+                CONTROL_STREAM,
+                &Frame::Result {
+                    call_id,
+                    ok: false,
+                    json: &json,
+                },
+                encode,
+            )
+            .await
         }
         Frame::Call {
             call_id,
