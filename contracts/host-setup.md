@@ -1,0 +1,70 @@
+<!-- Defines D255 shim-first host provisioning and the persistent window setup event contract (#189). -->
+# Host provisioning with an early terminal
+
+D255 changes the connection to a session, never its shell. Sign in using the
+existing strict SSH adapter, stage the matching compressed or verified reused
+payload, then launch a session shim and its shell over that same connection.
+The canvas attaches through an SSH channel bridged to that shim. Install and
+join continue while the person types. The infraternal agent discovers the same
+shim, and the existing terminal actor replaces its SSH transport with the
+admitted transport using ordinary reattach and replay. Close SSH only after
+that reattachment succeeds. Never adopt a shell started outside a shim.
+
+Preserve the host id, session id, execution uid, writer identities, input
+acknowledgments and absolute output offsets through the handover. Inputs whose
+acknowledgment was lost are replayed through the shim's existing deduplication;
+outputs resume at each viewer's existing cursor. No input queue is discarded
+on connection replacement. A failure after terminal publication preserves the
+session and reports the failed setup stage. It cannot run fresh-install
+rollback over a live user session. Before publication, existing cancellation,
+ownership checks, stale setup recovery and durable retirement still apply.
+
+## Host setup events
+
+The host status subscription first returns retained events, then live events.
+It belongs to the host and continues after the wizard socket closes. Admission
+uses the same current person, host ownership and component lifecycle as normal
+terminal access. Revocation and component-off retire the subscription and
+prevent further setup actions. The event envelope is additive:
+
+```json
+{
+  "setup": {
+    "host_id": "<uuid>",
+    "session_id": "<uuid>",
+    "window_id": "<canvas window id>",
+    "attempt": 1,
+    "sequence": 1,
+    "stage": "install",
+    "state": "running"
+  }
+}
+```
+
+`stage` is `install`, `join`, `start` or `ready`; `state` is `running`,
+`done` or `failed`. A failed event may add a classified `failed_step`
+(`connect`, `upload`, `install`, `join`, `start`, `readiness`) and a safe
+human `message`. No remote output, command input or credential enters it.
+A stage may emit running then done, or done alone. `ready:done` means the
+installed transport has reattached the existing session. A retry starts a
+new attempt and keeps the existing session. Sequences increase per host;
+replay overflow is explicitly reported as resync with current stage states.
+
+The terminal publication event carries `host_id` and `session_id`. The canvas
+supplies its window id when subscribing; the server does not invent a layout
+id or equate it with the session id. A session can have multiple windows, so
+each subscriber receives its own window id with otherwise identical events.
+The machine pill consumes these events; no ready toast is required. Mapping:
+connect/upload/install failures affect install, join affects join, start
+affects start, readiness affects ready.
+
+## Real-login compatibility (D240, D247)
+
+The early session must use the same host-login launcher and person/account
+identity as installed terminals when that work lands. On systemd this is the
+per-person long-lived unit with PAMName; elsewhere the host's su/login path.
+SSH authenticates delivery and bridging; it is not the session's login owner.
+The shim and shell stay inside their original login throughout installation
+and handover. The installed infraternal agent adopts the rendezvous and login
+identity, never moves an already running shell into a new login. Access
+revocation ends that person's login and terminals under the login contract.
