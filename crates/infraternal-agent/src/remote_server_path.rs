@@ -439,7 +439,7 @@ async fn steer(
                             if changed.is_err() { return Steered::Ended }
                             false
                         }
-                        result = remote_quic::path_interrupted(connection, MESH_PROBE_INTERVAL, MESH_PROBE_MARGIN) => result.is_err(),
+                        result = remote_quic::path_interrupted(connection, path, MESH_PROBE_INTERVAL, MESH_PROBE_MARGIN) => result.is_err(),
                     };
                     if !interrupted {
                         continue;

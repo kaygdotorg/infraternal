@@ -309,6 +309,7 @@ impl PeerFreshness {
 /// Returns `TimedOut` on interruption or `BrokenPipe` when the connection closes.
 pub async fn path_interrupted(
     connection: &quinn::Connection,
+    path: &crate::remote_path_socket::PathSocket,
     interval: std::time::Duration,
     margin: std::time::Duration,
 ) -> io::Result<()> {
@@ -316,21 +317,35 @@ pub async fn path_interrupted(
     let mut ticks = tokio::time::interval(interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut closed = std::pin::pin!(connection.closed());
-    // Send time of the oldest probe not yet followed by authenticated traffic.
+    // The endpoint may queue a probe while its socket is not writable. Only
+    // a successful encrypted socket send starts the network-response clock.
+    let mut queued: Option<tokio::time::Instant> = None;
     let mut pending: Option<tokio::time::Instant> = None;
     loop {
         let deadline = pending.map(|sent| sent + connection.rtt() + margin);
         tokio::select! {
             _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
             _ = ticks.tick() => {
-                if pending.is_some_and(|sent| freshness.silence(connection) < sent.elapsed()) {
+                let silence = freshness.silence(connection);
+                if pending.is_some_and(|sent| silence < sent.elapsed()) {
                     pending = None;
                 }
+                if pending.is_none() {
+                    queued.get_or_insert_with(tokio::time::Instant::now);
+                }
                 probe_liveness(connection);
-                pending.get_or_insert_with(tokio::time::Instant::now);
+            }
+            sent = async {
+                path.mesh_transmitted_after(queued.unwrap_or_else(tokio::time::Instant::now).into_std()).await
+            }, if queued.is_some() => {
+                pending = Some(sent.into());
+                queued = None;
             }
             () = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
                 let Some(sent) = pending else { continue };
+                // Let an already-ready endpoint receive authenticate its ACK
+                // before deciding a timer that became ready in the same pass.
+                tokio::task::yield_now().await;
                 if freshness.silence(connection) >= sent.elapsed() {
                     return Err(io::ErrorKind::TimedOut.into());
                 }
@@ -802,3 +817,7 @@ mod tests {
         assert!(client_config(&identity, roots).is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "remote_probe_tests.rs"]
+mod probe_tests;

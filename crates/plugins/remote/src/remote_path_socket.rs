@@ -41,6 +41,7 @@ struct Paths {
     mesh: Option<SocketAddr>,
     resend: Recent,
     mesh_heard: Option<Instant>,
+    mesh_sent: Option<Instant>,
     enrolled_heard: Option<Instant>,
 }
 
@@ -53,6 +54,7 @@ pub struct PathSocket {
     /// Datagrams received from the mesh address, for proof and liveness.
     mesh_datagrams: AtomicU64,
     heard: tokio::sync::Notify,
+    sent: tokio::sync::Notify,
 }
 
 impl fmt::Debug for PathSocket {
@@ -84,10 +86,12 @@ impl PathSocket {
                 mesh: None,
                 resend: Recent::default(),
                 mesh_heard: None,
+                mesh_sent: None,
                 enrolled_heard: None,
             }),
             mesh_datagrams: AtomicU64::new(0),
             heard: tokio::sync::Notify::new(),
+            sent: tokio::sync::Notify::new(),
         })
     }
 
@@ -124,6 +128,7 @@ impl PathSocket {
                 paths.mesh_heard = None;
             }
             paths.mesh = Some(mesh);
+            paths.mesh_sent = None;
             paths.resend.clear();
             self.on_mesh.store(true, Ordering::Release);
         }
@@ -193,6 +198,24 @@ impl PathSocket {
         self.heard.notified().await;
     }
 
+    /// Wait for a successful socket send after a queued probe. Queueing a
+    /// QUIC DATAGRAM alone cannot start its network-response deadline.
+    pub async fn mesh_transmitted_after(&self, queued: Instant) -> Instant {
+        loop {
+            let notified = self.sent.notified();
+            tokio::pin!(notified);
+            // Register before checking the timestamp, avoiding a lost wake if
+            // the endpoint emits between the check and the first await.
+            notified.as_mut().enable();
+            if let Some(sent) = self.paths.lock().ok().and_then(|paths| paths.mesh_sent)
+                && sent >= queued
+            {
+                return sent;
+            }
+            notified.await;
+        }
+    }
+
     /// A distinct socket handle over the same routing state. Rebinding the
     /// endpoint to it makes the connection announce itself at once (QUIC
     /// sends a PING with a fresh connection ID after a local address change)
@@ -206,6 +229,7 @@ impl PathSocket {
     fn keep(&self, transmit: &Transmit<'_>) {
         if let Ok(mut paths) = self.paths.lock() {
             paths.resend.keep(transmit);
+            paths.mesh_sent = Some(Instant::now());
         }
     }
 }
@@ -230,6 +254,7 @@ impl AsyncUdpSocket for PathSocket {
             src_ip: transmit.src_ip,
         })?;
         self.keep(transmit);
+        self.sent.notify_waiters();
         Ok(())
     }
 
