@@ -30,7 +30,7 @@ pub(super) struct Attempt {
     batch: Uuid,
     uid: u32,
     destination: Option<(String, Option<String>)>,
-    canary: Option<(EmbeddedAgent, [u8; 16])>,
+    canary: Option<(EmbeddedAgent, [u8; 16], [u32; 2])>,
     retirement: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
 }
 // Cancellation before JoinMaterial reaches the installer has no Resources.host
@@ -287,11 +287,12 @@ impl Backend for RemoteBackend {
                 .actor(authority, host)
                 .await
                 .map_err(|error| error.at(InstallStep::Readiness))?;
-            canary_registered(&actor, |session| {
+            let writers = canary_writers(&self.issuer.store().0).await?;
+            canary_registered(&actor, writers, |session| {
                 self.uid(authority, host)?;
                 let mut attempts = self.attempts.lock().map_err(|_| unavailable())?;
                 let attempt = attempts.get_mut(&host).ok_or_else(unavailable)?;
-                attempt.canary = Some((actor.clone(), session));
+                attempt.canary = Some((actor.clone(), session, writers));
                 Ok(())
             })
             .await?;
@@ -337,8 +338,8 @@ impl Backend for RemoteBackend {
                 .map_err(|_| unavailable())?
                 .get(&host)
                 .and_then(|attempt| attempt.canary.clone());
-            if let Some((actor, session)) = canary {
-                finish_canary(&actor, session).await?;
+            if let Some((actor, session, writers)) = canary {
+                finish_canary(&actor, session, writers[1]).await?;
             }
             Ok(())
         })
@@ -403,9 +404,23 @@ fn unavailable() -> Failure {
         "Remote host readiness is unavailable. Check the host's service and try again.",
     )
 }
+/// Reserve private writers from the same SQLite allocator as durable browsers.
+/// No private session is published. The write transaction prevents a browser
+/// allocation from interleaving, and exhaustion preserves the ordinary cap.
+async fn canary_writers(pool: &sqlx::SqlitePool) -> Result<[u32; 2], Failure> {
+    let mut tx = pool.begin().await.map_err(|_| unavailable())?;
+    sqlx::query("INSERT INTO sqlite_sequence(name,seq) SELECT 'terminal_writers',0 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='terminal_writers')")
+        .execute(&mut *tx).await.map_err(|_| unavailable())?;
+    let end: Option<i64> = sqlx::query_scalar("UPDATE sqlite_sequence SET seq=seq+2 WHERE name='terminal_writers' AND seq<=2147483645 RETURNING seq")
+        .fetch_optional(&mut *tx).await.map_err(|_| unavailable())?;
+    let end = u32::try_from(end.ok_or_else(unavailable)?).map_err(|_| unavailable())?;
+    tx.commit().await.map_err(|_| unavailable())?;
+    Ok([(end - 1) * 2, end * 2])
+}
+
 #[cfg(test)]
 async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
-    canary_registered(actor, |_| Ok(())).await
+    canary_registered(actor, [2, 4], |_| Ok(())).await
 }
 
 /// Opt-in test evidence owns only fixed stage names and bounded public clocks.
@@ -669,6 +684,7 @@ fn canary_output_stages_classify_frames_and_record_flags_once() {
 
 async fn canary_registered(
     actor: &EmbeddedAgent,
+    writers: [u32; 2],
     opened: impl FnOnce([u8; 16]) -> Result<(), Failure>,
 ) -> Result<(), Failure> {
     #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
@@ -704,15 +720,23 @@ async fn canary_registered(
     }
     // Publish ownership before the next await: cancellation cannot lose this id.
     if let Err(error) = opened(session) {
-        let _ = finish_canary(actor, session).await;
+        let _ = finish_canary(actor, session, writers[1]).await;
         return Err(error.at(InstallStep::Readiness));
     }
-    let result = tokio::time::timeout(Duration::from_secs(10), canary_output(actor, session)).await
-        .unwrap_or_else(|_| Err(Failure::install("The host connected, but its terminal did not answer. Check its service and try again.")));
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        canary_output(actor, session, writers[0]),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(Failure::install(
+            "The host connected, but its terminal did not answer. Check its service and try again.",
+        ))
+    });
     // Success includes the primary stream's exit proof. Reattaching then races
     // private-session retirement and can turn that proof into a handshake error.
     if result.is_err() {
-        let _ = finish_canary(actor, session).await;
+        let _ = finish_canary(actor, session, writers[1]).await;
     }
     #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
     if let Some(wait) = canary_wait {
@@ -725,14 +749,18 @@ async fn canary_registered(
     result.map_err(|error| error.at(InstallStep::Readiness))
 }
 
-async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
+async fn canary_output(
+    actor: &EmbeddedAgent,
+    session: [u8; 16],
+    writer: u32,
+) -> Result<(), Failure> {
     use infraternal_protocol::{Frame, encode_muxed_frame_into};
     #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
     let mut diagnostic = CanaryOutputStages::new();
     #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
     let attach_wait = diagnostic.wait("attach_start", "attach_return_error");
     let (handle, mut output) = actor
-        .attach(session, 0, 0, 2)
+        .attach(session, 0, 0, writer)
         .await
         .map_err(|_| unavailable())?
         .split();
@@ -811,11 +839,15 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
 
 /// A second writer can finish the fixed read even if the first attachment failed.
 /// No shell command, signal or arbitrary user session is selected by this path.
-async fn finish_canary(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
+async fn finish_canary(
+    actor: &EmbeddedAgent,
+    session: [u8; 16],
+    writer: u32,
+) -> Result<(), Failure> {
     use infraternal_protocol::{CLOSE_SESSION_GONE, Frame, encode_muxed_frame_into};
     tokio::time::timeout(Duration::from_secs(5), async {
         let (handle, mut output) = actor
-            .attach(session, 0, 0, 4)
+            .attach(session, 0, 0, writer)
             .await
             .map_err(|_| unavailable())?
             .split();

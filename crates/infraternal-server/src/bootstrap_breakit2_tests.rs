@@ -287,7 +287,7 @@ impl Backend for ObservedBackend {
             );
             let session = result.map_err(|_| unavailable())?;
             self.0.attempts.lock().unwrap().get_mut(&h).unwrap().canary =
-                Some((actor.clone(), session));
+                Some((actor.clone(), session, [2, 4]));
             let output = tokio::time::timeout(
                 Duration::from_secs(10),
                 diagnostic_canary_output(&actor, session),
@@ -299,7 +299,7 @@ impl Backend for ObservedBackend {
                 self.0.attempts.lock().unwrap().get_mut(&h).unwrap().canary = None;
                 println!("DIAG breakit2 canary_cleanup_ok=true primary_exit=true");
             } else {
-                let cleanup = finish_canary(&actor, session).await;
+                let cleanup = finish_canary(&actor, session, 4).await;
                 println!("DIAG breakit2 canary_cleanup_ok={}", cleanup.is_ok());
             }
             output
