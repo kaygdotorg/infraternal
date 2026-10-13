@@ -7,9 +7,9 @@ license.workspace = true
 
 [features]
 default = []
-transport = ["dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
+transport = ["dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
 agent = ["transport", "dep:infraternal-shim", "dep:nix"]
-server = ["transport", "dep:bytes", "infraternal-plugin-api/socket-host"]
+server = ["transport", "infraternal-plugin-api/socket-host"]
 test-support = ["transport"]
 
 [dependencies]

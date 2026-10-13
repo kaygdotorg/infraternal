@@ -74,19 +74,38 @@ fn identity(
     );
     Ok((vec![certificate], key.into()))
 }
+/// Largest UDP payload a host connection may discover. The connection can move
+/// onto the mesh below QUIC without seeing a path change (`remote_path_socket`),
+/// so its discovered size must also fit the mesh interface: 1380-byte interface
+/// MTU minus the 20-byte IPv4 and 8-byte UDP headers. A larger datagram would
+/// be dropped locally (EMSGSIZE) and stall until black-hole detection.
+pub const PATH_SAFE_UDP_PAYLOAD: u16 = 1352;
+/// Received QUIC DATAGRAM bytes the server buffers per connection. Hosts send
+/// only one-byte liveness probes while on the mesh and nothing reads them;
+/// the bound keeps that buffer at a few entries instead of Quinn's default.
+const DATAGRAM_BUFFER: usize = 64;
+
 fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
     transport_with_liveness(
         incoming_streams,
         std::time::Duration::from_secs(15),
         std::time::Duration::from_secs(60),
+        false,
     )
 }
 fn transport_with_liveness(
     incoming_streams: u32,
     keep_alive: std::time::Duration,
     idle: std::time::Duration,
+    client: bool,
 ) -> std::sync::Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
+    config.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER));
+    if client {
+        let mut discovery = quinn::MtuDiscoveryConfig::default();
+        discovery.upper_bound(PATH_SAFE_UDP_PAYLOAD);
+        config.mtu_discovery_config(Some(discovery));
+    }
     config.congestion_controller_factory(std::sync::Arc::new(
         quinn::congestion::BbrConfig::default(),
     ));
@@ -191,6 +210,7 @@ pub fn client_config_with_liveness(
             .map_err(|_| denied())?,
         keep_alive,
         idle,
+        true,
     ));
     Ok(config)
 }
@@ -278,6 +298,55 @@ impl PeerFreshness {
             }
         }
     }
+}
+/// Watch a path by asking for acknowledgements every `interval`. It is
+/// interrupted when a probe sees no newly authenticated frame within the
+/// current RTT plus `margin` (the server's ACK delay and scheduling jitter).
+/// Detection therefore follows the first unanswered probe, not a fixed silence
+/// window measured from the last packet. One timer and one probe per interval
+/// are the whole idle cost; cancellation stops both.
+/// # Errors
+/// Returns `TimedOut` on interruption or `BrokenPipe` when the connection closes.
+pub async fn path_interrupted(
+    connection: &quinn::Connection,
+    interval: std::time::Duration,
+    margin: std::time::Duration,
+) -> io::Result<()> {
+    let mut freshness = PeerFreshness::new(connection);
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut closed = std::pin::pin!(connection.closed());
+    // Send time of the oldest probe not yet followed by authenticated traffic.
+    let mut pending: Option<tokio::time::Instant> = None;
+    loop {
+        let deadline = pending.map(|sent| sent + connection.rtt() + margin);
+        tokio::select! {
+            _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
+            _ = ticks.tick() => {
+                if pending.is_some_and(|sent| freshness.silence(connection) < sent.elapsed()) {
+                    pending = None;
+                }
+                probe_liveness(connection);
+                pending.get_or_insert_with(tokio::time::Instant::now);
+            }
+            () = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
+                let Some(sent) = pending else { continue };
+                if freshness.silence(connection) >= sent.elapsed() {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                pending = None;
+            }
+        }
+    }
+}
+
+/// Ask the server for an acknowledgement: one ack-eliciting, one-byte QUIC
+/// DATAGRAM. Its ACK is authenticated traffic that keeps [`PeerFreshness`]
+/// current on an otherwise idle path; the payload carries no meaning.
+pub fn probe_liveness(connection: &quinn::Connection) {
+    // An unsupported or full datagram queue only delays detection; QUIC's own
+    // keepalive and idle timeout still bound the connection.
+    let _ = connection.send_datagram(bytes::Bytes::from_static(&[0]));
 }
 fn authenticated_frames(connection: &quinn::Connection) -> [u64; 24] {
     authenticated_signature(connection.stats().frame_rx)
@@ -445,6 +514,7 @@ mod tests {
             1,
             std::time::Duration::from_millis(50),
             std::time::Duration::from_secs(5),
+            false,
         );
         let mut server_config =
             server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();

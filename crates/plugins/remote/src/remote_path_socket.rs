@@ -50,6 +50,7 @@ struct Paths {
     resend: VecDeque<Sent>,
     resend_bytes: usize,
     mesh_heard: Option<Instant>,
+    enrolled_heard: Option<Instant>,
 }
 
 /// Physical routing for one connection's logical server address.
@@ -93,6 +94,7 @@ impl PathSocket {
                 resend: VecDeque::new(),
                 resend_bytes: 0,
                 mesh_heard: None,
+                enrolled_heard: None,
             }),
             mesh_datagrams: AtomicU64::new(0),
             heard: tokio::sync::Notify::new(),
@@ -119,6 +121,14 @@ impl PathSocket {
     /// Send every following datagram to `mesh`. The caller then triggers a
     /// transmission (see [`PathSocket::alias`]) and waits for [`PathSocket::heard_since`].
     pub fn use_mesh(&self, mesh: SocketAddr) {
+        // An IPv6 socket reaches an IPv4 mesh address through its mapped form,
+        // and reports replies from it the same way.
+        let mesh = match (self.logical, mesh) {
+            (SocketAddr::V6(_), SocketAddr::V4(v4)) => {
+                SocketAddr::new(v4.ip().to_ipv6_mapped().into(), v4.port())
+            }
+            _ => mesh,
+        };
         if let Ok(mut paths) = self.paths.lock() {
             if paths.mesh != Some(mesh) {
                 paths.mesh_heard = None;
@@ -169,6 +179,18 @@ impl PathSocket {
             .lock()
             .ok()
             .and_then(|paths| paths.mesh_heard)
+            .is_some_and(|heard| heard >= since)
+    }
+
+    /// Whether a datagram arrived from the enrolled address at or after
+    /// `since`. Late mesh replies stay accepted after a return, so proving the
+    /// enrolled path needs its own evidence.
+    #[must_use]
+    pub fn enrolled_heard_since(&self, since: Instant) -> bool {
+        self.paths
+            .lock()
+            .ok()
+            .and_then(|paths| paths.enrolled_heard)
             .is_some_and(|heard| heard >= since)
     }
 
@@ -248,28 +270,33 @@ impl AsyncUdpSocket for PathSocket {
             Poll::Ready(Ok(count)) => count,
             other => return other,
         };
-        let mesh = match self.paths.lock() {
-            Ok(paths) => paths.mesh,
-            Err(_) => None,
-        };
-        let Some(mesh) = mesh else {
+        let Ok(mut paths) = self.paths.lock() else {
             return Poll::Ready(Ok(count));
         };
         let mut heard = false;
+        let mut enrolled = false;
         // Only the exact trusted mesh tuple is normalized; any other source
         // stays foreign to the client connection, which drops it.
         for received in &mut meta[..count] {
-            if received.addr == mesh {
+            if Some(received.addr) == paths.mesh {
                 received.addr = self.logical;
                 heard = true;
+            } else if received.addr == self.logical {
+                enrolled = true;
             }
         }
-        if heard {
-            if let Ok(mut paths) = self.paths.lock() {
-                paths.mesh_heard = Some(Instant::now());
+        if enrolled {
+            paths.enrolled_heard = Some(Instant::now());
+            if !self.on_mesh.load(Ordering::Acquire) {
                 paths.resend.clear();
                 paths.resend_bytes = 0;
             }
+        }
+        if heard {
+            paths.mesh_heard = Some(Instant::now());
+            paths.resend.clear();
+            paths.resend_bytes = 0;
+            drop(paths);
             self.mesh_datagrams.fetch_add(1, Ordering::AcqRel);
             self.heard.notify_waiters();
         }
