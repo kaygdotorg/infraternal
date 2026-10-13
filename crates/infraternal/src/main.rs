@@ -260,11 +260,7 @@ fn dispatch_action(
         CliHandler::SshSession => {
             #[cfg(all(feature = "ssh", feature = "remote"))]
             {
-                matches
-                    .get_one::<String>("state")
-                    .map_or(ExitCode::FAILURE, |state| {
-                        ssh_session::run(PathBuf::from(state))
-                    })
+                run_ssh_session(matches)
             }
             #[cfg(not(all(feature = "ssh", feature = "remote")))]
             {
@@ -286,6 +282,23 @@ fn dispatch_action(
         | CliHandler::RemoveHost
         | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
     }
+}
+
+#[cfg(all(feature = "ssh", feature = "remote"))]
+fn run_ssh_session(matches: &ArgMatches) -> ExitCode {
+    let (Some(state), session) = (
+        matches.get_one::<String>("state"),
+        matches
+            .get_one::<String>("session")
+            .map(|value| uuid::Uuid::parse_str(value))
+            .transpose(),
+    ) else {
+        return ExitCode::FAILURE;
+    };
+    let Ok(session) = session else {
+        return ExitCode::FAILURE;
+    };
+    ssh_session::run(PathBuf::from(state), session)
 }
 
 fn missing_action(json_output: bool) -> ExitCode {

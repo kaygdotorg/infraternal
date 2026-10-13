@@ -52,10 +52,14 @@ class Writer(Binary):
 
 class Bridge(Writer):
     """Launch the real hidden SSH command and retain its canonical session receipt."""
+    def __init__(self, binary, state, existing=None):
+        self.existing = existing
+        super().__init__(binary, state)
+
     def start(self):
         env = dict(os.environ, ZDOTDIR=str(Path('crates/infraternal/tests/profile').resolve()))
         self.child = subprocess.Popen(
-            [str(self.binary), '__ssh-session', '--state', str(self.state)],
+            [str(self.binary), '__ssh-session', '--state', str(self.state)] + (['--session', str(self.existing)] if self.existing else []),
             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0,
         )
@@ -83,6 +87,12 @@ def run(binary):
         bridge.wait_ack()
         session = bridge.id
         out, entered, acked = bridge.out, bridge.entered, bridge.acked
+        # Retrying setup reconnects to this rendezvous instead of opening a shell.
+        bridge.kill()
+        bridge = Bridge(binary, state, session)
+        assert bridge.id == session, 'SSH retry replaced the existing session'
+        bridge.out, bridge.entered, bridge.acked = out, entered, acked
+        bridge.attach()
         # Lose the transport without receiving the next input acknowledgment.
         # Replaying this exact input must execute it once through the same writer.
         pending = b"printf 'PENDING_%s\\n' EXACTLY_ONCE\n"
@@ -103,7 +113,7 @@ def run(binary):
         assert installed.id == session
         installed.input(b'exit\n')
         installed.wait_event('terminal.exited')
-        print('PASS: shim-owned early shell; same session/writer; pending input executes once; output resumes')
+        print('PASS: shim-owned early shell; same session/writer through SSH retry; pending input executes once; output resumes')
     finally:
         if bridge is not None:
             bridge.kill()

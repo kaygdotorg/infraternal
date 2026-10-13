@@ -413,6 +413,7 @@ mod tests {
         assert!(!action.action.visible);
         assert_eq!(action.action.cli_handler, CliHandler::SshSession);
         assert_eq!(action.action.input.required, ["state"]);
+        assert!(action.action.input.properties.contains_key("session"));
     }
 
     #[cfg(feature = "plugin-mesh")]
@@ -632,12 +633,19 @@ fn ssh_session_action() -> ActionDefinition {
         [
             "Provide the private session state directory.",
             "Use only from the authenticated SSH bootstrap process.",
+            "Supply the published session identifier only when reconnecting its existing shim.",
         ],
         JsonSchema::object(
-            [(
-                "state".to_owned(),
-                JsonSchema::string("Private session state directory."),
-            )],
+            [
+                (
+                    "session".to_owned(),
+                    JsonSchema::string("Existing published session identifier to reconnect."),
+                ),
+                (
+                    "state".to_owned(),
+                    JsonSchema::string("Private session state directory."),
+                ),
+            ],
             ["state".to_owned()],
         ),
         JsonSchema::command_result(),

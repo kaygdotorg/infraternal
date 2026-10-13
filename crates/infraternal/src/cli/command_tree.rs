@@ -268,6 +268,38 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    #[test]
+    fn hidden_ssh_session_action_parses_existing_session_rendezvous() {
+        let registry = registry().expect("action registry");
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "__ssh-session",
+                "--state",
+                "private-state",
+                "--session",
+                id,
+            ])
+            .expect("registered SSH session bridge inputs");
+        let selected = selected(&matches);
+        assert_eq!(selected.path, ["__ssh-session"]);
+        assert_eq!(
+            selected
+                .matches
+                .get_one::<String>("session")
+                .map(String::as_str),
+            Some(id)
+        );
+        assert!(
+            !build(&registry)
+                .render_long_help()
+                .to_string()
+                .contains("__ssh-session")
+        );
+    }
+
     #[test]
     fn hidden_session_shim_parser_uses_the_registered_input_schema() {
         let registry = registry().expect("action registry");
