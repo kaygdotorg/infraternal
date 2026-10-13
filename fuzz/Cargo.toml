@@ -221,3 +221,10 @@ path = "fuzz_targets/remote_path_probe_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shim_spawn_args"
+path = "fuzz_targets/shim_spawn_args.rs"
+test = false
+doc = false
+bench = false
