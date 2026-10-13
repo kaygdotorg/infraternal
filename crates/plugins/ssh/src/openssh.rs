@@ -164,7 +164,9 @@ impl Session {
         // Method-specific authentication precedes retained public preferences;
         // OpenSSH singleton command-line options keep their first value.
         self.credentials.configure(&mut command);
-        if let Some(connector) = &self.tcp_connector {
+        if let Some(connector) = &self.tcp_connector
+            && self.configuration.permits_connector()
+        {
             let destination = &self.configuration.destination;
             let dial = format!(
                 "{} __ssh-connect {} {}",
