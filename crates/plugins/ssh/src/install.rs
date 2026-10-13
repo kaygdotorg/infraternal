@@ -84,6 +84,27 @@ impl PreparedPayload {
     }
 }
 
+/// Negotiated sources share the existing bounded compressor and digest cache.
+struct Transfer {
+    body: String,
+    raw_size: u64,
+    gzip: Option<Arc<[u8]>>,
+    zstd: Option<Arc<[u8]>>,
+}
+impl Transfer {
+    fn input<'a>(&'a self, binary: &'a Path, invitation: &'a [u8]) -> Input<'a> {
+        Input::Negotiated {
+            raw: PayloadInput::File {
+                path: binary,
+                size: self.raw_size,
+            },
+            gzip: self.gzip.as_deref(),
+            zstd: self.zstd.as_deref(),
+            invitation,
+        }
+    }
+}
+
 impl Installation {
     #[must_use]
     pub fn cleanup_coordinates(&self) -> Cleanup {
@@ -174,9 +195,26 @@ impl Installation {
                 "The enrollment invitation belongs to another host.",
             ));
         }
+        let transfer = Self::negotiated_payload(binary).await?;
+        let script = self.setup_script(join, Some(&transfer.body))?;
+        let input = transfer.input(binary, join.stdin.expose());
+        let output = self
+            .session
+            .run(&script, input)
+            .await
+            .map_err(|mut error| {
+                if error.failed_step.is_none() {
+                    error = error.at(InstallStep::Upload);
+                }
+                error.in_mode(self.mode)
+            })?;
+        parse_transfer_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+    }
+
+    async fn negotiated_payload(binary: &Path) -> Result<Transfer, Failure> {
         let digest = crate::payload::digest(binary)
             .await
-            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+            .map_err(|error| error.at(InstallStep::Upload))?;
         let zstd =
             crate::payload_encoding::encoded(binary, crate::payload_encoding::Codec::Zstd).await?;
         let gzip =
@@ -195,27 +233,77 @@ impl Installation {
             zstd_size = zstd.as_ref().map_or(0, |bytes| bytes.len()),
             gzip_size = gzip.as_ref().map_or(0, |bytes| bytes.len()),
         );
-        let script = self.setup_script(join, Some(&body))?;
-        let input = Input::Negotiated {
-            raw: PayloadInput::File {
-                path: binary,
-                size: raw_size,
-            },
-            gzip: gzip.as_deref(),
-            zstd: zstd.as_deref(),
-            invitation: join.stdin.expose(),
-        };
-        let output = self
-            .session
-            .run(&script, input)
-            .await
-            .map_err(|mut error| {
-                if error.failed_step.is_none() {
-                    error = error.at(InstallStep::Upload);
+        Ok(Transfer {
+            body,
+            raw_size,
+            gzip,
+            zstd,
+        })
+    }
+
+    /// Stage the verified payload and start a shim-owned shell on this SSH master.
+    /// The returned channel retains SSH until the installed transport reattaches.
+    /// # Errors
+    /// Refuses noncanonical transfer/session receipts and incomplete uploads.
+    pub async fn stage_session(
+        &self,
+        binary: &Path,
+    ) -> Result<(uuid::Uuid, crate::duplex::Duplex), Failure> {
+        use tokio::io::AsyncReadExt;
+        let transfer = Self::negotiated_payload(binary).await?;
+        let body = format!(
+            "{}\nexec 9<&-\nexec \"$stage/payload\" __ssh-session --state \"$base/sessions\"",
+            transfer.body
+        );
+        let channel = self.session.stream(&self.script(&body)).await?;
+        let receipt = channel.line(32).await?;
+        let choice = crate::transport::TransferChoice::parse(&receipt)
+            .ok_or_else(|| Failure::install("The payload transfer response was invalid."))?;
+        let bytes = match choice {
+            crate::transport::TransferChoice::Reuse => None,
+            crate::transport::TransferChoice::Gzip => {
+                Some(transfer.gzip.as_deref().ok_or_else(invalid_setup)?)
+            }
+            crate::transport::TransferChoice::Zstd => {
+                Some(transfer.zstd.as_deref().ok_or_else(invalid_setup)?)
+            }
+            crate::transport::TransferChoice::Raw => {
+                let mut file = tokio::fs::File::open(binary)
+                    .await
+                    .map_err(|_| invalid_setup())?;
+                let mut buffer = vec![0; 65536];
+                let mut remaining = transfer.raw_size;
+                while remaining != 0 {
+                    let limit =
+                        usize::try_from(remaining.min(65536)).map_err(|_| invalid_setup())?;
+                    let count = file
+                        .read(&mut buffer[..limit])
+                        .await
+                        .map_err(|_| invalid_setup())?;
+                    if count == 0 {
+                        return Err(invalid_setup());
+                    }
+                    channel
+                        .write(&buffer[..count])
+                        .await
+                        .map_err(|_| invalid_setup())?;
+                    remaining -= count as u64;
                 }
-                error.in_mode(self.mode)
-            })?;
-        parse_transfer_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+                None
+            }
+        };
+        if let Some(bytes) = bytes {
+            channel.write(bytes).await.map_err(|_| invalid_setup())?;
+        }
+        let receipt = channel.line(64).await?;
+        let id = std::str::from_utf8(&receipt)
+            .ok()
+            .and_then(|s| s.strip_prefix("SESSION "))
+            .and_then(|s| s.strip_suffix('\n'))
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .filter(|id| receipt == format!("SESSION {id}\n").as_bytes())
+            .ok_or_else(invalid_setup)?;
+        Ok((id, channel))
     }
 
     async fn prepare_payload(&self, binary: &Path) -> Result<PreparedPayload, Failure> {
