@@ -278,10 +278,17 @@ export class MuxConnection {
   acceptPong(nonce: bigint): void {
     const startedAt = this.pendingPings.get(nonce);
     if (startedAt === undefined) return;
+    const now = performance.now();
+    // A renderer can wake with an old reply queued ahead of its timer. Enforce the
+    // existing lease first; suspension must not become an hours-long learned RTT.
+    if (now - this.lastPongAt >= this.livenessRtt + 50) {
+      this.retireUnresponsiveSocket();
+      return;
+    }
     // A reply proves this direction works; discard older unanswered probes too.
     for (const key of this.pendingPings.keys()) { if (key <= nonce) this.pendingPings.delete(key); }
-    this.lastPongAt = performance.now();
-    const ms = Math.max(1, performance.now() - startedAt);
+    this.lastPongAt = now;
+    const ms = Math.max(1, now - startedAt);
     this.livenessRtt = Math.max(ms, this.livenessRtt === 1000 ? ms : this.livenessRtt * 0.95);
     // Probe frequency must not drive DOM/prediction updates more often than the former sampling cadence.
     if (this.lastPongAt - this.lastRttReportAt >= 2000) {
@@ -413,9 +420,7 @@ export class MuxConnection {
     if (!this.isWelcomed || this.closed) return;
     const now = performance.now();
     if (now - this.lastPongAt >= this.livenessRtt + 50) {
-      const socket = this.socket!;
-      this.disconnect(socket);
-      socket.close(4000, "connection unresponsive");
+      this.retireUnresponsiveSocket();
       return;
     }
     this.sampleRoundTrip();
@@ -425,6 +430,13 @@ export class MuxConnection {
     const nextProbe = this.lastPingAt + LIVENESS_TICK_MS - clock;
     const remaining = this.lastPongAt + this.livenessRtt + 50 - clock;
     this.livenessTimer = window.setTimeout(() => this.checkLiveness(), Math.max(1, Math.min(nextProbe, remaining)));
+  }
+
+  private retireUnresponsiveSocket(): void {
+    const socket = this.socket;
+    if (!socket) return;
+    this.disconnect(socket);
+    socket.close(4000, "connection unresponsive");
   }
 
   private dispatch(streamId: number, frame: WireFrame, message: Uint8Array, receivedAt: number): void {

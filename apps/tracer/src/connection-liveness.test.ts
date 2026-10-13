@@ -13,6 +13,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
   let forwarding = true;
   let disconnected = 0;
   const resumed: boolean[] = [];
+  let latestProbe = 0n;
   class Socket {
     static OPEN = 1;
     readyState = 1;
@@ -24,6 +25,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     constructor() { sockets.push(this); }
     send(bytes: Uint8Array) {
       new WebSocketFrameDecoder().feed(bytes, (_stream, frame) => {
+        if (frame.type === "Ping") latestProbe = frame.nonce;
         if (forwarding && frame.type === "Ping") this.receive(encodeMuxedFrame(0, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs }));
       });
     }
@@ -85,6 +87,15 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     advance(10);
     sockets[2]!.onopen?.();
     expect(resumed).toEqual([false, true, true]);
+    sockets[2]!.receive(welcome);
+    connection.streamAttached(true, 1);
+    connection.sampleRoundTrip();
+    // A suspended renderer may deliver a queued old Pong before its overdue timer.
+    // That delay is not a new network RTT and cannot redeem an expired route.
+    now += 60_000;
+    sockets[2]!.receive(encodeMuxedFrame(0, { type: "Pong", nonce: latestProbe, sentUs: 0n }));
+    expect(disconnected).toBe(3);
+    expect(connection.isWelcomed).toBe(false);
   } finally {
     connection?.dispose();
     for (const [key, value] of Object.entries(original)) { if (value === undefined) delete globals[key]; else globals[key] = value; }
