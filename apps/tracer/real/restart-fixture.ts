@@ -39,7 +39,11 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
             if (socket.readyState === WebSocket.OPEN) send(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
           }, Number(process.env.REAL_NETWORK_RTT_MS ?? 2 * Number(process.env.REAL_ONE_WAY_MS ?? 0)));
           if (frame.type === "Result") {
-            if (!frame.ok) { reject(new Error("scale fixture session open refused")); return; }
+            if (!frame.ok) {
+              const refusal = JSON.parse(new TextDecoder().decode(frame.json)) as { reason?: unknown };
+              const reason = ["invalid", "unavailable", "resource_unavailable", "host_memory_low", "host_memory_unavailable"].includes(String(refusal.reason)) ? String(refusal.reason) : "other";
+              reject(new Error(`scale fixture session open refused: opened=${opened} batch=${batch} reason=${reason}`)); return;
+            }
             if (attached) {
               const result = JSON.parse(new TextDecoder().decode(frame.json)) as { session_id: string };
               if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(result.session_id)) { reject(new Error("invalid fixture session identity")); return; }
@@ -61,9 +65,10 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
   } catch (error) { cleanup(); throw error; }
 }
 
-export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false, upstream?: "daemon" | "shim"): Promise<void> {
-  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:4398", ...(process.env.RESTART_MEASURE === "1" ? { port: Number(process.env.TRACER_TEST_PORT), address: "::" } : {}) });
-  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: unlock ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: unlock, hasTouch: unlock });
+export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false, upstream?: "daemon" | "shim", visibleSessions = 1): Promise<void> {
+  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: `127.0.0.1:${Number(process.env.TRACER_TEST_PORT ?? 4299) + 1000}`, ...(process.env.RESTART_MEASURE === "1" ? { port: Number(process.env.TRACER_TEST_PORT), address: "::" } : {}) });
+  const mobile = unlock && visibleSessions === 1;
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: mobile ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: mobile, hasTouch: mobile });
   const page = await context.newPage();
   let retainedBridges: number[] = [];
   let measuringRecovery = false;
@@ -128,6 +133,39 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     };
     await unlockAuthority();
     console.log("restart fixture: CA initialized");
+    const windows = page.locator('.cl[data-view="console"] .ui-window');
+    if (visibleSessions !== 1 && visibleSessions !== 3) throw new Error("invalid visible restart session count");
+    for (let i = 1; i < visibleSessions; i++) {
+      await windows.nth(i - 1).locator('[data-action="split-down"]').evaluate((button) => (button as HTMLElement).click());
+      await expect(windows).toHaveCount(i + 1);
+      try { await expect(windows.nth(i)).toHaveAttribute("data-status", "live"); }
+      catch (error) {
+        console.log("restart fixture: opening statuses", await windows.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.status)));
+        console.log("restart fixture: recent opening routes", server.bridges.slice(-3).map((bridge) => ({ closed: bridge.closed, serverClose: bridge.serverClose, acknowledgments: bridge.acked.size, actions: bridge.control.filter((frame) => frame.type === "Call" || frame.type === "Result").map((frame) => frame.detail) })));
+        throw error;
+      }
+    }
+    // All three windows share a real multiplexed route, rather than merely
+    // counting unattached PTYs. Preserve identities to check isolation after restart.
+    await expect.poll(() => new Set(server.bridges.filter((bridge) => !bridge.closed)
+      .flatMap((bridge) => [...bridge.attached.values()].flat())).size).toBe(visibleSessions);
+    const liveSessionIds = [...new Set(server.bridges.filter((bridge) => !bridge.closed)
+      .flatMap((bridge) => [...bridge.attached.values()].flat()))];
+    const sessionIds = visibleSessions === 1 ? liveSessionIds : [] as string[];
+    const sessionOutput = (session: string) => server.bridges.flatMap((bridge) =>
+      [...bridge.attached].filter(([, ids]) => ids.includes(session)).map(([stream]) => bridge.output.get(stream) ?? "")).join("");
+    if (visibleSessions === 3) for (let i = 0; i < visibleSessions; i++) {
+      await windows.nth(i).locator(".terminal-host").click({ position: { x: 40, y: 40 } });
+      await windows.nth(i).locator(".terminal-host textarea").focus();
+      await page.keyboard.type(`echo sibling-${i}-$((20+${i}))`);
+      await page.keyboard.press("Enter");
+      const marker = `sibling-${i}-${20 + i}`;
+      // Attachment arrival order is independent of canvas row order. Identify each
+      // window by its executed marker, then require three distinct surviving sessions.
+      await expect.poll(() => liveSessionIds.filter((session) => sessionOutput(session).includes(marker)).length, { timeout: 15_000 }).toBe(1);
+      sessionIds.push(liveSessionIds.find((session) => sessionOutput(session).includes(marker))!);
+    }
+    expect(new Set(sessionIds).size).toBe(visibleSessions);
     // An executed command remains evidence when a later route closes. A resumed
     // client need not replay output it already consumed on the preceding route.
     const output = () => server.bridges.flatMap((b) => [...b.output.values()]).join("");
@@ -140,9 +178,9 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     await page.keyboard.press("Enter");
     await expect.poll(output, { timeout: 15_000 }).toContain("before-42");
     console.log("restart fixture: initial typing works");
-    const scale = Number(process.env.RESTART_SESSIONS ?? 1);
-    if (!Number.isInteger(scale) || scale < 1 || scale > 72) throw new Error("invalid restart fixture scale");
-    cleanupScale = await populate(server, scale - 1);
+    const scale = Number(process.env.RESTART_SESSIONS ?? visibleSessions);
+    if (!Number.isInteger(scale) || scale < visibleSessions || scale > 72) throw new Error("invalid restart fixture scale");
+    cleanupScale = await populate(server, scale - visibleSessions);
     if (process.env.RESTART_MEASURE === "1") {
       const measurement = spawn("python3", [resolve(import.meta.dirname, "../../../scripts/restart-rss.py"), "/run/infraternal", String(server.pid)], { stdio: ["ignore", "pipe", "ignore"] });
       let result = "";
@@ -232,12 +270,28 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     if (unlock) await unlockAuthority();
     await expect.poll(() => server.bridges.filter((b) => !b.closed).some((b) => b.acked.size > 0), { timeout: 15_000 }).toBe(true);
     await expect.poll(output, { timeout: 15_000 }).toContain("waiting-49");
+    if (visibleSessions === 3) {
+      await expect.poll(() => sessionOutput(sessionIds[0]!), { timeout: 15_000 }).toContain("waiting-49");
+      for (const session of sessionIds.slice(1)) expect(sessionOutput(session)).not.toContain("waiting-49");
+    }
     await page.locator(".terminal-host").first().click({ position: { x: 40, y: 40 } });
     await page.locator(".terminal-host textarea").first().focus();
     await page.keyboard.type("echo after-$((6*8))", { delay: 5 });
     await page.keyboard.press("Enter");
     await expect.poll(output, { timeout: 15_000 }).toContain("after-48");
     await expect(page.locator('.cl[data-view="console"] .ui-window').first()).toHaveAttribute("data-status", "live");
+    // Recovery completes with the same focused input; only then exercise siblings.
+    for (let i = 0; i < visibleSessions; i++) await expect(windows.nth(i)).toHaveAttribute("data-status", "live");
+    if (visibleSessions === 3) for (let i = 0; i < visibleSessions; i++) {
+      await windows.nth(i).locator(".terminal-host").click({ position: { x: 40, y: 40 } });
+      await windows.nth(i).locator(".terminal-host textarea").focus();
+      await page.keyboard.type(`echo resumed-${i}-$((30+${i}))`);
+      await page.keyboard.press("Enter");
+      const marker = `resumed-${i}-${30 + i}`;
+      await expect.poll(() => sessionOutput(sessionIds[i]!), { timeout: 15_000 }).toContain(marker);
+      for (let other = 0; other < visibleSessions; other++) if (other !== i)
+        expect(sessionOutput(sessionIds[other]!)).not.toContain(marker);
+    }
     if (process.env.RESTART_CAPTURE_DIR) await page.screenshot({ path: resolve(process.env.RESTART_CAPTURE_DIR, `restart-${unlock ? "unlock" : "locked"}-ready.png`) });
     if (process.env.RESTART_MEASURE === "1") {
       const probe = await page.evaluate(() => (window as unknown as { restartProbe: { liveAt: number; retained: boolean; frameMs: number } }).restartProbe);
