@@ -38,7 +38,7 @@ struct Entry {
     bytes: Arc<OnceCell<Option<Arc<[u8]>>>>,
 }
 
-/// Four bounded entries cover two architectures and two optional codecs.
+/// Eight bounded entries cover full/session payloads, two architectures and two codecs.
 /// Missing tools and oversized/non-improving results preserve raw streaming.
 pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]>>, Failure> {
     // Opening and inspecting a local file are short syscalls; the compressor
@@ -62,7 +62,7 @@ pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]
             entry.bytes.clone()
         } else {
             let cell = Arc::new(OnceCell::new());
-            if cache.len() == 4 {
+            if cache.len() == 8 {
                 cache.remove(0);
             }
             cache.push(Entry {
