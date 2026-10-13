@@ -19,9 +19,9 @@ test("typing recovers when the old browser route stays open after the upstream s
     // New routes remain healthy; only this superseded route stops forwarding.
     socket.onMessage((message) => { if (!superseded()) upstream.send(message); });
     upstream.onMessage((message) => { if (!superseded()) socket.send(message); });
-    upstream.onClose((code, reason) => {
+    upstream.onClose(() => {
       if (superseded()) { stoppedRoutes++; return; }
-      socket.close({ code, reason });
+      socket.close();
     });
   });
   await page.goto("/?theme=ink&bg=none");

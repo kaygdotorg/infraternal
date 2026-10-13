@@ -47,9 +47,9 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     // stops. Replacement routes still reach the real restarted server.
     socket.onMessage((message) => { if (!superseded()) upstream.send(message); });
     upstream.onMessage((message) => { if (!superseded()) socket.send(message); });
-    upstream.onClose((code, reason) => {
+    upstream.onClose(() => {
       if (superseded()) { stoppedRoutes++; return; }
-      socket.close({ code, reason });
+      socket.close();
     });
   });
   page.on("pageerror", (error) => console.log("browser error kind:", error.name));
