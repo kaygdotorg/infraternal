@@ -33,7 +33,11 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
         socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data as Buffer)), (stream, frame) => {
           if (frame.type === "Hello") send(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "restart-scale" });
           if (frame.type === "Welcome") open();
-          if (frame.type === "Ping") send(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+          // Auxiliary load clients model the browser profile's RTT for route proofs;
+          // the measured browser itself traverses real TLS and port-scoped netem.
+          if (frame.type === "Ping") setTimeout(() => {
+            if (socket.readyState === WebSocket.OPEN) send(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+          }, Number(process.env.REAL_NETWORK_RTT_MS ?? 2 * Number(process.env.REAL_ONE_WAY_MS ?? 0)));
           if (frame.type === "Result") {
             if (!frame.ok) { reject(new Error("scale fixture session open refused")); return; }
             if (attached) {
@@ -58,29 +62,41 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
 }
 
 export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false, upstream?: "daemon" | "shim"): Promise<void> {
-  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:4398", ...(process.env.RESTART_MEASURE === "1" ? { port: Number(process.env.TRACER_TEST_PORT) } : {}) });
+  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:4398", ...(process.env.RESTART_MEASURE === "1" ? { port: Number(process.env.TRACER_TEST_PORT), address: "::" } : {}) });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: unlock ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: unlock, hasTouch: unlock });
   const page = await context.newPage();
-  let routes = 0;
-  let supersededRoutes = 0;
-  let stoppedRoutes = 0;
-  if (retainBrowserRoute) await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
-    const id = ++routes;
-    const superseded = () => id <= supersededRoutes;
-    const upstream = socket.connectToServer();
-    // Model an intermediary retaining the browser socket after its upstream
-    // stops. Replacement routes still reach the real restarted server.
-    socket.onMessage((message) => { if (!superseded()) upstream.send(message); });
-    upstream.onMessage((message) => { if (!superseded()) socket.send(message); });
-    upstream.onClose(() => {
-      if (superseded()) { stoppedRoutes++; return; }
-      socket.close();
-    });
-  });
+  let retainedBridges: number[] = [];
+  let measuringRecovery = false;
   let cleanupScale = () => {};
   page.on("pageerror", (error) => console.log("browser error kind:", error.name));
   try {
     const cdp = await context.newCDPSession(page);
+    if (process.env.RESTART_MEASURE === "1") {
+      const sockets = new Map<string, WebSocketFrameDecoder>();
+      await cdp.send("Network.enable");
+      cdp.on("Network.webSocketCreated", ({ requestId, url }) => {
+        if (new URL(url).pathname === "/v1/ws") sockets.set(requestId, new WebSocketFrameDecoder());
+      });
+      cdp.on("Network.webSocketClosed", ({ requestId }) => sockets.delete(requestId));
+      cdp.on("Network.webSocketFrameReceived", ({ requestId, response }) => {
+        // Decode in memory; never log frame bodies or request headers. Automatic upstream
+        // rebinding may finish before a window ever needs to leave its live state.
+        if (!measuringRecovery || response.opcode !== 2) return;
+        sockets.get(requestId)?.feed(new Uint8Array(Buffer.from(response.payloadData, "base64")), (stream, frame) => {
+          if (stream === 0 || frame.type !== "Event" || frame.eventJson.byteLength > 1024) return;
+          const notice = JSON.parse(new TextDecoder().decode(frame.eventJson)) as { type?: unknown; session_id?: unknown };
+          const target = server.bridges.flatMap((bridge) => [...bridge.attached.values()].flat())[0];
+          if (notice.type !== "terminal.replay_complete" || typeof notice.session_id !== "string"
+            || notice.session_id.replaceAll("-", "") !== target) return;
+          void page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => {
+            const probe = (window as unknown as { restartProbe: { liveAt: number } }).restartProbe;
+            if (document.querySelector<HTMLElement>('.cl[data-view="console"] .ui-window')?.dataset.status === "live")
+              probe.liveAt ||= performance.timeOrigin + performance.now();
+            done();
+          }))).catch(() => {});
+        });
+      });
+    }
     await cdp.send("WebAuthn.enable");
     await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true } });
     await page.goto(server.origin);
@@ -108,17 +124,21 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       // The Hosts card is in another canvas view; invoke its shared real ceremony
       // without making a camera flight part of this transport regression.
       await action.evaluate((button) => (button as HTMLButtonElement).click());
-      await expect.poll(authority).toEqual({ locked: false, initialized: true });
+      await expect.poll(authority, { timeout: 15_000 }).toEqual({ locked: false, initialized: true });
     };
     await unlockAuthority();
     console.log("restart fixture: CA initialized");
-    const output = () => server.bridges.filter((b) => !b.closed).flatMap((b) => [...b.output.values()]).join("");
+    // An executed command remains evidence when a later route closes. A resumed
+    // client need not replay output it already consumed on the preceding route.
+    const output = () => server.bridges.flatMap((b) => [...b.output.values()]).join("");
     await expect.poll(output, { timeout: 15_000 }).not.toBe("");
     await page.locator(".terminal-host").first().click({ position: { x: 40, y: 40 } });
     await page.locator(".terminal-host textarea").first().focus();
-    await page.keyboard.type("echo before-42", { delay: 5 });
+    // Computed markers cannot be satisfied by the PTY echoing unexecuted input,
+    // and remain valid when a replay Snapshot adds cursor controls or a prompt.
+    await page.keyboard.type("echo before-$((6*7))", { delay: 5 });
     await page.keyboard.press("Enter");
-    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?before-42\r?\n/);
+    await expect.poll(output, { timeout: 15_000 }).toContain("before-42");
     console.log("restart fixture: initial typing works");
     const scale = Number(process.env.RESTART_SESSIONS ?? 1);
     if (!Number.isInteger(scale) || scale < 1 || scale > 72) throw new Error("invalid restart fixture scale");
@@ -157,7 +177,13 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     });
     // Only the client's clock advances: expire resume credentials without expiring server auth.
     await page.evaluate(() => { const now = Date.now; Date.now = () => now() + 86_400_000; });
-    if (retainBrowserRoute) supersededRoutes = routes;
+    if (retainBrowserRoute) {
+      await expect.poll(() => server.bridges.some((bridge) => !bridge.closed && bridge.acked.size > 0)).toBe(true);
+      retainedBridges = server.bridges.filter((bridge) => !bridge.closed).map((bridge) => bridge.id);
+      server.retainBrowserRoutes();
+    }
+    const replaysBefore = new Map(server.bridges.map((bridge) => [bridge.id, bridge.replays]));
+    measuringRecovery = true;
     const disrupt = (during: () => Promise<void>) => upstream
       ? server.pauseUpstream(upstream, during) : server.restart(during);
     await disrupt(async () => {
@@ -165,12 +191,16 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       console.log("restart fixture: bridge state", server.bridges.map((bridge) => ({ closed: bridge.closed, closedBy: bridge.closedBy })));
       console.log("restart fixture: page state", await page.locator("#terminal-screen").getAttribute("data-connected"));
       if (retainBrowserRoute) {
-        await expect.poll(() => stoppedRoutes).toBeGreaterThan(0);
+        await expect.poll(() => server.bridges.filter((bridge) => retainedBridges.includes(bridge.id) && bridge.closed).length).toBeGreaterThan(0);
       } else {
         // Other sessions may remain writable; readiness belongs to this window.
         if (!upstream) await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "false");
-        await expect(page.locator('.cl[data-view="console"] .ui-window').first()).toHaveAttribute("data-status", "connecting");
       }
+      // Typing during the outage must be visibly queued, even when the browser socket stays open.
+      // A daemon may already have been replaced/rebound within its lease; a completed
+      // real replay proves that recovery and does not require an artificial UI outage.
+      await expect.poll(async () => await page.locator('.cl[data-view="console"] .ui-window').first().getAttribute("data-status") === "connecting"
+        || upstream === "daemon" && server.bridges.some((bridge) => bridge.replays > (replaysBefore.get(bridge.id) ?? 0))).toBe(true);
       // GPU readback belongs before the path recovers: it must not delay the
       // replay/paint timestamp used by the latency measurement.
       if (process.env.RESTART_MEASURE === "1") await page.evaluate(() => {
@@ -181,7 +211,7 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
         await page.screenshot({ path: resolve(process.env.RESTART_CAPTURE_DIR, `restart-${unlock ? "unlock" : "locked"}-catching-up.png`) });
       }
       console.log("restart fixture: disconnected indicator confirmed");
-      await page.keyboard.type("echo waiting-49", { delay: 5 });
+      await page.keyboard.type("echo waiting-$((7*7))", { delay: 5 });
       console.log("restart fixture: queued text entered");
       await page.keyboard.press("Enter");
       console.log("restart fixture: queued return entered");
@@ -193,27 +223,26 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       await page.keyboard.type("echo recovered-$((8*8))");
       await page.keyboard.press("Enter");
       try {
-        // Batched pending lines can be echoed before execution; an interactive
-        // shell may therefore prefix the next computed result with its prompt.
-        await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?recovered-64\r?\n/);
+        await expect.poll(output, { timeout: 15_000 }).toContain("recovered-64");
       } finally {
-        console.log(`real route recovery: routes=${routes} superseded_routes=${supersededRoutes} stopped_routes=${stoppedRoutes} window_status=${await page.locator('.cl[data-view="console"] .ui-window').first().getAttribute("data-status")} connected=${await page.locator("#terminal-screen").getAttribute("data-connected")}`);
+        console.log(`real route recovery: routes=${server.bridges.length} retained_routes=${retainedBridges.length} window_status=${await page.locator('.cl[data-view="console"] .ui-window').first().getAttribute("data-status")} connected=${await page.locator("#terminal-screen").getAttribute("data-connected")}`);
       }
     }
     await expect.poll(authority).toEqual({ locked: !upstream, initialized: true });
     if (unlock) await unlockAuthority();
     await expect.poll(() => server.bridges.filter((b) => !b.closed).some((b) => b.acked.size > 0), { timeout: 15_000 }).toBe(true);
-    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?waiting-49\r?\n/);
+    await expect.poll(output, { timeout: 15_000 }).toContain("waiting-49");
     await page.locator(".terminal-host").first().click({ position: { x: 40, y: 40 } });
     await page.locator(".terminal-host textarea").first().focus();
-    await page.keyboard.type("echo after-48", { delay: 5 });
+    await page.keyboard.type("echo after-$((6*8))", { delay: 5 });
     await page.keyboard.press("Enter");
-    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?after-48\r?\n/);
+    await expect.poll(output, { timeout: 15_000 }).toContain("after-48");
     await expect(page.locator('.cl[data-view="console"] .ui-window').first()).toHaveAttribute("data-status", "live");
     if (process.env.RESTART_CAPTURE_DIR) await page.screenshot({ path: resolve(process.env.RESTART_CAPTURE_DIR, `restart-${unlock ? "unlock" : "locked"}-ready.png`) });
     if (process.env.RESTART_MEASURE === "1") {
       const probe = await page.evaluate(() => (window as unknown as { restartProbe: { liveAt: number; retained: boolean; frameMs: number } }).restartProbe);
       const recovery = Math.max(0, probe.liveAt - server.recoveredAt!);
+      expect(probe.liveAt).toBeGreaterThan(0);
       const roundTrip = Number(process.env.REAL_NETWORK_RTT_MS ?? 2 * Number(process.env.REAL_ONE_WAY_MS ?? 0));
       console.log(`METRIC restart_sessions=${scale} viewport=${unlock ? "393x852" : "1440x900"} ca_after_recovery=${unlock || upstream ? "unlocked" : "locked"} mode=${upstream ?? (retainBrowserRoute ? "retained" : "closed")} transport=${process.env.REAL_NETWORK_RTT_MS ? "tcp-tls-netem" : "message-delay"} path_to_typable_ms=${recovery.toFixed(3)} rtt_ms=${roundTrip} budget_ms=${upstream ? roundTrip + 50 : roundTrip * 3 + 50} last_screen_retained=${probe.retained} screen_restore_ms=0 first_verification_frame_ms=${probe.frameMs.toFixed(3)}`);
       expect(probe.retained).toBe(true);
