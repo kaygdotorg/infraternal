@@ -5,6 +5,8 @@ root=Path(__file__).resolve().parent
 state=Path('/root/infraternal-bench/mesh-policy/s173');state.mkdir(mode=0o700,exist_ok=True)
 os.environ.update(PYTHONDONTWRITEBYTECODE='1',TRACER_TEST_PORT='4473',INFRATERNAL_TEST_STATE_ROOT=str(state))
 sys.path.insert(0,str(root/'scripts'))
+# The fixture is local to this report; the output-path helper lives in repository scripts.
+sys.path.insert(1,str(Path(__file__).resolve().parents[5]/'scripts'))
 from agent_fixture import cleanup
 from evidence_path import evidence_directory
 out=evidence_directory('mesh-policy-verify-round3');out.mkdir(parents=True,exist_ok=True)
