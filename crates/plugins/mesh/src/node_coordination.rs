@@ -26,6 +26,22 @@ async fn update_listener(
         *listener = Some((address, lease));
     }
 }
+// Probe before advertising an extension. Strict older nodes reject the probe,
+// then answer the ordinary request without enabling a new representation.
+async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
+    let reply = match channel
+        .call("mesh.identity", br#"{"compact_access":true}"#.to_vec())
+        .await
+    {
+        Ok(reply) => reply,
+        Err(_) => channel.call("mesh.identity", b"{}".to_vec()).await.ok()?,
+    };
+    serde_json::from_slice::<Option<Identity>>(&reply)
+        .ok()
+        .flatten()
+        .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0)
+}
+
 /// One event-driven worker belongs to the generic plugin lifecycle; disabling
 /// aborts and joins it. A disconnect never deletes durable mesh membership.
 // Keep acknowledged-version recovery and source invalidation in one event loop.
@@ -46,16 +62,7 @@ pub async fn run(
     loop {
         if refresh_identity || binding.is_none() {
             refresh_identity = false;
-            let identity = channel
-                .call("mesh.identity", b"{}".to_vec())
-                .await
-                .ok()
-                .and_then(|reply| {
-                    serde_json::from_slice::<Option<Identity>>(&reply)
-                        .ok()
-                        .flatten()
-                })
-                .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0);
+            let identity = read_identity(channel.as_ref()).await;
             if let Some(identity) = identity {
                 compact_access = identity.compact_access;
                 let ip = channel.observed_ip();
@@ -297,6 +304,10 @@ mod tests {
             let action = action.to_owned();
             Box::pin(async move {
                 if action == "mesh.identity" {
+                    // Model the strict legacy request parser to exercise fallback.
+                    if input != b"{}" {
+                        return Err("unsupported identity probe");
+                    }
                     self.queried.notify_one();
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
