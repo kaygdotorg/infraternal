@@ -92,15 +92,7 @@ fn main() -> std::io::Result<()> {
             println!("{{\"off\":true}}");
             break;
         } else {
-            let chunk: Chunk = serde_json::from_str(&line)?;
-            let started = std::time::Instant::now();
-            match node.chunk(chunk) {
-                Ok(applied) => println!(
-                    "{{\"applied\":{applied},\"apply_us\":{}}}",
-                    started.elapsed().as_micros()
-                ),
-                Err(e) => println!("{{\"failed\":true,\"error_kind\":\"{:?}\"}}", e.kind()),
-            }
+            apply(&mut node, &line)?;
         }
         std::io::stdout().flush()?;
     }
@@ -110,3 +102,28 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(not(all(feature = "agent", target_os = "linux")))]
 fn main() {}
+
+/// Return the final installed-rule timestamp only after durable success, never after rollback.
+#[cfg(all(feature = "agent", target_os = "linux"))]
+fn apply(node: &mut Node, line: &str) -> std::io::Result<()> {
+    let chunk: Chunk = serde_json::from_str(line)?;
+    let started = std::time::Instant::now();
+    let result = node.chunk(chunk);
+    #[cfg(feature = "cutoff-measure")]
+    let refusing_ns = node.refusing_at_ns();
+    #[cfg(not(feature = "cutoff-measure"))]
+    let refusing_ns: Option<u64> = None;
+    match result {
+        Ok(applied) => println!(
+            "{{\"applied\":{applied},\"apply_us\":{},\"refusing_ns\":{}}}",
+            started.elapsed().as_micros(),
+            if applied {
+                refusing_ns.map_or_else(|| "null".to_owned(), |ns| ns.to_string())
+            } else {
+                "null".to_owned()
+            }
+        ),
+        Err(e) => println!("{{\"failed\":true,\"error_kind\":\"{:?}\"}}", e.kind()),
+    }
+    Ok(())
+}

@@ -83,6 +83,8 @@ async def campaign(args):
         initialized = set()
         installed = {}
         applied = {}
+        completed = {}
+        refusal_clocks = {}
         measuring = False
         initial_versions = {}
         locks = [asyncio.Lock() for _ in nodes]
@@ -101,7 +103,7 @@ async def campaign(args):
             index=frame['node'];chunk=frame['chunk']
             await asyncio.sleep(args.rtt_ms/2000)
             reply=await request(index, chunk)
-            frames_log.write(json.dumps({'node':index,'version':chunk['version'],'index':chunk['index'],'last':chunk['last'],'dispatched_ns':dispatched_ns,'apply_us':reply['apply_us'],'at_ns':reply['_observed_ns']})+'\n');frames_log.flush()
+            frames_log.write(json.dumps({'node':index,'version':chunk['version'],'index':chunk['index'],'last':chunk['last'],'dispatched_ns':dispatched_ns,'apply_us':reply['apply_us'],'at_ns':reply['_observed_ns'],'refusing_ns':reply.get('refusing_ns')})+'\n');frames_log.flush()
             if chunk['last']:
                 if index not in initialized:
                     initialized.add(index);installed[index]=chunk['addresses'];initial_versions[index]=chunk['version']
@@ -109,7 +111,10 @@ async def campaign(args):
                     # Ignore startup replays and unrelated completed frames. The
                     # final acknowledgment must correspond to actual key removal.
                     if args.change in ('RuleRemoval','DefaultTightening') or len(await request(index, 'stats')) == 2 + args.extra_members:
-                        applied.setdefault(index, reply['_observed_ns'])
+                        assert reply['applied'], 'final access update was refused'
+                        completed.setdefault(index, reply['_observed_ns'])
+                        refusal_clocks[index] = 'kernel-install' if reply.get('refusing_ns') else 'completion'
+                        applied.setdefault(index, reply.get('refusing_ns') or reply['_observed_ns'])
             if index == 0 and chunk['last']:
                 # Independent receiving enforcement needs the sender's filter
                 # removed. Its subprocesses cannot stall other completion records.
@@ -182,6 +187,7 @@ async def campaign(args):
         sender=asyncio.create_task(packets());tasks.add(sender)
         await asyncio.sleep(.3+args.rtt_ms/1000)
         applied.clear()
+        completed.clear()
         measuring = True
         started=time.monotonic_ns()
         await send({'type':'Change','operation':args.change} if args.change else {'type':'Revoke'})
@@ -209,7 +215,7 @@ async def campaign(args):
         after=[len(await request(index, 'stats')) for index in (1,2)]
         assert after==[(3 if args.change in ('RuleRemoval','DefaultTightening') else 2)+args.extra_members]*2,after
         memory = [rss(node.pid) * 1024 for node in nodes]
-        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','public_journal':args.stateful,'change':args.change or 'PeerRetirement','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'change_started_ns':started,'last_apply_ns':last_apply,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
+        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','public_journal':args.stateful,'change':args.change or 'PeerRetirement','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'change_started_ns':started,'last_apply_ns':last_apply,'durable_completion_us':(max(completed.values())-started)/1000,'refusal_clock': refusal_clocks,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
         await asyncio.wait_for(asyncio.gather(*apply_tasks), 10)
         coordinator.stdin.close()
         await asyncio.wait_for(coordinator.wait(), 5)
