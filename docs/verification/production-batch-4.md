@@ -1,10 +1,14 @@
 <!-- Records the terminal-fidelity and event-driven ended-session production integration, #160/#168. -->
 # Production batch 4
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; fresh outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 Branch `release-prod-4` starts at live `1f77a449`. Reviewed terminal-fidelity
 `27db08cf` and ended-sessions `14d01feb` are merged in that order, one merge
 commit each (`69babc92`, `49438882`). CA custody branches and `64d4e213` are
-excluded; `evidence/prod4/excluded-ancestry.txt` records ancestry checks. Only
+excluded; the ancestry-check receipt was removed under D262. Only
 this branch is pushed; no deployment or issue closure is part of this job.
 
 ## Integration and follow-ups
@@ -46,7 +50,7 @@ not classified as a host-load waiver. `census-setup-diagnostic.log` and
 The same real-PTY fixture ran on `infraternal-perf-test`, Debian kernel 6.12.69,
 x86_64, four CPUs, CPUWeight 10000, under `/var/lock/perf-bench.lock`, at RTT 0.
 Each condition uses 1,000 samples. Runs are interleaved base/head three times.
-Exact image hashes are in `evidence/prod4/static-images.json`; the production
+The exact image-hash receipt was removed under D262; the production
 Rust image remains identical through the later test-only commits.
 
 | Run | Base PTY echo p50 / p99 (ms) | Head PTY echo p50 / p99 (ms) |
@@ -65,8 +69,8 @@ same-flood echo p99 is 18.31 → 16.12 ms. Load moves from 0.33/0.12/0.03 to
 1.02/0.35/0.11 during finite fixture bursts, with existing fixture cleanup.
 No VM build, account or host-key change was made.
 
-Raw evidence and reproducible runner: `evidence/prod4/perf-interleaved.log` and
-`perf-interleaved.sh`. The VM has a bash login shell, so the existing native
+The raw run receipt was removed under D262. Reproduce with
+[`perf-interleaved.sh`](production-batch-4/perf-interleaved.sh). The VM has a bash login shell, so the existing native
 latency fixture is used directly rather than a prompt-specific zsh oracle.
 
 ## Idle and exit discovery at scale
@@ -125,9 +129,9 @@ valid control; `browser-head-final.log` preserves the final broad run. The
 accidental duplicate baseline launch and a separately occupied backend port are
 retained as invalid setup attempts and excluded from comparisons.
 
-Production captures are under `evidence/prod4/captures/`; they are attached for
-owner/independent visual review, with no author visual-quality verdict or real
-phone claim. The final screenshot set includes ended states and mobile manager.
+Production captures were removed under D262 after owner/independent visual
+review. This report makes no author visual-quality verdict or real-phone claim.
+The final screenshot set included ended states and mobile manager.
 
 ## Static images and review
 

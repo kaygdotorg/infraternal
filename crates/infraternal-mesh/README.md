@@ -103,12 +103,11 @@ removal/rotation, checkpoint, DNS and status checks. The compile-fail doctest
 proves a node-side private key cannot enter serde serialization.
 
 The final ASAN coverage-guided run completed 20,000 executions in 71 seconds
-without an invariant or sanitizer failure. Raw evidence is
-[fuzz-final.log](evidence/2026-10-07/fuzz-final.log), with
-[compiler/instrumentation provenance](evidence/2026-10-07/fuzz-environment.txt).
-A [public synthetic corpus snapshot](evidence/2026-10-07/fuzz-corpus.hex)
-is retained for continued runs (each line after the role comment is a filename
-and hex-encoded bytes). Its completion record was:
+without an invariant or sanitizer failure. Raw logs and compiler provenance
+were removed under D262; fresh receipts belong on #80. The public synthetic
+corpus fixture at `tests/fixtures/fuzz-corpus.hex` is retained for continued
+runs (each line after the role comment is a filename and hex-encoded bytes).
+Its completion record was:
 
 ```text
 #20000	DONE   cov: 6485 ft: 26123 corp: 871/226Kb lim: 824 exec/s: 281 rss: 445Mb
@@ -131,7 +130,7 @@ Reconstruct the retained corpus from the repository root:
 from pathlib import Path
 corpus = Path.home() / ".cache/codex-scratch/mesh-core/corpus"
 corpus.mkdir(parents=True, exist_ok=True)
-for line in Path("crates/infraternal-mesh/evidence/2026-10-07/fuzz-corpus.hex").read_text().splitlines():
+for line in Path("crates/infraternal-mesh/tests/fixtures/fuzz-corpus.hex").read_text().splitlines():
     if not line.startswith("#"):
         name, data = line.split()
         (corpus / name).write_bytes(bytes.fromhex(data))
@@ -151,9 +150,9 @@ A pure coordinator cannot prove actual packet filtering or zero packet loss:
 Measured production source `15e4e32` on `infraternal-dev`, Intel Core i9-9900K
 at 3.60 GHz, eight logical CPUs, with workspace Rust 1.99.0 release optimization
 and LTO. Every benchmark ran under a user scope with CPUWeight=10000. The
-one-minute load ranged from 25.88 to 26.41. Raw samples and per-process load
-records are in [evidence/2026-10-07](evidence/2026-10-07/); compiler/profile
-provenance is in [environment.txt](evidence/2026-10-07/environment.txt).
+one-minute load ranged from 25.88 to 26.41. Raw samples and compiler/profile
+receipts were removed under D262; the measured summary remains below, and new
+run receipts belong on #80.
 
 | Nodes | Arrows/node | Full CPU median/max ms | Wall median/max ms | Coordinator RSS MiB | Peak RSS MiB |
 | ---: | ---: | ---: | ---: | ---: | ---: |

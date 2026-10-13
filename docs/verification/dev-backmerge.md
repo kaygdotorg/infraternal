@@ -1,6 +1,10 @@
 <!-- Records the production-to-dev merge, resolution invariants and reproducible gates for #163. -->
 # Production backmerge
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 The merge commit is `90247165280a1d1231151aa703ec713838706794`, with parents
 `5bc58323ab14a99613df16c1dbe254e99bda3d28` (dev) and
 `6320f5b52f75c14b6ae0bc92b7ab1974f5570982` (production). The brief identifies
@@ -72,7 +76,7 @@ The complete suite uses TRACER_TEST_PORT=4637. An interrupted unweighted run is 
 a complete result. A wrong-directory invocation failed setup and was corrected. Failed files are rerun alone on a detached merge
 checkout, port 4643; persistent failures are compared with the production parent,
 port 4641. Each isolated invocation records before/after load. The complete result is 423 passed, 81 failed, 38 skipped (542 cases, 2.5h).
-[The comparison matrix](../../evidence/dev-backmerge/browser-matrix.md) maps
+[The comparison matrix](dev-backmerge/browser-matrix.md) maps
 every failed file to isolated runs. Persistent failures reproduce on production;
 other cases pass alone. Predictive screenshots initially passed on production
 at load 9.55/14.17/19.66, then the same visibility assertion failed on both
@@ -82,8 +86,8 @@ on both. Full results are recorded in unedited logs and #163.
 Real-shell smoke passes: owner enrollment, one native PTY and returned shell
 echo (1 passed, 23.1s). Real production-build captures also pass against the merged
 x86_64 static binary (1 passed, 29.4s). Desktop and phone, ink and paper images
-are attached under [captures](../../evidence/dev-backmerge/captures/canvas-real/).
-They are handed off for visual review; this merge authors no UI changes.
+were handed off for visual review and removed under D262; this merge authors no
+UI changes.
 
 The optional host-facts spec fails on the merge and production parent. Its
 Kernel expectation targets the default core view, while Kernel is extended-only

@@ -1,11 +1,15 @@
 <!-- Local regression, benchmark and gate evidence for the infraternal agent review fixes [5][13][40][41][75][81], issue #20. -->
 # Infraternal agent review fixes — #20
 
+> Historical raw logs and measurement receipts were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/agent-review-fixes/evidence/` and selected files should be
+> attached to #20 with the `issue-attach` helper.
+
 Review baseline: `947d68f02d787fea54dec33898418651d65fdf74`.
 Implementation, regression and benchmark head: `5ee58480e5face8cfaf368bae0a2cdf2a77f3fe8`
 on `t-agent`. The report is committed separately. The issue records the final
-head and verbatim fast-gate output. Evidence paths below are relative to this
-worktree, retained under `target/review-fixes/` rather than tracked binary artifacts.
+head and verbatim fast-gate output. Historical raw receipts were removed under
+D262; new reproduction output belongs under external job scratch.
 
 R1–R3 and R4's secondary copies, buffers, reads and credit grants are addressed.
 The VT engine and row clearing belong to the separate `spike-vt` work. Decisions

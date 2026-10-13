@@ -1,6 +1,10 @@
 <!-- Mobile terminal gestures, D113 recovery, reproduction and reviewer evidence for #44 and #45. -->
 # Mobile terminal and recovery verification
 
+> Historical raw logs and screenshots were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/mobile-recovery/evidence/`; selected screenshots should be
+> attached to #44/#45.
+
 Branch `mobile-recovery` starts at `56bb6f5`. The D113 authority is the owner's
 comment on [#45](https://git.kayg.org/kayg/infraternal/issues/45); DECISIONS.md
 is unchanged. The current task explicitly requires the tray to stay put, overriding
@@ -23,7 +27,7 @@ leaving binary-handling functions for the parallel fix-prf job.
 
 ## Evidence
 
-`target/playwright-final.log`: **29 passed (3.4m)** against the production build,
+`$HOME/.cache/codex-scratch/mobile-recovery/evidence/playwright-final.log`: **29 passed (3.4m)** against the production build,
 port 4551, Chromium with the iPhone 15 touch profile for terminal gestures.
 The 500-key probe reports p99 **16.10 ms** against the existing 20 ms assertion.
 The touch result is verbatim:
@@ -32,7 +36,7 @@ The touch result is verbatim:
 MOBILE_SCROLL rows=368 drag=16 momentum=40 font=13->24 pan=90 document=0 controls=fixed
 ```
 
-`target/native-browser.log`: the existing four real-authenticator scenarios and
+`$HOME/.cache/codex-scratch/mobile-recovery/evidence/native-browser.log`: the existing four real-authenticator scenarios and
 two new recovery scenarios pass on Chromium 149.0.7827.55. Native PRF,
 HKDF-SHA256/AES-GCM and the real Rust verifier/SQLite run through private IPC.
 Both immediate and delayed recovery preserve the DEK, consume the capability and
@@ -47,7 +51,8 @@ and the first terminal interaction retained onboarding listeners (3 page errors)
 The retained tests cover wrong-account, pending and expired cookies, revocation
 while Argon2 runs, active requests that cannot be accelerated, authoritative delay,
 invalid words, failed registration/finish retries, original-DEK wraps, pane glide,
-44 px steady touch targets and listener cleanup. Red/green logs remain in target.
+44 px steady touch targets and listener cleanup. Historical red/green logs were
+removed under D262; fresh receipts belong under the external job evidence directory.
 
 ### Measurements and their limits
 
@@ -55,24 +60,24 @@ Same-toolchain production build comparison against `56bb6f5`: main.js gzip
 27911 → 28328 bytes (+417); all JavaScript files gzip 238995 → 243842 bytes
 (+4847). Raw totals are 793205 → 805662 bytes. All-file totals include lazy
 terminal/recovery chunks and workers, not the first-paint download.
-Evidence: `target/evidence/bundle-size.json`, Bun 1.4.2 minification and gzip
+Evidence: `$HOME/.cache/codex-scratch/mobile-recovery/evidence/bundle-size.json`, Bun 1.4.2 minification and gzip
 level 9 per file. Recovery loads on demand and reuses the already-present BIP-39
 and envelope code rather than introducing a second authentication implementation.
 
 The optimized recovery-start diagnostic uses 50 live database session rows and
 30 samples per path. With no matching cookie: p50 17436 us, p99 22332 us;
 with the matching cookie: p50 17548 us, p99 20062 us
-(`target/recovery-scale.log`). This measures Argon2 plus SQLite-memory request
+(`$HOME/.cache/codex-scratch/mobile-recovery/evidence/recovery-scale.log`). This measures Argon2 plus SQLite-memory request
 creation, not network or device authentication. No per-session state was added;
 50 sessions use 50 existing session rows, and one recovery row per account.
 
 Machine: Linux x86_64, KVM, i9-9900K, 8 cores at 3.60 GHz, 31 GiB RAM.
 Three loaded repeats and machine/load metadata are retained in
-`target/recovery-scale-repeat.log` and `target/evidence/recovery-scale-machine.json`.
+`$HOME/.cache/codex-scratch/mobile-recovery/evidence/recovery-scale-repeat.log` and `$HOME/.cache/codex-scratch/mobile-recovery/evidence/recovery-scale-machine.json`.
 Repeat load averages increased from 6.36/6.24/7.08 to 8.63/6.73/7.23 while other
 atomic-gate compilation and tests overlapped. These noisy local samples establish
 no regression claim. Full-browser completion load is recorded separately in
-`target/evidence/browser-machine.json`. The pinned perf-VM budget run remains
+`$HOME/.cache/codex-scratch/mobile-recovery/evidence/browser-machine.json`. The pinned perf-VM budget run remains
 review work; this job's authorization does not extend to modifying that host.
 
 ## Review checklist
@@ -124,7 +129,7 @@ The native gate also needs the native build drivers available from the same Nix
 shell. No browser trace or automatic failure screenshots capture secrets.
 Explicit recovery screenshots contain public deterministic fixture words only.
 Per-commit complete gates/checks/builds and elapsed times are recorded in
-`target/atomic-gates/results.jsonl` and `*-fast.log` / `*-app.log`.
+`$HOME/.cache/codex-scratch/mobile-recovery/evidence/atomic-gates/results.jsonl` and `*-fast.log` / `*-app.log`.
 The final issue comments supply the final head, unedited gate output attachments
 and three-line owner testing notes. Nothing is pushed, merged or deployed.
 

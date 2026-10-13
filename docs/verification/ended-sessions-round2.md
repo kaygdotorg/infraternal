@@ -1,6 +1,10 @@
 <!-- Records the #168 round-two fixes, acceptance evidence and measured limits. -->
 # Ended sessions: independent review fixes (#168)
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 Baseline: `a23432f2387dcbff5f19429966feb65c8d9abb35`. Independent acceptance
 source: `origin/review-ended-sessions` at `87e53fc5`. Fixes and acceptance
 commits: `bc656a96`, `8230b4e3`, `a6c60d8a`, `281160bf`, `92b9f49b`,
@@ -36,8 +40,8 @@ invariant), and the older blocked reconciliation must never close that row.
 The saved-exit test is unchanged. The startup fixture test additionally opens
 a real PTY and verifies its census precedes the Result and usable marker.
 
-Failing baseline/model evidence is in
-[`evidence/ended-sessions-round2`](../../evidence/ended-sessions-round2/):
+Failing baseline/model receipts were removed under D262; their result summaries
+remain here:
 `es01-baseline-red.log`, `es02-baseline-red.log`, `es03-baseline-red.log`,
 `es01-model-red.log`, `es04-red.log`, `host-fence-red.log`. Acceptance tests
 were not weakened. The two extra host-isolation tests failed before their fix.
@@ -63,11 +67,8 @@ stalled also passed separately (`restart-focused.log`).
 Production browser acceptance passed against the real built frontend at
 300 ms simulated RTT on a unique port. The unchanged dead-session browser
 suite passed **7/7** under CPUWeight=10000; a matched detached baseline
-passed **7/7**. Logs: `es01-browser-latest.log`, `browser-head-repeat.log`,
-`browser-baseline.log`. Production captures:
-[`ordering acceptance`](../../evidence/ended-sessions-round2/es01-browser-green.png),
-[`session sidebar`](../../evidence/ended-sessions-round2/sidebar-final.png).
-These are review evidence; this job does not grade its own visual quality.
+passed **7/7**. The raw browser receipts and production screenshots were removed
+under D262; their recorded results remain above.
 
 `client-final.log` records strict TypeScript checking, **159 passing unit
 tests**, the default production build and unchanged D188 budgets:

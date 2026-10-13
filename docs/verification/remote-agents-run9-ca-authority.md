@@ -1,5 +1,9 @@
 <!-- Verification evidence for the real administrator CA authority and HTTP decoder, D168/#78; no key/proof bodies. -->
 
+> Historical screenshots, logs and receipts were removed under D262. Fresh output belongs in
+> `$HOME/.cache/codex-scratch/remote-browser-<pid>/evidence/remote-agents/screenshots/` and selected files should be attached to
+> #78 with the `issue-attach` helper.
+
 Shipping status: the authority, HTTP decoder and real CLI regression are committed.
 Runtime activation remains pending the ARM budget decision; the configured CLI
 proof passes with that recorded patch, not the unmodified shipping runtime.
@@ -91,9 +95,7 @@ certificate through the existing harness. No HTTP/WebSocket test double is used
 in this proof; mock=1 enables inspection hooks. Browser authority stays on private
 stdin and the captures contain only synthetic shell markers.
 
-Production captures for owner review (no author visual-quality judgment):
-[desktop](remote-agents/run9-merged-production/desktop.png),
-[phone viewport](remote-agents/run9-merged-production/iphone.png).
+Historical production screenshots were removed under D262. Fresh screenshots belong in job scratch and should be attached for owner review; this report makes no author visual-quality judgment.
 The 325-case production browser suite ran separately on TRACER_TEST_PORT=4701
 with a dedicated output directory; its result is recorded below.
 

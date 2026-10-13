@@ -1,6 +1,10 @@
 <!-- Role: build, run, and browser-test guide for the minimal S1 web client. -->
 # Tracer
 
+> Historical raw screenshots and logs were removed under D262. Fresh Playwright output belongs
+> under `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/`; attach selected review
+> screenshots to the relevant issue with the `issue-attach` helper.
+
 The tracer is a static TypeScript client with one full-viewport terminal. It uses
 the shared protocol codec and builds into `dist/` for the server's `--web-root`.
 
@@ -120,7 +124,7 @@ with one opacity setting, `--terminal-prediction-opacity`.
 The production test compares seeded input/echo schedules against a second
 Ghostty instance and captures pending and confirmed glyphs in both themes at
 393 × 852 and 1440 × 900. The captures and latency attribution are under
-`test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/`;
+`$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/terminal-first-run-passkey-29742-esume-and-the-latency-probe/`;
 measured results and the 50 MB throughput comparison are recorded on issue #50.
 
 ## Browser test
@@ -138,7 +142,7 @@ double: its passkey endpoints accept test ceremonies and do not verify WebAuthn
 signatures. Do not use it as an authentication server. The browser test sends
 20 sequential probe keys for the p99 latency report and saves terminal and
 probe screenshots plus the per-key browser/double attribution under
-`test-results/`. Playwright disables renderer backgrounding by default so
+`$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/`. Playwright disables renderer backgrounding by default so
 headless rAF scheduling reflects an active terminal surface. Set
 `TRACER_CHROMIUM_FLAGS` to override launch flags when comparing browser
 scheduling modes.
@@ -153,8 +157,10 @@ The test double validates the credential/user-handle association; actual Rust
 signature/counter verification is covered by the server lane's software and
 real-browser router tests. No arbitrary browser traces/failure screens are saved.
 
-Production screenshots for external review are in
-`test-results/terminal-first-run-passkey-29742-esume-and-the-latency-probe/`:
+Fresh production screenshots for external review are written to
+`$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/
+terminal-first-run-passkey-29742-esume-and-the-latency-probe/`; historical files
+were removed under D262:
 `setup-light.png`, `setup-dark.png`, `signin-light.png`, `signin-dark.png` at
 390 × 844 under light and dark system preferences. The inherited tracer CSS is
 dark-only, so these are preference captures rather than separate implemented
@@ -172,7 +178,7 @@ Production `main.js` is 49,589 bytes, deferred terminal chunk 662,827 bytes.
 The existing 500-key probe painted 500/500 echoes: p50 15.0 ms, p99 16.4 ms,
 resume 75.0 ms. Earlier concurrent-build runs exceeded its unchanged 20 ms gate
 (25.7–39.1 ms); the successful run remains in
-`../../target/passkey-job/browser-foreground.log`. Access/error measurements are
+`$HOME/.cache/codex-scratch/tracer/evidence/passkey-job/browser-foreground.log`. Access/error measurements are
 `access-render.log` and `errors-green.log` in that directory. These values do not
 prove the pinned perf-VM or physical-phone budgets in decision 41.
 
@@ -186,10 +192,10 @@ production dist directory and the actual Rust router over private IPC. It passes
 resident setup, recovery acknowledgement, empty-storage discoverable login and
 DEK unwrap on Chromium 149.0.7827.55; terminal sockets are closed locally because
 that fixture verifies authentication only. Evidence is the server worktree's
-`target/passkey-job/paired-browser.log`.
+`$HOME/.cache/codex-scratch/tracer/evidence/passkey-job/paired-browser.log`.
 
 `check-restart.mjs` in the server lane also SIGKILLs the actual server, retrieves
 the newly minted token through the actual CLI, and runs this production browser
 flow against its HTTP router. Older and spent tokens fail; a third startup
 retains the owner and exposes no new capability. Evidence: the server worktree's
-`target/passkey-job/process-restart.log`.
+`$HOME/.cache/codex-scratch/tracer/evidence/passkey-job/process-restart.log`.

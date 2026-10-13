@@ -70,7 +70,7 @@ The final production Chromium gate passed all 14 browser tests in 2.0 minutes.
 All seven reproducers and all three complete fixtures survived, and each
 post-fixture canary painted. The 50 MB behemoth case completed in 24.2 seconds
 in that run. The production terminal and latency screenshots are emitted under
-`test-results/` by `terminal.spec.ts`.
+`$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/` by `terminal.spec.ts`.
 
 ## Renderer memory
 
@@ -172,6 +172,7 @@ used above.
   payloads pass against the production build in Chromium and paint a canary.
 - [x] RSS was sampled from renderer processes with default and one-byte
   scrollback controls, then across eight default sessions; no budgets changed.
-- [x] The production terminal and probe screenshots are available under
-  `test-results/` for external review. This checklist records their presence;
-  it does not claim visual approval.
+- [x] The production run writes terminal and probe screenshots under
+  `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/`; historical files
+  were removed under D262. Attach selected screenshots for external review; this
+  checklist does not claim visual approval.

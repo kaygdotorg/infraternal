@@ -1,6 +1,10 @@
 <!-- Functional proof, performance measurements and unwaived limits for mesh transport slice 2, #129. -->
 # Mesh transport slice 2 [215,227,228], #129
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 The real kernel/PTY proofs pass. Performance acceptance is **not complete**:
 the measured cut-to-fallback time misses D41 and PROCESS §6, and the mesh echo
 p99 misses the local D41 reference. No threshold or owner decision was changed.
@@ -49,8 +53,9 @@ Both runs have **two live nodes, one live PTY, 1,000 public inventory members
 and 999 configured kernel peers on each side**. This is not 1,000 live nodes
 or 200 live PTYs. Both sides use default-drop stateful input firewalls; only
 the existing server port 7443 is granted. There are **zero WireGuard port
-grants**. Actual dynamically allocated ports, encrypted counters, complete
-firewall listings and test transcripts are in the linked evidence directory.
+grants**. Actual dynamically allocated ports, encrypted counters, firewall listings and
+test transcripts were recorded in receipts removed under D262. The baseline
+firewall inputs remain in `mesh-agent-transport/`.
 Assertions check that neither port is zero or 51820, every peer has keepalive,
 and encrypted traffic counters increase in both directions.
 
@@ -102,12 +107,10 @@ fallback but cannot meet the reconnect budget as implemented. The transport
 idle timeout stays 60 s; the authenticated guard bounds loss independently.
 These trade-offs are reported for review, not accepted as a budget waiver.
 
-Raw results: [zero-delay JSON](mesh-agent-transport/namespace-transport-0.json),
-[delayed JSON](mesh-agent-transport/namespace-transport-300.json),
-[zero-delay transcript](mesh-agent-transport/namespace-release-0.log),
-[delayed transcript](mesh-agent-transport/namespace-release-300.log),
-[server firewall](mesh-agent-transport/server-firewall-observed.nft),
-[node firewall](mesh-agent-transport/node-firewall-observed.nft).
+Historical zero-delay and delayed JSON/transcript receipts, plus observed firewall
+outputs, were removed under D262. The retained baseline firewall inputs are
+`mesh-agent-transport/server-firewall.nft` and
+`mesh-agent-transport/node-firewall.nft`.
 
 ## Transport cost at 1,000 connections
 
@@ -140,11 +143,9 @@ keepalives; it does not establish zero idle wakeups. Maximum observed
 authenticated silence is 489,555 µs guarded versus 416,677 µs without watchers
 at 100 ms, below the guarded deadline in this run. Raw UDP cannot refresh it.
 
-Raw records and matching transcripts are in
-[mesh-agent-transport/](mesh-agent-transport/), including
-[guarded data](mesh-agent-transport/mesh-idle-guarded-true-1000-100-60000.json),
-[equal-interval data](mesh-agent-transport/mesh-idle-guarded-false-1000-100-60000.json)
-and [baseline data](mesh-agent-transport/mesh-idle-guarded-false-1000-15000-60000.json).
+Historical raw records and matching transcripts were removed under D262. The
+retained `mesh-agent-transport/` directory contains the firewall input fixtures
+and `regressions.md`.
 
 ## Retained input at 200 terminals
 
@@ -158,7 +159,7 @@ allocated only for pending data and backpressure refuses further input at the
 cap. Full-cap replay is split into legal protocol frames. The real PTY proof
 above establishes actual byte retention across transport changes.
 
-Transcript: [200-terminal model](mesh-agent-transport/input-retention-200-resized.log).
+The historical 200-terminal model transcript was removed under D262.
 
 ## Gates, provenance and reproduction
 
@@ -166,9 +167,8 @@ Machine: infraternal-dev, 12 vCPUs and 64 GB after the resize; compiler pinned
 to Rust 1.99. All reported optimized measurements ran sequentially under
 `systemd-run --user --scope -p CPUWeight=10000` without concurrent job-owned
 builds. Other jobs were active; this is not pinned performance acceptance.
-[Machine record](mesh-agent-transport/machine.json) and
-[shipping binary size/hash](mesh-agent-transport/shipping-binary.json) identify
-the artifacts. The x86 static binary is **20,705,152 B**, **+90,496 B** versus
+The historical machine and binary identity receipts were removed under D262;
+the reported sizes and load remain in this report. The x86 static binary is **20,705,152 B**, **+90,496 B** versus
 recorded slice-1 `a5f744fb` (20,614,656 B). The unchanged static limit is
 16,404,816 B. D205's known overrun is reported, not hidden. ARM static checks
 are not reached when the fast gate stops on that x86 size failure.

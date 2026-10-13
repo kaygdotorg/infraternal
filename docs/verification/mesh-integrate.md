@@ -1,8 +1,12 @@
 <!-- Records merge compatibility, shutdown crash safety and measured shipping evidence for #129 (D16, D163, D198, D201, D202, D205, D216). -->
 # Mesh integration and shutdown
 
-Code head: `d9ee14267b848c5f458ddcabec7a83809e5ca748`. Evidence and author
-review: [evidence/mesh-integrate](../../evidence/mesh-integrate/).
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
+Code head: `d9ee14267b848c5f458ddcabec7a83809e5ca748`. The raw integration
+receipts were removed under D262; this report retains the summary and review.
 The final branch-head gate and exact head are recorded on issue #129 after
 this evidence commit. Only the integration branch is pushed; the orchestrator
 owns the fast-forward of `dev`. No deployment or external host was used.

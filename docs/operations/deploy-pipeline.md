@@ -175,8 +175,11 @@ spacing. Each gap is a conservative bracket from the last successful connect
 before refusal to the first success afterward; no observed refusal is reported
 as zero at that resolution. p50/p99 use nearest rank over 12 brackets; p99 is
 the maximum sample. This is listener availability, not end-to-end terminal
-reconnect time. Raw VM output and machine/load context are retained in
-`evidence/deploy-pipeline/staging-proof.txt`. The native fixture stops its own transient unit and process group before
+reconnect time. Raw VM output and machine/load context are written to
+`$HOME/.cache/codex-scratch/deploy-pipeline/evidence/staging-proof.txt` by default;
+`INFRATERNAL_EVIDENCE_DIR` overrides the evidence directory. The historical
+committed staging receipt was removed under D262. The native fixture stops its
+own transient unit and process group before
 returning. After lock release, the runner removes its data, CA, executables and
 runtime libraries and confirms the run directory is absent.
 

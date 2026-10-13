@@ -6,6 +6,10 @@ using the real server, infraternal agent, shim and shell. The host memory floor
 is configured above actual available memory through its authenticated action;
 no mock replaces admission. The default is restored after the test.
 
+The spec writes to `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/session-bounds/`.
+Attach selected review images to #151 with the orchestrator's `issue-attach` helper;
+the repository does not retain generated screenshots.
+
 - `refusal-desktop.png`: desktop viewport 1440x1000.
 - `refusal-phone.png`: phone viewport 393x852, device scale factor 3.
 - `sessions-phone.png`: the existing host sessions picker after activating the

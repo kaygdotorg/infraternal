@@ -1,6 +1,10 @@
 <!-- Records defensive CA custody and release-verification evidence for the exact production pin, #154. -->
 # CA custody and update verification audit
 
+> Historical raw receipts were removed under D262. `run-audit.py` writes per-phase output under
+> `$HOME/.cache/codex-scratch/ca-update-audit-<phase>/evidence/` by default and honors
+> `INFRATERNAL_EVIDENCE_DIR`; attach fresh receipts to #154 with the `issue-attach` helper.
+
 Scope: branch `audit-ca-update`, production base
 `15d15c257c6985c838b41f6db5216b6544f60bd0`, 2026-10-11. No production
 access, deployment or key inspection. All cryptographic fixtures use ephemeral
@@ -68,7 +72,8 @@ Test `signer_coverage`: **PASS**, real WebCrypto Ed25519 and independent ssh-key
 Worker's SSHSIG; altered SUMS and another public key refuse, VERSION bytes
 are hashed. R2 uses an in-memory storage fixture; private keys exist only in
 this test process. No production key, Worker endpoint or credentials are read.
-Evidence: `evidence/ca-update-audit/signer-{coverage,missing-version,mismatched-version}.txt`.
+The historical signer receipts were removed under D262. Reproduction output for
+the `after` phase goes under `$HOME/.cache/codex-scratch/ca-update-audit-after/evidence/`.
 
 ## SIG-02 — P2: Worker permits ambiguous checksum filenames (supplemental source)
 
@@ -78,7 +83,8 @@ contains no slash and is included unescaped in a line-oriented SHA256SUMS.
 The signer should refuse control characters before signing. A strict client
 must also refuse ambiguous or path-bearing manifest entries. No archive parser
 exists in the production pin, so archive extraction safety is not claimed.
-Evidence: `evidence/ca-update-audit/signer-unsafe-name.txt`.
+The historical unsafe-name receipt was removed under D262. Fresh phase output
+goes under `$HOME/.cache/codex-scratch/ca-update-audit-after/evidence/`.
 
 Reproduce supplemental tests by extracting that exact public source object to a
 job scratch `.mjs` file, then running `node
@@ -485,7 +491,8 @@ an allocator speed/memory improvement claim or whole-server budget proof.
 A real wrapped/unlocked signer fixture separately records VmLck **1,024 KiB**,
 RSS **11,332 → 18,840 KiB**, secure usage **832 B**, and a further imported-key
 secure delta of exactly **32 B**. Its historical before regression had VmLck0.
-Evidence: `evidence/ca-update-hardening/{heap-scale,locked-pages-resume}.txt`.
+The historical hardening receipts were removed under D262. The hardening phase
+now writes under `$HOME/.cache/codex-scratch/ca-update-audit-hardening/evidence/`.
 
 ## CA-03 repair and admission boundaries (#154)
 
@@ -540,8 +547,8 @@ head `25e4e026` at resume: SIG-01 `a7c11bfb`, SIG-02 `9e60256d`, documentation
 and version/channel/hash/other-key mutation refusals. SIG-01 missing/mismatched
 identity and all14 unsafe-name cases failed before. Exact framing, verify commands
 and manual owner deployment notes live in `apps/release-signer/README.md` on that
-branch; no binding or key rotation is required. Evidence: that branch's
-`evidence/signer-hardening/` and this branch's `signer-final-fast.txt`.
+branch; no binding or key rotation is required. Historical receipts from that
+branch were removed under D262; the result summary is retained here.
 
 Worker local WebCrypto/in-memory R2 diagnostic, 30 samples each on this same
 12-CPU host, CPUWeight10000, no own build/browser overlap; load36.98/38.61/31.36

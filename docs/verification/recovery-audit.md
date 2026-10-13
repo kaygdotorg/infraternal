@@ -1,6 +1,10 @@
 <!-- Recovery audit fixes, browser-only derivation, historical review and superseding recovery evidence for #45. -->
 # Recovery audit verification
 
+> Historical raw logs, JSON receipts and screenshots were removed under D262. Fresh output belongs
+> under `$HOME/.cache/codex-scratch/recovery-audit/evidence/`; screenshot attachments on #45
+> remain the visual-review record.
+
 This slice continues `mobile-recovery` from `18d5035`, using the audit on
 [#45](https://git.kayg.org/kayg/infraternal/issues/45), comment 30593. D113 is the
 owner's same-account recovery decision; D151 is the browser-only recovery
@@ -42,10 +46,10 @@ below describe rejected behavior, not a supported protocol.
 
 ## Evidence
 
-Unedited logs, exact-snapshot gate results and machine metadata are in
-`target/recovery-fixes/`. The issue holds the final SHA and verbatim gate output;
-`atomic-gates/results.jsonl` records each immutable commit verification. Gate
-completion is determined by that evidence, not this prose.
+Historical raw logs, exact-snapshot gate results and machine metadata were
+removed under D262. The issue holds the final SHA and verbatim gate output; the
+commit-by-commit JSON receipt was removed under D262. Gate completion is
+determined by the issue record, not this prose.
 
 Failing tests preceded fixes:
 
@@ -85,8 +89,8 @@ and cancel, and **0** events to a separately authenticated account, in **0.64 s*
 (`socket-capacity-green.log`). Audit evidence includes the exact lifecycle sequence
 `start, cancel, start, complete`; old tokens and cancelled ceremonies fail closed.
 
-28 production screenshots at **393×852** and **1440×900** are attached on #45 and
-listed in `screenshot-attachments.json`: immediate/delayed recovery steps, pending
+28 production screenshots at **393×852** and **1440×900** are attached on #45;
+the local attachment-list receipt was removed under D262: immediate/delayed recovery steps, pending
 notice/toast and explicit legacy warning. Word captures use public deterministic
 fixtures only. They are attached for owner review; this job does not judge visual
 quality. A physical iPhone/PWA and Safari passkey check remains device review.

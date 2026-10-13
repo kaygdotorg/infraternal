@@ -26,8 +26,11 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
   is not compatible with AGPL.
 - Taste: read `docs/design/TASTE.md` before any UI work and check your work
   against it. Every annoyance the owner spots is added there the same day.
-- Review UI from screenshots of a real production build. Codex jobs attach the
-  screenshots. They do not judge their own visual quality.
+- Review UI from screenshots of a real production build. Save screenshots,
+  logs and other raw receipts outside the checkout under
+  `$HOME/.cache/codex-scratch/<job>/evidence/`; Codex jobs attach the selected
+  files to the issue with the orchestrator's `issue-attach` helper. They do not
+  judge their own visual quality.
 - Code explains itself. Use module docs and comments for choices and
   invariants that are not obvious.
 - No secrets in the repo, in logs or in argv. No prices in the repo.
@@ -71,4 +74,4 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 
 Before you report that work is done, run `scripts/verify fast` and quote its
 output. Each slice adds its own gates (integration, browser, bench). A green
-gate is not proof: include the evidence (screenshots, numbers).
+gate is not proof: include measured numbers and issue-attached screenshots.

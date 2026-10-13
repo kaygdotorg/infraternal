@@ -1,6 +1,10 @@
 <!-- SSH bootstrap implementation, measured component evidence and explicit acceptance prerequisites; #87. -->
 # SSH bootstrap evidence
 
+> Historical raw receipts were removed under D262. The recorded measurements remain; new run
+> output belongs under `$HOME/.cache/codex-scratch/ssh-bootstrap-87/evidence/` and selected
+> files should be attached to #87 with the `issue-attach` helper.
+
 This branch supplies a strict system OpenSSH adapter, memory-only credential
 helpers, transactional installation and owner-authenticated progress. Full
 end-to-end acceptance is incomplete: production enrollment, authenticated facts
@@ -17,8 +21,7 @@ host. Ping/Pong preserve progress without refreshing authority. Revocation
 interrupts even a stalled write; disconnect cancels work and runs rollback.
 
 The ordinary server now mounts the router. Before registration, a real TCP
-regression returned 404 instead of unauthenticated 401; its corrected result is
-in evidence/ssh-bootstrap/continuation-runtime-route-green.log.
+regression returned 404 instead of unauthenticated 401; its corrected result is recorded in the run summary. The raw receipt was removed under D262.
 
 The trusted factory receives the exact live Auth and SQLite pool. Backend
 operations receive nonsecret owner/batch identity and an opaque zeroizing
@@ -78,17 +81,14 @@ not unloaded pinned performance gates. No perf VM was used.
 | Controller RSS delayed baseline/peak | 4828/4840 KiB |
 | Owned SSH child summed RSS local/delayed peak | 91432/91476 KiB |
 
-Initial load 1.44/1.37/1.27; `evidence/ssh-bootstrap/continuation-real-ssh.log` includes one passing
-real-sshd oracle, strict unknown-key rejection at the configured port and
-credential-helper cleanup. Child RSS repeats shared libraries and excludes the
+Initial load 1.44/1.37/1.27; the removed raw receipt recorded one passing real-sshd oracle, strict unknown-key rejection at the configured port and credential-helper cleanup. Child RSS repeats shared libraries and excludes the
 fixture's sshd/ssh-agent, database, authentication and full control-plane state.
 The ten connections are not ten distinct full host installations.
 
 A controlled backend admission run held 1000 targets in 10 batches at exactly
 eight active operations: baseline/held/completed RSS 4432/7452/7884 KiB, 45 ms to
 independent failure. It measures scheduler state, not whole-server memory.
-Load 0.69/1.10/1.19; evidence/ssh-bootstrap/continuation-admission-scale-final.log
-records the current production scheduler, with a controlled unavailable backend.
+Load 0.69/1.10/1.19; the removed raw receipt recorded the current production scheduler with a controlled unavailable backend.
 
 Inherited-run private-directory checks, 500 interleaved samples/profile, initial
 load 1.84/1.75/1.70: plain shell p50/p99=1002/1506 us; equivalent two-fork
@@ -103,10 +103,9 @@ diagnostics and seeds through 65537 bytes. Instrumented fuzzer memory is
 not server memory. A subsequent run linked directly to the production crate exercised
 1,366,902 inputs in 61 seconds without a crash, through the same target source.
 The continuation campaign ran 4,256,482 executions in 181 seconds, max_len
-65537, seed 1694043920, without a crash (continuation-parser-fuzz.log).
-After two Clippy-only assertion/style corrections, the final source completed
-100,000 more executions in four seconds without a crash
-(continuation-parser-final-source.log). Both logs are under evidence/ssh-bootstrap/.
+65537, seed 1694043920, without a crash. After two Clippy-only assertion/style
+corrections, the final source completed 100,000 more executions in four seconds
+without a crash. Both raw receipts were removed under D262.
 
 The subprocess group-lifetime regression first demonstrated a reaped leader
 while inherited pipes remained pending. Retain its unreaped identity until
@@ -122,7 +121,7 @@ binary-size delta, license and trust/config parity. No engine switch is made.
 The final reachable production binaries measured 16,520,048 bytes x86_64 musl
 and 13,881,064 bytes aarch64 musl, stripped and without PT_INTERP. The unchanged
 262,144-byte allowance passes against the separately recorded #87 baselines.
-Evidence: evidence/ssh-bootstrap/continuation-runtime-fast.log.
+The raw gate receipt was removed under D262; the production binary sizes and unchanged allowance are recorded above.
 
 ## Real-host prerequisites and remaining acceptance
 

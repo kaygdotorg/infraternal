@@ -1,6 +1,10 @@
 <!-- Records the static provider diagnosis, D244 repair, root proof and verification boundaries for #154. -->
 # Static key-memory refusal
 
+> Raw run receipts cited here were removed under D262. The diagnosis, measurements and
+> reproduction method remain; new outputs belong in job scratch and should be attached to #154
+> with the `issue-attach` helper.
+
 Investigation base: `audit-ca-update` at `b0cf61ef`. Production batch
 `8cff05cd` pins the identical provider: openssl-src 300.6.1+3.6.3 and
 openssl-sys 0.9.117. All #154 comments were read; no linked parent exists.
@@ -16,8 +20,7 @@ the define is absent.
 
 ## Root reproduction
 
-[Raw systemd output](../../../evidence/ca-static-heap/root-systemd.txt)
-comes from the explicitly authorized infraternal-perf-test VM, Linux
+The recorded systemd rows came from the explicitly authorized benchmark VM, Linux
 6.12.69+deb13-amd64, as root under `/var/lock/perf-bench.lock`. Only synthetic
 allocations were made. No keys, dump contents or addresses were printed.
 
@@ -53,8 +56,7 @@ benchmarks. Machine load is in the transcript; no load generators ran.
 The brief requires: “If the repair needs a different OpenSSL build option
 or a new dependency, that is a foundational choice: stop and write the
 question on #154 with the measured options.” The
-[question and options](../../../evidence/ca-static-heap/foundation-question.txt)
-were posted on #154. Recommendation: remove the exact musl disable define
+The question and options were posted on #154. Recommendation: remove the exact musl disable define
 through the pinned compiler wrapper; alternative: maintain an explicit
 openssl-src patch. Neither requires a new engine.
 
@@ -76,7 +78,7 @@ export CARGO_TARGET_DIR="$HOME/.cache/codex-scratch/ca-static-heap/target"
 scripts/auth-toolchain
 nix shell nixpkgs#gnumake nixpkgs#perl -c cargo build --locked --release \
   --package openssl-sys --target x86_64-unknown-linux-musl
-python3 evidence/ca-static-heap/build_probe.py "$CARGO_TARGET_DIR" x86_64
+python3 docs/verification/ca-static-heap/build_probe.py "$CARGO_TARGET_DIR" x86_64
 ```
 
 The C probes compiled with `-Wall -Wextra -Werror`. The final root runner
@@ -89,7 +91,7 @@ TRACER_TEST_PORT=5814, one Rust test thread and job-owned scratch paths.
 Network self-test and formatting completed; Clippy was still compiling at
 the owner boundary. The run was interrupted (exit 130), along with the
 queued full-server and aarch64 builds. No final summary or full-test/static
-pass is claimed. [Captured output](../../../evidence/ca-static-heap/verify-fast.txt).
+pass is claimed. The raw transcript was removed under D262.
 
 Author checklist: compile condition traced; no credential inspection;
 authorized VM and lock used; real kernel flags checked at 10,000 allocations;
@@ -125,7 +127,7 @@ explicitly reported as untested. No ARM runtime result is claimed.
 
 Both original-production reference images omit the diagnostic. These are
 full repair deltas, not the earlier standalone C-probe measurements.
-[Hashes, file identification and interpreter checks](../../../evidence/ca-static-heap/d244-binary-sizes.txt):
+The recorded hash, file-identification and interpreter checks are summarized below; their raw receipt was removed under D262:
 
 | Target | Before | After | Delta | Unchanged ceiling |
 | --- | ---: | ---: | ---: | ---: |
@@ -138,7 +140,7 @@ The measured additional bytes implement the owner's D244 protection choice.
 
 ### Root systemd proof and startup measurements
 
-[Actual production CLI startup receipt](../../../evidence/ca-static-heap/d244-root-startup.txt):
+The actual production CLI startup receipt was removed under D262; its result is summarized below:
 `infraternal-perf-test`, Linux 6.12.69+deb13-amd64, 4 CPUs, root, shared perf
 lock held, systemd CPUWeight=10000 and LimitMEMLOCK=8388608. Load before and
 after: 0.01/0.06/0.06. No load generators or builds ran on the VM.
@@ -160,7 +162,7 @@ successful startup is discarded so its setup capability cannot enter evidence.
 
 ### Real static CA and scale proof
 
-[Root static-release CA receipt](../../../evidence/ca-static-heap/d244-root-ca-tests.txt)
+The root static-release CA receipt was removed under D262.
 uses the existing release/musl test executable with the remote feature, under
 root/systemd 8 MiB and the same shared lock. All **3 selected tests pass**:
 locked imported signer, real passkey HTTP authority unlock, and 10,000 live
@@ -202,8 +204,8 @@ Build drivers are supplied through the documented Nix gnumake/perl invocation.
 Preserve RUSTC_WRAPPER for the compiler cache. The native runtime gate requires
 prlimit; the cross-target build still requires the pinned D213 toolchain.
 The reproducible root harness is
-[run-d244-root.sh](../../../evidence/ca-static-heap/run-d244-root.sh) plus
-[run_d244_root.py](../../../evidence/ca-static-heap/run_d244_root.py), run in
+[run-d244-root.sh](run-d244-root.sh) plus
+[run_d244_root.py](run_d244_root.py), run in
 `/root/infraternal-bench/ca-heap/` only while holding the shared perf lock.
 Its explicit split modes preserve startup and CA receipts separately.
 

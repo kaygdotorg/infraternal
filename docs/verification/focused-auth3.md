@@ -80,8 +80,9 @@ per screen, local production build. A concurrent-build run failed at 29.2 ms;
 that failure remains recorded, and the clean rerun passes. These browser terminal
 numbers use the clearly marked transport test double, not a production PTY.
 Native auth passes four isolated scenarios; paired Rust/production browser and
-process-restart checks pass. Production screenshots for independent review are in
-`t-web-auth/apps/tracer/test-results/`, including
+process-restart checks pass. Historical production screenshots were removed under
+D262. Fresh screenshots for independent review belong in
+`$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/`, including
 `onboarding-setup-recovery--906cd--match-the-browser-contract/returning-sign-in-iphone-15.png`
 and `terminal-first-run-passkey-29742-esume-and-the-latency-probe/tracer-terminal.png`.
 This job does not approve its own visual quality.

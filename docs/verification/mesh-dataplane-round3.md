@@ -1,6 +1,10 @@
 <!-- Mesh round-three repair evidence, regression chronology and reviewer checklist for #129, D165/D166/D170/D198/D205/D206/D228/D231. -->
 # Mesh data plane round three
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 Reviewed base: `378d4055`. Production repair head: `24542436`.
 The host-resize WIP `ac21cb69` was soft-reset and split into `9a7fa2ea`
 (route shape/prefix recovery) and `24542436` (durable node transaction).
@@ -83,7 +87,8 @@ branch-head gate is recorded with its SHA on #129.
 
 ## Reproduction
 
-Raw evidence is in [the round-three evidence directory](../../evidence/mesh-dataplane-round3/).
+Raw round-three receipts were removed under D262; the report retains their
+result summaries.
 `red-*` captures pre-fix cases; `shape-*` confirms shape alone is insufficient;
 `node-*` captures the final regression suite, targeted gates and executable hashes.
 The node binaries were built before committing their unchanged sources; provenance

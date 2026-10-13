@@ -1,6 +1,10 @@
 <!-- Mesh slice 1 round 2 regression, kernel, scale and gate evidence for #129, D206 and D228. -->
 # Mesh slice 1 round 2
 
+> Historical raw logs and receipts were removed under D262. Fresh receipts belong under
+> `$HOME/.cache/codex-scratch/mesh-dataplane/evidence/` and should be attached to #129 with the
+> `issue-attach` helper.
+
 Base: `a5f744fbc1d5e8966de46982b995d816e91baff5`. Production/test head: `9091e49f`.
 The three review commits were imported first, without weakening or deleting their assertions.
 The sole test hygiene change removes redundant raw-string delimiters; packet contents are identical.
@@ -33,7 +37,7 @@ The fallback adds one delivery drop per family, shared by INPUT and FORWARD. Leg
 
 ## Reproduction and provenance
 
-All logs and long diffs are under `$HOME/.cache/codex-scratch/mesh-dataplane/`.
+Fresh logs and long diffs belong under `$HOME/.cache/codex-scratch/mesh-dataplane/evidence/`; the historical committed receipts were removed under D262.
 Benchmark/proof commands run locally under `systemd-run --user --scope -p CPUWeight=10000` and `unshare -Urn`; no induced host load or other host was used.
 Build outside the isolated network namespace so the compiler cache remains reachable. Save executable copies before comparing revisions.
 
