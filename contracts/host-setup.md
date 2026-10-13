@@ -116,3 +116,27 @@ The SSH master uses `LogLevel=ERROR` to suppress remote login notices. Its
 selective `LogVerbose` override admits only the local `ssh_userauth2` method
 receipt, reduced by the existing constant-size recognizer without retaining
 raw diagnostic text. SSH control-socket admission remains the sign-in proof.
+
+## Optional session payload (D255, D198)
+
+A release may supply `infraternal-<architecture>-session-musl` beside the full
+host payload. It is the same executable built with the session and SSH component
+only, using the same shim, rendezvous protocol and terminal dispatcher. These
+paths are trusted server configuration; target requests cannot select a payload.
+A missing session artifact retains full-payload staging. A present symlink,
+directory or inaccessible artifact is refused.
+
+After read-only admission, verified session-payload staging starts the original
+shim-owned shell. Once its session is protected and published, the existing
+session-preserving setup retry path stages the full host payload over another
+command channel on the same authenticated SSH connection. It retires only the
+owned installation journal and never truncates the inode backing a live process.
+The session, writer cursors, host identity and rendezvous remain unchanged. The
+private enrollment input still follows verified full-payload staging. Cancellation,
+component-off, ownership checks and failed-setup retry retain their existing
+boundaries. D240/D247's per-person login requirement applies to both builds.
+
+The public digest index has four entries (two architectures times two builds),
+and the encoding index has eight (two codecs per build). Each encoded entry
+retains the existing 64 MiB ceiling. These caches belong to the server; no cache
+or compressor is added to a host daemon or a session shim.
