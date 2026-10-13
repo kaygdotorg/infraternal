@@ -2554,3 +2554,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Containers and Kubernetes,** when they arrive, are more sources in
        the same search, vitals and alerts.
      - **Process monitoring** is its own feature, to be grilled later.
+262. **Evidence lives on the issue, not in the repo (owner, 2026-10-13,
+     #200; changes how CLAUDE.md "Codex jobs attach the screenshots" is
+     carried out):** screenshots, captures, raw logs, traces, gate
+     transcripts and measurement receipts are attached to the Forgejo issue
+     of the work, next to the numbers in the comment. The repo holds code,
+     tests, fixtures that tests read, docs and decisions only. A gate refuses
+     new large or evidence-type files. The existing `evidence/` and
+     `apps/tracer/captures/` trees leave the repo, and history is rewritten
+     once to remove them (about 600 MB of `.git`, two thirds of it
+     screenshots and evidence). Rejected: a short per-job evidence README in
+     the repo (owner: evidence belongs to the issue), and Git LFS (another
+     server-side store for what the issue already holds).
