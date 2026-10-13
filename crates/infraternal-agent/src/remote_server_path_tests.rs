@@ -148,21 +148,74 @@ struct Server {
     task: tokio::task::JoinHandle<()>,
     connection_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     dropping: Arc<std::sync::atomic::AtomicBool>,
+    reserved: Option<std::net::UdpSocket>,
 }
+
+/// Reserve both address tuples before publishing either port to another task.
+fn udp_pair(ip: std::net::IpAddr) -> (std::net::UdpSocket, std::net::UdpSocket) {
+    let other = if ip == "127.0.0.1".parse::<std::net::IpAddr>().unwrap() {
+        "127.0.0.2"
+    } else {
+        "127.0.0.1"
+    };
+    for _ in 0..64 {
+        let primary = std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).unwrap();
+        if let Ok(alternate) = std::net::UdpSocket::bind(SocketAddr::new(
+            other.parse().unwrap(),
+            primary.local_addr().unwrap().port(),
+        )) {
+            return (primary, alternate);
+        }
+    }
+    panic!("could not jointly reserve the fixture UDP paths");
+}
+
+/// TCP port allocation does not reserve UDP, so keep all three descriptors.
+fn tcp_mesh_pair() -> (
+    tokio::net::TcpListener,
+    std::net::UdpSocket,
+    std::net::UdpSocket,
+) {
+    for _ in 0..64 {
+        let (mesh, enrolled) = udp_pair("127.0.0.2".parse().unwrap());
+        if let Ok(tcp) = std::net::TcpListener::bind(enrolled.local_addr().unwrap()) {
+            tcp.set_nonblocking(true).unwrap();
+            return (
+                tokio::net::TcpListener::from_std(tcp).unwrap(),
+                mesh,
+                enrolled,
+            );
+        }
+    }
+    panic!("could not jointly reserve TCP and both UDP paths");
+}
+
 impl Server {
-    // Keep handshake, proof and connection ownership in one fixture boundary.
-    #[allow(clippy::too_many_lines)]
     fn new(
         identity: &remote_tls::Identity,
         roots: &[openssl::x509::X509],
         address: SocketAddr,
     ) -> Self {
+        assert_eq!(
+            address.port(),
+            0,
+            "fixed ports must transfer their reserved descriptor"
+        );
+        let (socket, reserved) = udp_pair(address.ip());
+        Self::from_socket(identity, roots, socket, Some(reserved))
+    }
+    // Keep handshake, proof and connection ownership in one fixture boundary.
+    #[allow(clippy::too_many_lines)]
+    fn from_socket(
+        identity: &remote_tls::Identity,
+        roots: &[openssl::x509::X509],
+        socket: std::net::UdpSocket,
+        reserved: Option<std::net::UdpSocket>,
+    ) -> Self {
         use quinn::Runtime as _;
         let dropping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let bindings = Bindings::new(Arc::new(DroppedReplies {
-            inner: quinn::TokioRuntime
-                .wrap_udp_socket(std::net::UdpSocket::bind(address).unwrap())
-                .unwrap(),
+            inner: quinn::TokioRuntime.wrap_udp_socket(socket).unwrap(),
             dropping: dropping.clone(),
         }));
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
@@ -240,6 +293,7 @@ impl Server {
             task,
             connection_count,
             dropping,
+            reserved,
         }
     }
     /// Answer on `ip` at the primary port too (the server's mesh address).
@@ -249,8 +303,13 @@ impl Server {
             ip.parse().unwrap(),
             self.endpoint.local_addr().unwrap().port(),
         );
+        let reserved = self
+            .reserved
+            .as_ref()
+            .expect("fixture lacks a reserved mesh path");
+        assert_eq!(reserved.local_addr().unwrap(), address);
         let socket = quinn::TokioRuntime
-            .wrap_udp_socket(std::net::UdpSocket::bind(address).unwrap())
+            .wrap_udp_socket(reserved.try_clone().unwrap())
             .unwrap();
         self.lease = Some(self.bindings.lease(socket).unwrap());
         address
@@ -354,6 +413,30 @@ fn supervise(
         tokio::spawn(async move { run(&identity, state, None, control).await }),
         directory,
     )
+}
+
+#[tokio::test]
+async fn a_future_mesh_lease_and_silent_cut_keep_their_port_reserved() {
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let mesh = SocketAddr::new(
+        "127.0.0.2".parse().unwrap(),
+        server.endpoint.local_addr().unwrap().port(),
+    );
+    assert!(
+        std::net::UdpSocket::bind(mesh).is_err(),
+        "a parallel fixture can steal the later mesh binding"
+    );
+    server.lease("127.0.0.2");
+    server.cut();
+    assert!(
+        std::net::UdpSocket::bind(mesh).is_err(),
+        "a silent cut must absorb UDP without ICMP or port reuse"
+    );
 }
 
 /// The proposal moves the admitted connection itself; a silent cut returns it.
@@ -511,10 +594,11 @@ async fn untrusted_server_on_the_mesh_address_never_takes_the_connection() {
     let roots = std::slice::from_ref(&ca.certificate);
     let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
     let enrolled = server.endpoint.local_addr().unwrap();
-    let mut impostor = Server::new(
+    let mut impostor = Server::from_socket(
         &leaf(&wrong, true),
         std::slice::from_ref(&wrong.certificate),
-        SocketAddr::new("127.0.0.2".parse().unwrap(), enrolled.port()),
+        server.reserved.take().unwrap(),
+        None,
     );
     let registry = registry();
     let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
@@ -699,7 +783,7 @@ async fn healthy_mesh_path_is_never_declared_interrupted() {
 async fn component_down_proves_tcp_fallback_when_enrolled_udp_is_unavailable() {
     let ca = root();
     let server = leaf(&ca, true);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, mesh_socket, _enrolled_blackhole) = tcp_mesh_pair();
     let address = listener.local_addr().unwrap();
     let acceptor =
         remote_tls::server_config(&server, std::slice::from_ref(&ca.certificate)).unwrap();
@@ -743,10 +827,11 @@ async fn component_down_proves_tcp_fallback_when_enrolled_udp_is_unavailable() {
             while sessions.try_join_next().is_some() {}
         }
     });
-    let mut mesh = Server::new(
+    let mut mesh = Server::from_socket(
         &server,
         std::slice::from_ref(&ca.certificate),
-        SocketAddr::new("127.0.0.2".parse().unwrap(), address.port()),
+        mesh_socket,
+        None,
     );
     let registry = registry();
     let (supervisor, _directory) = supervise(identity(&ca, address), &registry);
