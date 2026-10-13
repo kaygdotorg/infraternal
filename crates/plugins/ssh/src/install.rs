@@ -21,6 +21,27 @@ pub struct BinaryPaths {
     pub aarch64: PathBuf,
 }
 impl BinaryPaths {
+    /// Prefer the same executable built with only session/SSH support. Missing
+    /// optional release artifacts preserve the full-payload installation path.
+    /// Paths remain trusted server settings, never supplied by a target.
+    /// # Errors
+    /// Refuses a present artifact that is a symlink, directory or inaccessible.
+    pub fn session_payload(&self, architecture: Architecture) -> Result<PathBuf, Failure> {
+        let name = match architecture {
+            Architecture::X86_64 => "infraternal-x86_64-session-musl",
+            Architecture::Aarch64 => "infraternal-aarch64-session-musl",
+        };
+        let full = self.get(architecture);
+        let session = full.with_file_name(name);
+        match std::fs::symlink_metadata(&session) {
+            Ok(metadata) if metadata.is_file() => Ok(session),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(full.to_path_buf()),
+            _ => Err(Failure::install(
+                "The matching static infraternal binary is unavailable.",
+            )),
+        }
+    }
+
     #[must_use]
     pub fn get(&self, architecture: Architecture) -> &Path {
         match architecture {
