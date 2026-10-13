@@ -106,7 +106,7 @@ export interface ConnectionConfig {
   onConnectionChange?: (connected: boolean) => void;
 }
 
-interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number }
+interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 
 export class MuxConnection {
   private socket: WebSocket | undefined;
@@ -349,6 +349,9 @@ export class MuxConnection {
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
       const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
+      // The server retains a live writer indefinitely; its grace starts on disconnect
+      // (or startup recovery), not Welcome. Failed retries must never renew that grace.
+      if (this.welcomed && this.credentials) this.credentials.deadline = Date.now() + this.credentials.windowMs;
       this.socket = undefined;
       this.decoder = undefined;
       this.welcomed = false;
@@ -392,7 +395,8 @@ export class MuxConnection {
         this.credentials = {
           connectionId: frame.connectionId.slice(),
           resumeToken: frame.resumeToken.slice(),
-          deadline: Date.now() + frame.resumeWindowSeconds * 1000,
+          deadline: Infinity,
+          windowMs: frame.resumeWindowSeconds * 1000,
         };
         this.welcomed = true;
         this.welcomedAt = performance.now();
