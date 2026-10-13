@@ -418,15 +418,23 @@ async fn run_socket(
         tokio::select! {
             _ = ticks.tick(), if !attachments.is_empty() => {
                 if liveness.expired() { break; }
-                // Retire only stalled session routes; the healthy browser socket and sibling streams
-                // remain usable. Reattaching the same stream retains its durable input writer.
+                // Rebind stalled session routes on the server; the healthy browser socket,
+                // sibling streams and durable input writer remain usable.
                 let expired_streams: Vec<u32> = attachments.iter()
                     .filter_map(|(&id, a)| (!a.awaiting_ack && a.liveness.expired()).then_some(id)).collect();
                 for stream_id in expired_streams {
+                    let reconnect = attachments.get(&stream_id).filter(|a|
+                        matches!(*a.inventory.borrow(), SessionInventoryState::Available(_)))
+                        .map(|a| a.handle.clone());
                     if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                         &state, &user_id, &session_token, &connection_id, stream_id,
-                        TerminalOutput::Closed { code: 1013 }, &mut attachments, &mut ended, &mut sink, &mut encode,
+                        TerminalOutput::Reconnecting, &mut attachments, &mut ended, &mut sink, &mut encode,
                     )).await.is_err() { loop_result = Err(()); break; }
+                    if let Some(handle) = reconnect
+                        && while_authorized(&state, &user_id, &session_token, true,
+                            async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() {
+                            loop_result = Err(()); break;
+                        }
                 }
                 if loop_result.is_err() { break; }
                 if while_authorized(&state, &user_id, &session_token, true, async {
@@ -897,6 +905,26 @@ where
         TerminalOutput::Pong { nonce, sent_us } => {
             attachment.liveness.pong(nonce, sent_us);
             return Ok(());
+        }
+        TerminalOutput::Reconnecting => {
+            attachment.awaiting_ack = true;
+            attachment.liveness = Liveness::new();
+            let notice = serde_json::to_vec(&json!({
+                "type": "terminal.reconnecting",
+                "session_id": uuid::Uuid::from_bytes(attachment.session_id).to_string(),
+            }))
+            .map_err(|_| ())?;
+            send_frame(
+                sink,
+                stream_id,
+                &Frame::Event {
+                    sub_id: 0,
+                    event_json: &notice,
+                },
+                encode,
+            )
+            .await
+            .is_ok()
         }
         TerminalOutput::Ack { in_seq_acked } => {
             if in_seq_acked < attachment.last_in_acked
@@ -1458,6 +1486,7 @@ where
                     awaiting_ack: true,
                     needs_snapshot: false,
                     liveness: Liveness::new(),
+                    inventory: agent.session_inventory(),
                 },
             );
             let sender = output_tx.clone();
@@ -1605,6 +1634,7 @@ struct ClientAttachment {
     awaiting_ack: bool,
     needs_snapshot: bool,
     liveness: Liveness,
+    inventory: tokio::sync::watch::Receiver<SessionInventoryState>,
 }
 
 /// Browser plugin action adapter; dimensions arrive in the attachment's Resize.

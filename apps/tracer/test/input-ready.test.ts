@@ -7,6 +7,7 @@ test("an unconfirmed attachment buffers typing and flushes it once replay confir
   const retained: number[] = [];
   const sent: WireFrame[] = [];
   let confirmed = 0;
+  const readiness: boolean[] = [];
   // This adapter observes the queue boundary; the production ring is unchanged.
   const queue = {
     free: 1024 * 1024,
@@ -23,13 +24,14 @@ test("an unconfirmed attachment buffers typing and flushes it once replay confir
     inputModifiers: { ctrl: "off", alt: "off" }, inputQueue: queue,
     inputScratch: new Uint8Array(16 * 1024), nextInSeq: 0n, ackedInSeq: 0n,
     streamId: 1, lastOutSeq: 0n, replayResponseFence: 0n,
+    receivedOutSeq: 0n, sessionId: new Uint8Array(16),
     config: { hooks: {}, status: { textContent: "Catching up…" } },
-    conn: { streamAttached: () => { confirmed++; } },
+    conn: { streamAttached: (ready: boolean) => { readiness.push(ready); if (ready) confirmed++; } },
     sampleRoundTrip: () => {}, startPings: () => {}, setStatus: () => {},
     sendFrame: (_stream: number, frame: WireFrame) => {
       sent.push(frame.type === "Input" ? { ...frame, bytes: frame.bytes.slice() } : frame);
     },
-  }) as { handleInput(data: string): void; releaseReplayResponsesAfterPaint(): void; nextInSeq: bigint };
+  }) as { handleInput(data: string): void; releaseReplayResponsesAfterPaint(): void; nextInSeq: bigint; handleTerminalFrame(frame: WireFrame, message: Uint8Array, at: number): void };
   client.handleInput("keep");
   expect(sent).toEqual([]);
   expect(new TextDecoder().decode(Uint8Array.from(retained))).toBe("keep");
@@ -39,4 +41,16 @@ test("an unconfirmed attachment buffers typing and flushes it once replay confir
   client.releaseReplayResponsesAfterPaint();
   expect(sent).toHaveLength(1);
   expect(client.nextInSeq).toBe(4n);
+  const event = (type: string, extra = {}) => client.handleTerminalFrame({
+    type: "Event", subId: 0, eventJson: new TextEncoder().encode(JSON.stringify({
+      type, session_id: "00000000-0000-0000-0000-000000000000", ...extra,
+    })),
+  }, new Uint8Array(), 0);
+  event("terminal.reconnecting");
+  client.handleInput("more");
+  expect(sent).toHaveLength(1);
+  expect(readiness).toEqual([true, false]);
+  event("terminal.replay_complete", { out_seq: "0" });
+  expect(readiness).toEqual([true, false, true]);
+  expect(sent[1]).toEqual({ type: "Input", inSeq: 0n, bytes: new TextEncoder().encode("keepmore") });
 });

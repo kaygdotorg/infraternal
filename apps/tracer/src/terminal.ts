@@ -828,7 +828,19 @@ export class TerminalClient {
           const session = uuidBytes(requireString(notice.session_id));
           if (!this.sessionId || session.some((byte, index) => byte !== this.sessionId?.[index])) throw new Error("session mismatch");
           // Notices describe recovery; only the subsequent wire Snapshot advances the cursor.
-          if (notice.type === "terminal.snapshot" && notice.approximate === true) {
+          if (notice.type === "terminal.reconnecting") {
+            // The supervisor retains this writer and replays it on the new host link.
+            // Keep new input locally until the replacement's replay fence is painted.
+            if (this.attachmentConfirmed) {
+              this.conn.streamAttached(false);
+              this.config.hooks?.onDisconnected?.(false);
+            }
+            this.attachmentConfirmed = false;
+            this.connectionIsResume = true;
+            this.replayResponseFence = undefined;
+            this.suppressReplayResponses = true;
+            this.setStatus("Catching up…");
+          } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");

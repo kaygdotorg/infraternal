@@ -92,6 +92,8 @@ pub(crate) enum TerminalOutput {
     Ack { in_seq_acked: u64 },
     /// The shim answered an ordered state fence for this terminal route.
     Pong { nonce: u64, sent_us: u64 },
+    /// The shared host link is rebinding; keep this stream and its input writer.
+    Reconnecting,
     /// The agent retired one terminal stream.
     Closed { code: u16 },
 }
@@ -125,6 +127,17 @@ impl AttachmentHandle {
         self.0
             .input
             .send(frame)
+            .await
+            .map_err(|_| AgentError::Unavailable)
+    }
+
+    /// Rebind a stalled route without changing its browser stream or shim writer.
+    pub async fn reconnect(&self) -> Result<(), AgentError> {
+        self.0
+            .commands
+            .send(Command::Reconnect {
+                attachment_id: self.0.id,
+            })
             .await
             .map_err(|_| AgentError::Unavailable)
     }
@@ -396,6 +409,9 @@ enum Command {
         frame: Bytes,
     },
     Detach {
+        attachment_id: u64,
+    },
+    Reconnect {
         attachment_id: u64,
     },
 }
@@ -691,11 +707,7 @@ async fn run_actor(
                 let (nonce, sent_us) = liveness.ping();
                 if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await)
                     && let Some(old) = connection.take() {
-                        // Do not hold recovery behind graceful child reaping. The old process
-                        // gets its bounded TERM/KILL cleanup independently; shims survive it.
-                        tokio::spawn(async move { cleanup_connection(old).await; });
-                        routes.clear();
-                        for (_, call) in pending.drain() { call.refuse(AgentError::Unavailable); }
+                        connection_lost(old, &mut attachments, &mut routes, &mut pending);
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         first_attempt = true;
                 }
@@ -708,7 +720,7 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() {
-                    connection_lost(old, &mut attachments, &mut routes, &mut pending).await;
+                    connection_lost(old, &mut attachments, &mut routes, &mut pending);
                     session_inventory.send_replace(SessionInventoryState::Unavailable);
                 }
             }
@@ -724,10 +736,10 @@ async fn run_actor(
                 if !ok {
                     let link = connection.take();
                     if let Some(link) = link {
-                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending);
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
-                        first_attempt = false;
+                        first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                 }
             }
@@ -735,10 +747,10 @@ async fn run_actor(
                 let Some(incoming) = incoming else {
                     let link = connection.take();
                     if let Some(link) = link {
-                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending);
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
-                        first_attempt = false;
+                        first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                     continue;
                 };
@@ -754,10 +766,10 @@ async fn run_actor(
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
                     let link = connection.take();
                     if let Some(link) = link {
-                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending);
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
-                        first_attempt = false;
+                        first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                 }
             }
@@ -1044,6 +1056,28 @@ async fn process_command(
             let _ = reply.send(Ok((attachment_id, stream_id)));
             true
         }
+        Command::Reconnect { attachment_id } => {
+            let Some(attachment) = attachments.get_mut(&attachment_id) else {
+                return true;
+            };
+            // A shared-link replacement already replays this attachment once.
+            if attachment.awaiting_ack {
+                return true;
+            }
+            if !write_frame(
+                connection,
+                attachment.stream_id,
+                &Frame::Close {
+                    code: 1013,
+                    reason: "terminal route unresponsive",
+                },
+            )
+            .await
+            {
+                return false;
+            }
+            reattach(connection, attachment).await
+        }
         Command::Input {
             attachment_id,
             frame,
@@ -1175,27 +1209,36 @@ async fn reattach_all(
 ) -> bool {
     for (id, attachment) in attachments.iter_mut() {
         let stream_id = attachment.stream_id;
-        attachment.awaiting_ack = true;
-        if !send_attach(
-            connection,
-            stream_id,
-            attachment.session_id,
-            attachment.last_out_seq,
-            attachment.last_in_seq,
-        )
-        .await
-        {
+        if !reattach(connection, attachment).await {
             return false;
         }
-        if attachment.credit != 0 {
-            let Ok(bytes) = u32::try_from(attachment.credit) else {
-                return false;
-            };
-            if !write_frame(connection, stream_id, &Frame::Credit { bytes }).await {
-                return false;
-            }
-        }
         routes.insert(stream_id, *id);
+    }
+    true
+}
+
+/// Close/Attach reuse the same durable writer; only unspent output credit returns.
+async fn reattach(connection: &mut AgentConnection, attachment: &mut AttachmentState) -> bool {
+    let stream_id = attachment.stream_id;
+    attachment.awaiting_ack = true;
+    if !send_attach(
+        connection,
+        stream_id,
+        attachment.session_id,
+        attachment.last_out_seq,
+        attachment.last_in_seq,
+    )
+    .await
+    {
+        return false;
+    }
+    if attachment.credit != 0 {
+        let Ok(bytes) = u32::try_from(attachment.credit) else {
+            return false;
+        };
+        if !write_frame(connection, stream_id, &Frame::Credit { bytes }).await {
+            return false;
+        }
     }
     true
 }
@@ -1723,19 +1766,31 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
     )
 }
 
-async fn connection_lost(
-    mut connection: AgentConnection,
-    _attachments: &mut HashMap<u64, AttachmentState>,
+fn connection_lost(
+    connection: AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     pending: &mut HashMap<u32, PendingCall>,
 ) {
     routes.clear();
+    notify_reconnecting(attachments);
     for (_, call) in pending.drain() {
         call.refuse(AgentError::Unavailable);
     }
-    if let Some(pid) = connection.pid.take() {
-        stop_child(pid).await;
-    }
+    // An old child gets bounded TERM/KILL cleanup independently of recovery.
+    // Accepted shim input and surviving session processes remain authoritative.
+    tokio::spawn(cleanup_connection(connection));
+}
+
+/// A stalled host does not retire its surviving PTYs. A full consumer still
+/// retires locally; never hold shared reconnection behind one output queue.
+fn notify_reconnecting(attachments: &mut HashMap<u64, AttachmentState>) {
+    attachments.retain(|_, attachment| {
+        attachment
+            .output
+            .try_send(TerminalOutput::Reconnecting)
+            .is_ok()
+    });
 }
 
 async fn cleanup_connection(mut connection: AgentConnection) {
