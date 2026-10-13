@@ -2635,3 +2635,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      not Safari alone. Lowering the rate of windows nobody is watching, and
      combining windows into one stream, are measured before any decision;
      neither may lower the rate of a window being captured for a viewer.
+267. **Device rules later; no WebTransport for resume; honest reconnect
+     budget (owner, 2026-10-13, Q16–Q18; amends D265):**
+     - **Access stays per person.** A person may use their sessions from
+       any of their signed-in devices; mesh arrows only limit network
+       traffic between machines. Rules that limit by device or device tag
+       ("only from company laptops") are recorded for later, as a "from …"
+       word in the existing rule sentence.
+     - **No WebTransport for browser resume now:** browsers cannot migrate
+       WebTransport sessions in 2026 and the gain is one round trip, against
+       a second transport, its own UDP port and certificate, and binary
+       growth (D243). Native apps resume in one round trip over plain QUIC
+       migration (mesh). Revisit when a browser migrates WebTransport or
+       the proxy can carry it. Lossy-link typing over WebTransport
+       datagrams is measured separately (#208).
+     - **Browser reconnect after a network change costs four round trips
+       + 50 ms** (TCP, TLS, upgrade, then the first-message resume token
+       of D265), replacing D265's three. Reusable links keep one round trip
+       + 50 ms; the last screen still returns within one frame.
