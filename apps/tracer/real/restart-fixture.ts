@@ -32,10 +32,26 @@ async function populate(server: RealServer, count: number): Promise<void> {
   } finally { socket.terminate(); }
 }
 
-export async function exerciseRestart(browser: Browser, unlock: boolean): Promise<void> {
+export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false): Promise<void> {
   const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:4398" });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: unlock ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: unlock, hasTouch: unlock });
   const page = await context.newPage();
+  let routes = 0;
+  let supersededRoutes = 0;
+  let stoppedRoutes = 0;
+  if (retainBrowserRoute) await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
+    const id = ++routes;
+    const superseded = () => id <= supersededRoutes;
+    const upstream = socket.connectToServer();
+    // Model an intermediary retaining the browser socket after its upstream
+    // stops. Replacement routes still reach the real restarted server.
+    socket.onMessage((message) => { if (!superseded()) upstream.send(message); });
+    upstream.onMessage((message) => { if (!superseded()) socket.send(message); });
+    upstream.onClose((code, reason) => {
+      if (superseded()) { stoppedRoutes++; return; }
+      socket.close({ code, reason });
+    });
+  });
   page.on("pageerror", (error) => console.log("browser error kind:", error.name));
   try {
     const cdp = await context.newCDPSession(page);
@@ -115,12 +131,17 @@ export async function exerciseRestart(browser: Browser, unlock: boolean): Promis
     });
     // Only the client's clock advances: expire resume credentials without expiring server auth.
     await page.evaluate(() => { const now = Date.now; Date.now = () => now() + 86_400_000; });
+    if (retainBrowserRoute) supersededRoutes = routes;
     await server.restart(async () => {
       console.log("restart fixture: server stopped");
       console.log("restart fixture: bridge state", server.bridges.map((bridge) => ({ closed: bridge.closed, closedBy: bridge.closedBy })));
       console.log("restart fixture: page state", await page.locator("#terminal-screen").getAttribute("data-connected"));
-      await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "false");
-      await expect(page.locator('.cl[data-view="console"] .ui-window').first()).toHaveAttribute("data-status", "connecting");
+      if (retainBrowserRoute) {
+        await expect.poll(() => stoppedRoutes).toBeGreaterThan(0);
+      } else {
+        await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "false");
+        await expect(page.locator('.cl[data-view="console"] .ui-window').first()).toHaveAttribute("data-status", "connecting");
+      }
       // GPU readback belongs before the path recovers: it must not delay the
       // replay/paint timestamp used by the latency measurement.
       if (process.env.RESTART_MEASURE === "1") await page.evaluate(() => {
@@ -137,6 +158,17 @@ export async function exerciseRestart(browser: Browser, unlock: boolean): Promis
       console.log("restart fixture: queued return entered");
     });
     console.log("restart fixture: server restarted");
+    if (retainBrowserRoute) {
+      // Fresh input after the real server is healthy must trigger eventual
+      // recovery without reload, focus changes or a forced client close.
+      await page.keyboard.type("echo recovered-$((8*8))");
+      await page.keyboard.press("Enter");
+      try {
+        await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\nrecovered-64\r?\n/);
+      } finally {
+        console.log(`real route recovery: routes=${routes} superseded_routes=${supersededRoutes} stopped_routes=${stoppedRoutes} window_status=${await page.locator('.cl[data-view="console"] .ui-window').first().getAttribute("data-status")} connected=${await page.locator("#terminal-screen").getAttribute("data-connected")}`);
+      }
+    }
     await expect.poll(authority).toEqual({ locked: true, initialized: true });
     if (unlock) await unlockAuthority();
     await expect.poll(() => server.bridges.filter((b) => !b.closed).some((b) => b.acked.size > 0), { timeout: 15_000 }).toBe(true);
