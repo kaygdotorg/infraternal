@@ -159,3 +159,19 @@ optional acknowledgment flag. Reuse still requires ordinary digest selection;
 unknown capabilities, root setup and later retries retain negotiation. No
 check-time hint authorizes installation or bypasses ownership, digest, terminal
 proof or commit checks.
+
+The session image is built with the internal `session-payload` feature, which
+implies SSH and selects its private entrypoints when server/transport/host-facts
+components are absent. The same shim option record, defaults and runner remain
+shared with the full build. Its argv decoder accepts only the canonical shape
+emitted by the session launcher, including readiness and detach suffixes; it
+never executes fuzzed or unknown invocation shapes. Operator commands and
+inherited-fd startup belong to the installed full image. The cross-build oracle
+therefore names that full image when it adopts the original shim. Full and
+all-component builds retain the public CLI.
+
+After publication, installed facts and the private terminal canary may run
+concurrently. Each independently waits for installed authority and checks owner
+and execution UID; both must pass before the commit signal. Failure withholds
+commit and finishes only the registered private canary. The person's original
+session remains live. Legacy adapters retain sequential proof ordering.
