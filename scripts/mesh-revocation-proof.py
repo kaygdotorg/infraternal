@@ -107,7 +107,7 @@ async def campaign(args):
             if chunk['last']:
                 if index not in initialized:
                     initialized.add(index);installed[index]=chunk['addresses'];initial_versions[index]=chunk['version']
-                elif measuring and index in (1,2) and chunk['version']>initial_versions[index]:
+                elif measuring and (index in (1,2) or args.change in ('RuleRemoval','DefaultTightening')) and chunk['version']>initial_versions[index]:
                     # Ignore startup replays and unrelated completed frames. The
                     # final acknowledgment must correspond to actual key removal.
                     if args.change in ('RuleRemoval','DefaultTightening') or len(await request(index, 'stats')) == 2 + args.extra_members:
@@ -192,7 +192,8 @@ async def campaign(args):
         started=time.monotonic_ns()
         await send({'type':'Change','operation':args.change} if args.change else {'type':'Revoke'})
         deadline=time.monotonic()+30
-        while len(applied)<2 or not revoked.is_set():
+        expected_nodes = 3 if args.change in ('RuleRemoval','DefaultTightening') else 2
+        while len(applied)<expected_nodes or not revoked.is_set():
             for task in apply_tasks:
                 if task.done(): task.result()
             assert time.monotonic()<deadline,'revocation publication timeout'
