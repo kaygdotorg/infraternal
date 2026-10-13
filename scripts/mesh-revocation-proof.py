@@ -206,7 +206,7 @@ async def campaign(args):
         after=[len(await request(index, 'stats')) for index in (1,2)]
         assert after==[(3 if args.change in ('RuleRemoval','DefaultTightening') else 2)+args.extra_members]*2,after
         memory = [rss(node.pid) * 1024 for node in nodes]
-        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','change':args.change or 'PeerRetirement','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'change_started_ns':started,'last_apply_ns':last_apply,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
+        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','public_journal':args.stateful,'change':args.change or 'PeerRetirement','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'change_started_ns':started,'last_apply_ns':last_apply,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
         await asyncio.wait_for(asyncio.gather(*apply_tasks), 10)
         coordinator.stdin.close()
         await asyncio.wait_for(coordinator.wait(), 5)
@@ -238,9 +238,14 @@ def main():
     parser.add_argument('--fixture',required=True);parser.add_argument('--coordinator',required=True)
     parser.add_argument('--evidence',type=Path,required=True);parser.add_argument('--nf-tables',action='store_true')
     parser.add_argument('--rtt-ms',type=int,choices=(0,150),default=0);parser.add_argument('--extra-members',type=int,default=997)
+    parser.add_argument('--stateful',action='store_true',help='Use the public-journal fixture and include persistence in apply')
     parser.add_argument('--budget-ms',type=float,help='Fail after retaining evidence when change-to-last-refusal exceeds this budget')
     parser.add_argument('--change',choices=('PeerRetirement','RuleRemoval','DefaultTightening'))
     args=parser.parse_args();args.evidence.mkdir(parents=True,exist_ok=True)
+    if args.stateful:
+        state_root=args.evidence/'node-state'
+        state_root.mkdir(mode=0o700,exist_ok=True)
+        os.environ['INFRATERNAL_TEST_STATE_ROOT']=str(state_root.resolve())
     assert Path('/proc/self/uid_map').read_text().split()[2:]==['1'],'run inside unshare -Urn'
     os.environ['PATH']='/usr/sbin:'+os.environ.get('PATH','')
     summary=asyncio.run(campaign(args))

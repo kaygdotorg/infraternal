@@ -28,7 +28,16 @@ fn main() -> std::io::Result<()> {
     let obstruction = root.join(format!("mesh-public.{}.new", std::process::id()));
     for line in std::io::stdin().lock().lines() {
         let line = line?;
-        if line == "obstruct" {
+        if line == "stats" {
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &infraternal_plugin_mesh::wireguard::Device::counters()?
+                        .values()
+                        .collect::<Vec<_>>()
+                )?
+            );
+        } else if line == "obstruct" {
             std::fs::write(&obstruction, b"public fixture obstruction")?;
             println!("{{\"obstructed\":true}}");
         } else if line == "unobstruct" {
@@ -84,8 +93,12 @@ fn main() -> std::io::Result<()> {
             break;
         } else {
             let chunk: Chunk = serde_json::from_str(&line)?;
+            let started = std::time::Instant::now();
             match node.chunk(chunk) {
-                Ok(applied) => println!("{{\"applied\":{applied},\"apply_us\":0}}"),
+                Ok(applied) => println!(
+                    "{{\"applied\":{applied},\"apply_us\":{}}}",
+                    started.elapsed().as_micros()
+                ),
                 Err(e) => println!("{{\"failed\":true,\"error_kind\":\"{:?}\"}}", e.kind()),
             }
         }
