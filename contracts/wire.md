@@ -334,13 +334,22 @@ allowance. Liveness traffic must not drive the latency pill or terminal painter
 at the probe frequency. Initial unpainted windows remain connecting; previously
 confirmed windows are monitored continuously through reconnect and replay.
 
-A stalled session attachment closes transiently and reattaches the same stream
-on the healthy browser connection. Its durable writer retains acknowledged and
-unacknowledged input. A stalled browser route becomes disconnected before the
+A stalled session attachment is rebound on the server while retaining its
+browser stream and durable writer. It retains acknowledged and unacknowledged
+input; ordinary retirement still closes only that terminal stream. A stalled
+browser route becomes disconnected before the
 client requests WebSocket closure: an intermediary need not deliver a close
 event. Replacement sockets ignore all late events from the retired route. A
 shared daemon link is replaced independently of graceful child reaping; session
-shims remain alive. None of these paths ends a session or bypasses authority
+shims remain alive. Before automatic rebinding, each retained stream receives
+`{"type":"terminal.reconnecting","session_id":"UUID"}` on its Event channel.
+The window stops advertising readiness and holds input in its existing bounded
+queue; the replacement's painted `terminal.replay_complete` fence confirms
+readiness and releases that input on the same writer. Individual terminal
+rebinding uses Close/Attach on leg B with the existing offsets and unspent credit;
+a shared-link replacement already replays its retained attachments. Neither
+path requires another client attach round trip. None of these paths ends a
+session or bypasses authority
 expiry/revocation. An existing local session does not require the CA to be
 unlocked; connection readiness follows painted, session-bound replay rather
 than inventory membership.
