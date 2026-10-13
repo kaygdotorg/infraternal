@@ -104,7 +104,6 @@ pub(crate) async fn initialize(
         };
         (bootstrap, key)
     };
-    result.0.prepare_payloads().await;
     Ok(result)
 }
 

@@ -275,7 +275,7 @@ async fn fixture_at_with_lock(
         }),
         roots: vec![root.clone()],
     };
-    let (app, setup, listeners) = build_router_core(
+    let (app, setup, listeners, _) = build_router_core(
         config,
         Some(EmbeddedAgent::unavailable()),
         Some(service.enrollment.clone()),

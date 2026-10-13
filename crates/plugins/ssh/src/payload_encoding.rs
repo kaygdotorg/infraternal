@@ -2,7 +2,11 @@
 
 use crate::{model::Failure, payload::Identity};
 use std::{path::Path, process::Stdio, sync::Arc};
-use tokio::{io::AsyncReadExt, process::Command, sync::Mutex};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    sync::{Mutex, OnceCell},
+};
 
 const LIMIT: usize = 64 * 1024 * 1024;
 static CACHE: Mutex<Vec<Entry>> = Mutex::const_new(Vec::new());
@@ -31,7 +35,7 @@ impl Codec {
 struct Entry {
     identity: Identity,
     codec: Codec,
-    bytes: Arc<[u8]>,
+    bytes: Arc<OnceCell<Option<Arc<[u8]>>>>,
 }
 
 /// Four bounded entries cover two architectures and two optional codecs.
@@ -47,13 +51,39 @@ pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]
         return Ok(None);
     }
     let identity = Identity::of(&metadata);
-    let mut cache = CACHE.lock().await;
-    if let Some(entry) = cache
-        .iter()
-        .find(|entry| entry.identity == identity && entry.codec == codec)
-    {
-        return Ok(Some(entry.bytes.clone()));
-    }
+    // The global index protects only lookup/eviction. Each file/codec has its
+    // own single-flight cell, so one slow compressor cannot block other hosts.
+    let cell = {
+        let mut cache = CACHE.lock().await;
+        if let Some(entry) = cache
+            .iter()
+            .find(|entry| entry.identity == identity && entry.codec == codec)
+        {
+            entry.bytes.clone()
+        } else {
+            let cell = Arc::new(OnceCell::new());
+            if cache.len() == 4 {
+                cache.remove(0);
+            }
+            cache.push(Entry {
+                identity,
+                codec,
+                bytes: cell.clone(),
+            });
+            cell
+        }
+    };
+    cell.get_or_try_init(|| compress(path, file, identity, codec))
+        .await
+        .cloned()
+}
+
+async fn compress(
+    path: &Path,
+    file: tokio::fs::File,
+    identity: Identity,
+    codec: Codec,
+) -> Result<Option<Arc<[u8]>>, Failure> {
     let mut command = codec.command();
     command
         .stdin(Stdio::from(file.into_std().await))
@@ -87,14 +117,6 @@ pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]
         return Ok(None);
     }
     let bytes: Arc<[u8]> = bytes.into();
-    if cache.len() == 4 {
-        cache.remove(0);
-    }
-    cache.push(Entry {
-        identity,
-        codec,
-        bytes: bytes.clone(),
-    });
     Ok(Some(bytes))
 }
 
@@ -142,9 +164,15 @@ mod tests {
     #[tokio::test]
     async fn gzip_roundtrip_and_repeated_adds_share_one_encoding() {
         let fixture = Fixture::new();
-        let first = encoded(&fixture.0, Codec::Gzip).await.unwrap().unwrap();
-        let second = encoded(&fixture.0, Codec::Gzip).await.unwrap().unwrap();
+        let (first, second) = tokio::join!(
+            encoded(&fixture.0, Codec::Gzip),
+            encoded(&fixture.0, Codec::Gzip)
+        );
+        let first = first.unwrap().unwrap();
+        let second = second.unwrap().unwrap();
+        let third = encoded(&fixture.0, Codec::Gzip).await.unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &third));
         assert_eq!(unpack(&first).await, std::fs::read(&fixture.0).unwrap());
     }
 

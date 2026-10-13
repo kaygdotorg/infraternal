@@ -317,6 +317,18 @@ impl Bootstrap {
             }
         }
     }
+    /// Warm public encodings after the listener is bound; component-off cancels
+    /// the owned compressors and waits for their existing activity lease.
+    pub fn warm_payloads(&self) {
+        let bootstrap = self.clone();
+        let mut enabled = self.enabled_changes();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = bootstrap.prepare_payloads() => {},
+                _ = enabled.changed() => {},
+            }
+        });
+    }
     /// Construct an adapter with no network side effects or idle timers.
     #[must_use]
     pub fn new(
