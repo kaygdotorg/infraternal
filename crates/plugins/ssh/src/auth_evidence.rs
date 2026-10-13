@@ -1,11 +1,19 @@
 //! Reduces local SSH authentication receipts to method metadata without retaining diagnostics or inferring a provider (#190).
 
 const PREFIX: &[u8] = b"Authenticated to ";
+const TAG: &[u8] = b"sshconnect2.c:ssh_userauth2():";
 const USING: &[u8] = b" using \"";
 
 #[derive(Clone, Copy)]
 enum Phase {
     Prefix(usize),
+    Tag(usize),
+    Location(usize),
+    Open,
+    Context(usize),
+    Colon,
+    Space,
+    CrEnd(bool),
     Using(usize),
     Method { length: usize, none: bool },
     Dot(bool),
@@ -33,13 +41,35 @@ impl MethodReceipt {
     pub fn feed(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             if byte == b'\n' {
-                if let Phase::End(none) = self.phase {
+                if let Phase::End(none) | Phase::CrEnd(none) = self.phase {
                     self.network = Some(none);
                 }
                 self.phase = Phase::Prefix(0);
                 continue;
             }
             self.phase = match self.phase {
+                Phase::Prefix(0) if byte == TAG[0] => Phase::Tag(1),
+                Phase::Tag(index) if TAG.get(index) == Some(&byte) => {
+                    if index + 1 == TAG.len() {
+                        Phase::Location(0)
+                    } else {
+                        Phase::Tag(index + 1)
+                    }
+                }
+                Phase::Location(length) if length < 10 && byte.is_ascii_digit() => {
+                    Phase::Location(length + 1)
+                }
+                Phase::Location(length) if length > 0 && byte == b' ' => Phase::Open,
+                Phase::Open if byte == b'(' => Phase::Context(0),
+                Phase::Context(_) if byte == b')' => Phase::Colon,
+                Phase::Context(length)
+                    if length < 128 && (byte.is_ascii_graphic() || byte == b' ') =>
+                {
+                    Phase::Context(length + 1)
+                }
+                Phase::Colon if byte == b':' => Phase::Space,
+                Phase::Space if byte == b' ' => Phase::Prefix(0),
+                Phase::End(none) if byte == b'\r' => Phase::CrEnd(none),
                 Phase::Prefix(index) if PREFIX.get(index) == Some(&byte) => {
                     if index + 1 == PREFIX.len() {
                         Phase::Using(0)
@@ -103,6 +133,20 @@ mod tests {
             receipt.feed(&[*byte]);
         }
         assert_eq!(receipt.network(), Some(true));
+    }
+
+    #[test]
+    fn selected_local_authentication_diagnostics_keep_method_at_every_boundary() {
+        let line = b"sshconnect2.c:ssh_userauth2():458 (pid=123): Authenticated to fixture using \"none\".\r\n";
+        for split in 0..=line.len() {
+            let mut receipt = MethodReceipt::default();
+            receipt.feed(&line[..split]);
+            receipt.feed(&line[split..]);
+            assert_eq!(receipt.network(), Some(true));
+        }
+        let mut receipt = MethodReceipt::default();
+        receipt.feed(b"sshconnect2.c:input_userauth_banner():1 (pid=123): Authenticated to fixture using \"none\".\r\n");
+        assert_eq!(receipt.network(), None);
     }
 
     #[test]

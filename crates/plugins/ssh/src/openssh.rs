@@ -215,7 +215,9 @@ impl Session {
             "-o",
             "NumberOfPasswordPrompts=1",
             "-o",
-            "LogLevel=VERBOSE",
+            "LogLevel=ERROR",
+            "-o",
+            "LogVerbose=sshconnect2.c:ssh_userauth2():*",
         ]);
         let destination = &self.configuration.destination;
         command.args(["-M", "-N", "-S"]).arg(socket);
