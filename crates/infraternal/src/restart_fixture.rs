@@ -7,6 +7,18 @@ use std::{
 #[path = "../../infraternal-server/tests/support/release_signing.rs"]
 mod signing;
 
+/// Scratch directory for restart tests, located the way cargo itself does: beside
+/// the running test executable (`<target>/<profile>/deps`). Reading `CARGO_TARGET_DIR`
+/// instead fails whenever the gate runs with the default target directory or from a
+/// harness that does not export it, and it points elsewhere under `--target-dir`.
+pub(crate) fn scratch_root() -> PathBuf {
+    std::env::current_exe()
+        .unwrap()
+        .parent()
+        .expect("test executable has a directory")
+        .to_owned()
+}
+
 pub(crate) struct Signed {
     pub path: PathBuf,
     trust: String,
