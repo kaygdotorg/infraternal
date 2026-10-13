@@ -126,6 +126,8 @@ fn cli_plugin() -> PluginDefinition {
     plugin.actions.push(key_memory_check_action());
     #[cfg(feature = "ssh")]
     plugin.actions.push(ssh_askpass_action());
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    plugin.actions.push(ssh_session_action());
     plugin
 }
 
@@ -401,6 +403,18 @@ mod tests {
         assert_eq!(action.action.cli_handler, CliHandler::SessionShim);
     }
 
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    #[test]
+    fn hidden_ssh_session_bridge_is_registered_to_its_runtime_handler() {
+        let registry = registry().expect("built-in plugin metadata is valid");
+        let action = registry
+            .find(&["__ssh-session"])
+            .expect("internal SSH session action is registered");
+        assert!(!action.action.visible);
+        assert_eq!(action.action.cli_handler, CliHandler::SshSession);
+        assert_eq!(action.action.input.required, ["state"]);
+    }
+
     #[cfg(feature = "plugin-mesh")]
     #[test]
     fn registered_actions_include_plugin_permission_contract_fields() {
@@ -606,6 +620,34 @@ fn ssh_askpass_action() -> ActionDefinition {
     )
     .hidden()
     .with_cli_handler(CliHandler::SshAskpass)
+}
+
+
+/// Runs the private session bridge only after the generated CLI validates its state path.
+#[cfg(all(feature = "ssh", feature = "remote"))]
+fn ssh_session_action() -> ActionDefinition {
+    ActionDefinition::new(
+        ["__ssh-session"],
+        "Bridge an authenticated SSH session.",
+        "Used only after SSH authentication to start the shell through its owned session shim.",
+        [
+            "Provide the private session state directory.",
+            "Use only from the authenticated SSH bootstrap process.",
+        ],
+        JsonSchema::object(
+            [("state".to_owned(), JsonSchema::string("Private session state directory."))],
+            ["state".to_owned()],
+        ),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Session,
+            ActionEffect::Write,
+            "cli.internal.ssh-session",
+            DryRun::Unsupported,
+        ),
+    )
+    .hidden()
+    .with_cli_handler(CliHandler::SshSession)
 }
 
 #[cfg(all(test, feature = "release"))]

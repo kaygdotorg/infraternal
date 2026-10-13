@@ -27,6 +27,8 @@ mod restart_binary;
 mod restart_image;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
+#[cfg(all(feature = "ssh", feature = "remote"))]
+mod ssh_session;
 
 #[cfg(feature = "plugin-server")]
 mod install;
@@ -255,6 +257,20 @@ fn dispatch_action(
             }
         }
         CliHandler::SessionShim => run_shim_command(matches),
+        CliHandler::SshSession => {
+            #[cfg(all(feature = "ssh", feature = "remote"))]
+            {
+                matches
+                    .get_one::<String>("state")
+                    .map_or(ExitCode::FAILURE, |state| {
+                        ssh_session::run(PathBuf::from(state))
+                    })
+            }
+            #[cfg(not(all(feature = "ssh", feature = "remote")))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::KeyMemoryCheck => {
             #[cfg(feature = "remote")]
             {
