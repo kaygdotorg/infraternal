@@ -319,6 +319,7 @@ impl Echo {
                     }
                     TerminalOutput::Snapshot { bytes, .. } => {
                         if running.load(std::sync::atomic::Ordering::Acquire) && !bytes.is_empty() {
+                            println!("FAULT repaint_snapshot");
                             failed.store(true, std::sync::atomic::Ordering::Release);
                         }
                         received.lock().await.extend_from_slice(&bytes);
@@ -330,6 +331,7 @@ impl Echo {
                             .unwrap();
                     }
                     TerminalOutput::Closed { .. } => {
+                        println!("FAULT terminal_closed");
                         failed.store(true, std::sync::atomic::Ordering::Release);
                         break;
                     }
@@ -927,30 +929,42 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         events
             .iter()
             .find(|event| event.kind == kind && event.peer == first_byte.peer)
-            .unwrap()
     };
+    // An in-place move keeps the admitted connection: no mesh peer may complete
+    // a new mTLS handshake, and none of the setup milestones exist for it.
     let tls = milestone(crate::remote_autoswitch_probe::Kind::TlsHandshake);
     let admitted = milestone(crate::remote_autoswitch_probe::Kind::LedgerAdmission);
     let control = milestone(crate::remote_autoswitch_probe::Kind::ControlReady);
+    let preserved = !events.iter().any(|event| {
+        event.kind == crate::remote_autoswitch_probe::Kind::TlsHandshake
+            && event.peer.ip() != "10.220.0.2".parse::<std::net::IpAddr>().unwrap()
+    });
+    assert!(preserved, "the move opened a new mesh connection");
     timing::validate_lifecycle(
         enabled_wall,
         joined,
-        tls.wall,
+        tls.map(|event| event.wall),
         first_byte.wall,
         first_byte.monotonic.duration_since(moved.into_std()),
     )
     .unwrap();
+    let between = |from: Option<&crate::remote_autoswitch_probe::Event>,
+                   to: Option<&crate::remote_autoswitch_probe::Event>| {
+        from.zip(to)
+            .map(|(from, to)| to.monotonic.duration_since(from.monotonic).as_micros())
+    };
     let phases = serde_json::json!({
         "terminal_byte_boundary": "authenticated_transport_arrival_before_actor_delivery",
         "fresh_kernel_peer": true,
         "lifecycle_and_clock_validated": true,
+        "preserved_connection": preserved,
         "fixture_enable_to_node_wg_handshake_us": joined.duration_since(enabled_wall).unwrap().as_micros(),
         "node_wg_handshake_to_first_mesh_byte_us": first_byte.wall.duration_since(joined).unwrap().as_micros(),
         "fixture_enable_to_first_mesh_byte_us": first_byte.monotonic.duration_since(moved.into_std()).as_micros(),
-        "server_mtls_to_ledger_admission_us": admitted.monotonic.duration_since(tls.monotonic).as_micros(),
-        "ledger_admission_to_control_ready_us": control.monotonic.duration_since(admitted.monotonic).as_micros(),
-        "control_ready_to_first_mesh_byte_us": first_byte.monotonic.duration_since(control.monotonic).as_micros(),
-        "server_mtls_to_first_mesh_byte_us": first_byte.monotonic.duration_since(tls.monotonic).as_micros(),
+        "server_mtls_to_ledger_admission_us": between(tls, admitted),
+        "ledger_admission_to_control_ready_us": between(admitted, control),
+        "control_ready_to_first_mesh_byte_us": between(control, Some(first_byte)),
+        "server_mtls_to_first_mesh_byte_us": between(tls, Some(first_byte)),
         "first_mesh_byte_stream": first_byte.stream,
         "add_host_completion_measured": false,
     });
@@ -1008,7 +1022,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     // Persist latency before later lifecycle assertions: a failed mesh reprobe
     // must not discard the already measured terminal recovery evidence.
     let partial = serde_json::json!({
-        "machine": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(), "head_profile": "primed-writer",
+        "machine": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(), "head_profile": "in-place-path",
         "configured_rtt_ms": rtt_ms, "configured_rtt_jitter_ms": 2 * (rtt_ms / 20),
         "real_kernel": true, "real_pty": true, "live_nodes": 2,
         "live_terminals": 1, "public_inventory": 1000,
@@ -1034,6 +1048,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     );
     command("nft", &["delete", "table", "inet", "mesh_link_cut"]);
     wait_link(&remote, ServerLinkKind::Mesh).await;
+    println!("CHECK mesh_restored result=PASS");
     // Refuse only the underlay listener. A retained mesh path must join without
     // first reaching the original infraternal agent port.
     command("nft", &["add", "table", "inet", "fallback_cut"]);
@@ -1088,10 +1103,12 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         node_process(namespace_pid, &bundle).await;
     assert_eq!((same_session, same_shim), (session, shim));
     wait_link(&remote, ServerLinkKind::Mesh).await;
+    println!("CHECK restarted_on_mesh result=PASS");
     echo.send(b"restart-survives|").await;
     expected.extend_from_slice(b"restart-survives|");
     echo.wait(&expected).await;
     let restart_us = restarted.elapsed().as_micros();
+    println!("CHECK restart_retains_bytes result=PASS");
     command("nft", &["delete", "table", "inet", "fallback_cut"]);
     runtime.set_enabled("mesh", false).await.unwrap();
     wait_link(&remote, ServerLinkKind::Fallback).await;
@@ -1105,7 +1122,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     report["silent_cut_to_echo_us"] = serde_json::json!(fallback_us);
     report["silent_cut_to_fallback_status_us"] = serde_json::json!(fallback_status_us);
     report["load_start"] = load_start.trim().into();
-    report["head_profile"] = "primed-writer".into();
+    report["head_profile"] = "in-place-path".into();
     report["lifecycle_complete"] = true.into();
     report["phases"] = phases;
     std::fs::write(

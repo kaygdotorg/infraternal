@@ -53,17 +53,19 @@ fn decode(reply: &[u8; 12]) -> io::Result<SystemTime> {
 /// cycles and wall/monotonic disagreement. A second handshake before TLS cannot
 /// be distinguished from the first by this API; the short fresh-peer lifecycle
 /// avoids scheduled rekeying rather than claiming to recover kernel history.
+/// `tls` is absent when the existing connection moved without a new handshake.
 pub(super) fn validate_lifecycle(
     enabled: SystemTime,
     joined: SystemTime,
-    tls: SystemTime,
+    tls: Option<SystemTime>,
     output: SystemTime,
     elapsed: Duration,
 ) -> io::Result<()> {
     let wall_elapsed = output.duration_since(enabled).map_err(io::Error::other)?;
+    let tls_ordered = tls.is_none_or(|tls| joined <= tls && tls <= output);
     if joined < enabled
-        || joined > tls
-        || tls > output
+        || joined > output
+        || !tls_ordered
         || elapsed >= Duration::from_secs(60)
         || wall_elapsed.abs_diff(elapsed) > Duration::from_millis(5)
     {
@@ -99,12 +101,14 @@ mod tests {
         let joined = start + Duration::from_secs(1);
         let tls = start + Duration::from_secs(2);
         let output = start + Duration::from_secs(3);
-        assert!(validate_lifecycle(start, joined, tls, output, Duration::from_secs(3)).is_ok());
+        assert!(
+            validate_lifecycle(start, joined, Some(tls), output, Duration::from_secs(3)).is_ok()
+        );
         assert!(
             validate_lifecycle(
                 start,
                 start - Duration::from_secs(1),
-                tls,
+                Some(tls),
                 output,
                 Duration::from_secs(3)
             )
@@ -114,19 +118,35 @@ mod tests {
             validate_lifecycle(
                 start,
                 tls + Duration::from_nanos(1),
-                tls,
+                Some(tls),
                 output,
                 Duration::from_secs(3)
             )
             .is_err()
         );
-        assert!(validate_lifecycle(start, joined, output, tls, Duration::from_secs(2)).is_err());
-        assert!(validate_lifecycle(start, joined, tls, output, Duration::from_secs(2)).is_err());
+        assert!(
+            validate_lifecycle(start, joined, Some(output), tls, Duration::from_secs(2)).is_err()
+        );
+        assert!(
+            validate_lifecycle(start, joined, Some(tls), output, Duration::from_secs(2)).is_err()
+        );
+        // A preserved connection has no new handshake but keeps the ordering.
+        assert!(validate_lifecycle(start, joined, None, output, Duration::from_secs(3)).is_ok());
+        assert!(
+            validate_lifecycle(
+                start,
+                output + Duration::from_nanos(1),
+                None,
+                output,
+                Duration::from_secs(3)
+            )
+            .is_err()
+        );
         assert!(
             validate_lifecycle(
                 start,
                 joined,
-                tls,
+                Some(tls),
                 start + Duration::from_secs(60),
                 Duration::from_secs(60)
             )
