@@ -2605,3 +2605,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      OpenSSL (backups, file transfer) or when an AVX-512 machine is at
      hand: measure, and restore the code if bulk throughput drops more than
      5% or keystroke latency changes.
+265. **Resume token and realistic reconnect budgets (owner, 2026-10-13,
+     #176; amends D259):**
+     - **The resume token travels in the first message after the
+       WebSocket opens,** never in a header or URL, so proxy logs and
+       browser tools do not show it. It costs no extra round trip.
+       Rejected: a header (the branch did this without a decision) and
+       keeping the old mechanism.
+     - **D259's "typable within one round trip + 50 ms" applies when the
+       connection can be reused or resumed.** The server pings, so a dead
+       or half-open link is detected within about one round trip; input
+       typed meanwhile is kept, never lost. After a real network change a
+       fresh TCP + TLS + upgrade needs about three round trips, so that
+       case's budget is **three round trips + 50 ms**, measured on the
+       perf VM through real TLS. The last screen still returns within one
+       frame from the client's copy (D259, unchanged).
+     - **QUIC/WebTransport resumption is researched next** (0–1 round trip
+       after a network change, browser support including Safari, size and
+       code cost) and decided after measurement. Rejected for now: a
+       second warm connection per open tab (an idle socket per tab works
+       against D260's lean principle).
