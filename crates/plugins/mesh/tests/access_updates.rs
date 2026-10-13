@@ -21,7 +21,7 @@ fn config() -> Config {
         node: NodeId(2),
         version: 1,
         addresses: Addresses {
-            ipv4: Ipv4Addr::from(0x0afe0002),
+            ipv4: Ipv4Addr::from(0x0afe_0002),
             ipv6: Ipv6Addr::from(0xfd02_u128 << 112 | 2),
         },
         default_policy: DefaultPolicy::Allow,
@@ -33,7 +33,7 @@ fn config() -> Config {
                         peer: Peer {
                             key: PublicKey([3; 32]),
                             addresses: Addresses {
-                                ipv4: Ipv4Addr::from(0x0afe0000 + id),
+                                ipv4: Ipv4Addr::from(0x0afe_0000 + id),
                                 ipv6: Ipv6Addr::from((0xfd02_u128 << 112) + u128::from(id)),
                             },
                             endpoint: None,
@@ -65,5 +65,27 @@ fn negotiated_access_chunk_is_accepted_by_the_strict_action_parser() {
     assert!(
         parsed.is_ok(),
         "negotiated access updates must retain the strict bounded action parser"
+    );
+}
+
+#[test]
+#[ignore = "Fail-first encoding regression; enable when the compact encoder is wired."]
+fn default_tightening_at_1000_peers_fits_one_round_trip() {
+    let old = config();
+    let mut next = old.clone();
+    next.version += 1;
+    next.default_policy = DefaultPolicy::Deny;
+    for peer in next.peers.values_mut() {
+        peer.inbound = TrafficPolicy::None;
+        peer.outbound = TrafficPolicy::None;
+    }
+    let parts = configuration::chunks(Some(&old), &next).unwrap();
+    assert_eq!(
+        parts.len(),
+        1,
+        "uniform access removal must not serialize one round trip per peer chunk"
+    );
+    assert!(
+        serde_json::to_vec(&parts[0]).unwrap().len() <= infraternal_plugin_api::MAX_ACTION_BYTES
     );
 }
