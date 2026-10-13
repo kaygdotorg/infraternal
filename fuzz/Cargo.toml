@@ -10,6 +10,8 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+# Shared CLI option record; the fixed spawned-shim decoder itself uses std only.
+clap.workspace = true
 infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/release", default-features = false }
 serde_json.workspace = true
 infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh" }

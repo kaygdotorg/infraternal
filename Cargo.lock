@@ -1376,6 +1376,7 @@ name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "infraternal-agent",
  "infraternal-plugin-api",
  "infraternal-plugin-host-facts",
