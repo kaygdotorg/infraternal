@@ -148,14 +148,48 @@ async fn upgrade(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let token = Secret::new(token.as_bytes().to_vec());
-    ws.max_message_size(32 * 1024)
-        .max_frame_size(32 * 1024)
-        .on_upgrade(move |socket| async move {
-            // Retire stream and admission before publishing this lifetime inactive.
-            let _activity = activity;
-            let _permit = permit;
-            run(socket, api, owner, token).await;
-        })
+    upgrade_admitted(
+        ws.max_message_size(32 * 1024).max_frame_size(32 * 1024),
+        api,
+        owner,
+        token,
+        activity,
+        permit,
+        SocketMode::Bootstrap,
+    )
+}
+
+/// Both socket kinds share one upgrade task type; limits and authority remain
+/// with each caller. Sharing the cold upgrade avoids duplicating its task and
+/// cancellation machinery for retained setup subscriptions (D243, D255).
+enum SocketMode {
+    Bootstrap,
+    #[cfg(feature = "remote")]
+    Setup,
+}
+
+#[inline(never)]
+fn upgrade_admitted(
+    ws: WebSocketUpgrade,
+    api: Arc<Api>,
+    owner: String,
+    token: Secret,
+    activity: infraternal_plugin_ssh::bootstrap::Activity,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    mode: SocketMode,
+) -> Response {
+    ws.on_upgrade(move |socket| async move {
+        // Retire stream and admission before publishing this lifetime inactive.
+        let _activity = activity;
+        let _permit = permit;
+        match mode {
+            SocketMode::Bootstrap => run(socket, api, owner, token).await,
+            #[cfg(feature = "remote")]
+            SocketMode::Setup => {
+                let _ = setup_api::run(socket, api, owner, token).await;
+            }
+        }
+    })
 }
 
 /// Both Settings and WebSocket admission require the exact pinned browser Origin

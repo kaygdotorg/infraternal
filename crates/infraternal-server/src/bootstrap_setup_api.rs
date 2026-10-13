@@ -47,20 +47,27 @@ pub(super) async fn upgrade(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let token = Secret::new(token.as_bytes().to_vec());
-    ws.max_message_size(4096)
-        .max_frame_size(4096)
-        .on_upgrade(move |socket| async move {
-            let _activity = activity;
-            let _permit = permit;
-            let _ = run(socket, api, owner, token).await;
-        })
+    super::upgrade_admitted(
+        ws.max_message_size(4096).max_frame_size(4096),
+        api,
+        owner,
+        token,
+        activity,
+        permit,
+        super::SocketMode::Setup,
+    )
 }
 
 async fn host_owned(api: &Api, owner: &str, token: &str, host: Uuid) -> bool {
     authorized(api, token, owner).await && api.auth.bootstrap_host(owner, host).await
 }
 
-async fn run(mut socket: WebSocket, api: Arc<Api>, owner: String, token: Secret) -> Result<(), ()> {
+pub(super) async fn run(
+    mut socket: WebSocket,
+    api: Arc<Api>,
+    owner: String,
+    token: Secret,
+) -> Result<(), ()> {
     let token = std::str::from_utf8(token.expose()).map_err(|_| ())?;
     let mut enabled = api.runner.enabled_changes();
     let mut revocation = api.auth.revocation_events();
