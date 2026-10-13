@@ -90,6 +90,12 @@ pub(crate) async fn quic(
             let Ok(fingerprint) = remote_quic::peer_fingerprint(&connection) else {
                 return;
             };
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            crate::remote_autoswitch_probe::record(
+                crate::remote_autoswitch_probe::Kind::TlsHandshake,
+                connection.remote_address(),
+                0,
+            );
             let Ok(Ok(authority)) = tokio::time::timeout(
                 Duration::from_secs(5),
                 AuthorityGuard::admit(store, fingerprint),
@@ -100,9 +106,21 @@ pub(crate) async fn quic(
             };
             let mut admission =
                 crate::remote_standby::Admission::new(authority, (source_permit, permit), standby);
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            crate::remote_autoswitch_probe::record(
+                crate::remote_autoswitch_probe::Kind::LedgerAdmission,
+                connection.remote_address(),
+                0,
+            );
             let admitted = async {
                 let link =
                     RemoteLink::quic_admitted(connection.clone(), Some(&mut admission)).await?;
+                #[cfg(all(test, feature = "mesh-transport-proof"))]
+                crate::remote_autoswitch_probe::record(
+                    crate::remote_autoswitch_probe::Kind::ControlReady,
+                    connection.remote_address(),
+                    0,
+                );
                 hosts
                     .admit_observed(admission.authority, link, address)
                     .await?;

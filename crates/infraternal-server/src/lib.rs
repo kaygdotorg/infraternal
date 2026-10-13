@@ -49,6 +49,8 @@ pub mod plugins;
 mod remote_accept;
 #[cfg(feature = "remote")]
 mod remote_admission;
+#[cfg(all(test, feature = "mesh-transport-proof"))]
+mod remote_autoswitch_probe;
 #[cfg(feature = "remote")]
 pub mod remote_enrollment;
 #[cfg(feature = "remote")]

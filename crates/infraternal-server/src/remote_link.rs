@@ -742,6 +742,14 @@ async fn pump(
             }
             return;
         };
+        #[cfg(all(test, feature = "mesh-transport-proof"))]
+        if matches!(decoded.frame, Frame::Output { bytes, .. } if !bytes.is_empty()) {
+            crate::remote_autoswitch_probe::record(
+                crate::remote_autoswitch_probe::Kind::TerminalByte,
+                connection.remote_address(),
+                stream,
+            );
+        }
         let mut bytes = Vec::new();
         if encode_muxed_frame_into(stream, &decoded.frame, &mut bytes).is_err() {
             return;
