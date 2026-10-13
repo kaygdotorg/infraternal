@@ -68,7 +68,6 @@ fn negotiated_access_chunk_is_accepted_by_the_strict_action_parser() {
 }
 
 #[test]
-#[ignore = "Fail-first encoding regression; enable when the compact encoder is wired."]
 fn default_tightening_at_1000_peers_fits_one_round_trip() {
     let old = config();
     let mut next = old.clone();
@@ -78,7 +77,7 @@ fn default_tightening_at_1000_peers_fits_one_round_trip() {
         peer.inbound = TrafficPolicy::None;
         peer.outbound = TrafficPolicy::None;
     }
-    let parts = configuration::chunks(Some(&old), &next).unwrap();
+    let parts = infraternal_plugin_mesh::access_updates::chunks(Some(&old), &next).unwrap();
     assert_eq!(
         parts.len(),
         1,

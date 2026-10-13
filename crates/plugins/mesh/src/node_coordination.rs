@@ -41,6 +41,7 @@ pub async fn run(
     let mut binding = None;
     let mut installed: Option<Snapshot> = None;
     let mut refresh_identity = true;
+    let mut compact_access = false;
     let mut listener: ServerListener = None;
     loop {
         if refresh_identity || binding.is_none() {
@@ -56,6 +57,7 @@ pub async fn run(
                 })
                 .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0);
             if let Some(identity) = identity {
+                compact_access = identity.compact_access;
                 let ip = channel.observed_ip();
                 let endpoint =
                     (!ip.is_unspecified()).then(|| std::net::SocketAddr::new(ip, identity.port));
@@ -128,7 +130,14 @@ pub async fn run(
             });
             if changed {
                 let was_delta = old.is_some();
-                let Ok(chunks) = configuration::chunks(old.as_ref(), &config) else {
+                // Never send additive fields to an older strict receiver. A
+                // refused compact delta still retries the original full snapshot.
+                let encoded = if compact_access {
+                    crate::access_updates::chunks(old.as_ref(), &config)
+                } else {
+                    configuration::chunks(old.as_ref(), &config)
+                };
+                let Ok(chunks) = encoded else {
                     return;
                 };
                 let mut failed = false;

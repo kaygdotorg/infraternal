@@ -1,8 +1,9 @@
 //! Packs access-only changes into one negotiated action without repeating peer identity [242,252,256].
+#[cfg(feature = "agent")]
+use crate::policy::model::NodeId;
 use crate::{
     configuration,
     dataplane::{AccessUpdate, Chunk, Config},
-    policy::model::NodeId,
 };
 
 /// Keep snapshots and peer identity changes on the original bounded chunk path.
