@@ -42,6 +42,8 @@ export interface LiveSessionsOptions {
   firstHooks?: TerminalHooks;
   /** Called with the first terminal once it is ready (the probe binds to it). */
   onFirstClient?: (client: TerminalClient) => void;
+  /** Deferred account data starts after a terminal paints, or the initial terminal cannot open. */
+  onFirstTerminalSettled?: () => void;
   /** Called when the window shows a session (restored or new). */
   onSessionCreated?: (sessionId: string) => void;
   /** The host no longer has a window's session (#158): the inventory marks it ended and the window paints that. */
@@ -58,6 +60,8 @@ export interface LiveSessions extends SessionService {
   /** Registers only an admitted UUID; readable labels never become routing authority. */
   registerHost(host: HostEntry & { address?: string }): void;
   forgetHost(id: string): void;
+  /** Replaces remote admission in one notification; returns identities whose access disappeared. */
+  replaceHosts(hosts: (HostEntry & { address?: string })[]): string[];
   dispose(): void;
 }
 
@@ -68,6 +72,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
   const remotes = new Map<string, HostEntry & { address?: string }>();
   let firstHostUsed = false;
   let firstReported = false;
+  let firstSettled = false;
+  const settle = (): void => { if (!firstSettled) { firstSettled = true; options.onFirstTerminalSettled?.(); } };
   let active: Binding | undefined;
   let serial = 0;
   // The last known screens (screen-cache.on-demand.ts) load at idle; until then a switch simply has no picture to show.
@@ -156,15 +162,17 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       if (!hostEl) return;
       const first = !firstReported;
       firstReported = true;
+      // A silent attached session needs inventory too; a one-shot grace lets an initial prompt paint first.
       const hooks: TerminalHooks = {
         ...(first ? options.firstHooks : {}),
-        onAttached: (resumed, terminal) => { this.mark("attached"); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
-        onPaintedOutput: (bytes, at, sequence) => { if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onAttached: (resumed, terminal) => { this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
+        onPaintedOutput: (bytes, at, sequence) => { if (!firstSettled && this.client?.readScreenText().trim()) settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
-        onSessionGone: (status) => options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status),
+        onSessionGone: (status) => { if (first) settle(); options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status); },
         onOpenRefused: (message, sessionList) => {
           if (this.disposed) return true;
+          if (first) settle();
           // A window whose strip asked for this shell says why itself, where the person is looking.
           if (this.refused?.(message)) return true;
           core.toast.show({ message, tone: "error", ...(sessionList ? { duration: 0 } : {}),
@@ -214,9 +222,10 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         if (this.activeNow) core.setActiveTerminal(client);
         if (!this.visible) client.setSuspended(true);
         if (this.wantsFocus) client.focus();
-        if (this.retired) client.markSessionGone(this.retired.status);
+        if (this.retired) { client.markSessionGone(this.retired.status); if (first) settle(); }
         if (first) options.onFirstClient?.(client);
       } catch {
+        if (first && !this.disposed) settle();
         if (!this.disposed) core.toast.show({ message: "Could not open the terminal. Try again.", tone: "error", duration: 5000 });
       }
     }
@@ -286,11 +295,12 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     open(hostName, opts): WindowModel {
       // Explicit UUIDs and splits preserve affinity even when host labels are duplicated.
       const explicit = opts?.from?.hostId ?? (isCanonicalUuid(hostName) ? hostName : undefined);
+      const embeddedTarget = hostName === "embedded" || Boolean(opts?.from && !opts.from.hostId && !opts.from.noAccess && opts.from.host === host.name);
       const matches = [...remotes.values()].filter((entry) => entry.name === hostName);
-      const remote = explicit ? remotes.get(explicit) : matches.length === 1 && hostName !== host.name ? matches[0] : undefined;
-      const local = !explicit && hostName === host.name && matches.length === 0;
+      const remote = explicit ? remotes.get(explicit) : !embeddedTarget && matches.length === 1 && hostName !== host.name ? matches[0] : undefined;
+      const local = !explicit && (embeddedTarget || hostName === host.name && matches.length === 0);
       return {
-        id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? hostName,
+        id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? (local ? host.name : hostName),
         ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local && host.user ? { user: host.user, ...(host.os ? { os: host.os } : {}) } : { noAccess: !local }),
         ...(opts?.from ? { splitOf: opts.from.id } : {}),
         ...(opts?.session ? { sessionId: opts.session } : {}),
@@ -300,6 +310,15 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       if (!isCanonicalUuid(entry.id)) throw new Error("Host identity is not valid.");
       remotes.set(entry.id, { ...entry });
       for (const listener of listeners) listener();
+    },
+    replaceHosts(entries) {
+      const ids = new Set(entries.map((entry) => entry.id));
+      if (entries.some((entry) => !isCanonicalUuid(entry.id)) || ids.size !== entries.length) throw new Error("Host inventory is not valid.");
+      const removed = [...remotes.keys()].filter((id) => !ids.has(id));
+      remotes.clear();
+      for (const entry of entries) remotes.set(entry.id, { ...entry });
+      for (const listener of listeners) listener();
+      return removed;
     },
     forgetHost(id) { remotes.delete(id); for (const listener of listeners) listener(); },
     hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }, ...remotes.values()]; },

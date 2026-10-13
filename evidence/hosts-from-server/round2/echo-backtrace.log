@@ -1,0 +1,6 @@
+
+running 1 test
+test auth::tests::server_setup_terminal_echo_and_resume_preserve_offsets_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 460 filtered out; finished in 2.53s
+

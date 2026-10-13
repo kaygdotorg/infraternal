@@ -1,0 +1,12 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-drkyekn6.js, chunk-px28wsnv.js, chunk-qpqnqjyj.js, chunk-qs2w8cx9.js, chunk-rjdzcw68.js, chunk-ggt2eh8y.js, chunk-91cx0fbb.js, chunk-eegv10qw.js, chunk-bdqkv6y5.js, chunk-2bq5f3w2.js, chunk-6znv0srk.js, chunk-a6fj3zyq.js, chunk-gxvqf3b8.js, chunk-g6k2kdqq.js, chunk-xpw2sbew.js, chunk-5hspwa5n.js, chunk-yfcacn79.js, chunk-g2gh0ry9.js, chunk-3bqa8s13.js, chunk-gzvx0p2s.js, chunk-a67fcsj7.js, chunk-na49xj9e.js, main.js, chunk-8n70sfjx.js, chunk-fn4w1xnh.js, chunk-9dhw6tbb.js, chunk-fg8pkn4j.js, chunk-p7ec0gfk.js, chunk-zqx5q9bf.js, chunk-w3fhff6g.js, chunk-8gqdshxw.js, chunk-2rynp1vv.js, chunk-8j1gws45.js, chunk-eck1nw3y.js, chunk-cgj2hv56.js, chunk-yy6c95hv.js, chunk-1m821hje.js, chunk-v3tm1sxy.js, chunk-5rvpj7bp.js, chunk-cpqdxgzp.js, chunk-eeam6zap.js, chunk-wx3f2a6d.js, chunk-axbkkqp1.js, chunk-k2t111g3.js, chunk-qwparapb.js, chunk-ywsej8gw.js, chunk-mgpm9dqm.js, chunk-f7mjtn1t.js, chunk-44bczs9d.js, chunk-aae1nejq.js, chunk-3qbc6qm7.js, chunk-97776jbp.js, chunk-jwp3qkjx.js, chunk-7va92x2f.js, chunk-0d3bc9sw.js, chunk-w5rbdch0.js, chunk-ze251hma.js, chunk-r8p9yfye.js, chunk-npgqavjn.js, chunk-0sfvakeg.js, chunk-vjkx83vd.js, chunk-h6p0f84t.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-cz28y0eq.js, chunk-c56z9pzw.js, chunk-smrfvp7n.js, chunk-dzhhabhn.js, chunk-eb9h5bnf.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4395
+[WebServer] latency proxy listening on http://localhost:4394; upstream port=4395
+
+Running 1 test using 1 worker
+
+(node:3674703) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/hosts-from-server.spec.ts:5:1 › admitted hosts from another browser remain discoverable without saved windows (13.0s)
+
+  1 passed (20.5s)

@@ -1,0 +1,71 @@
+/** Proves admitted-host synchronization is independent of storage, deduplicated, and fenced across welcomes. */
+import { expect, test } from "bun:test";
+import { syncAdmittedHosts } from "./hosts";
+import type { HostEntry } from "./adapter";
+
+const id = "11111111-2222-3333-4444-555555555555";
+const row = { id, name: "worker", user: "operator", os: "Debian GNU/Linux", address: "operator@worker", online: false };
+function fixture() {
+  const hosts = new Map<string, HostEntry>();
+  let ready = () => {}, event = (_value: Record<string, unknown>) => {};
+  let response: Record<string, unknown> = { hosts: [row], next: null };
+  let reads = 0, subs = 0;
+  const stop = syncAdmittedHosts({
+    call: async () => { reads++; return response; },
+    onWelcome: (listener) => { ready = listener; listener(); return () => {}; },
+    subscribe: (_filter, listener) => { subs++; event = listener; return () => {}; },
+  }, { replaceHosts: (entries) => { hosts.clear(); for (const entry of entries) hosts.set(entry.id, entry); } });
+  return { hosts, ready: () => ready(), event: () => event({ type: "changed" }), set: (value: Record<string, unknown>) => { response = value; }, reads: () => reads, subs: () => subs, stop };
+}
+const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+test("fresh storage lists an offline host added by another browser", async () => {
+  const f = fixture(); await settle();
+  expect([...f.hosts.values()]).toEqual([{ ...row, os: "debian" }]);
+  expect(f.subs()).toBe(1); f.stop();
+});
+test("every welcome reconciles without duplicate subscriptions or hosts", async () => {
+  const f = fixture(); await settle(); f.ready(); await settle();
+  expect(f.hosts.size).toBe(1); expect(f.reads()).toBe(2); expect(f.subs()).toBe(1); f.stop();
+});
+test("a removal in another browser withdraws the host", async () => {
+  const f = fixture(); await settle(); f.set({ hosts: [], next: null }); f.event(); await settle();
+  expect(f.hosts.size).toBe(0); f.stop();
+});
+test("a malformed page cannot partially replace the authoritative inventory", async () => {
+  const f = fixture(); await settle(); f.set({ hosts: [{ ...row, id: "wrong" }], next: null }); f.event(); await settle();
+  expect(f.hosts.size).toBe(1); f.stop();
+});
+
+test("a socket-authority refusal withdraws previously admitted hosts", async () => {
+  const { ActionRefused } = await import("../../connection");
+  let welcome = () => {}, denied = false;
+  let entries: HostEntry[] = [];
+  const stop = syncAdmittedHosts({
+    call: async () => { if (denied) throw new ActionRefused(); return { hosts: [row], next: null }; },
+    onWelcome: (listener) => { welcome = listener; listener(); return () => {}; },
+    subscribe: () => () => {},
+  }, { replaceHosts: (hosts) => { entries = hosts; } });
+  await settle(); expect(entries).toHaveLength(1);
+  denied = true; welcome(); await settle(); expect(entries).toHaveLength(0); stop();
+});
+
+test("an invalidated read cannot enqueue an unsent call while the socket is down", async () => {
+  let connected = true, calls = 0, event = (_value: Record<string, unknown>) => {}, welcome = () => {};
+  let rejectRead: ((reason: Error) => void) | undefined;
+  let entries: HostEntry[] = [];
+  const stop = syncAdmittedHosts({
+    get isWelcomed() { return connected; },
+    call: async () => {
+      calls++;
+      if (calls === 2) return await new Promise<Record<string, unknown>>((_resolve, reject) => { rejectRead = reject; });
+      if (!connected) return await new Promise<Record<string, unknown>>(() => {});
+      return { hosts: calls === 1 ? [row] : [], next: null };
+    },
+    onWelcome: (listener) => { welcome = listener; listener(); return () => {}; },
+    subscribe: (_filter, listener) => { event = listener; return () => {}; },
+  }, { replaceHosts: (hosts) => { entries = hosts; } });
+  await settle(); event({ type: "changed" }); await settle(); event({ type: "changed" });
+  connected = false; rejectRead?.(new Error("drop")); await settle();
+  expect(calls).toBe(2);
+  connected = true; welcome(); await settle(); expect(entries).toHaveLength(0); stop();
+});

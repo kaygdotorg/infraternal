@@ -1,0 +1,69 @@
+critical chunk-rgh1mqz4.js: identity=590 gzip=327 brotli=301 bytes
+critical chunk-28rbcdd5.js: identity=39 gzip=39 brotli=39 bytes
+critical chunk-adf20kc4.js: identity=2519 gzip=1007 brotli=878 bytes
+critical chunk-a52hbfka.js: identity=1104 gzip=666 brotli=605 bytes
+onDemand chunk-c82kjqfm.js: identity=50801 gzip=15858 brotli=14080 bytes
+deferred chunk-k8a26t1r.js: identity=1556 gzip=799 brotli=726 bytes
+onDemand chunk-9k5ta12n.js: identity=31924 gzip=12268 brotli=11015 bytes
+onDemand chunk-mpbb7rpf.js: identity=7662 gzip=3398 brotli=2959 bytes
+onDemand chunk-5347w9a9.js: identity=4640 gzip=1930 brotli=1700 bytes
+deferred chunk-t288ywda.js: identity=43046 gzip=16589 brotli=14614 bytes
+critical chunk-8xrqnqf5.js: identity=162 gzip=150 brotli=125 bytes
+onDemand chunk-z2taavgr.js: identity=2420 gzip=1200 brotli=1084 bytes
+onDemand chunk-21fn8b6d.js: identity=2824 gzip=1385 brotli=1193 bytes
+onDemand chunk-ha1j4vqw.js: identity=2462 gzip=1110 brotli=936 bytes
+deferred chunk-jmsfctqm.js: identity=99030 gzip=33597 brotli=29762 bytes
+critical chunk-jamf9182.js: identity=17627 gzip=6244 brotli=5560 bytes
+onDemand chunk-p34rqwxp.js: identity=1063 gzip=651 brotli=518 bytes
+onDemand chunk-af4vyzwp.js: identity=1026 gzip=623 brotli=497 bytes
+onDemand chunk-e05pny5p.js: identity=4575 gzip=2015 brotli=1785 bytes
+critical faulty-terminal.worker.js: identity=1086 gzip=562 brotli=492 bytes
+critical backdrop.worker.js: identity=243 gzip=211 brotli=159 bytes
+critical chunk-xkspkv15.js: identity=199 gzip=161 brotli=139 bytes
+onDemand chunk-6wy2fyjw.js: identity=11529 gzip=4655 brotli=4255 bytes
+critical chunk-d3d44zbs.js: identity=5443 gzip=2606 brotli=2385 bytes
+critical chunk-axbkkqp1.js: identity=90 gzip=90 brotli=78 bytes
+critical chunk-6gtm055g.js: identity=88 gzip=88 brotli=77 bytes
+critical chunk-63658b0g.js: identity=9810 gzip=4018 brotli=3453 bytes
+critical chunk-f2r0hhqc.js: identity=128 gzip=109 brotli=111 bytes
+critical chunk-9xd3g65e.js: identity=39 gzip=39 brotli=39 bytes
+onDemand chunk-g3sj1czq.js: identity=3891 gzip=1736 brotli=1504 bytes
+onDemand chunk-q5fmb0qz.js: identity=191 gzip=171 brotli=138 bytes
+critical chunk-r5yb81ya.js: identity=42534 gzip=14520 brotli=13026 bytes
+onDemand chunk-4myrwgrb.js: identity=2557 gzip=1180 brotli=1009 bytes
+onDemand chunk-tb0vvacc.js: identity=10693 gzip=4124 brotli=3763 bytes
+onDemand chunk-ytpxqt0e.js: identity=2108 gzip=1037 brotli=870 bytes
+onDemand chunk-da010a6p.js: identity=540 gzip=352 brotli=313 bytes
+critical chunk-yr0r38s4.js: identity=386 gzip=238 brotli=196 bytes
+critical chunk-p938y84p.js: identity=8377 gzip=3575 brotli=3188 bytes
+critical chunk-45e8w4af.js: identity=21235 gzip=6856 brotli=6137 bytes
+critical chunk-eeywpde5.js: identity=707945 gzip=204708 brotli=165955 bytes
+critical chunk-1y0k7gwq.js: identity=4499 gzip=1858 brotli=1633 bytes
+onDemand chunk-8g27f160.js: identity=6195 gzip=2792 brotli=2521 bytes
+onDemand chunk-4dh812dh.js: identity=6357 gzip=2371 brotli=2110 bytes
+onDemand chunk-tsx9wh53.js: identity=1170 gzip=708 brotli=622 bytes
+onDemand chunk-6bwycy35.js: identity=1616 gzip=864 brotli=737 bytes
+onDemand chunk-e1a40qz3.js: identity=5359 gzip=2579 brotli=2296 bytes
+onDemand chunk-ymk1xecz.js: identity=14531 gzip=5410 brotli=4855 bytes
+onDemand chunk-wcb9xt97.js: identity=6265 gzip=2101 brotli=1859 bytes
+onDemand chunk-hcsw58jj.js: identity=6772 gzip=3177 brotli=2892 bytes
+critical main.js: identity=111722 gzip=40612 brotli=35241 bytes
+onDemand chunk-1f4exzmv.js: identity=228 gzip=179 brotli=166 bytes
+critical chunk-61xwpgvs.js: identity=49 gzip=49 brotli=49 bytes
+critical chunk-d6cfpmjf.js: identity=707 gzip=363 brotli=306 bytes
+critical chunk-b437sgfp.js: identity=16027 gzip=6221 brotli=5555 bytes
+JavaScript transfer, critical: identity=952648 gzip=295317/307200 brotli=245727/256000 bytes
+JavaScript transfer, deferred: identity=143632 gzip=50985/51200 brotli=45102/45056 bytes
+JavaScript transfer, onDemand: identity=189399 gzip=73874/20480 brotli=65677/18432 bytes
+JavaScript transfer, onDemand largest chunk chunk-c82kjqfm.js: gzip=15858/20480 brotli=14080/18432 bytes (class total gzip=73874 brotli=65677, not limited)
+62 | console.log(`JavaScript transfer, onDemand largest chunk ${biggest.name}: gzip=${biggest.gzip}/${limits.onDemand.gzip} brotli=${biggest.brotli}/${limits.onDemand.brotli} bytes (class total gzip=${totals.onDemand.gzip} brotli=${totals.onDemand.brotli}, not limited)`);
+63 | for (const [name, size] of onDemandChunks) {
+64 |   if (size.gzip > limits.onDemand.gzip || size.brotli > limits.onDemand.brotli) throw new Error(`on-demand chunk ${name} exceeds its compressed transfer budget`);
+65 | }
+66 | if (totals.deferred.gzip > limits.deferred.gzip || totals.deferred.brotli > limits.deferred.brotli) {
+67 |   throw new Error("production deferred JavaScript exceeds its compressed transfer budget");
+                 ^
+error: production deferred JavaScript exceeds its compressed transfer budget
+      at /home/kayg/Developer/infraternal/.worktrees/review-hosts-from-server/apps/tracer/transfer-budget.ts:67:13
+
+Bun v1.4.2 (Linux x64)

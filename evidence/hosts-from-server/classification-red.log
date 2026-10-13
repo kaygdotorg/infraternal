@@ -1,0 +1,31 @@
+bun test v1.4.2 (744846f84)
+
+chunk-classes.test.ts:
+(pass) the first screen is critical, the canvas product module and what only it uses are deferred [1.44ms]
+(pass) a chunk that both sides use stays critical [0.36ms]
+(pass) code only an action loads is on demand, even when the lazy canvas is what loads it [0.37ms]
+51 |     "./main.js": out([["./product.js", "dynamic-import"]], ["src/main.ts"], "src/main.ts"),
+52 |     "./product.js": out([["./hosts.js", "dynamic-import"], ["./sessions.js", "import-statement"]], ["src/canvas/product.ts"], "src/canvas/product.ts"),
+53 |     "./hosts.js": out([["./sessions.js", "import-statement"]], ["src/canvas/sessions/hosts.ts"], "src/canvas/sessions/hosts.ts"),
+54 |     "./sessions.js": out([]),
+55 |   });
+56 |   expect(result.critical).toEqual(["main.js"]);
+                               ^
+error: expect(received).toEqual(expected)
+
+  [
++   "hosts.js",
+    "main.js",
++   "sessions.js",
+  ]
+
+- Expected  - 0
++ Received  + 2
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/apps/tracer/chunk-classes.test.ts:56:27)
+(fail) post-terminal host inventory entry and its shared canvas imports stay deferred [6.41ms]
+
+ 3 pass
+ 1 fail
+ 9 expect() calls
+Ran 4 tests across 1 file. [16.00ms]

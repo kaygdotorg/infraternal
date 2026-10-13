@@ -44,3 +44,15 @@ test("code only an action loads is on demand, even when the lazy canvas is what 
   expect(result.deferred).toEqual(["both.js", "canvasonly.js", "product.js"]);
   expect(result.onDemand).toEqual(["wizard.js", "wizardonly.js"]);
 });
+
+
+test("post-terminal host inventory entry and its shared canvas imports stay deferred", () => {
+  const result = classifyChunks({
+    "./main.js": out([["./product.js", "dynamic-import"]], ["src/main.ts"], "src/main.ts"),
+    "./product.js": out([["./hosts.js", "dynamic-import"], ["./sessions.js", "import-statement"]], ["src/canvas/product.ts"], "src/canvas/product.ts"),
+    "./hosts.js": out([["./sessions.js", "import-statement"]], ["src/canvas/sessions/hosts.ts"], "src/canvas/sessions/hosts.ts"),
+    "./sessions.js": out([]),
+  });
+  expect(result.critical).toEqual(["main.js"]);
+  expect(result.deferred).toEqual(["hosts.js", "product.js", "sessions.js"]);
+});

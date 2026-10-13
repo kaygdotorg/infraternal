@@ -80,6 +80,7 @@ pub enum EnrollmentError {
 pub struct EnrollmentStore(
     pub(crate) SqlitePool,
     pub(crate) std::sync::Arc<crate::remote_guard::Revocations>,
+    pub(crate) crate::remote_inventory::InventoryChanges,
 );
 
 impl EnrollmentStore {
@@ -99,6 +100,7 @@ impl EnrollmentStore {
         Self(
             pool,
             std::sync::Arc::new(crate::remote_guard::Revocations::default()),
+            crate::remote_inventory::InventoryChanges::default(),
         )
     }
 
@@ -279,6 +281,7 @@ impl EnrollmentStore {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
+        self.2.publish();
         Ok(())
     }
 }

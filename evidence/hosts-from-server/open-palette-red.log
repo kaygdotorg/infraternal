@@ -1,0 +1,44 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-a7dtbqan.js, chunk-px28wsnv.js, chunk-kbqn0mwc.js, chunk-qs2w8cx9.js, chunk-r9c3aeky.js, chunk-vs0486ra.js, chunk-scw9yx8w.js, chunk-pnfespd3.js, chunk-1rrnk8xt.js, chunk-8ty10zqa.js, chunk-6znv0srk.js, chunk-a6fj3zyq.js, chunk-gxvqf3b8.js, chunk-dgv2bbhn.js, chunk-xpw2sbew.js, chunk-y9ctxefs.js, chunk-r80z597w.js, chunk-g2gh0ry9.js, chunk-hgzt5wrh.js, chunk-yg0rdgf3.js, chunk-xaa4y3qm.js, chunk-na49xj9e.js, main.js, chunk-8n70sfjx.js, chunk-fn4w1xnh.js, chunk-9dhw6tbb.js, chunk-7fq5evxm.js, chunk-h5b535ry.js, chunk-vrbd8n79.js, chunk-w4f93c04.js, chunk-8gqdshxw.js, chunk-hnvgvs35.js, chunk-x93a8bp4.js, chunk-fr74cefy.js, chunk-cgj2hv56.js, chunk-3mmdcrdx.js, chunk-pv2w0en9.js, chunk-34bpxfs6.js, chunk-5rncddpj.js, chunk-76qydz8x.js, chunk-wvfykp6h.js, chunk-axbkkqp1.js, chunk-47vht88w.js, chunk-vhxkjrw6.js, chunk-kk8m7by7.js, chunk-7mav53y1.js, chunk-g10maath.js, chunk-7m9kj66c.js, chunk-aae1nejq.js, chunk-y9qa5ms4.js, chunk-gqg6kc1e.js, chunk-qmvd9a3a.js, chunk-qczvfa32.js, chunk-a84mj8kq.js, chunk-vgp30ddg.js, chunk-8h91skyd.js, chunk-ycf096qk.js, chunk-j03kxy19.js, chunk-0cpxbze1.js, chunk-c5t0kf8a.js, chunk-arcrwz1y.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-k2kgpza0.js, chunk-5xd8pffv.js, chunk-smrfvp7n.js, chunk-dzhhabhn.js, chunk-ra5ajpb9.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4395
+[WebServer] latency proxy listening on http://localhost:4394; upstream port=4395
+
+Running 1 test using 1 worker
+
+(node:3037659) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 test/hosts-from-server.spec.ts:5:1 › admitted hosts from another browser remain discoverable without saved windows (23.6s)
+
+
+  1) test/hosts-from-server.spec.ts:5:1 › admitted hosts from another browser remain discoverable without saved windows 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('#palette-results [role=option]').filter({ hasText: 'Open shell on another-device-host' })
+    Expected: 0
+    Received: 1
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" with timeout 5000ms
+      - waiting for locator('#palette-results [role=option]').filter({ hasText: 'Open shell on another-device-host' })
+        13 × locator resolved to 1 element
+           - unexpected value "1"
+
+
+      44 |   admitted = false; push?.();
+      45 |   await expect.poll(() => reads).toBeGreaterThan(2);
+    > 46 |   await expect(row).toHaveCount(0);
+         |                     ^
+      47 | });
+      48 |
+        at /home/kayg/Developer/infraternal/.worktrees/hosts-from-server/apps/tracer/test/hosts-from-server.spec.ts:46:21
+
+    attachment #1: admitted-offline-host (image/png) ───────────────────────────────────────────────
+    test-results/hosts-from-server-admitted-e5d47-rable-without-saved-windows/attachments/admitted-offline-host-7f07698496ac73040e64acdd03973c99e454687d.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/hosts-from-server-admitted-e5d47-rable-without-saved-windows/error-context.md
+
+  1 failed
+    test/hosts-from-server.spec.ts:5:1 › admitted hosts from another browser remain discoverable without saved windows 

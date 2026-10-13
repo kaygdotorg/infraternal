@@ -1,0 +1,14 @@
+bun test v1.4.2 (744846f84)
+
+src/canvas/sessions/live.test.ts:
+(pass) the toolbar sessions seam exposes admitted host state and routes by identity [1.97ms]
+(pass) an enrolled host opens by UUID and splits keep that authority [0.17ms]
+(pass) unknown and ambiguous labels never open an embedded shell [0.08ms]
+(pass) removed hosts disappear from inventory and cannot route a new shell [0.12ms]
+(pass) an authoritative host snapshot replaces admission with one notification [0.23ms]
+(pass) the embedded inventory identity still opens locally beside an equally named remote [0.12ms]
+
+ 6 pass
+ 0 fail
+ 28 expect() calls
+Ran 6 tests across 1 file. [16.00ms]

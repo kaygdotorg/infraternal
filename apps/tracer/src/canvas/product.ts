@@ -80,11 +80,15 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
   const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
+  let disposed = false, hostsStarted = false, hostsReady = false;
+  let startHosts = (): void => {};
+  let offHosts: (() => void) | undefined;
   const sessions = createLiveSessions({
     core, connection, pool, host: embedded,
     ...(options.predictiveEcho ? { predictiveEcho: true } : {}),
     ...(options.firstHooks ? { firstHooks: options.firstHooks } : {}),
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
+    onFirstTerminalSettled: () => { hostsReady = true; startHosts(); },
     onSessionGone: inventory.gone,
     getEndedSession: (host, id) => {
       const session = inventory.get(host, id);
@@ -174,11 +178,28 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   canvasReady();
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
   if (first) canvas.cx.win.setActive(first);
+  // Neither inventory code nor its RPC competes with the first terminal frame.
+  startHosts = () => {
+    if (disposed || hostsStarted) return;
+    hostsStarted = true;
+    void import("./sessions/hosts").then(({ syncAdmittedHosts }) => {
+      if (disposed) return;
+      offHosts = syncAdmittedHosts(connection, { replaceHosts(hosts) {
+        const removed = new Set(sessions.replaceHosts(hosts));
+        for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId && removed.has(rec.model.hostId)) canvas.cx.win.close(rec);
+        if (removed.size) canvas.flush();
+      } });
+    }, () => { hostsStarted = false; });
+  };
+  const offHostWelcome = connection.onWelcome(() => { if (hostsReady) startHosts(); });
   return {
     canvas, sessions, connection,
     dispose() {
       canvas.flush();
       offRoundTrip();
+      disposed = true;
+      offHosts?.();
+      offHostWelcome();
       offSessionInventory();
       authority.dispose();
       offMeshView();

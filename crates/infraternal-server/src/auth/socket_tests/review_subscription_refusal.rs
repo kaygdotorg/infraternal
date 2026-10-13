@@ -176,7 +176,7 @@ async fn refusal_ends_subscription(case: Refusal) {
             } => {
                 assert_eq!(
                     serde_json::from_slice::<Value>(event_json).unwrap(),
-                    json!({"type":"error","error":"mesh unavailable"})
+                    json!({"type":"error","error": if cfg!(feature = "remote") && !matches!(case, Refusal::Saturated) { "plugin unavailable" } else { "mesh unavailable" }})
                 );
                 break;
             }

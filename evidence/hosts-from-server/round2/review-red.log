@@ -1,0 +1,39 @@
+bun test v1.4.2 (744846f84)
+
+transfer-metadata-review.test.ts:
+29 |     // Use the repository's gate rather than duplicating its classification, compression or budgets.
+30 |     const gate = Bun.spawn([process.execPath, "run", "transfer-budget.ts"], { cwd: import.meta.dir, env, stdout: "pipe", stderr: "pipe" });
+31 |     const output = await new Response(gate.stdout).text();
+32 |     const errors = await new Response(gate.stderr).text();
+33 |     await writeFile(join(root, "transfer-metadata-gate.log"), output + errors);
+34 |     expect(await gate.exited).toBe(0);
+                                   ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/apps/tracer/transfer-metadata-review.test.ts:34:31)
+(fail) the reviewed production source meets transfer budgets for fixed build metadata [3139.74ms]
+
+src/canvas/sessions/hosts-scale-review.test.ts:
+(pass) a fresh browser discovers 10000 admitted offline hosts from complete bounded pages [30.88ms]
+21 |   }, { replaceHosts: (hosts) => { entries = hosts; } });
+22 |   // Resolve every page and final publication without a wall-clock timing assertion.
+23 |   for (let microtask = 0; microtask < 200; microtask++) await Promise.resolve();
+24 |   stop();
+25 |   expect(calls).toBe(79);
+26 |   expect(entries).toHaveLength(count);
+                       ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 10001
+Received length: 0
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/apps/tracer/src/canvas/sessions/hosts-scale-review.test.ts:26:19)
+(fail) a fresh browser discovers 10001 admitted offline hosts from complete bounded pages [16.63ms]
+
+ 1 pass
+ 2 fail
+ 6 expect() calls
+Ran 3 tests across 2 files. [3.21s]

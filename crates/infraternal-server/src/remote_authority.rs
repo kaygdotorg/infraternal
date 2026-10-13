@@ -168,6 +168,7 @@ impl EnrollmentStore {
             let committed = transaction.commit().await;
             if committed.is_ok() {
                 store.1.tombstoned(host);
+                store.2.publish();
             }
             #[cfg(test)]
             store.1.after_commit().await;

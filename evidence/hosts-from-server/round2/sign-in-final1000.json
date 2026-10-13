@@ -1,0 +1,130 @@
+{
+  "machine": "infraternal-perf-test",
+  "loadBefore": "1.43 1.43 0.99 1/20295 1250438",
+  "hosts": 1000,
+  "samples": 6,
+  "rttMs": 300,
+  "tracerTestPort": "4404",
+  "firstFrameDefinition": "first glyph draw on the visible terminal canvas",
+  "variantOrder": [
+    "baseline",
+    "candidate"
+  ],
+  "baseline": {
+    "firstFrameMs": [
+      1594.5,
+      2228.5,
+      1427.9000000059605,
+      2423.300000011921,
+      1565.5999999940395,
+      1359.9000000059605
+    ],
+    "phases": [
+      {
+        "mount": 132.69999998807907,
+        "client": 614.3999999761581,
+        "attached": 1274.699999988079,
+        "painted": 1594.699999988079
+      },
+      {
+        "mount": 141.40000000596046,
+        "client": 1258.4000000059605,
+        "attached": 1913.800000011921,
+        "painted": 2228.800000011921
+      },
+      {
+        "mount": 150.2000000178814,
+        "client": 440.59999999403954,
+        "attached": 1107.4000000059605,
+        "painted": 1428
+      },
+      {
+        "mount": 127.30000001192093,
+        "client": 1446.4000000059605,
+        "attached": 2106.5999999940395,
+        "painted": 2423.5999999940395
+      },
+      {
+        "mount": 119.5,
+        "client": 592,
+        "attached": 1246.5999999940395,
+        "painted": 1565.7999999821186
+      },
+      {
+        "mount": 138.2000000178814,
+        "client": 400.59999999403954,
+        "attached": 1046.9000000059605,
+        "painted": 1360.2000000178814
+      }
+    ],
+    "p50Ms": 1565.5999999940395,
+    "sampleMaxMs": 2423.300000011921,
+    "inventoryAskedBeforeFirstFrame": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "candidate": {
+    "firstFrameMs": [
+      1559.2999999821186,
+      1626.300000011921,
+      1601.7999999821186,
+      1362.300000011921,
+      1558.699999988079,
+      1365.5
+    ],
+    "phases": [
+      {
+        "mount": 117.2999999821186,
+        "client": 588.8999999761581,
+        "attached": 1246.7999999821186,
+        "painted": 1562.5
+      },
+      {
+        "mount": 130.2000000178814,
+        "client": 627.4000000059605,
+        "attached": 1303.5,
+        "painted": 1629.6000000238419
+      },
+      {
+        "mount": 133.19999998807907,
+        "client": 612.4000000059605,
+        "attached": 1276.2999999821186,
+        "painted": 1607
+      },
+      {
+        "mount": 122.2000000178814,
+        "client": 383.2000000178814,
+        "attached": 1039.0999999940395,
+        "painted": 1365.5
+      },
+      {
+        "mount": 109,
+        "client": 582,
+        "attached": 1239.699999988079,
+        "painted": 1561.699999988079
+      },
+      {
+        "mount": 124,
+        "client": 393.90000000596046,
+        "attached": 1042,
+        "painted": 1374.0999999940395
+      }
+    ],
+    "p50Ms": 1558.699999988079,
+    "sampleMaxMs": 1626.300000011921,
+    "inventoryAskedBeforeFirstFrame": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "loadAfter": "1.76 1.54 1.05 1/18409 1250851"
+}
