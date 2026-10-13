@@ -25,9 +25,11 @@ if [[ "${3:-}" != --built ]]; then
         CARGO_TARGET_DIR="$host_target" scripts/static-cargo build --locked --release -p infraternal \
             --no-default-features --features plugin-host-facts,remote,ssh \
             --target "$arch-unknown-linux-musl"
-        # The early shell needs the same shim and SSH bridge before enrollment.
+        # The early shell needs the same shim and SSH bridge, before enrollment
+        # and host components are installed. Feature removal keeps those APIs
+        # out of this artifact without selecting a different session engine.
         CARGO_TARGET_DIR="$session_target" scripts/static-cargo build --locked --release -p infraternal \
-            --no-default-features --features ssh --target "$arch-unknown-linux-musl"
+            --no-default-features --features session-payload --target "$arch-unknown-linux-musl"
     done
 fi
 # Validate the complete set before publishing; a partial directory is never a release.
