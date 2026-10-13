@@ -319,7 +319,10 @@ impl AgentPlugin for MeshNodePlugin {
                 ))
             }
             Request::Up => {
-                json!(node.up().map_err(|_| PluginError::Rejected)?)
+                json!(identity_response(
+                    Some(node.up().map_err(|_| PluginError::Rejected)?),
+                    false,
+                ))
             }
             Request::Down => {
                 node.down().map_err(|_| PluginError::Rejected)?;
