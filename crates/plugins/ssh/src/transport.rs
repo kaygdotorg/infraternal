@@ -124,6 +124,14 @@ pub trait SshTransport: Send + Sync {
 
 /// A session owns ephemeral credentials and cleans them when its final owner drops it.
 pub trait SshSession: Send + Sync {
+    /// Open a duplex command on this connection, never authenticate a new one.
+    fn stream<'a>(&'a self, _: &'a str) -> Operation<'a, crate::duplex::Duplex> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "The SSH terminal bridge is unavailable.",
+            ))
+        })
+    }
     /// Opt into fixed setup-step receipts; older adapters retain separate steps.
     fn setup_steps(&self) -> bool {
         false
