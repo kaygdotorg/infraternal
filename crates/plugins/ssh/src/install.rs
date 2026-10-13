@@ -200,6 +200,23 @@ if command -v gzip >/dev/null 2>&1; then gzip=gzip; fi
 printf 'CAPS %s %s %s\n' "$zstd" "$gzip" "$digest"
 "#;
 
+/// Drop full-line comments and indentation from a generated shell program
+/// before it crosses a high-latency link (D255, #189). Bytes on a fresh
+/// connection are paced out, so the check script's size is on the prompt
+/// path. Valid only for programs without here-documents, line continuations
+/// or quoted strings that span lines; the embedded setup scripts have none.
+fn compact(script: &str) -> String {
+    let mut compacted = String::with_capacity(script.len());
+    for line in script.lines() {
+        let line = line.trim_start_matches([' ', '\t']);
+        if !line.is_empty() && !line.starts_with('#') {
+            compacted.push_str(line);
+            compacted.push('\n');
+        }
+    }
+    compacted
+}
+
 impl Installation {
     #[must_use]
     pub fn cleanup_coordinates(&self) -> Cleanup {
@@ -356,11 +373,11 @@ impl Installation {
             uuid::Uuid::nil(),
             &format!("{PAYLOAD_CACHE}\n{TRANSFER_PROBE}"),
         );
-        let script = format!(
+        let script = compact(&format!(
             "{SETUP_HEADER}setup_step connect {}\ncaps=$(sh -c {} </dev/null 2>/dev/null) || caps=\n[ -z \"$caps\" ] || printf '%s\\n' \"$caps\"\nreader=head\nif command -v dd >/dev/null 2>&1; then reader=dd; fi\nprintf 'CHECK ready %s\\n' \"$reader\"\nIFS= read -r setup_length\ncase \"$setup_length\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$setup_length\" -le 65536 ] || exit 1\nif [ \"$reader\" = dd ]; then setup_body=$(dd bs=1 count=\"$setup_length\" 2>/dev/null); else setup_body=$(head -c \"$setup_length\"); fi\nexec sh -c \"$setup_body\"\n",
             shell_quote(check),
             shell_quote(&probe),
-        );
+        ));
         let channel = session.stream(&script).await?;
         if channel.line(32).await? != b"STEP connect\n" {
             return Err(invalid_setup().at(InstallStep::Connect));
@@ -439,6 +456,7 @@ impl Installation {
             shell_quote(&self.script(start))
         );
         let channel = if let Some(checked) = checked {
+            let script = compact(&script);
             if script.len() > 65536 {
                 return Err(invalid_setup().at(InstallStep::Upload));
             }
@@ -1367,7 +1385,7 @@ fn invalid_setup() -> Failure {
 
 #[cfg(test)]
 mod tests {
-    //! Pins the check-time transfer record (#189).
+    //! Pins the check-time transfer record and the script compaction rules (#189).
     use super::*;
 
     #[test]
@@ -1399,6 +1417,47 @@ mod tests {
             "CAPS zstd gzip -\r\n".to_owned(),
         ] {
             assert_eq!(TransferCaps::parse(invalid.as_bytes()), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn compaction_drops_only_comment_lines_and_indentation() {
+        assert_eq!(
+            compact(
+                "# header\nif true; then\n    # note\n\tprintf '%s\\n' \"a # b\"\n\nfi # tail\n"
+            ),
+            "if true; then\nprintf '%s\\n' \"a # b\"\nfi # tail\n"
+        );
+    }
+
+    #[test]
+    fn embedded_setup_programs_have_no_constructs_compaction_would_change() {
+        // Compaction is sound only without here-documents, line continuations
+        // and quoted strings spanning lines; keep that true for these sources.
+        for source in [
+            crate::probe::CHECK_SCRIPT,
+            crate::previous_attempt::INSPECT,
+            PAYLOAD_CACHE,
+            STAGE_TRANSACTION,
+            PUBLISH_PAYLOAD_CACHE,
+            TRANSFER_PROBE,
+            SETUP_HEADER,
+        ] {
+            for line in source.lines() {
+                let code = if line.trim_start().starts_with('#') {
+                    ""
+                } else {
+                    line
+                };
+                assert!(!code.contains("<<"), "{line}");
+                assert!(!code.ends_with('\\'), "{line}");
+                assert_eq!(code.matches('\'').count() % 2, 0, "{line}");
+                assert_eq!(
+                    code.matches('"').count() % 2,
+                    code.matches("\\\"").count() % 2,
+                    "{line}"
+                );
+            }
         }
     }
 }
