@@ -42,6 +42,7 @@ rust_check_static_binary() {
     local binary="${target_dir}/${target}/release/infraternal"
     local description
     local size_bytes
+    local delta_bytes
     local max_size_bytes
 
     if [[ ! -x "$binary" ]]; then
@@ -72,8 +73,9 @@ rust_check_static_binary() {
     esac
 
     size_bytes="$(stat -c '%s' "$binary")"
-    printf 'PT_INTERP: absent; size: %s bytes (max %s; allowance 0)\n' \
-        "$size_bytes" "$max_size_bytes"
+    delta_bytes=$((size_bytes - max_size_bytes))
+    printf 'PT_INTERP: absent; size: %s bytes; cap: %s bytes; delta: %+d bytes\n' \
+        "$size_bytes" "$max_size_bytes" "$delta_bytes"
     if ((size_bytes > max_size_bytes)); then
         printf 'binary exceeds the %s-byte size budget: %s bytes\n' \
             "$max_size_bytes" "$size_bytes" >&2
