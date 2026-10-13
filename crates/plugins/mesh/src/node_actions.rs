@@ -514,6 +514,7 @@ mod tests {
         let observed = infraternal_plugin_api::server_path::ServerLink {
             kind: infraternal_plugin_api::server_path::ServerLinkKind::Fallback,
             endpoint: Some("127.0.0.1:7443".parse().expect("endpoint")),
+            source_port: None,
             reason: infraternal_plugin_api::server_path::ServerLinkReason::MeshRefused,
         };
         plugin.set_server_link(&observed);

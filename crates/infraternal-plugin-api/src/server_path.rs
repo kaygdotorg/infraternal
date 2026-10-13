@@ -17,6 +17,10 @@ pub enum ServerLinkKind {
 pub struct ServerLink {
     pub kind: ServerLinkKind,
     pub endpoint: Option<SocketAddr>,
+    /// Local UDP source port, reported over the authenticated control channel.
+    /// A peer behind NAT may have a different enrolled source port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_port: Option<u16>,
     pub reason: ServerLinkReason,
 }
 
@@ -36,3 +40,22 @@ pub enum ServerLinkReason {
 /// Owns a listener's lifecycle. Dropping the lease cancels its sockets and workers.
 pub trait ListenerLease: Send + Sync {}
 impl<T: Send + Sync> ListenerLease for T {}
+
+#[cfg(test)]
+mod tests {
+    //! Legacy control replies remain valid when local UDP coordinates are absent.
+    use super::*;
+    #[test]
+    fn legacy_link_omits_the_optional_source_port() {
+        let link: ServerLink = serde_json::from_str(
+            r#"{"kind":"Fallback","endpoint":"127.0.0.1:7443","reason":"Connecting"}"#,
+        )
+        .unwrap();
+        assert_eq!(link.source_port, None);
+        assert!(
+            !serde_json::to_string(&link)
+                .unwrap()
+                .contains("source_port")
+        );
+    }
+}

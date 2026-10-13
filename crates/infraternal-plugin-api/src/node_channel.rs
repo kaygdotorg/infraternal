@@ -16,6 +16,15 @@ pub trait NodeChannel: Send + Sync {
     #[cfg(feature = "socket-host")]
     fn changes(&self) -> tokio::sync::watch::Receiver<()>;
     fn call(&self, action: &str, input: Vec<u8>) -> PluginOperation<'_, Vec<u8>>;
+    /// Lease an alternative source address for this admitted peer. The host
+    /// supplies its existing logical tuple and identity; plugins supply routing only.
+    /// Dropping the lease removes the alternative without ending the session.
+    fn route_peer(
+        &self,
+        _address: std::net::SocketAddr,
+    ) -> PluginOperation<'_, Option<Box<dyn crate::server_path::ListenerLease>>> {
+        Box::pin(async { Ok(None) })
+    }
     /// Lease an additional authenticated listener on an explicitly created server.
     /// Dropping the lease stops admission; ordinary nodes cannot create listeners.
     fn listen_server(

@@ -228,6 +228,7 @@ fn report(
     registry.set_server_link(ServerLink {
         kind: current.map_or(ServerLinkKind::Disconnected, |(kind, _)| kind),
         endpoint: current.map(|(_, address)| address),
+        source_port: None,
         reason,
     });
 }

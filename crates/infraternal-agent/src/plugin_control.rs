@@ -92,6 +92,7 @@ impl Registry {
             registry.set_server_link(infraternal_plugin_api::server_path::ServerLink {
                 kind: infraternal_plugin_api::server_path::ServerLinkKind::Local,
                 endpoint: None,
+                source_port: None,
                 reason: infraternal_plugin_api::server_path::ServerLinkReason::Local,
             });
         }
@@ -756,6 +757,7 @@ mod tests {
         let observed = ServerLink {
             kind: ServerLinkKind::Fallback,
             endpoint: Some("127.0.0.1:7443".parse().unwrap()),
+            source_port: None,
             reason: ServerLinkReason::MeshRefused,
         };
         registry.set_server_link(observed.clone());
