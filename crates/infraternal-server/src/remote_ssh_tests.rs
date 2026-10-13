@@ -82,19 +82,24 @@ except EOFError: pass
 
 #[tokio::test]
 async fn ssh_bridge_retires_only_after_installed_writer_acknowledges() {
-    replacement(false).await;
+    replacement(false, false).await;
 }
 
 #[tokio::test]
 async fn refused_installed_reattachment_restores_the_ssh_writer() {
-    replacement(true).await;
+    replacement(true, false).await;
+}
+
+#[tokio::test]
+async fn component_off_retires_ssh_fallback_after_installed_admission() {
+    replacement(false, true).await;
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "Keep admission, reattachment and retirement ordered in the real peer lifecycle."
 )]
-async fn replacement(refuse: bool) {
+async fn replacement(refuse: bool, component_off: bool) {
     let root_dir = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
         ".cache/codex-scratch/addhost-instant/pipe-{}",
         Uuid::new_v4()
@@ -142,7 +147,7 @@ async fn replacement(refuse: bool) {
         &server,
         std::slice::from_ref(&issuer),
         store,
-        hosts,
+        hosts.clone(),
     )
     .await
     .unwrap();
@@ -193,6 +198,20 @@ async fn replacement(refuse: bool) {
         !retired.load(std::sync::atomic::Ordering::SeqCst),
         "SSH was retired before installed replay acknowledgment"
     );
+    if component_off {
+        hosts.stop_provisioning().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while alive(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("component-off retained the old SSH bridge after installed admission");
+        assert!(
+            hosts.installed(host).await,
+            "SSH off cannot stop the installed component"
+        );
+    }
     release.send(()).unwrap();
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(5), output.recv())
@@ -215,6 +234,7 @@ async fn replacement(refuse: bool) {
         drop(actor);
         drop(listeners);
     }
+    drop(hosts);
     tokio::time::timeout(Duration::from_secs(5), async {
         while alive(pid) {
             tokio::time::sleep(Duration::from_millis(10)).await;

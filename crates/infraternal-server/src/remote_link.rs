@@ -114,12 +114,18 @@ impl Drop for QuicLink {
 }
 
 impl RemoteLink {
-    /// The admitted logical QUIC tuple; TCP cannot move below its transport.
+    /// The admitted logical QUIC tuple; TCP and SSH channels cannot move below their transport.
     pub(crate) fn peer_address(&self) -> Option<std::net::SocketAddr> {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.remote_address()),
             LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
         }
+    }
+    #[cfg(feature = "ssh")]
+    pub(crate) fn ssh_backed(&self) -> bool {
+        matches!(&self.transport, LinkTransport::Ssh { .. })
     }
     pub(crate) fn authorize(mut self, authority: crate::remote_guard::AuthorityGuard) -> Self {
         self.authority = Some(authority);

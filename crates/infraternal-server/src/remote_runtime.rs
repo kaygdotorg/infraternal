@@ -220,11 +220,24 @@ impl RemoteHosts {
         }
     }
     #[cfg(feature = "ssh")]
-    pub(crate) async fn stop_provisioning(&self) {
-        self.0
-            .lock()
-            .await
-            .retain(|_, host| host.authority.installed());
+    pub(crate) async fn stop_provisioning(&self) -> io::Result<()> {
+        let actors = {
+            let mut hosts = self.0.lock().await;
+            hosts.retain(|_, host| host.authority.installed());
+            hosts
+                .values()
+                .map(|host| host.actor.clone())
+                .collect::<Vec<_>>()
+        };
+        // Installed admission can coexist briefly with an unacknowledged SSH
+        // fallback. Retire that fallback without stopping its installed role.
+        for actor in actors {
+            actor
+                .retire_ssh()
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        }
+        Ok(())
     }
     #[cfg(feature = "ssh")]
     pub(crate) async fn installed(&self, id: Uuid) -> bool {

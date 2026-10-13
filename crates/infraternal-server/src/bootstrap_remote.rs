@@ -277,8 +277,10 @@ impl Backend for RemoteBackend {
     }
     fn stop(&self) -> Operation<'_, ()> {
         Box::pin(async move {
-            self.hosts.stop_provisioning().await;
-            Ok(())
+            self.hosts
+                .stop_provisioning()
+                .await
+                .map_err(|_| unavailable())
         })
     }
     fn early_terminal(&self) -> bool {

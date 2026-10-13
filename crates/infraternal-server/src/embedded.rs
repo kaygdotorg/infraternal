@@ -284,6 +284,21 @@ impl EmbeddedAgent {
         result
     }
 
+    /// Component shutdown retires SSH fallback without ending installed transports.
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    pub(crate) async fn retire_ssh(&self) -> Result<(), AgentError> {
+        let (reply, retired) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            self.commands
+                .send(Command::RetireSsh(reply))
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            retired.await.map_err(|_| AgentError::Unavailable)
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
+    }
+
     /// A bounded control call shares the existing id allocator and reply dispatcher.
     #[cfg(feature = "remote")]
     pub(crate) async fn control_call(
@@ -461,6 +476,8 @@ impl EmbeddedAgent {
 }
 
 enum Command {
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    RetireSsh(oneshot::Sender<()>),
     #[cfg(feature = "remote")]
     Prime {
         link: Box<RemoteLink>,
@@ -794,7 +811,7 @@ async fn forward_inputs(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "Keep link loss, capability invalidation and census publication in the same actor lifetime."
+    reason = "Keep link loss, capability invalidation, census publication, fallback retirement, and route ownership ordered in the same actor turn."
 )]
 async fn run_actor(
     mut source: Source,
@@ -978,6 +995,22 @@ async fn run_actor(
                     hot.start(*secondary, link.execution_uid, &attachments, reply);
                     continue;
                 }
+                #[cfg(all(feature = "remote", feature = "ssh"))]
+                if let Command::RetireSsh(reply) = command {
+                    if fallback.as_ref().is_some_and(ssh_backed)
+                        && let Some(old) = fallback.take()
+                    {
+                        cleanup_connection(old).await;
+                    }
+                    if connection.as_ref().is_some_and(ssh_backed)
+                        && let Some(old) = connection.take()
+                    {
+                        connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
+                    }
+                    let _ = reply.send(());
+                    continue;
+                }
                 #[cfg(feature = "remote")]
                 if writes.enabled() && matches!(&link.peer, Peer::Remote(remote) if remote.native())
                     && let Some(ok) = retain_owned_input(&command, &mut attachments, &mut routes, &mut writes) {
@@ -1065,6 +1098,11 @@ async fn run_actor(
             }
         }
     }
+}
+
+#[cfg(all(feature = "remote", feature = "ssh"))]
+fn ssh_backed(connection: &AgentConnection) -> bool {
+    matches!(&connection.peer, Peer::Remote(link) if link.ssh_backed())
 }
 
 async fn connect_with_fallback(
@@ -1470,6 +1508,9 @@ async fn process_command(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match command {
+        // The actor consumes this command before entering ordinary dispatch.
+        #[cfg(all(feature = "remote", feature = "ssh"))]
+        Command::RetireSsh(_) => false,
         #[cfg(feature = "remote")]
         Command::Prime { reply, .. } => {
             let _ = reply.send(Err(AgentError::Unavailable));
