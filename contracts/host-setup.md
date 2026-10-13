@@ -2,7 +2,11 @@
 # Host provisioning with an early terminal
 
 D255 changes the connection to a session, never its shell. Sign in using the
-existing strict SSH adapter, stage the matching compressed or verified reused
+existing strict SSH adapter. Its read-only check and verified staging share one
+duplex command channel; after check/mode/ownership admission the trusted server
+sends a bounded public setup script (decimal length, at most 65,536 bytes). This
+envelope carries no credential and reuses existing canonical check, failure and
+transfer parsers. Legacy adapters retain buffered commands. Stage the matching compressed or verified reused
 payload, then launch a session shim and its shell over that same connection.
 The canvas attaches through an SSH channel bridged to that shim. Install and
 join continue while the person types. The infraternal agent discovers the same
