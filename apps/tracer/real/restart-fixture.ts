@@ -54,7 +54,7 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
 }
 
 export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false, upstream?: "daemon" | "shim"): Promise<void> {
-  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:4398" });
+  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:4398", ...(process.env.RESTART_MEASURE === "1" ? { port: Number(process.env.TRACER_TEST_PORT) } : {}) });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: unlock ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: unlock, hasTouch: unlock });
   const page = await context.newPage();
   let routes = 0;
