@@ -37,3 +37,17 @@ impl Drop for Stage {
         let _ = std::io::stderr().write_all(line.as_bytes());
     }
 }
+
+/// Cross-process clock shared with packet timestamps; diagnostic failures never change enforcement.
+#[cfg(feature = "agent")]
+pub(crate) fn monotonic_ns() -> Option<u64> {
+    if std::env::var_os("INFRATERNAL_CUTOFF_MEASURE").as_deref() != Some(std::ffi::OsStr::new("1"))
+    {
+        return None;
+    }
+    let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).ok()?;
+    u64::try_from(now.tv_sec())
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(u64::try_from(now.tv_nsec()).ok()?)
+}

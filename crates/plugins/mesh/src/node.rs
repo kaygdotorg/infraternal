@@ -34,6 +34,8 @@ pub struct Node {
     // A committed revision remains restrictive until exact retirement succeeds.
     connection_cleanup_pending: bool,
     client: Option<Client>,
+    #[cfg(feature = "cutoff-measure")]
+    refusing_at_ns: Option<u64>,
 }
 impl Default for Node {
     fn default() -> Self {
@@ -48,10 +50,19 @@ impl Default for Node {
             owned: false,
             connection_cleanup_pending: false,
             client: None,
+            #[cfg(feature = "cutoff-measure")]
+            refusing_at_ns: None,
         }
     }
 }
 impl Node {
+    /// Diagnostic firewall completion, valid only when the enclosing chunk returns applied.
+    #[cfg(feature = "cutoff-measure")]
+    #[must_use]
+    pub fn refusing_at_ns(&self) -> Option<u64> {
+        self.refusing_at_ns
+    }
+
     /// Use an explicitly selected supported packet-filter frontend in an isolated namespace.
     #[must_use]
     pub fn with_firewall(firewall: Firewall) -> Self {
@@ -289,6 +300,10 @@ impl Node {
     /// # Errors
     /// Refuses stale/out-of-order/wrong-node chunks before changing installed state.
     pub fn chunk(&mut self, chunk: Chunk) -> io::Result<bool> {
+        #[cfg(feature = "cutoff-measure")]
+        {
+            self.refusing_at_ns = None;
+        }
         self.finish_connection_cleanup()?;
         let result = self.stage(chunk);
         if result.is_err() {
@@ -605,6 +620,10 @@ impl Node {
                 crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             self.firewall.install_pending(&config)?;
             #[cfg(feature = "cutoff-measure")]
+            {
+                self.refusing_at_ns = crate::cutoff_measure::monotonic_ns();
+            }
+            #[cfg(feature = "cutoff-measure")]
             drop(firewall);
             #[cfg(feature = "cutoff-measure")]
             let persistence =
@@ -673,6 +692,10 @@ impl Node {
                 Device::retain_recorded_routes(&self.routes, &proposed)?;
             }
             self.firewall.install_pending(&config)?;
+            #[cfg(feature = "cutoff-measure")]
+            {
+                self.refusing_at_ns = crate::cutoff_measure::monotonic_ns();
+            }
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
