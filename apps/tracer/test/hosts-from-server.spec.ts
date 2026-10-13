@@ -5,7 +5,7 @@ import { decodeMuxedFrame, encodeMuxedFrame } from "../../../packages/protocol/s
 test("admitted hosts from another browser remain discoverable without saved windows", async ({ page }, info) => {
   await page.request.post("/__mock/reset");
   const id = "11111111-2222-3333-4444-555555555555";
-  let admitted = true, subscription: number | undefined, reads = 0;
+  let admitted = true, subscription: number | undefined, reads = 0, subscriptions = 0, emptyReplies = 0;
   let push: (() => void) | undefined;
   let routed: string | undefined;
   let askedAfterPaint: boolean | undefined;
@@ -30,12 +30,18 @@ test("admitted hosts from another browser remain discoverable without saved wind
         reads++;
         askedAfterPaint ??= await page.evaluate(() => Reflect.get(window, "__hostPainted") === true);
         socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: admitted ? [{ id, name: "another-device-host", user: "operator", online: false, os: "Debian" }] : [], next: null })) })));
+        if (!admitted) emptyReplies++;
         return;
       }
-      if (frame.type === "Subscribe" && JSON.parse(new TextDecoder().decode(frame.filterJson)).topic === "remote.hosts") { subscription = frame.subId; return; }
+      if (frame.type === "Subscribe" && JSON.parse(new TextDecoder().decode(frame.filterJson)).topic === "remote.hosts") { subscriptions++; subscription = frame.subId; return; }
       if (frame.type === "Call" && frame.actionId === "ssh.session.open") {
         const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { host_id?: string };
-        if (input.host_id) routed = input.host_id;
+        if (input.host_id === id) {
+          routed = input.host_id;
+          // An offline infraternal agent refuses the open; forwarding it would replace the fixture's embedded session.
+          socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unavailable"}') })));
+          return;
+        }
       }
       server.send(message);
     });
@@ -53,9 +59,9 @@ test("admitted hosts from another browser remain discoverable without saved wind
   await row.click();
   await expect.poll(() => routed).toBe(id);
   await page.request.post("/__mock/drop-sockets");
-  await expect.poll(() => reads).toBeGreaterThan(1);
+  await expect.poll(() => subscriptions).toBe(2);
   await palette(); await expect(row).toHaveCount(1);
   admitted = false; push?.();
-  await expect.poll(() => reads).toBeGreaterThan(2);
+  await expect.poll(() => emptyReplies).toBeGreaterThan(0);
   await expect(row).toHaveCount(0);
 });
