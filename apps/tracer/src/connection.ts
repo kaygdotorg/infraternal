@@ -120,6 +120,7 @@ export class MuxConnection {
   private livenessTimer = 0;
   private lastPongAt = 0;
   private livenessRtt = 1000;
+  private lastRttReportAt = -Infinity;
   private readonly subscriptions = new Map<number, Subscription>();
   private readonly welcomeListeners = new Set<() => void>();
   private readonly attachListeners = new Set<() => void>();
@@ -282,24 +283,36 @@ export class MuxConnection {
     this.lastPongAt = performance.now();
     const ms = Math.max(1, performance.now() - startedAt);
     this.livenessRtt = Math.max(ms, this.livenessRtt === 1000 ? ms : this.livenessRtt * 0.95);
-    for (const l of this.rttListeners) l(ms);
+    // Probe frequency must not drive DOM/prediction updates more often than the former sampling cadence.
+    if (this.lastPongAt - this.lastRttReportAt >= 2000) {
+      this.lastRttReportAt = this.lastPongAt;
+      for (const l of this.rttListeners) l(ms);
+    }
   }
 
   /** Forces a WebSocket close for the opt-in resume probe. */
   forceDrop(): void {
+    const socket = this.socket;
+    if (!socket) return;
     this.forcedDrop = true;
-    this.socket?.close(4000, "tracer resume probe");
+    this.disconnect(socket);
+    socket.close(4000, "tracer resume probe");
   }
 
   /** Closes the socket so the connection restarts (every stream re-attaches on the next welcome). */
   forceClose(): void {
-    this.socket?.close();
+    const socket = this.socket;
+    if (!socket) return;
+    this.disconnect(socket);
+    socket.close();
   }
 
   /** Reports a violation of the wire contract and closes the socket (the browser rejects 1002 from script, so 4002). */
   fail(message: string): void {
-    for (const s of this.streams.values()) s.onStatus("The connection sent something unexpected and was closed. Reconnecting…");
-    try { this.socket?.close(4002, "invalid tracer frame"); } catch { this.socket?.close(); }
+    const socket = this.socket;
+    if (socket) this.disconnect(socket);
+    this.status("The connection sent something unexpected and was closed. Reconnecting…");
+    try { socket?.close(4002, "invalid tracer frame"); } catch { socket?.close(); }
   }
 
   dispose(): void {
@@ -360,7 +373,11 @@ export class MuxConnection {
         this.fail("server sent an invalid wire frame");
       }
     };
-    socket.onerror = () => this.status("Connection interrupted. Reconnecting…");
+    socket.onerror = () => {
+      if (this.socket !== socket || this.closed) return;
+      this.disconnect(socket);
+      socket.close();
+    };
     socket.onclose = () => this.disconnect(socket);
   }
 
@@ -395,14 +412,19 @@ export class MuxConnection {
     this.livenessTimer = 0;
     if (!this.isWelcomed || this.closed) return;
     const now = performance.now();
-    if (now - this.lastPongAt > this.livenessRtt + 25) {
+    if (now - this.lastPongAt >= this.livenessRtt + 50) {
       const socket = this.socket!;
       this.disconnect(socket);
       socket.close(4000, "connection unresponsive");
       return;
     }
     this.sampleRoundTrip();
-    this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
+    // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
+    // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
+    const clock = performance.now();
+    const nextProbe = this.lastPingAt + LIVENESS_TICK_MS - clock;
+    const remaining = this.lastPongAt + this.livenessRtt + 50 - clock;
+    this.livenessTimer = window.setTimeout(() => this.checkLiveness(), Math.max(1, Math.min(nextProbe, remaining)));
   }
 
   private dispatch(streamId: number, frame: WireFrame, message: Uint8Array, receivedAt: number): void {
@@ -481,7 +503,7 @@ export class MuxConnection {
         return;
       case "Close":
         this.status(plainCloseReason(frame.reason, "The server closed the connection."));
-        this.socket?.close();
+        this.forceClose();
         return;
       default:
         this.fail("server sent a terminal frame on the control stream");
@@ -503,6 +525,7 @@ export class MuxConnection {
     window.clearTimeout(this.livenessTimer);
     this.livenessTimer = 0;
     this.lastPingAt = -Infinity;
+    this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
     for (const l of this.rttListeners) l(undefined);
   }

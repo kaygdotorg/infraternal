@@ -19,6 +19,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     binaryType = "";
     onopen?: () => void;
     onclose?: () => void;
+    onerror?: () => void;
     onmessage?: (event: { data: ArrayBuffer }) => void;
     constructor() { sockets.push(this); }
     send(bytes: Uint8Array) {
@@ -57,10 +58,13 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     const welcome = encodeMuxedFrame(0, { type: "Welcome", connectionId: new Uint8Array(16).fill(1), resumeToken: new Uint8Array(32).fill(2), resumeWindowSeconds: 120 });
     sockets[0]!.receive(welcome);
     connection.streamAttached(true, 1);
+    // Attachment/typing may sample between timer ticks; the next scheduled probe must still be sent.
+    advance(2);
+    connection.sampleRoundTrip();
     advance(100);
     expect(connection.isWelcomed).toBe(true);
     forwarding = false;
-    advance(50);
+    advance(51);
     expect(disconnected).toBe(1);
     expect(connection.isWelcomed).toBe(false);
     advance(10);
@@ -68,11 +72,19 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     sockets[1]!.onopen?.();
     expect(resumed).toEqual([false, true]);
     sockets[1]!.receive(welcome);
+    connection.streamAttached(true, 1);
     // Superseded traffic and close events cannot corrupt the replacement's decoder/readiness.
     sockets[0]!.receive(new Uint8Array([255]));
     sockets[0]!.onclose?.();
+    sockets[0]!.onerror?.();
     expect(connection.isWelcomed).toBe(true);
     expect(disconnected).toBe(1);
+    connection.forceDrop();
+    expect(disconnected).toBe(2);
+    expect(connection.isWelcomed).toBe(false);
+    advance(10);
+    sockets[2]!.onopen?.();
+    expect(resumed).toEqual([false, true, true]);
   } finally {
     connection?.dispose();
     for (const [key, value] of Object.entries(original)) { if (value === undefined) delete globals[key]; else globals[key] = value; }
