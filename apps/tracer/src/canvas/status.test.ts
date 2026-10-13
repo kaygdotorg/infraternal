@@ -8,7 +8,8 @@ function relay() {
   const callbacks: Array<() => void> = [];
   const element = { hidden: false, textContent: "" };
   const globals = globalThis as unknown as Record<string, unknown>;
-  globals.document = { createElement: () => element };
+  // This fixture mounts no SVG paths; lazy mark completion can still query it.
+  globals.document = { createElement: () => element, querySelectorAll: () => [] };
   globals.MutationObserver = class { constructor(callback: () => void) { callbacks.push(callback); } observe() {} disconnect() {} };
   createStatusRelay({ show: (value: { message: string; tone?: string; duration?: number }) => shown.push(value), dismiss() {}, dispose() {} } as never);
   const say = (text: string): void => { element.textContent = text; for (const callback of callbacks) callback(); };
