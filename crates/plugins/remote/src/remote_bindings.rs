@@ -131,8 +131,7 @@ impl Bindings {
         if !peers.insert(id, logical, alternate) {
             return Err(io::ErrorKind::AddrInUse.into());
         }
-        self.peer_count
-            .store(peers.logical.len(), Ordering::Release);
+        self.peer_count.store(peers.len(), Ordering::Release);
         Ok(PeerBinding {
             bindings: self.clone(),
             logical,
@@ -143,8 +142,7 @@ impl Bindings {
     fn remove_peer(&self, logical: SocketAddr, id: u64) {
         if let Ok(mut peers) = self.peers.lock() {
             peers.remove(logical, id);
-            self.peer_count
-                .store(peers.logical.len(), Ordering::Release);
+            self.peer_count.store(peers.len(), Ordering::Release);
         }
     }
 
@@ -158,8 +156,8 @@ impl Bindings {
         if let Ok(mut peers) = self.peers.lock() {
             for received in meta {
                 let physical = received.addr;
-                let logical = peers.alternate.get(&physical).copied().unwrap_or(physical);
-                if let Some(peer) = peers.logical.get_mut(&logical) {
+                if let Some(peer) = peers.by_physical(physical) {
+                    let logical = peer.logical;
                     if peer.physical != physical || peer.binding != lease {
                         peer.physical = physical;
                         peer.binding = lease;
@@ -199,7 +197,7 @@ impl Bindings {
         self.peers
             .lock()
             .ok()
-            .and_then(|peers| peers.logical.get(&logical).map(|peer| peer.physical))
+            .and_then(|peers| peers.get(logical).map(|peer| peer.physical))
             .unwrap_or(logical)
     }
 
@@ -317,7 +315,7 @@ impl AsyncUdpSocket for Bindings {
             .flatten();
         let peer = peers
             .as_mut()
-            .and_then(|peers| peers.logical.get_mut(&transmit.destination));
+            .and_then(|peers| peers.get_mut(transmit.destination));
         let physical = peer
             .as_ref()
             .map_or(transmit.destination, |peer| peer.physical);
