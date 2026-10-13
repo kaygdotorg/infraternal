@@ -606,8 +606,67 @@ async fn component_down(cut: bool, refuse_admission: bool) {
     let _ = supervisor.await;
 }
 
-/// Acknowledged probes keep a healthy mesh path; it is never declared lost.
+/// Functional control traffic retains exact reply ordering on the one
+/// admitted connection. Idle liveness deadlines have a separate VM check.
 #[tokio::test]
+async fn healthy_mesh_preserves_every_control_reply_on_the_admitted_connection() {
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let registry = registry();
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let mut active = server.admitted_channel().await;
+    preference(&registry, Some(mesh.ip())).await;
+    until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    for nonce in 1..=64 {
+        Transmit::default()
+            .send(
+                active.control.as_ref(),
+                0,
+                &Frame::Ping { nonce, sent_us: 0 },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reply = active.receive.next(active.control.as_ref()).await.unwrap();
+                assert_eq!(reply.stream_id, 0);
+                match reply.frame {
+                    Frame::Pong {
+                        nonce: received,
+                        sent_us,
+                    } => {
+                        assert_eq!((received, sent_us), (nonce, 0));
+                        break;
+                    }
+                    Frame::Event { .. } => {}
+                    other => panic!("unexpected control reply: {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(server.connections(), 1);
+    assert!(server.accepted.try_recv().is_err());
+    supervisor.abort();
+    let _ = supervisor.await;
+}
+
+/// Acknowledged probes keep a healthy mesh path; its RTT-scale timing is
+/// validated only on the perf VM, independently of concurrent build-host jobs.
+#[tokio::test]
+#[ignore = "Timing assertion: run on the perf VM under the shared benchmark lock."]
 async fn healthy_mesh_path_is_never_declared_interrupted() {
     let ca = root();
     let roots = std::slice::from_ref(&ca.certificate);
