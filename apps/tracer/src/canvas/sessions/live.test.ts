@@ -2,6 +2,7 @@
 import { expect, test } from "bun:test";
 import type { CoreScreen } from "../../core-screen";
 import type { MuxConnection } from "../../connection";
+import type { SessionService } from "./adapter";
 const previousMatchMedia = globalThis.matchMedia;
 globalThis.matchMedia = (() => ({ matches: false })) as unknown as typeof matchMedia;
 const { createLiveSessions } = await import("./live");
@@ -10,6 +11,23 @@ else Reflect.deleteProperty(globalThis, "matchMedia");
 
 const id = "11111111-2222-3333-4444-555555555555";
 const service = () => createLiveSessions({ core: {} as CoreScreen, connection: {} as MuxConnection, host: { name: "server", user: "owner" } });
+test("the toolbar sessions seam exposes admitted host state and routes by identity", () => {
+  const sessions = service();
+  // Toolbar consumers use only SessionService; no product-only inventory API or saved window is needed.
+  const toolbar: SessionService = sessions;
+  let changes = 0;
+  const stop = toolbar.onChange(() => { changes++; });
+  sessions.replaceHosts([{ id, name: "worker", user: "operator", os: "debian", online: false }]);
+  expect(toolbar.hosts().find((host) => host.id === id)).toEqual({ id, name: "worker", user: "operator", os: "debian", online: false });
+  expect(toolbar.open(id).hostId).toBe(id);
+  sessions.replaceHosts([{ id, name: "worker", online: true }]);
+  expect(toolbar.hosts().find((host) => host.id === id)?.online).toBe(true);
+  sessions.replaceHosts([]);
+  expect(toolbar.hosts().map((host) => host.id)).toEqual(["embedded"]);
+  expect(toolbar.open(id).noAccess).toBe(true);
+  expect(changes).toBe(3);
+  stop(); sessions.dispose();
+});
 test("an enrolled host opens by UUID and splits keep that authority", () => {
   const sessions = service();
   sessions.registerHost({ id, name: "worker", user: "operator", os: "debian" });
