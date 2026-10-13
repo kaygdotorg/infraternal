@@ -345,13 +345,42 @@ impl Installation {
             self.stage(binary).await?;
             return self.setup(join).await;
         }
+        self.transfer_setup(binary, join, None).await
+    }
+
+    /// Both initial staging and session-preserving restaging use the same
+    /// bounded transfer and refusal parser. Cleanup runs in its own errexit
+    /// child before upload; its early exits cannot skip the upload program.
+    async fn transfer_setup(
+        &self,
+        binary: &Path,
+        join: &JoinMaterial,
+        cleanup: Option<&str>,
+    ) -> Result<bool, Failure> {
         if join.host != self.host {
             return Err(Failure::install(
                 "The enrollment invitation belongs to another host.",
             ));
         }
         let transfer = Self::negotiated_payload(binary).await?;
-        let script = self.setup_script(join, Some(&transfer.body))?;
+        let mut upload = String::new();
+        if let Some(cleanup) = cleanup {
+            // Observe the child status explicitly: conditional function calls
+            // would disable errexit inside the journal recovery program.
+            let guarded_cleanup = Self::script_for(
+                self.mode,
+                self.host,
+                self.transaction,
+                &format!(
+                    "setup_guarded=yes\n{}\n{cleanup}",
+                    include_str!("setup_lock.sh")
+                ),
+            );
+            writeln!(upload, "sh -c {}", shell_quote(&guarded_cleanup))
+                .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
+        }
+        upload.push_str(&transfer.body);
+        let script = self.setup_script(join, Some(&upload))?;
         let input = transfer.input(binary, join.stdin.expose());
         let output = self
             .session
@@ -919,9 +948,20 @@ if [ -d "$stage" ] && [ ! -L "$stage" ]; then
     if [ -d "$stage/state" ] && [ ! -e "$base/state" ]; then mv "$stage/state" "$base/state"; fi
 fi
 "#;
-        self.session.run(&self.script(&format!("{FRESH_CLEANUP}\n{retain}\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}")), Input::Empty).await?;
-        self.stage(binary).await?;
-        self.setup(join).await
+        let cleanup = format!(
+            "{FRESH_CLEANUP}\n{retain}\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}"
+        );
+        if self.session.setup_steps() {
+            // Recover only this journal before selecting the full payload.
+            // The early shim keeps its open executable and private rendezvous;
+            // no upload starts until its prompt has already been published.
+            self.transfer_setup(binary, join, Some(&cleanup)).await
+        } else {
+            self.session
+                .run(&self.script(&cleanup), Input::Empty)
+                .await?;
+            self.stage_and_setup(binary, join).await
+        }
     }
 
     /// Restore the previous installation, or remove only this host-bound fresh installation.
