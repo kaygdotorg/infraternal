@@ -134,16 +134,23 @@ Reviews and fixes run at the same time as the next lane's build.
 ## 7. Rust build speed and static binary size
 
 - `scripts/verify fast` checks the stripped, static release binaries against
-  these measured baselines plus a 256 KiB allowance per target:
+  exact measured ceilings, with no growth allowance (D243):
 
-  | Target | Baseline | Maximum |
-  | --- | ---: | ---: |
-  | `x86_64-unknown-linux-musl` | 16,142,672 bytes | 16,404,816 bytes |
-  | `aarch64-unknown-linux-musl` | 13,555,672 bytes | 13,817,816 bytes |
+  | Target | Measured ceiling |
+  | --- | ---: |
+  | `x86_64-unknown-linux-musl` | 22,204,304 bytes |
+  | `aarch64-unknown-linux-musl` | 19,638,744 bytes |
 
-  The baseline is the #57 measurement on the Debian 13, 8-vCPU build guest.
-  An intentional size increase needs target-specific measurements and a
-  rationale on its issue before the baseline is changed.
+  These are the #198 measurements of the full-feature release recipe after
+  unused native APIs and duplicated action metadata construction were cut.
+  The obsolete #57 ceilings were below every shipping build and obscured growth.
+  Larger images fail. Smaller images also fail until that target's ceiling is
+  ratcheted down to its new measured size; a cut cannot leave slack for later
+  regrowth. Update both targets and this table with evidence on the issue.
+  An intentional increase needs a justified, target-specific measured owner
+  exception under D243. The gate never updates a ceiling automatically.
+  Attribution, retained feature costs and runtime tradeoffs are recorded in
+  `docs/verification/size-ratchet/README.md`.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.

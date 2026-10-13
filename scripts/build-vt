@@ -60,6 +60,16 @@ comptime {
     @export(&@import("infraternal_snapshot.zig").compare, .{ .name = "infraternal_vt_compare" });
 }
 ZIG
+# Keep every upstream API in the archive, but let the final static link discard
+# APIs the shim never calls. One monolithic section otherwise retains input
+# encoders, formatters and render-state helpers with the terminal engine [243].
+# Restore the pinned build definition before adjusting its section layout, so
+# retries cannot accumulate edits in the native source cache.
+build_definition=src/build/GhosttyLibVt.zig
+tar -xOf "$archive" "ghostty-$version/$build_definition" > "$source_dir/$build_definition"
+sed -i '/lib.bundle_compiler_rt = true;/a\
+        lib.link_function_sections = true;\
+        lib.link_data_sections = true;' "$source_dir/$build_definition"
 # Baseline CPU keeps distributed binaries valid on hosts older than the builder.
 # ReleaseSafe retains bounds checks in development; release uses ReleaseFast.
 cd "$source_dir"

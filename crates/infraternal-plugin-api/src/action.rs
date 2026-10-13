@@ -49,25 +49,25 @@ impl JsonSchema {
     /// Create a string schema with a description.
     #[must_use]
     pub fn string(description: impl Into<String>) -> Self {
-        Self::scalar(JsonSchemaType::String, description)
+        Self::scalar(JsonSchemaType::String, description.into())
     }
 
     /// Create an integer schema with a description.
     #[must_use]
     pub fn integer(description: impl Into<String>) -> Self {
-        Self::scalar(JsonSchemaType::Integer, description)
+        Self::scalar(JsonSchemaType::Integer, description.into())
     }
 
     /// Create a number schema with a description.
     #[must_use]
     pub fn number(description: impl Into<String>) -> Self {
-        Self::scalar(JsonSchemaType::Number, description)
+        Self::scalar(JsonSchemaType::Number, description.into())
     }
 
     /// Create a boolean schema with a description.
     #[must_use]
     pub fn boolean(description: impl Into<String>) -> Self {
-        Self::scalar(JsonSchemaType::Boolean, description)
+        Self::scalar(JsonSchemaType::Boolean, description.into())
     }
 
     /// Create an object schema with strict additional-property handling.
@@ -76,11 +76,22 @@ impl JsonSchema {
         properties: impl IntoIterator<Item = (String, Self)>,
         required: impl IntoIterator<Item = String>,
     ) -> Self {
+        Self::object_fields(
+            properties.into_iter().collect(),
+            required.into_iter().collect(),
+        )
+    }
+
+    // Metadata stays off the terminal data path. Normalize iterator shapes
+    // before ordered-map insertion so LTO shares the constructor across every
+    // field-array length; required fields retain their original order [243].
+    #[inline(never)]
+    fn object_fields(properties: Vec<(String, Self)>, required: Vec<String>) -> Self {
         Self {
             schema_type: JsonSchemaType::Object,
             description: None,
             properties: properties.into_iter().collect(),
-            required: required.into_iter().collect(),
+            required,
             items: None,
             additional_properties: Some(false),
         }
@@ -153,10 +164,12 @@ impl JsonSchema {
         self
     }
 
-    fn scalar(schema_type: JsonSchemaType, description: impl Into<String>) -> Self {
+    // Share scalar initialization across types and call sites [243].
+    #[inline(never)]
+    fn scalar(schema_type: JsonSchemaType, description: String) -> Self {
         Self {
             schema_type,
-            description: Some(description.into()),
+            description: Some(description),
             properties: BTreeMap::new(),
             required: Vec::new(),
             items: None,
@@ -425,11 +438,35 @@ impl ActionDefinition {
         output_schema: JsonSchema,
         contract: ActionContract,
     ) -> Self {
+        Self::from_fields(
+            command.into_iter().map(Into::into).collect(),
+            description.into(),
+            when_to_use.into(),
+            instructions.into_iter().map(Into::into).collect(),
+            input_schema,
+            output_schema,
+            contract,
+        )
+    }
+
+    // Keep one action envelope constructor after the generic string/iterator
+    // conversion. Handler defaults and metadata are identical for every plugin;
+    // duplicating their initialization at each declaration only costs code [243].
+    #[inline(never)]
+    fn from_fields(
+        command: Vec<String>,
+        description: String,
+        when_to_use: String,
+        instructions: Vec<String>,
+        input_schema: JsonSchema,
+        output_schema: JsonSchema,
+        contract: ActionContract,
+    ) -> Self {
         Self {
-            command: command.into_iter().map(Into::into).collect(),
-            description: description.into(),
-            when_to_use: when_to_use.into(),
-            instructions: instructions.into_iter().map(Into::into).collect(),
+            command,
+            description,
+            when_to_use,
+            instructions,
             input_schema,
             output_schema,
             examples: Vec::new(),
