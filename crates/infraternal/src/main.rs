@@ -23,6 +23,7 @@ mod remote_service;
 mod restart;
 #[cfg(feature = "remote")]
 mod restart_binary;
+mod shim_cli;
 #[cfg(feature = "remote")]
 mod restart_image;
 #[cfg(feature = "ssh")]
@@ -1050,42 +1051,35 @@ fn run_embedded_agent(matches: &ArgMatches, json_output: bool) -> ExitCode {
 }
 
 fn run_shim_command(matches: &ArgMatches) -> ExitCode {
-    let session = matches
-        .get_one::<String>("session")
-        .map_or("", String::as_str);
-    let parsed: Result<(u32, u16, u16, usize), String> = (|| {
-        Ok((
-            shim_integer(matches, "uid", None)?,
-            shim_integer(matches, "cols", Some(80))?,
-            shim_integer(matches, "rows", Some(24))?,
-            shim_integer(matches, "ring_capacity", Some(8 * 1024 * 1024))?,
-        ))
+    let options = (|| {
+        Ok(shim_cli::Options {
+            session: matches
+                .get_one::<String>("session")
+                .cloned()
+                .unwrap_or_default(),
+            uid: shim_integer(matches, "uid", None)?,
+            cols: shim_integer(matches, "cols", Some(80))?,
+            rows: shim_integer(matches, "rows", Some(24))?,
+            state: matches.get_one::<String>("state").map(PathBuf::from),
+            detach: matches.get_flag("detach"),
+            ring_capacity: shim_integer(matches, "ring_capacity", Some(8 * 1024 * 1024))?,
+            exit_retention_ms: matches
+                .get_one::<i64>("exit_retention_ms")
+                .copied()
+                .unwrap_or(600_000)
+                .try_into()
+                .unwrap_or(600_000),
+            readiness: matches.get_flag("readiness"),
+        })
     })();
-    let (uid, cols, rows, ring_capacity) = match parsed {
-        Ok(values) => values,
+    let options = match options {
+        Ok(options) => options,
         Err(error) => {
             eprintln!("shim startup/session failed: {error}");
             return ExitCode::from(2);
         }
     };
-    let state = matches.get_one::<String>("state").map(PathBuf::from);
-    let detach = matches.get_flag("detach");
-    match run_shim(
-        session,
-        uid,
-        cols,
-        rows,
-        state,
-        detach,
-        ring_capacity,
-        matches
-            .get_one::<i64>("exit_retention_ms")
-            .copied()
-            .unwrap_or(600_000)
-            .try_into()
-            .unwrap_or(600_000),
-        matches.get_flag("readiness"),
-    ) {
+    match options.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("shim startup/session failed: {error}");
@@ -1342,48 +1336,6 @@ mod setup_token_tests {
         server.await.expect("token test socket server");
         std::fs::remove_dir_all(data_dir).expect("remove token test directory");
     }
-}
-
-/// Validate the session identifier before any fork or filesystem operation.
-/// Validate identifiers before forking; clamp exited-screen retention inside the shim.
-#[allow(clippy::too_many_arguments)]
-fn run_shim(
-    session: &str,
-    uid: u32,
-    cols: u16,
-    rows: u16,
-    state: Option<std::path::PathBuf>,
-    detach: bool,
-    ring_capacity: usize,
-    exit_retention_ms: u64,
-    readiness: bool,
-) -> std::io::Result<()> {
-    if session.len() != 32 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "session must be 32 hexadecimal characters",
-        ));
-    }
-    let mut id = [0; 16];
-    for (i, value) in id.iter_mut().enumerate() {
-        *value =
-            u8::from_str_radix(&session[i * 2..i * 2 + 2], 16).map_err(std::io::Error::other)?;
-    }
-    if detach && !infraternal_shim::detach()? {
-        return Ok(());
-    }
-    infraternal_shim::run_with_retention(
-        infraternal_shim::Config {
-            session: id,
-            uid,
-            cols,
-            rows,
-            state,
-            ring_capacity,
-            readiness,
-        },
-        std::time::Duration::from_millis(exit_retention_ms),
-    )
 }
 
 #[cfg(test)]
