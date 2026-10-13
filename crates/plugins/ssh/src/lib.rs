@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod cli;
 pub mod config;
 pub mod credentials;
+pub mod duplex;
 pub mod install;
 mod lifecycle;
 
