@@ -1,12 +1,13 @@
 /**
  * The machine tab of the details popover (TASTE: no "More" tab). With "Extended machine info" off it lists only the
  * essentials; with it on, every fact sits under a titled section. No control labelled "More" exists either way.
- * Also saves the review captures under captures/machine-sections/.
+ * Also saves review screenshots in the external job evidence directory.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 
 const SIZES = [["desktop", { width: 1440, height: 900 }, false], ["phone", { width: 393, height: 852 }, true], ["phone-small", { width: 375, height: 667 }, true]] as const;
-const SHOTS = "captures/machine-sections";
+const SHOTS = tracerEvidencePath("machine-sections");
 const open = async (page: Page, extended: boolean, mobile: boolean): Promise<void> => {
   await page.addInitScript((on) => { try { localStorage.setItem("tracer.extended-info", on ? "1" : "0"); } catch { /* no storage */ } }, extended);
   await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");

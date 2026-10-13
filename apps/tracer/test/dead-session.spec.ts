@@ -6,6 +6,7 @@
  * the link; the page removes the row, settles the existing window, never retries it after the ended state, and
  * opens a new shell with one action.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "playwright/test";
@@ -59,7 +60,7 @@ test("a dead session disappears and does not retry after the ended state", async
   // The capture the owner reviews (1440×900, production build, ink).
   await page.mouse.move(2, 2);
   await page.waitForTimeout(400);
-  const dir = resolve(import.meta.dirname, "..", "captures", "dead-session");
+  const dir = tracerEvidencePath("dead-session");
   await mkdir(dir, { recursive: true });
   const shot = resolve(dir, "ended-1440x900-ink.png");
   await page.screenshot({ path: shot, animations: "disabled" });
@@ -109,7 +110,7 @@ test("the sidebar waits for the live-shim snapshot and never lists ended cached 
   }
 
   // The reviewed capture is the production bundle at the desktop target viewport.
-  const dir = resolve(import.meta.dirname, "..", "captures", "ended-sessions");
+  const dir = tracerEvidencePath("ended-sessions");
   await mkdir(dir, { recursive: true });
   const shot = resolve(dir, "sidebar-after-1440x900.png");
   await page.screenshot({ path: shot, animations: "disabled" });
@@ -163,7 +164,7 @@ for (const status of [7, 0]) test(`a retired session carries exit ${status} thro
   await expect(page.locator(".capsule-session")).toHaveText("· 0 sessions");
   await page.waitForTimeout(2_000);
   expect((await mockState(request)).attach_count).toBe(before);
-  const dir = resolve(import.meta.dirname, "..", "captures", "dead-session");
+  const dir = tracerEvidencePath("dead-session");
   await mkdir(dir, { recursive: true });
   const shot = resolve(dir, `retired-exit-${status}-1440x900-ink.png`);
   await page.screenshot({ path: shot, animations: "disabled" });

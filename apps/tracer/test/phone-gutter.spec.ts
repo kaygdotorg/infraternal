@@ -3,11 +3,12 @@
  * while it is open"). Runs against the test double's mockup canvas, which mounts the product canvas (create.ts), so the
  * geometry is the same code the product runs. Phones use a touch profile at 393x852 and 375x667; desktop at 1440x900.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { devices, expect, test, type Browser, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const captures = resolve(import.meta.dirname, "../captures/phone-gutter");
+const captures = tracerEvidencePath("phone-gutter");
 const URL = "/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft";
 
 async function phone(browser: Browser, width: number, height: number): Promise<{ page: Page; close(): Promise<void> }> {

@@ -3,6 +3,7 @@
  * one repeated request), new lines keep arriving, the view stays on the newest line, and when the person scrolls up to
  * read it stays where they are and a "Jump to latest" button brings them back.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 
 async function open(page: Page): Promise<void> {
@@ -33,7 +34,7 @@ test("the backlog fills the window, is varied, and stays on the newest line", as
   const later = await state(page);
   expect(later.lines).toBeGreaterThan(s.lines);
   expect(Math.abs(later.top - later.max), "still pinned after new lines").toBeLessThanOrEqual(1);
-  await page.screenshot({ path: "captures/logs/after-pinned.png" });
+  await page.screenshot({ path: tracerEvidencePath("logs", "after-pinned.png") });
 });
 
 test("scrolling up stops the follow and shows Jump to latest", async ({ page }) => {
@@ -50,7 +51,7 @@ test("scrolling up stops the follow and shows Jump to latest", async ({ page }) 
   const after = await state(page);
   expect(Math.abs(after.top - before.top), "reading position does not move while lines arrive").toBeLessThanOrEqual(1);
   expect(after.lines).toBeGreaterThan(before.lines);
-  await page.screenshot({ path: "captures/logs/after-scrolled-up.png" });
+  await page.screenshot({ path: tracerEvidencePath("logs", "after-scrolled-up.png") });
   await jump.click();
   await expect(jump).toBeHidden();
   const end = await state(page);

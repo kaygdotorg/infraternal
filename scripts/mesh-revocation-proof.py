@@ -16,6 +16,7 @@ from pathlib import Path
 import socket
 import subprocess
 import time
+from evidence_path import evidence_directory
 
 spec = importlib.util.spec_from_file_location('policy_proof', Path(__file__).with_name('mesh-policy-proof.py'))
 policy = importlib.util.module_from_spec(spec)
@@ -246,7 +247,7 @@ async def campaign(args):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fixture',required=True);parser.add_argument('--coordinator',required=True)
-    parser.add_argument('--evidence',type=Path,required=True);parser.add_argument('--nf-tables',action='store_true')
+    parser.add_argument('--evidence',type=Path,default=evidence_directory('mesh-revocation-proof'));parser.add_argument('--nf-tables',action='store_true')
     parser.add_argument('--rtt-ms',type=int,choices=(0,150),default=0);parser.add_argument('--extra-members',type=int,default=997)
     parser.add_argument('--stateful',action='store_true',help='Use the public-journal fixture and include persistence in apply')
     parser.add_argument('--budget-ms',type=float,help='Fail after retaining evidence when change-to-last-refusal exceeds this budget')

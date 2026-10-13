@@ -3,11 +3,12 @@
  * locks (the canvas, the terminal); on, the same icon with the shared lock badge and nothing else changed. Phone toolbar at
  * 393x852 in ink and paper, both toggles off and on, with 3x crops of the capsule.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const captures = resolve(import.meta.dirname, "../captures/lock-icons");
+const captures = tracerEvidencePath("lock-icons");
 
 for (const theme of ["ink", "paper"] as const) {
   test(`phone toolbar ${theme}: canvas lock and input lock are the plain icon off and the badged icon on`, async ({ browser }) => {

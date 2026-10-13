@@ -5,6 +5,7 @@
  * The keyboard is emulated by shrinking the viewport's height (the page's meta asks for the layout to resize with
  * the keyboard); only the height may change: the window keeps its width and the terminal its columns.
  */
+import { tracerEvidencePath } from "../test/evidence-path";
 import { devices, expect, test, type BrowserContext, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -13,7 +14,7 @@ import { startRealServer, type RealServer } from "./server";
 test.describe.configure({ mode: "serial" });
 let server: RealServer;
 let cookies: Awaited<ReturnType<BrowserContext["cookies"]>>;
-const captures = resolve(import.meta.dirname, "../captures/window-sizes");
+const captures = tracerEvidencePath("window-sizes");
 
 test.beforeAll(async ({ browser }) => {
   server = await startRealServer();

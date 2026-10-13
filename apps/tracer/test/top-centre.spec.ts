@@ -7,13 +7,14 @@
  *    the pill off-centre;
  *  - the disabled "Continue" has no filter or fractional transform in its ancestry, and its own text-shadow is none;
  *  - the disabled and enabled labels reach at least 3:1 (4.5:1 enabled) against their fill, from computed colours;
- *  - captures for a person to read go to captures/centre-button (the top bar, and the footer at 2x in ink and paper).
+ *  - review screenshots go to the external job evidence directory (the top bar and footer at 2x in ink and paper).
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
-const OUT = resolve(import.meta.dirname, "../captures/centre-button");
+const OUT = tracerEvidencePath("centre-button");
 mkdirSync(OUT, { recursive: true });
 
 async function openCanvas(page: Page): Promise<void> {

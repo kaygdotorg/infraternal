@@ -4,13 +4,14 @@
  * On a phone "Full width" is exactly the screen between the safe areas with no neighbour showing, and "Edge to edge" (the
  * default) is narrower by the gap and a slice for each neighbour, so a thin slice of each shows. Neither may overflow the
  * visual viewport, and the terminal's columns come from the window's real width. Runs on the test double's canvas (the
- * product canvas code), touch profiles at 393x852 and 375x667, ink theme. Captures land in captures/phone-window-width.
+ * product canvas code), touch profiles at 393x852 and 375x667, ink theme. Review screenshots land in job scratch.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const captures = resolve(import.meta.dirname, "../captures/phone-window-width");
+const captures = tracerEvidencePath("phone-window-width");
 const PEEK = 10, GAP = 12;
 const SIZES = [{ w: 393, h: 852 }, { w: 375, h: 667 }] as const;
 const KEY = "tracer.window-size.phone";

@@ -6,11 +6,12 @@
  * Scenes: scene 1 has a Console view with 4 windows, which this spec grows to 54 through the test double; scene 2
  * has Console with 3 windows, which shows three rows and no "All" row.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
-const CAPTURES = resolve(import.meta.dirname, "..", "captures", "view-recents");
+const CAPTURES = tracerEvidencePath("view-recents");
 mkdirSync(CAPTURES, { recursive: true });
 
 interface Probe {

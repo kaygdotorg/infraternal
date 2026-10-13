@@ -6,7 +6,8 @@ repo=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('stateproof',repo/'scripts/mesh-access-state-proof.py');s=importlib.util.module_from_spec(spec);spec.loader.exec_module(s)
 s.SERVER=s.SERVER.replace('b,a=s.recvfrom(4096);s.sendto(b,a)','b,a=s.recvfrom(4096)\n  try: s.sendto(b,a)\n  except OSError: pass')
 import argparse,os
-parser=argparse.ArgumentParser();parser.add_argument('--fixture',required=True);parser.add_argument('--evidence',required=True,type=Path);parser.add_argument('--nf-tables',action='store_true');args=parser.parse_args()
+from evidence_path import evidence_directory
+parser=argparse.ArgumentParser();parser.add_argument('--fixture',required=True);parser.add_argument('--evidence',type=Path,default=evidence_directory('mesh-connection-recovery-proof'));parser.add_argument('--nf-tables',action='store_true');args=parser.parse_args()
 base=args.evidence;base.mkdir(parents=True,exist_ok=True)
 os.environ['INFRATERNAL_TEST_STATE_ROOT']=str(base.resolve())
 f=s.HeldCampaign.__new__(s.HeldCampaign);flow=None

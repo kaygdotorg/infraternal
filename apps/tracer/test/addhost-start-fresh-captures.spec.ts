@@ -1,8 +1,9 @@
 /** Captures for the leftovers and already-running screens (#169), at phone and desktop size in the ink theme. */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { resolve } from "node:path";
 
-const OUT = resolve(import.meta.dirname, "..", "captures", "addhost-start-fresh");
+const OUT = tracerEvidencePath("addhost-start-fresh");
 const SIZES = [{ name: "desktop", width: 1440, height: 900 }, { name: "phone", width: 393, height: 852 }];
 
 async function reach(page: Page, host: string, size: { width: number; height: number }): Promise<void> {

@@ -4,13 +4,14 @@
  * Locked: sign-in shows one persistent toast with Unlock; dismissing it moves the item to the sidebar card, and
  * while the sidebar is closed the toggle carries a dot. Unlock from the card clears the card and the dot. A reload
  * after unlocking (a new sign-in) shows nothing. A viewer who is not an administrator sees nothing at all.
- * Captures land in captures/inbox-generic/ for the visual review.
+ * Review screenshots land in the external job evidence directory.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
-const CAPTURES = resolve(import.meta.dirname, "..", "captures", "inbox-generic");
+const CAPTURES = tracerEvidencePath("inbox-generic");
 mkdirSync(CAPTURES, { recursive: true });
 const TITLE = "Host connections are locked";
 const LINE = "Unlock host connections";

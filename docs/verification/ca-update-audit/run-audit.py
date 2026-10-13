@@ -4,14 +4,18 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
+
+root = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(root / 'scripts'))
+from evidence_path import evidence_directory
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--target', type=Path, required=True)
 parser.add_argument('--phase', choices=['before', 'after', 'hardening'], required=True)
 args = parser.parse_args()
-root = Path(__file__).resolve().parents[3]
-evidence = root / ('evidence/ca-update-hardening' if args.phase == 'hardening' else 'evidence/ca-update-audit')
+evidence = evidence_directory(f'ca-update-audit-{args.phase}')
 evidence.mkdir(parents=True, exist_ok=True)
 
 def binary(stem, marker):

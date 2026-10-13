@@ -1,12 +1,13 @@
 /**
  * The sidebar's long list (TASTE "Tree lines run to their last child", "The sidebar header owns its row"): with 30
  * sessions under one host, every guide line ends at its last child's connector at any scroll position, and the
- * round toggle never intersects a row. Review captures land in captures/sidebar-polish/ (top, middle, bottom).
+ * round toggle never intersects a row. Review screenshots land in the external job evidence directory.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
-const OUT = resolve(import.meta.dirname, "..", "captures", "sidebar-polish");
+const OUT = tracerEvidencePath("sidebar-polish");
 
 async function open(page: Page, theme: string): Promise<void> {
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&shells=30`);

@@ -1,4 +1,5 @@
 /** Regresses query replies during output replay and terminal-state restoration. */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "playwright/test";
@@ -13,7 +14,7 @@ type MockState = {
   attach_history?: Array<{ last_out_seq: string; output_sequence: string }>;
 };
 
-const scratch = resolve(import.meta.dirname, "../test-results/query-replay");
+const scratch = tracerEvidencePath("query-replay");
 const testDoublePort = Number(process.env.TRACER_BACKEND_PORT ?? String(Number(process.env.TRACER_TEST_PORT ?? "4621") + 1));
 const testDoubleOrigin = `http://localhost:${testDoublePort}`;
 const mockUrl = (path: string): string => new URL(path, testDoubleOrigin).toString();

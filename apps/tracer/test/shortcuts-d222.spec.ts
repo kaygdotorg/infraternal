@@ -6,6 +6,7 @@
  * The browser's own accelerators (⌘W, Ctrl+W, ⌘T, Ctrl+T, ⌘/Ctrl+ zoom and similar) never reach a page in a synthetic test,
  * so they are not asserted here; docs/verification/shortcuts-d222.md lists them for a manual check.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 
 const VIEW = '.cl[data-view="console"]';
@@ -167,7 +168,7 @@ for (const [name, platform, chords] of [["mac", MAC, MAC_CHORDS], ["windows", WI
     await chord(page, chords.panel);
     await expect(page.locator(".ui-shortcuts")).toBeVisible();
     await page.waitForTimeout(500);
-    await page.screenshot({ path: `captures/shortcuts-d222/${name}-panel-ink-1440x900.png` });
+    await page.screenshot({ path: tracerEvidencePath("shortcuts-d222", `${name}-panel-ink-1440x900.png`) });
     await page.keyboard.press("Escape");
   });
 }

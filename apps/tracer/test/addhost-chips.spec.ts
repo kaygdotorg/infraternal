@@ -2,14 +2,15 @@
  * The add-host field's chips (#87): a typed `user@host` becomes a chip and is selected without a tick. Typed
  * delimiters, Tab, Enter, Continue and paste all end a token; an invalid token shows a quiet hint and never blocks
  * the chips beside it; Backspace on an empty field returns the last chip to editable text.
- * Captures of the field (1440x900 and 393x852, ink and paper) are written to `captures/addhost-chips/` when
- * `ADDHOST_CHIPS_CAPTURE=1` is set: evidence for a person to read, so ordinary runs skip them.
+ * Field screenshots (1440x900 and 393x852, ink and paper) go to the external job evidence directory when
+ * `ADDHOST_CHIPS_CAPTURE=1` is set, so ordinary runs skip them.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
 const port = process.env.TRACER_TEST_PORT ?? "4621";
-const OUT = "captures/addhost-chips";
+const OUT = tracerEvidencePath("addhost-chips");
 const SIZES = [{ name: "1440x900", width: 1440, height: 900 }, { name: "393x852", width: 393, height: 852 }];
 const THEMES = ["ink", "paper"] as const;
 

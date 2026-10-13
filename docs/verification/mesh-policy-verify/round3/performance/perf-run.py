@@ -1,11 +1,13 @@
 """Interleave immutable native latency artifacts and measure delayed retirement under the booked lock."""
 import json,os,signal,socket,subprocess,sys,time
 from pathlib import Path
-root=Path(__file__).resolve().parent;out=root/'results';out.mkdir(exist_ok=True)
+root=Path(__file__).resolve().parent
 state=Path('/root/infraternal-bench/mesh-policy/s173');state.mkdir(mode=0o700,exist_ok=True)
 os.environ.update(PYTHONDONTWRITEBYTECODE='1',TRACER_TEST_PORT='4473',INFRATERNAL_TEST_STATE_ROOT=str(state))
 sys.path.insert(0,str(root/'scripts'))
 from agent_fixture import cleanup
+from evidence_path import evidence_directory
+out=evidence_directory('mesh-policy-verify-round3');out.mkdir(parents=True,exist_ok=True)
 rows=[]
 def execute(name,command,env=None,timeout=119):
  before=Path('/proc/loadavg').read_text().strip();started=time.monotonic()

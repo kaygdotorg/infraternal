@@ -2,8 +2,9 @@
  * No frame of a split, before, during or after its animation, flashes (#141). A CDP screencast records the composited
  * frames; a frame is a flash when it differs clearly from the frame before and the one after while those two agree with
  * each other (a normal animation changes a little every frame, a flash is one wrong frame in between). The strip is
- * saved under captures/split-flash/ for a person to look at.
+ * saved under the external job evidence directory for a person to review.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
@@ -40,7 +41,7 @@ async function spikes(page: Page, frames: Array<{ data: string }>): Promise<numb
 export async function flashStrip(page: Page, name: string, act: () => Promise<void>): Promise<{ frames: number; worst: number }> {
   const frames = await record(page, act, 2500);
   const sp = await spikes(page, frames);
-  const dir = `captures/split-flash/${name}`;
+  const dir = tracerEvidencePath("split-flash", name);
   mkdirSync(dir, { recursive: true });
   frames.forEach((f, i) => writeFileSync(`${dir}/f${String(i).padStart(3, "0")}.jpg`, Buffer.from(f.data, "base64")));
   writeFileSync(`${dir}/spikes.json`, JSON.stringify(sp.map((v, i) => [i, Math.round((frames[i]!.t - frames[0]!.t) * 1000), +v.toFixed(4)])));

@@ -10,6 +10,7 @@
  *
  * `INFRATERNAL_BIN` is the server binary, built from a scratch merge of mesh-api; the merge is never committed.
  */
+import { tracerEvidencePath } from "../test/evidence-path";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 import { WebSocket } from "ws";
@@ -117,7 +118,7 @@ test.describe("a server that serves the Mesh", () => {
     const arrow = page.locator('.cl[data-view="mesh"] .cl-arrow[data-tip="alpha-to-bravo"]');
     await expect(arrow).toHaveCount(1, { timeout: 15_000 });
     expect(await page.locator(".cl-arrow-handle").count()).toBe(0); // least privilege until the server sends `access`
-    await page.screenshot({ path: resolve(import.meta.dirname, "../captures/canvas-mesh/real-server-ink-1440x900.png") });
+    await page.screenshot({ path: tracerEvidencePath("canvas-mesh", "real-server-ink-1440x900.png") });
   });
 
   test("a mesh bigger than one frame arrives in pages and shows every host", async () => {

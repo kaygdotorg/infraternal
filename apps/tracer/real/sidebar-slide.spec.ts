@@ -8,6 +8,7 @@
  *   opaque    blur and tint on two layers; while it slides the layer is opaque and has no blur, at rest the blur fades in
  *   contained opaque, plus will-change only while sliding and contain: strict
  */
+import { tracerEvidencePath } from "../test/evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { loadavg } from "node:os";
 import { startRealServer, type RealServer } from "./server";
@@ -140,7 +141,7 @@ test("during the slide, layout and paint work stops after the first frame", asyn
 });
 
 test("captures: the sidebar mid-slide and at rest, with the winning material", async () => {
-  const out = process.env.SLIDE_CAPTURES ?? "/tmp";
+  const out = process.env.SLIDE_CAPTURES ?? tracerEvidencePath("sidebar-slide");
   await setVariant(process.env.SLIDE_VARIANT ?? "contained");
   await page.evaluate(() => { document.documentElement.style.setProperty("--ui-overlay-saturation", "100%"); });
   await markSlide();

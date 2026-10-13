@@ -4,8 +4,9 @@
  * pins in the canvas document, the states a mesh can be in, and frame times at 1,000 nodes. The product's own
  * adapter runs unchanged; only the server is a test double (`src/canvas/mock/mesh-server.ts`).
  *
- * `MESH_CAPTURES=1` writes the reviewed screenshots to `captures/canvas-mesh/` (1440x900 and 393x852, ink and paper).
+ * `MESH_CAPTURES=1` writes review screenshots to the external job evidence directory (1440x900 and 393x852, ink and paper).
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { loadavg, cpus } from "node:os";
 import { expect, test, type Browser, type CDPSession, type Page } from "playwright/test";
 
@@ -601,7 +602,7 @@ test("a dragged node is pinned and saved in the canvas document; the others are 
 // ---- states and captures ----------------------------------------------------------------------------------------
 const CAPTURE = process.env.MESH_CAPTURES === "1";
 async function capture(page: Page, name: string, testInfo: { outputPath(n: string): string }): Promise<void> {
-  const dir = `${import.meta.dirname}/../captures/canvas-mesh`;
+  const dir = tracerEvidencePath("canvas-mesh");
   const path = CAPTURE ? `${dir}/${name}.png` : testInfo.outputPath(`${name}.png`);
   if (CAPTURE) await import("node:fs/promises").then((fs) => fs.mkdir(dir, { recursive: true }));
   await page.screenshot({ path });

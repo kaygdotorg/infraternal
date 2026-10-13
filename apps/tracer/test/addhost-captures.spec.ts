@@ -1,12 +1,13 @@
 /**
  * Captures of every add-host wizard state at 1440x900 and 393x852 in ink and paper, for the TASTE review
  * (`ADDHOST_CAPTURE=1 TRACER_TEST_PORT=... bun x playwright test test/addhost-captures.spec.ts`). They are written to
- * `captures/addhost-wizard/`. Skipped in ordinary runs: a capture is evidence for a person to read, not an assertion.
+ * the external job evidence directory. Skipped in ordinary runs: screenshots are for review, not assertions.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
-const OUT = "captures/addhost-wizard";
+const OUT = tracerEvidencePath("addhost-wizard");
 const SIZES = [{ name: "1440x900", width: 1440, height: 900, touch: false }, { name: "393x852", width: 393, height: 852, touch: true }];
 const THEMES = ["ink", "paper"];
 const port = process.env.TRACER_TEST_PORT ?? "4621";
