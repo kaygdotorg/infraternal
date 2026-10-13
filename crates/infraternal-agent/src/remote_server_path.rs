@@ -1,4 +1,19 @@
-//! Proves plugin-proposed server paths before replacement, retaining one live authenticated transport during probes [128,198,215].
+//! Moves the host's one authenticated server connection onto plugin-proposed paths and back, below QUIC, without a reconnect [128,198,215,263], #201.
+//!
+//! Every QUIC connection names the enrolled server address. Its `PathSocket`
+//! decides where datagrams physically go. A mesh proposal moves the live
+//! connection in place: the endpoint is rebound to the same socket state so
+//! the connection announces itself at once, and the server's shared endpoint
+//! validates the new source with QUIC path migration. Streams, writer
+//! bindings and terminal offsets never change, so nothing is replayed or
+//! reattached. While on the mesh the host asks for an acknowledgement every
+//! probe interval; the first unanswered probe after one RTT plus a margin
+//! returns the connection to the enrolled address, resending its unanswered
+//! mesh datagrams at once.
+//!
+//! A TCP connection (UDP to the enrolled address unavailable) cannot move. It
+//! keeps the earlier behaviour: a separately proven QUIC connection to the mesh
+//! address replaces it.
 use super::{
     Connected, RemoteIdentity, dial_preferred,
     dial_runtime::DialRuntime,
@@ -7,9 +22,17 @@ use super::{
 };
 use crate::{channel::Channel, daemon, remote_quic, remote_tls};
 use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
-use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
+use infraternal_plugin_remote::remote_path_socket::{Path, PathSocket};
+use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Acknowledgement requests while on the mesh; this is the path's idle cost.
+const MESH_PROBE_INTERVAL: Duration = Duration::from_millis(100);
+/// Beyond one RTT: the server's 25 ms maximum ACK delay plus scheduling jitter.
+const MESH_PROBE_MARGIN: Duration = Duration::from_millis(50);
+/// A switched path must answer within this much beyond two RTTs (a possible
+/// `WireGuard` handshake, then the server's reply) before it is used.
+const SWITCH_MARGIN: Duration = Duration::from_millis(200);
 
 enum Proof {
     Quic(super::ProvedControl),
@@ -24,11 +47,12 @@ struct Link {
     connected: Connected,
     endpoint: Option<quinn::Endpoint>,
     driver: Option<DialRuntime>,
+    /// QUIC links only: where the connection's datagrams physically go.
+    path: Option<Arc<PathSocket>>,
     address: SocketAddr,
     kind: ServerLinkKind,
     proof: tokio::sync::Mutex<Option<Proof>>,
     standby: tokio::sync::watch::Sender<u64>,
-    native: Option<super::primed_native::Service>,
 }
 impl Drop for Link {
     fn drop(&mut self) {
@@ -40,6 +64,16 @@ impl Drop for Link {
             endpoint.close(0u32.into(), b"");
         }
         self.driver.take();
+    }
+}
+impl Link {
+    /// The path actually carrying traffic now, which a QUIC link can change.
+    fn current(&self) -> (ServerLinkKind, SocketAddr) {
+        match self.path.as_ref().map(|path| (path.path(), path.logical())) {
+            Some((Path::Mesh(address), _)) => (ServerLinkKind::Mesh, address),
+            Some((Path::Enrolled, logical)) => (ServerLinkKind::Fallback, logical),
+            None => (self.kind, self.address),
+        }
     }
 }
 
@@ -65,6 +99,8 @@ fn current(
     })
 }
 
+/// Dial the enrolled server address. A mesh dial sends the same connection's
+/// datagrams to `address` from the start, so a later return needs no new dial.
 async fn connect(
     identity: &RemoteIdentity,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
@@ -72,31 +108,31 @@ async fn connect(
     kind: ServerLinkKind,
     prove: bool,
 ) -> io::Result<Link> {
-    let identity = current(identity, renewal, address)?;
+    let identity = current(identity, renewal, identity.endpoint)?;
     let driver = DialRuntime::new();
-    let mut endpoint = quinn::Endpoint::new(
+    let path = PathSocket::new(
+        driver.runtime().wrap_udp_socket(std::net::UdpSocket::bind(
+            if identity.endpoint.is_ipv6() {
+                "[::]:0"
+            } else {
+                "0.0.0.0:0"
+            },
+        )?)?,
+        identity.endpoint,
+    );
+    if kind == ServerLinkKind::Mesh {
+        path.use_mesh(address);
+    }
+    let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
         quinn::EndpointConfig::default(),
         None,
-        std::net::UdpSocket::bind(if address.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        })?,
+        path.clone(),
         driver.runtime(),
     )?;
-    let config = if kind == ServerLinkKind::Mesh {
-        remote_quic::client_config_with_liveness(
-            &identity.identity,
-            &identity.roots,
-            // A probe belongs to the new mesh path. Inheriting the old path
-            // RTT can delay its first keepalive beyond the freshness budget.
-            Duration::from_millis(100),
-            Duration::from_secs(60),
-        )?
-    } else {
-        remote_quic::client_config(&identity.identity, &identity.roots)?
-    };
-    endpoint.set_default_client_config(config);
+    endpoint.set_default_client_config(remote_quic::client_config(
+        &identity.identity,
+        &identity.roots,
+    )?);
     let connected = if kind == ServerLinkKind::Mesh {
         // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
         // proof below completes before any Hello can replace the server actor.
@@ -109,22 +145,22 @@ async fn connect(
         let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
         dial_preferred(&endpoint, &identity, &tls).await?
     };
-    let (endpoint, driver) = if matches!(&connected, Connected::Tcp(_)) {
+    let (endpoint, driver, path) = if matches!(&connected, Connected::Tcp(_)) {
         drop(endpoint);
         drop(driver);
-        (None, None)
+        (None, None, None)
     } else {
-        (Some(endpoint), Some(driver))
+        (Some(endpoint), Some(driver), Some(path))
     };
     let link = Link {
         connected,
         endpoint,
         driver,
+        path,
         address,
         kind,
         proof: tokio::sync::Mutex::new(None),
         standby: tokio::sync::watch::channel(0).0,
-        native: None,
     };
     if prove {
         let proof = tokio::time::timeout(PROBE_TIMEOUT, async {
@@ -188,9 +224,10 @@ fn report(
     link: Option<&Link>,
     reason: ServerLinkReason,
 ) {
+    let current = link.map(Link::current);
     registry.set_server_link(ServerLink {
-        kind: link.map_or(ServerLinkKind::Disconnected, |link| link.kind),
-        endpoint: link.map(|link| link.address),
+        kind: current.map_or(ServerLinkKind::Disconnected, |(kind, _)| kind),
+        endpoint: current.map(|(_, address)| address),
         reason,
     });
 }
@@ -208,7 +245,7 @@ async fn session(
                 Some(Proof::Quic(proof)) => Some(proof),
                 _ => None,
             };
-            let session = quic_session_on(
+            quic_session_on(
                 connection.clone(),
                 identity,
                 state,
@@ -216,19 +253,9 @@ async fn session(
                 registry,
                 proof,
                 &link.standby,
-                link.native.is_some(),
-            );
-            if link.kind == ServerLinkKind::Mesh {
-                // Existing authenticated transport traffic supplies liveness;
-                // current RTT adjusts the guard through changing network delay.
-                let mut freshness = remote_quic::PeerFreshness::new(connection);
-                tokio::select! {
-                    result = session => result,
-                    result = freshness.interrupted_adaptive(connection) => result,
-                }
-            } else {
-                session.await
-            }
+                false,
+            )
+            .await
         }
         Connected::Tcp(connection) => {
             if let Some(Proof::Tcp { receive, greeting }) = link.proof.lock().await.take() {
@@ -260,138 +287,192 @@ async fn session(
     }
 }
 
-/// Parking never replaces the active session. Legacy server greetings leave
-/// this future asleep; failed warm probes retry without retiring the live mesh.
-async fn warming(
-    live: &Link,
-    identity: &RemoteIdentity,
-    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
-    state: &std::path::Path,
-) -> io::Result<Link> {
-    let mut support = live.standby.subscribe();
-    while *support.borrow_and_update() & infraternal_plugin_api::channel::REMOTE_STANDBY == 0 {
-        support
-            .changed()
-            .await
-            .map_err(|_| io::ErrorKind::BrokenPipe)?;
-    }
-    let mut retry = Duration::from_secs(1);
-    loop {
-        if let Ok(mut link) = connect(
-            identity,
-            renewal,
-            identity.endpoint,
-            ServerLinkKind::Fallback,
-            true,
-        )
-        .await
-        {
-            let prime = matches!(link.connected, Connected::Quic(_))
-                && *support.borrow() & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0;
-            let result = tokio::time::timeout(PROBE_TIMEOUT, async {
-                let mut proof = link.proof.lock().await;
-                match proof.as_mut().ok_or(io::ErrorKind::InvalidData)? {
-                    Proof::Quic(proof) => {
-                        proof.greeting = Some(park_channel(&proof.control, &mut proof.receive, prime).await?);
-                        if prime {
-                            if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
-                                return Err(io::ErrorKind::PermissionDenied.into());
-                            }
-                            let Connected::Quic(connection) = &link.connected else {
-                                return Err(io::ErrorKind::InvalidData.into());
-                            };
-                            let hello = infraternal_protocol::decode_frame(proof.greeting.as_ref().ok_or(io::ErrorKind::InvalidData)?)
-                                .map_err(io::Error::other)?;
-                            if !matches!(hello.frame, infraternal_protocol::Frame::Hello { caps, .. }
-                                if caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0) {
-                                return Err(io::ErrorKind::InvalidData.into());
-                            }
-                            let binding = remote_quic::negotiate_binding(connection, &hello.frame)?;
-                            crate::transport::Transmit::default().send(&proof.control, 0, &super::client_greeting(renewal.is_some())).await?;
-                            proof.primed = true;
-                            link.native = Some(super::primed_native::Service::start(connection.clone(), binding, state.to_path_buf()));
-                        }
-                    }
-                    Proof::Tcp { receive, greeting } => {
-                        let Connected::Tcp(connection) = &link.connected else {
-                            return Err(io::ErrorKind::InvalidData.into());
-                        };
-                        *greeting = Some(park_channel(&connection.channel, receive, false).await?);
-                    }
+/// Rebind the endpoint to a fresh handle over the same socket state. QUIC
+/// treats this as a local address change and sends a PING (with a new
+/// connection ID) immediately, so the new path carries traffic at once.
+fn announce(endpoint: &quinn::Endpoint, path: &Arc<PathSocket>) {
+    // The handle shares the descriptor; failure only delays the first packet.
+    let _ = endpoint.rebind_abstract(path.alias());
+}
+
+/// Wait until the current path answers: a datagram from that exact address,
+/// then newly authenticated traffic. Returns false at the deadline.
+async fn answered(
+    connection: &quinn::Connection,
+    path: &PathSocket,
+    since: tokio::time::Instant,
+    mesh: bool,
+) -> bool {
+    let mut freshness = remote_quic::PeerFreshness::new(connection);
+    let deadline = connection
+        .rtt()
+        .saturating_mul(2)
+        .min(Duration::from_secs(3))
+        + SWITCH_MARGIN;
+    tokio::time::timeout(deadline, async {
+        loop {
+            let heard = if mesh {
+                path.heard_since(since.into_std())
+            } else {
+                path.enrolled_heard_since(since.into_std())
+            };
+            // Quinn decrypts the datagram after the socket reports it; the
+            // frame signature changes on the endpoint driver's next pass.
+            if heard && freshness.silence(connection) < since.elapsed() {
+                return;
+            }
+            if heard || !mesh {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            } else {
+                let notified = path.mesh_heard();
+                tokio::pin!(notified);
+                tokio::select! {
+                    () = notified => {}
+                    () = tokio::time::sleep(Duration::from_millis(5)) => {}
                 }
-                Ok::<(), io::Error>(())
-            })
-            .await;
-            if matches!(result, Ok(Ok(()))) {
-                return Ok(link);
             }
         }
-        current(identity, renewal, identity.endpoint)?;
-        tokio::time::sleep(retry).await;
-        retry = (retry * 2).min(MAX_BACKOFF);
-    }
+    })
+    .await
+    .is_ok()
 }
 
-async fn park_channel<C: Channel>(
-    channel: &C,
-    receive: &mut crate::transport::Receive,
-    prime: bool,
-) -> io::Result<Vec<u8>> {
-    crate::transport::Transmit::default()
-        .send(
-            channel,
-            0,
-            &infraternal_protocol::Frame::Call {
-                call_id: 0,
-                action_id: "transport.standby",
-                input_json: if prime { b"{\"prime\":true}" } else { b"{}" },
-            },
-        )
-        .await?;
-    let result = receive.next(channel).await?;
-    if result.stream_id != 0
-        || !matches!(
-            result.frame,
-            infraternal_protocol::Frame::Result {
-                call_id: 0,
-                ok: true,
-                ..
+/// Return in place to the enrolled address, resending unanswered mesh datagrams.
+async fn to_enrolled(
+    connection: &quinn::Connection,
+    endpoint: &quinn::Endpoint,
+    path: &Arc<PathSocket>,
+) -> bool {
+    let since = tokio::time::Instant::now();
+    path.use_enrolled();
+    announce(endpoint, path);
+    remote_quic::probe_liveness(connection);
+    answered(connection, path, since, false).await
+}
+
+enum Steered {
+    /// The session or its transport ended; the caller reconnects.
+    Ended,
+    /// A TCP link was replaced by a separately proven QUIC link.
+    Replaced(Box<Link>, ServerLinkReason),
+}
+
+/// Drive one QUIC link: move it between paths in place until its session ends.
+#[allow(clippy::too_many_lines)]
+async fn steer(
+    link: &Link,
+    identity: &RemoteIdentity,
+    state: &std::path::Path,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    registry: &crate::plugin_control::Registry,
+    cooling: bool,
+    reason: &mut ServerLinkReason,
+) -> Steered {
+    let (Connected::Quic(connection), Some(endpoint), Some(path)) =
+        (&link.connected, link.endpoint.as_ref(), link.path.as_ref())
+    else {
+        return Steered::Ended;
+    };
+    let active = session(
+        link,
+        identity,
+        state.to_path_buf(),
+        renewal,
+        registry.clone(),
+    );
+    tokio::pin!(active);
+    let mut proposals = registry.server_paths();
+    let mut retry = Duration::from_secs(1);
+    let mut not_before = tokio::time::Instant::now() + if cooling { retry } else { Duration::ZERO };
+    loop {
+        let proposed = (*proposals.borrow_and_update())
+            .map(|ip| SocketAddr::new(ip, identity.endpoint.port()));
+        match path.path() {
+            Path::Enrolled => {
+                let Some(mesh) = proposed else {
+                    tokio::select! {
+                        _ = &mut active => return Steered::Ended,
+                        changed = proposals.changed() => if changed.is_err() { return Steered::Ended },
+                    }
+                    continue;
+                };
+                tokio::select! {
+                    _ = &mut active => return Steered::Ended,
+                    changed = proposals.changed() => {
+                        if changed.is_err() { return Steered::Ended }
+                        continue;
+                    }
+                    () = tokio::time::sleep_until(not_before) => {}
+                }
+                let since = tokio::time::Instant::now();
+                path.use_mesh(mesh);
+                announce(endpoint, path);
+                remote_quic::probe_liveness(connection);
+                let moved = tokio::select! {
+                    _ = &mut active => return Steered::Ended,
+                    moved = answered(connection, path, since, true) => moved,
+                };
+                if moved {
+                    retry = Duration::from_secs(1);
+                    *reason = ServerLinkReason::MeshProven;
+                } else {
+                    // An unanswered switch keeps the session: its datagrams are
+                    // resent on the enrolled path and the move retries later.
+                    let _ = to_enrolled(connection, endpoint, path).await;
+                    *reason = ServerLinkReason::MeshRefused;
+                    not_before = tokio::time::Instant::now() + retry;
+                    retry = (retry * 2).min(Duration::from_secs(30));
+                }
+                report(registry, Some(link), *reason);
             }
-        )
-    {
-        return Err(io::ErrorKind::InvalidData.into());
+            Path::Mesh(current) => {
+                if proposed.is_some_and(|proposed| {
+                    proposed.ip().to_canonical() == current.ip().to_canonical()
+                }) {
+                    let interrupted = tokio::select! {
+                        _ = &mut active => return Steered::Ended,
+                        changed = proposals.changed() => {
+                            if changed.is_err() { return Steered::Ended }
+                            false
+                        }
+                        result = remote_quic::path_interrupted(connection, MESH_PROBE_INTERVAL, MESH_PROBE_MARGIN) => result.is_err(),
+                    };
+                    if !interrupted {
+                        continue;
+                    }
+                    *reason = ServerLinkReason::MeshInterrupted;
+                    not_before = tokio::time::Instant::now() + retry;
+                    retry = (retry * 2).min(Duration::from_secs(30));
+                } else {
+                    // Component down or a new address: leave the mesh now.
+                    *reason = if proposed.is_none() {
+                        ServerLinkReason::MeshDisabled
+                    } else {
+                        ServerLinkReason::MeshInterrupted
+                    };
+                    not_before = tokio::time::Instant::now();
+                }
+                let returned = tokio::select! {
+                    _ = &mut active => return Steered::Ended,
+                    returned = to_enrolled(connection, endpoint, path) => returned,
+                };
+                if proposed.is_none() {
+                    path.forget_mesh();
+                }
+                report(registry, Some(link), *reason);
+                if !returned {
+                    // The enrolled address is not answering either (for example
+                    // UDP is blocked there). End this session; the caller's dial
+                    // race, including TCP, owns recovery.
+                    return Steered::Ended;
+                }
+            }
+        }
     }
-    let hello = receive.next(channel).await?;
-    if hello.stream_id != 0
-        || !matches!(hello.frame, infraternal_protocol::Frame::Hello { version: 1, caps, .. } if caps & infraternal_plugin_api::channel::REMOTE_STANDBY != 0)
-    {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    let mut prefix = Vec::new();
-    if channel.native_stream_id().is_some() {
-        infraternal_protocol::encode_frame_into(&hello.frame, &mut prefix)
-            .map_err(io::Error::other)?;
-    } else {
-        infraternal_protocol::encode_muxed_frame_into(0, &hello.frame, &mut prefix)
-            .map_err(io::Error::other)?;
-    }
-    Ok(prefix)
 }
 
-async fn warm_closed(warm: Option<&Link>) {
-    match warm.map(|link| &link.connected) {
-        Some(Connected::Quic(connection)) => {
-            connection.closed().await;
-        }
-        Some(Connected::Tcp(connection)) => {
-            let _ = connection.channel.read(&mut [0; 1]).await;
-        }
-        None => std::future::pending().await,
-    }
-}
-
-/// A failed candidate leaves the established session and all its dispatchers live.
-/// Retrying is bounded and sleeps only while a proposed destination is unavailable.
+/// A TCP link cannot move below its transport. A separately proven QUIC link
+/// to the mesh address replaces it; a failed candidate leaves the session live.
 async fn replacement(
     live: &Link,
     identity: &RemoteIdentity,
@@ -405,37 +486,21 @@ async fn replacement(
         tokio::time::sleep(retry).await;
     }
     loop {
-        let proposed = *paths.borrow_and_update();
-        let (destination, kind, reason) = proposed.map_or(
-            (
-                identity.endpoint,
-                ServerLinkKind::Fallback,
-                ServerLinkReason::MeshDisabled,
-            ),
-            |ip| {
-                (
-                    SocketAddr::new(ip, identity.endpoint.port()),
-                    ServerLinkKind::Mesh,
-                    ServerLinkReason::MeshProven,
-                )
-            },
-        );
-        if destination == live.address && kind == live.kind {
+        let Some(ip) = *paths.borrow_and_update() else {
             paths
                 .changed()
                 .await
                 .map_err(|_| io::ErrorKind::BrokenPipe)?;
             retry = Duration::from_secs(1);
             continue;
-        }
+        };
+        let destination = SocketAddr::new(ip, identity.endpoint.port());
         // A changed preference cancels only this candidate's owned socket. In
         // particular, an explicit component down cannot leave a probe running.
         tokio::select! {
-            result = connect(identity, renewal, destination, kind, true) => {
-                if let Ok(link) = result { return Ok((link, reason)); }
-                if live.kind == ServerLinkKind::Fallback {
-                    report(registry, Some(live), ServerLinkReason::MeshRefused);
-                }
+            result = connect(identity, renewal, destination, ServerLinkKind::Mesh, true) => {
+                if let Ok(link) = result { return Ok((link, ServerLinkReason::MeshProven)); }
+                report(registry, Some(live), ServerLinkReason::MeshRefused);
             }
             changed = paths.changed() => {
                 changed.map_err(|_| io::ErrorKind::BrokenPipe)?;
@@ -450,26 +515,15 @@ async fn replacement(
     }
 }
 
-/// A component down retains its meaning when transport closure wins its race.
-fn interruption_reason(registry: &crate::plugin_control::Registry) -> ServerLinkReason {
-    if registry.server_paths().borrow().is_none() {
-        ServerLinkReason::MeshDisabled
-    } else {
-        ServerLinkReason::MeshInterrupted
-    }
-}
-
-/// Keep warm ownership live during proof and react to down before starting a cold dial.
-/// These futures leave scope before the caller retires the old authenticated link.
-async fn transition(
+/// Run a TCP link's session while a QUIC mesh candidate is proven beside it.
+async fn replace_tcp(
     link: &Link,
     identity: &RemoteIdentity,
     state: &std::path::Path,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     registry: &crate::plugin_control::Registry,
     cooling: bool,
-    warm: &mut Option<Link>,
-) -> Option<(Link, ServerLinkReason)> {
+) -> Steered {
     let active = session(
         link,
         identity,
@@ -478,40 +532,18 @@ async fn transition(
         registry.clone(),
     );
     let replacing = replacement(link, identity, renewal, registry, cooling);
-    let mut preparing = (link.kind == ServerLinkKind::Mesh)
-        .then(|| Box::pin(warming(link, identity, renewal, state)));
-    let mut intent = registry.server_paths();
-    tokio::pin!(active, replacing);
-    loop {
-        if link.kind == ServerLinkKind::Mesh
-            && warm.is_some()
-            && intent.borrow_and_update().is_none()
-        {
-            return warm
-                .take()
-                .map(|next| (next, ServerLinkReason::MeshDisabled));
-        }
-        tokio::select! {
-            biased;
-            changed = intent.changed(), if link.kind == ServerLinkKind::Mesh && warm.is_some() => {
-                if changed.is_err() { return None; }
-            }
+    tokio::select! {
+        result = replacing => result.map_or(Steered::Ended, |(next, why)| Steered::Replaced(Box::new(next), why)),
+        _ = active => Steered::Ended,
+    }
+}
 
-            result = &mut replacing => return result.ok(),
-            result = &mut active => {
-                eprintln!("Infraternal agent server session ended ({:?}); reconnecting", result.err().map(|error| error.kind()));
-                return None;
-            },
-            result = async { preparing.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.await },
-                if preparing.is_some() && warm.is_none() => {
-                *warm = result.ok();
-                if warm.is_none() { preparing = Some(Box::pin(warming(link, identity, renewal, state))); }
-            }
-            () = warm_closed(warm.as_ref()), if warm.is_some() => {
-                *warm = None;
-                preparing = Some(Box::pin(warming(link, identity, renewal, state)));
-            }
-        }
+/// A component down retains its meaning when transport closure wins its race.
+fn interruption_reason(registry: &crate::plugin_control::Registry) -> ServerLinkReason {
+    if registry.server_paths().borrow().is_none() {
+        ServerLinkReason::MeshDisabled
+    } else {
+        ServerLinkReason::MeshInterrupted
     }
 }
 
@@ -563,6 +595,8 @@ async fn available(
     }
 }
 
+// Keep pinned-session retirement and reconnect accounting in the same owning scope.
+#[allow(clippy::too_many_lines)]
 pub(super) async fn run(
     identity: &RemoteIdentity,
     state: PathBuf,
@@ -577,7 +611,6 @@ pub(super) async fn run(
         .await
         .map_err(|_| io::ErrorKind::Other)?;
     let mut live = None;
-    let mut warm = None;
     let mut force_fallback = false;
     let mut reason = ServerLinkReason::MeshUnavailable;
     let mut backoff = Duration::from_millis(200);
@@ -585,7 +618,7 @@ pub(super) async fn run(
     loop {
         let attempt_started = tokio::time::Instant::now();
         // Reconnection itself never waits for a failed mesh probe. Once the
-        // fallback is healthy, probes run alongside it and cannot lose bytes.
+        // fallback is healthy, moves run on the live connection itself.
         let link = if let Some(link) = live.take() {
             link
         } else {
@@ -619,48 +652,55 @@ pub(super) async fn run(
         let started = tokio::time::Instant::now();
         report(&registry, Some(&link), reason);
         connected.send_replace(true);
-        // Both futures leave scope before retiring the old transport. Aborting
-        // a partial write is safe only because Link closes that entire channel.
-        let moved = transition(
-            &link, identity, &state, renewal, &registry, cooling, &mut warm,
-        )
-        .await;
-        connected.send_replace(false);
-        // A transport close can win the replacement race after component down.
-        // The current applied preference owns the reason, rather than whichever
-        // future happened to finish first.
-        let interrupted_reason = interruption_reason(&registry);
-        let moved = match moved {
-            Some((next, why)) if next.kind == ServerLinkKind::Fallback && warm.is_some() => {
-                Some((warm.take().unwrap_or(next), why))
-            }
-            None if link.kind == ServerLinkKind::Mesh => {
-                warm.take().map(|next| (next, interrupted_reason))
-            }
-            other => other,
-        };
-        if let Some((next, why)) = moved {
-            live = Some(next);
-            reason = why;
-            cooling = why == ServerLinkReason::MeshInterrupted;
+        // Every session future leaves scope before the old transport retires.
+        // Aborting a partial write is safe only because Link closes that channel.
+        let steered = if link.path.is_some() {
+            steer(
+                &link,
+                identity,
+                &state,
+                renewal,
+                &registry,
+                cooling,
+                &mut reason,
+            )
+            .await
         } else {
-            reason = if link.kind == ServerLinkKind::Mesh {
-                interrupted_reason
-            } else {
-                ServerLinkReason::Connecting
-            };
-            cooling = reason == ServerLinkReason::MeshInterrupted;
-            force_fallback = cooling;
-            report(&registry, None, reason);
-            if link.kind == ServerLinkKind::Fallback {
-                let elapsed = if started.elapsed() > Duration::from_secs(10) {
-                    backoff = Duration::from_millis(200);
-                    Duration::ZERO
+            replace_tcp(&link, identity, &state, renewal, &registry, cooling).await
+        };
+        connected.send_replace(false);
+        let (was, _) = link.current();
+        match steered {
+            Steered::Replaced(next, why) => {
+                live = Some(*next);
+                reason = why;
+                cooling = false;
+            }
+            Steered::Ended => {
+                // A transport close can race a component down; the current
+                // applied preference owns the reason.
+                reason = if was == ServerLinkKind::Mesh
+                    || matches!(
+                        reason,
+                        ServerLinkReason::MeshInterrupted | ServerLinkReason::MeshDisabled
+                    ) {
+                    interruption_reason(&registry)
                 } else {
-                    attempt_started.elapsed()
+                    ServerLinkReason::Connecting
                 };
-                tokio::time::sleep(retry_delay(backoff, elapsed)).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                cooling = reason == ServerLinkReason::MeshInterrupted;
+                force_fallback = cooling;
+                report(&registry, None, reason);
+                if was == ServerLinkKind::Fallback {
+                    let elapsed = if started.elapsed() > Duration::from_secs(10) {
+                        backoff = Duration::from_millis(200);
+                        Duration::ZERO
+                    } else {
+                        attempt_started.elapsed()
+                    };
+                    tokio::time::sleep(retry_delay(backoff, elapsed)).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                }
             }
         }
         drop(link);

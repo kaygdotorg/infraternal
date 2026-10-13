@@ -1,4 +1,4 @@
-//! Proves destination preference, rejected candidates and automatic fallback over real mutually authenticated QUIC [215].
+//! Proves in-place moves to a proposed mesh address, refusal, silent-cut return and component down over real mutually authenticated QUIC, one connection throughout [215], #201.
 use super::*;
 use crate::{
     remote_native::NativeChannel,
@@ -8,6 +8,7 @@ use crate::{
 use infraternal_plugin_api::{
     ActionDef, AgentPlugin, PluginDescriptor, PluginError, PluginRegistry,
 };
+use infraternal_plugin_remote::remote_bindings::{Bindings, LeasedBinding};
 use infraternal_protocol::Frame;
 use std::net::IpAddr;
 
@@ -106,58 +107,46 @@ struct Accepted {
     control: std::sync::Arc<NativeChannel>,
     receive: Receive,
 }
+/// One QUIC endpoint answering on its primary address and, while leased, a
+/// second address: the production server's shared socket set.
 struct Server {
     endpoint: quinn::Endpoint,
+    bindings: std::sync::Arc<Bindings>,
+    lease: Option<LeasedBinding>,
     accepted: tokio::sync::mpsc::Receiver<Accepted>,
-    parked: tokio::sync::mpsc::Receiver<()>,
     task: tokio::task::JoinHandle<()>,
-    proof_valid: std::sync::Arc<std::sync::atomic::AtomicBool>,
     connection_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Server {
+    // Keep handshake, proof and connection ownership in one fixture boundary.
+    #[allow(clippy::too_many_lines)]
     fn new(
         identity: &remote_tls::Identity,
         roots: &[openssl::x509::X509],
         address: SocketAddr,
     ) -> Self {
-        Self::with_proof(identity, roots, address, true)
-    }
-    fn with_proof(
-        identity: &remote_tls::Identity,
-        roots: &[openssl::x509::X509],
-        address: SocketAddr,
-        valid: bool,
-    ) -> Self {
-        Self::with_options(identity, roots, address, valid, false)
-    }
-    // Keep handshake, parking and connection ownership in one fixture boundary.
-    #[allow(clippy::too_many_lines)]
-    fn with_options(
-        identity: &remote_tls::Identity,
-        roots: &[openssl::x509::X509],
-        address: SocketAddr,
-        valid: bool,
-        standby: bool,
-    ) -> Self {
-        let endpoint = quinn::Endpoint::server(
-            remote_quic::server_config(identity, roots).unwrap(),
-            address,
+        use quinn::Runtime as _;
+        let bindings = Bindings::new(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind(address).unwrap())
+                .unwrap(),
+        );
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(remote_quic::server_config(identity, roots).unwrap()),
+            bindings.clone(),
+            std::sync::Arc::new(quinn::TokioRuntime),
         )
         .unwrap();
         let listen = endpoint.clone();
-        let proof_valid = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(valid));
         let connection_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let valid = proof_valid.clone();
         let connections = connection_count.clone();
         let (notices, accepted) = tokio::sync::mpsc::channel(8);
-        let (parking, parked) = tokio::sync::mpsc::channel(8);
         let task = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
             while let Some(incoming) = listen.accept().await {
                 while sessions.try_join_next().is_some() {}
                 let notices = notices.clone();
-                let parking = parking.clone();
-                let valid = valid.clone();
                 let connections = connections.clone();
                 sessions.spawn(async move {
                     let Ok(connection) = incoming.await else {
@@ -170,85 +159,20 @@ impl Server {
                     let control =
                         std::sync::Arc::new(NativeChannel::control(send, receive).unwrap());
                     let mut rx = Receive::default();
-                    let Ok(first) = rx.next(control.as_ref()).await else {
+                    let Ok(mut hello) = rx.next(control.as_ref()).await else {
                         return;
                     };
-                    if let Frame::Ping { nonce, sent_us } = first.frame {
+                    if let Frame::Ping { nonce, sent_us } = hello.frame {
                         Transmit::default()
-                            .send(
-                                control.as_ref(),
-                                0,
-                                &Frame::Pong {
-                                    nonce: if valid.load(std::sync::atomic::Ordering::Relaxed) {
-                                        nonce
-                                    } else {
-                                        nonce.wrapping_add(1)
-                                    },
-                                    sent_us,
-                                },
-                            )
+                            .send(control.as_ref(), 0, &Frame::Pong { nonce, sent_us })
                             .await
                             .unwrap();
-                        let Ok(hello) = rx.next(control.as_ref()).await else {
+                        let Ok(next) = rx.next(control.as_ref()).await else {
                             return;
                         };
-                        if standby
-                            && matches!(
-                                hello.frame,
-                                Frame::Call {
-                                    call_id: 0,
-                                    action_id: "transport.standby",
-                                    input_json: b"{}"
-                                }
-                            )
-                        {
-                            let mut transmit = Transmit::default();
-                            transmit
-                                .send(
-                                    control.as_ref(),
-                                    0,
-                                    &Frame::Result {
-                                        call_id: 0,
-                                        ok: true,
-                                        json: b"{}",
-                                    },
-                                )
-                                .await
-                                .unwrap();
-                            transmit
-                                .send(
-                                    control.as_ref(),
-                                    0,
-                                    &Frame::Hello {
-                                        version: 1,
-                                        caps: remote_quic::REMOTE_WRITER_BINDING
-                                            | infraternal_plugin_api::channel::REMOTE_STANDBY,
-                                        client_info: "fixture",
-                                    },
-                                )
-                                .await
-                                .unwrap();
-                            parking.send(()).await.unwrap();
-                            let Ok(hello) = rx.next(control.as_ref()).await else {
-                                return;
-                            };
-                            if !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
-                                return;
-                            }
-                            notices
-                                .send(Accepted {
-                                    control: control.clone(),
-                                    receive: rx,
-                                })
-                                .await
-                                .unwrap();
-                            let _ = connection.closed().await;
-                            return;
-                        }
-                        if !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
-                            return;
-                        }
-                    } else if !matches!(first.frame, Frame::Hello { version: 1, .. }) {
+                        hello = next;
+                    }
+                    if !matches!(hello.frame, Frame::Hello { version: 1, .. }) {
                         return;
                     }
                     Transmit::default()
@@ -257,12 +181,7 @@ impl Server {
                             0,
                             &Frame::Hello {
                                 version: 1,
-                                caps: remote_quic::REMOTE_WRITER_BINDING
-                                    | if standby {
-                                        infraternal_plugin_api::channel::REMOTE_STANDBY
-                                    } else {
-                                        0
-                                    },
+                                caps: remote_quic::REMOTE_WRITER_BINDING,
                                 client_info: "fixture",
                             },
                         )
@@ -281,27 +200,39 @@ impl Server {
         });
         Self {
             endpoint,
+            bindings,
+            lease: None,
             accepted,
-            parked,
             task,
-            proof_valid,
             connection_count,
         }
     }
-    async fn admitted(&mut self) {
-        let _ = self.admitted_channel().await;
+    /// Answer on `ip` at the primary port too (the server's mesh address).
+    fn lease(&mut self, ip: &str) -> SocketAddr {
+        use quinn::Runtime as _;
+        let address = SocketAddr::new(
+            ip.parse().unwrap(),
+            self.endpoint.local_addr().unwrap().port(),
+        );
+        let socket = quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind(address).unwrap())
+            .unwrap();
+        self.lease = Some(self.bindings.lease(socket).unwrap());
+        address
+    }
+    /// Silently stop answering on the leased address: no close, no reset.
+    fn cut(&mut self) {
+        self.lease = None;
+    }
+    fn connections(&self) -> usize {
+        self.connection_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     async fn admitted_channel(&mut self) -> Accepted {
         tokio::time::timeout(Duration::from_secs(3), self.accepted.recv())
             .await
             .unwrap()
             .unwrap()
-    }
-    async fn parked(&mut self) {
-        tokio::time::timeout(Duration::from_secs(3), self.parked.recv())
-            .await
-            .unwrap()
-            .unwrap();
     }
 }
 impl Drop for Server {
@@ -346,92 +277,175 @@ async fn status(registry: &crate::plugin_control::Registry) -> ServerLink {
     )
     .unwrap()
 }
+async fn until(
+    registry: &crate::plugin_control::Registry,
+    kind: ServerLinkKind,
+    reason: ServerLinkReason,
+) -> ServerLink {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let link = status(registry).await;
+            if link.kind == kind && link.reason == reason {
+                return link;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("link never reached {kind:?}/{reason:?}"))
+}
 fn registry() -> crate::plugin_control::Registry {
     let mut plugins = PluginRegistry::default();
     plugins.register(Box::<Fixture>::default()).unwrap();
     crate::plugin_control::Registry::new(plugins)
 }
-
-#[tokio::test]
-async fn proven_mesh_destination_is_preferred_and_failure_returns_to_enrolled_port() {
-    let ca = root();
-    let server = leaf(&ca, true);
-    let mut fallback = Server::new(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        "127.0.0.1:0".parse().unwrap(),
-    );
-    let address = fallback.endpoint.local_addr().unwrap();
-    let mut mesh = Server::new(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        SocketAddr::new("127.0.0.2".parse().unwrap(), address.port()),
-    );
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: address,
+fn identity(ca: &remote_tls::Identity, endpoint: SocketAddr) -> RemoteIdentity {
+    RemoteIdentity {
+        identity: leaf(ca, false),
+        roots: vec![ca.certificate.clone()],
+        endpoint,
         server_name: "localhost".into(),
         execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
+    }
+}
+fn supervise(
+    identity: RemoteIdentity,
+    registry: &crate::plugin_control::Registry,
+) -> (tokio::task::JoinHandle<io::Result<()>>, Directory) {
     let directory = Directory::new();
-    let registry = registry();
     let control = registry.clone();
     let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    fallback.admitted().await;
-    preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
-    mesh.admitted().await;
-    assert_eq!(status(&registry).await.kind, ServerLinkKind::Mesh);
-    mesh.endpoint.close(0u32.into(), b"");
-    fallback.admitted().await;
-    let link = status(&registry).await;
-    assert_eq!(link.kind, ServerLinkKind::Fallback);
-    assert_eq!(link.reason, ServerLinkReason::MeshInterrupted);
-    assert_eq!(link.endpoint, Some(address));
+    (
+        tokio::spawn(async move { run(&identity, state, None, control).await }),
+        directory,
+    )
+}
+
+/// The proposal moves the admitted connection itself; a silent cut returns it.
+#[tokio::test]
+async fn proposed_mesh_moves_the_live_connection_and_a_silent_cut_returns_it() {
+    let ca = root();
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let registry = registry();
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let mut active = server.admitted_channel().await;
+    preference(&registry, Some(mesh.ip())).await;
+    let link = until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    assert_eq!(link.endpoint, Some(mesh));
+    assert_remote_status(&mut active, ServerLinkKind::Mesh).await;
+    server.cut();
+    let link = until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshInterrupted,
+    )
+    .await;
+    assert_eq!(link.endpoint, Some(enrolled));
+    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
+    assert_eq!(server.connections(), 1, "the session never reconnected");
+    assert!(server.accepted.try_recv().is_err());
     supervisor.abort();
     let _ = supervisor.await;
 }
 
+/// A recovered mesh is retried on the same connection after the cool-down.
 #[tokio::test]
-async fn untrusted_candidate_never_retires_the_authenticated_fallback() {
+async fn interrupted_mesh_is_retried_on_the_same_connection() {
+    let ca = root();
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let registry = registry();
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let mut active = server.admitted_channel().await;
+    preference(&registry, Some(mesh.ip())).await;
+    until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    server.cut();
+    until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshInterrupted,
+    )
+    .await;
+    server.lease("127.0.0.2");
+    until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    assert_remote_status(&mut active, ServerLinkKind::Mesh).await;
+    assert_eq!(server.connections(), 1);
+    supervisor.abort();
+    let _ = supervisor.await;
+}
+
+/// No answer from the proposed address: the live connection stays put and works.
+#[tokio::test]
+async fn unanswered_mesh_address_keeps_the_live_connection() {
+    let ca = root();
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let registry = registry();
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let mut active = server.admitted_channel().await;
+    preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
+    let link = until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshRefused,
+    )
+    .await;
+    assert_eq!(link.endpoint, Some(enrolled));
+    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
+    assert_eq!(server.connections(), 1);
+    assert!(!supervisor.is_finished());
+    supervisor.abort();
+    let _ = supervisor.await;
+}
+
+/// A different server answering on the proposed address cannot authenticate
+/// this connection's packets, so the move is refused and the session stays.
+#[tokio::test]
+async fn untrusted_server_on_the_mesh_address_never_takes_the_connection() {
     let ca = root();
     let wrong = root();
-    let mut fallback = Server::new(
-        &leaf(&ca, true),
-        std::slice::from_ref(&ca.certificate),
-        "127.0.0.1:0".parse().unwrap(),
-    );
-    let address = fallback.endpoint.local_addr().unwrap();
-    let _invalid = Server::new(
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mut impostor = Server::new(
         &leaf(&wrong, true),
         std::slice::from_ref(&wrong.certificate),
-        SocketAddr::new("127.0.0.2".parse().unwrap(), address.port()),
+        SocketAddr::new("127.0.0.2".parse().unwrap(), enrolled.port()),
     );
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let directory = Directory::new();
     let registry = registry();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    fallback.admitted().await;
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let mut active = server.admitted_channel().await;
     preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while status(&registry).await.reason != ServerLinkReason::MeshRefused {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(status(&registry).await.kind, ServerLinkKind::Fallback);
-    assert!(fallback.accepted.try_recv().is_err());
-    assert!(!supervisor.is_finished());
+    until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshRefused,
+    )
+    .await;
+    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
+    assert!(impostor.accepted.try_recv().is_err());
+    assert_eq!(impostor.connections(), 0);
     supervisor.abort();
     let _ = supervisor.await;
 }
@@ -445,20 +459,16 @@ async fn retained_mesh_proposal_connects_when_the_fallback_port_is_unavailable()
         "127.0.0.2:0".parse().unwrap(),
     );
     let address = mesh.endpoint.local_addr().unwrap();
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: SocketAddr::new("127.0.0.1".parse().unwrap(), address.port()),
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
     let registry = registry();
     preference(&registry, Some(address.ip())).await;
-    let directory = Directory::new();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    mesh.admitted().await;
+    let (supervisor, _directory) = supervise(
+        identity(
+            &ca,
+            SocketAddr::new("127.0.0.1".parse().unwrap(), address.port()),
+        ),
+        &registry,
+    );
+    let _ = mesh.admitted_channel().await;
     let link = status(&registry).await;
     assert_eq!(link.kind, ServerLinkKind::Mesh);
     assert_eq!(link.endpoint, Some(address));
@@ -467,133 +477,80 @@ async fn retained_mesh_proposal_connects_when_the_fallback_port_is_unavailable()
 }
 
 #[tokio::test]
-async fn invalid_application_proof_keeps_the_live_fallback() {
-    let ca = root();
-    let server = leaf(&ca, true);
-    let mut fallback = Server::new(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        "127.0.0.1:0".parse().unwrap(),
-    );
-    let address = fallback.endpoint.local_addr().unwrap();
-    let mut invalid = Server::with_proof(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        SocketAddr::new("127.0.0.2".parse().unwrap(), address.port()),
-        false,
-    );
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let directory = Directory::new();
-    let registry = registry();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    fallback.admitted().await;
-    preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while status(&registry).await.reason != ServerLinkReason::MeshRefused {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(status(&registry).await.kind, ServerLinkKind::Fallback);
-    assert!(fallback.accepted.try_recv().is_err());
-    assert!(invalid.accepted.try_recv().is_err());
-    assert!(!supervisor.is_finished());
-    supervisor.abort();
-    let _ = supervisor.await;
+async fn component_down_returns_the_live_connection_to_the_enrolled_address() {
+    component_down(false, false).await;
 }
 
 #[tokio::test]
-async fn component_down_replaces_mesh_with_a_proven_fallback() {
-    component_down(false).await;
+async fn component_down_keeps_its_reason_when_the_mesh_also_stops_answering() {
+    component_down(true, false).await;
 }
 
-#[tokio::test]
-async fn component_down_keeps_its_reason_when_mesh_closes_during_replacement() {
-    component_down(true).await;
-}
-
-async fn component_down(close_mesh: bool) {
+async fn component_down(cut: bool, refuse_admission: bool) {
     let ca = root();
-    let server = leaf(&ca, true);
-    let mut fallback = Server::new(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        "127.0.0.1:0".parse().unwrap(),
-    );
-    let address = fallback.endpoint.local_addr().unwrap();
-    let mut mesh = Server::new(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        SocketAddr::new("127.0.0.2".parse().unwrap(), address.port()),
-    );
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let directory = Directory::new();
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
     let registry = registry();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    fallback.admitted().await;
-    preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
-    mesh.admitted().await;
-    preference(&registry, None).await;
-    if close_mesh {
-        mesh.endpoint.close(0u32.into(), b"");
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let mut active = server.admitted_channel().await;
+    preference(&registry, Some(mesh.ip())).await;
+    until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    if refuse_admission {
+        // The already admitted connection must survive refusal of every new handshake.
+        server.endpoint.set_server_config(None);
     }
-    fallback.admitted().await;
-    let link = status(&registry).await;
-    assert_eq!(link.kind, ServerLinkKind::Fallback);
-    assert_eq!(link.reason, ServerLinkReason::MeshDisabled);
+    preference(&registry, None).await;
+    if cut {
+        server.cut();
+    }
+    let link = until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshDisabled,
+    )
+    .await;
+    assert_eq!(link.endpoint, Some(enrolled));
+    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
+    assert_eq!(server.connections(), 1);
     supervisor.abort();
     let _ = supervisor.await;
 }
 
+/// Acknowledged probes keep a healthy mesh path; it is never declared lost.
 #[tokio::test]
-async fn healthy_mesh_probes_do_not_inherit_the_previous_paths_rtt() {
+async fn healthy_mesh_path_is_never_declared_interrupted() {
     let ca = root();
-    let server = Server::new(
-        &leaf(&ca, true),
-        std::slice::from_ref(&ca.certificate),
-        "127.0.0.1:0".parse().unwrap(),
-    );
-    let address = server.endpoint.local_addr().unwrap();
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let link = connect(&identity, None, address, ServerLinkKind::Mesh, true)
-        .await
-        .unwrap();
-    let Connected::Quic(connection) = &link.connected else {
-        panic!("mesh proof did not establish native QUIC");
-    };
-    let mut freshness = remote_quic::PeerFreshness::new(connection);
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(700),
-            freshness.interrupted_adaptive(connection)
-        )
-        .await
-        .is_err(),
-        "a healthy new mesh path expired before its inherited keepalive could run"
-    );
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let registry = registry();
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let _active = server.admitted_channel().await;
+    preference(&registry, Some(mesh.ip())).await;
+    until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let link = status(&registry).await;
+        assert_eq!(
+            (link.kind, link.reason),
+            (ServerLinkKind::Mesh, ServerLinkReason::MeshProven)
+        );
+    }
+    supervisor.abort();
+    let _ = supervisor.await;
 }
 
 #[tokio::test]
@@ -649,32 +606,25 @@ async fn component_down_proves_tcp_fallback_when_enrolled_udp_is_unavailable() {
         std::slice::from_ref(&ca.certificate),
         SocketAddr::new("127.0.0.2".parse().unwrap(), address.port()),
     );
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let directory = Directory::new();
     let registry = registry();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
+    let (supervisor, _directory) = supervise(identity(&ca, address), &registry);
     tokio::time::timeout(Duration::from_secs(3), accepted.recv())
         .await
         .unwrap()
         .unwrap();
     preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
-    mesh.admitted().await;
+    let _ = mesh.admitted_channel().await;
     preference(&registry, None).await;
-    tokio::time::timeout(Duration::from_secs(3), accepted.recv())
+    tokio::time::timeout(Duration::from_secs(5), accepted.recv())
         .await
         .unwrap()
         .unwrap();
-    let link = status(&registry).await;
-    assert_eq!(link.kind, ServerLinkKind::Fallback);
-    assert_eq!(link.reason, ServerLinkReason::MeshDisabled);
+    let link = until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshDisabled,
+    )
+    .await;
     assert_eq!(link.endpoint, Some(address));
     supervisor.abort();
     let _ = supervisor.await;
@@ -682,95 +632,39 @@ async fn component_down_proves_tcp_fallback_when_enrolled_udp_is_unavailable() {
     let _ = tcp.await;
 }
 
-/// The live path is interrupted by discarding UDP, without sending a close or
-/// removing the interface. This measures the silent-failure case seen on a
-/// network change; the enrolled fallback remains reachable throughout.
+/// The mesh address stops answering without a close or an interface change,
+/// the silent case seen on a network change. Timing belongs to the perf VM.
 #[tokio::test]
 #[ignore = "Run alone on the perf VM under the shared benchmark lock."]
 async fn review_silent_mesh_interruption_returns_to_fallback_within_local_reconnect_budget() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
     let ca = root();
-    let server = leaf(&ca, true);
-    let mut fallback = Server::new(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        "127.0.0.1:0".parse().unwrap(),
-    );
-    let address = fallback.endpoint.local_addr().unwrap();
-    let mut mesh = Server::new(
-        &server,
-        std::slice::from_ref(&ca.certificate),
-        "127.0.0.3:0".parse().unwrap(),
-    );
-    let upstream = mesh.endpoint.local_addr().unwrap();
-    let socket = tokio::net::UdpSocket::bind(SocketAddr::new(
-        "127.0.0.2".parse().unwrap(),
-        address.port(),
-    ))
-    .await
-    .unwrap();
-    let cut = Arc::new(AtomicBool::new(false));
-    let refused = cut.clone();
-    let relay = tokio::spawn(async move {
-        let mut client = None;
-        let mut packet = vec![0; 65536];
-        loop {
-            let (count, source) = socket.recv_from(&mut packet).await.unwrap();
-            if refused.load(Ordering::Acquire) {
-                continue;
-            }
-            let destination = if source == upstream {
-                let Some(client) = client else {
-                    continue;
-                };
-                client
-            } else {
-                client = Some(source);
-                upstream
-            };
-            socket.send_to(&packet[..count], destination).await.unwrap();
-        }
-    });
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let parent = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
-        .join(format!("review-path-{}", uuid::Uuid::new_v4().simple()));
-    let directory = Directory(crate::sessions::state(Some(parent)).unwrap());
+    let roots = std::slice::from_ref(&ca.certificate);
+    let mut server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
     let registry = registry();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    fallback.admitted().await;
-    preference(&registry, Some("127.0.0.2".parse().unwrap())).await;
-    mesh.admitted().await;
-    assert_eq!(status(&registry).await.kind, ServerLinkKind::Mesh);
-    // Allow healthy keepalives before the cut so failure detection begins from
-    // an established path rather than from negotiation or initial scheduling.
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let _active = server.admitted_channel().await;
+    preference(&registry, Some(mesh.ip())).await;
+    until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    // Healthy probes first, so detection starts from an established path.
     tokio::time::sleep(Duration::from_millis(350)).await;
-    cut.store(true, Ordering::Release);
+    server.cut();
     let started = tokio::time::Instant::now();
-    let recovered = tokio::time::timeout(Duration::from_secs(6), fallback.accepted.recv()).await;
+    until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshInterrupted,
+    )
+    .await;
     let elapsed = started.elapsed();
-    let observed = status(&registry).await;
     supervisor.abort();
     let _ = supervisor.await;
-    relay.abort();
-    let _ = relay.await;
-    assert!(
-        matches!(recovered, Ok(Some(_))),
-        "reachable fallback must recover"
-    );
-    assert_eq!(observed.kind, ServerLinkKind::Fallback);
-    // Local authenticated handshake RTT is negligible. D41 also supplies the
-    // less strict 300 ms reconnect reference at zero network overhead.
     println!(
         "METRIC review_silent_mesh_cut fallback_us={} budget_us=300000 load={}",
         elapsed.as_micros(),
@@ -780,64 +674,6 @@ async fn review_silent_mesh_interruption_returns_to_fallback_within_local_reconn
         elapsed < Duration::from_millis(300),
         "silent mesh interruption exceeded the local reconnect budget: {elapsed:?}"
     );
-}
-
-/// The server-side transport stays usable through parked activation and a new
-/// mesh proof; the cached greeting must not leak into the next control exchange.
-#[tokio::test]
-async fn parked_fallback_recovers_mesh_and_keeps_control_actions_usable() {
-    let ca = root();
-    let server = leaf(&ca, true);
-    let roots = std::slice::from_ref(&ca.certificate);
-    let mut fallback =
-        Server::with_options(&server, roots, "127.0.0.1:0".parse().unwrap(), true, true);
-    let address = fallback.endpoint.local_addr().unwrap();
-    let mesh_address = SocketAddr::new("127.0.0.2".parse().unwrap(), address.port());
-    let mut mesh = Server::with_options(&server, roots, mesh_address, true, true);
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate.clone()],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let directory = Directory::new();
-    let registry = registry();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    fallback.admitted().await;
-    preference(&registry, Some(mesh_address.ip())).await;
-    mesh.admitted().await;
-    fallback.parked().await;
-    drop(mesh);
-    let mut active = fallback.admitted_channel().await;
-    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
-    // Quinn's owned driver releases the old fixture socket asynchronously.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match tokio::net::UdpSocket::bind(mesh_address).await {
-                Ok(socket) => {
-                    drop(socket);
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                Err(error) => panic!("fixture address refused: {error}"),
-            }
-        }
-    })
-    .await
-    .unwrap();
-    let mut restored = Server::with_options(&server, roots, mesh_address, true, true);
-    let mut active = restored.admitted_channel().await;
-    assert_remote_status(&mut active, ServerLinkKind::Mesh).await;
-    fallback.parked().await;
-    assert_remote_status(&mut active, ServerLinkKind::Mesh).await;
-    assert!(!supervisor.is_finished());
-    supervisor.abort();
-    let _ = supervisor.await;
 }
 
 async fn assert_remote_status(active: &mut Accepted, expected: ServerLinkKind) {
@@ -854,9 +690,9 @@ async fn assert_remote_status(active: &mut Accepted, expected: ServerLinkKind) {
         .await
         .unwrap();
     let status = tokio::time::timeout(Duration::from_secs(3), async {
-        // Each activated daemon publishes its initial census before action
-        // replies. Validate this additive event, then retain exact correlation.
-        for _ in 0..2 {
+        // Each daemon publishes its initial census before action replies.
+        // Validate that additive event, then retain exact correlation.
+        loop {
             let reply = active.receive.next(active.control.as_ref()).await.unwrap();
             assert_eq!(reply.stream_id, 0);
             match reply.frame {
@@ -880,58 +716,16 @@ async fn assert_remote_status(active: &mut Accepted, expected: ServerLinkKind) {
                 other => panic!("control action failed: {other:?}"),
             }
         }
-        panic!("control action reply missing after initial census");
     })
     .await
     .unwrap();
     assert_eq!(status.kind, expected);
 }
 
-/// A parked proof remains usable when new admission is refused; down must not redial.
+/// An admitted fallback remains usable when new handshakes are refused.
 #[tokio::test]
 async fn component_down_activates_the_warm_fallback_without_a_new_connection() {
-    use std::sync::atomic::Ordering;
-    let ca = root();
-    let server = leaf(&ca, true);
-    let roots = std::slice::from_ref(&ca.certificate);
-    let mut fallback =
-        Server::with_options(&server, roots, "127.0.0.1:0".parse().unwrap(), true, true);
-    let address = fallback.endpoint.local_addr().unwrap();
-    let mesh_address = SocketAddr::new("127.0.0.2".parse().unwrap(), address.port());
-    let mut mesh = Server::with_options(&server, roots, mesh_address, true, true);
-    let identity = RemoteIdentity {
-        identity: leaf(&ca, false),
-        roots: vec![ca.certificate.clone()],
-        endpoint: address,
-        server_name: "localhost".into(),
-        execution_uid: nix::unistd::Uid::effective().as_raw(),
-    };
-    let directory = Directory::new();
-    let registry = registry();
-    let control = registry.clone();
-    let state = directory.0.clone();
-    let supervisor = tokio::spawn(async move { run(&identity, state, None, control).await });
-    fallback.admitted().await;
-    preference(&registry, Some(mesh_address.ip())).await;
-    mesh.admitted().await;
-    fallback.parked().await;
-    // Refuse only future path proofs, preserving the parked authenticated stream.
-    fallback.proof_valid.store(false, Ordering::Relaxed);
-    let before = fallback.connection_count.load(Ordering::Relaxed);
-    preference(&registry, None).await;
-    let mut active = fallback.admitted_channel().await;
-    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
-    assert_eq!(
-        status(&registry).await.reason,
-        ServerLinkReason::MeshDisabled
-    );
-    assert_eq!(
-        fallback.connection_count.load(Ordering::Relaxed),
-        before,
-        "component down opened another fallback connection despite a healthy parked proof"
-    );
-    supervisor.abort();
-    let _ = supervisor.await;
+    component_down(false, true).await;
 }
 
 /// Credential validity can change during an outage; it must not retire the dialer.
