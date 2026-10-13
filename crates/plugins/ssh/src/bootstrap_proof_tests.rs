@@ -13,6 +13,7 @@ struct Proofs {
     fail_facts: AtomicBool,
     cleaned: AtomicBool,
     committed: AtomicBool,
+    commit_failure: tokio::sync::Notify,
 }
 impl Backend for Proofs {
     fn resolve<'a>(
@@ -79,9 +80,10 @@ impl SshSession for Commit {
             let Input::Signal(release) = input else {
                 panic!("only a commit signal is allowed");
             };
-            release
-                .await
-                .map_err(|_| Failure::install("No proof approval."))?;
+            tokio::select! {
+                approved = release => approved.map_err(|_| Failure::install("No proof approval."))?,
+                () = self.0.commit_failure.notified() => return Err(Failure::install("The commit channel stopped.")),
+            }
             self.0.committed.store(true, Ordering::SeqCst);
             Ok(CommandOutput { stdout: Vec::new() })
         })
@@ -158,4 +160,28 @@ async fn failed_published_facts_clean_only_the_private_probe_and_never_commit() 
     );
     assert!(proofs.cleaned.load(Ordering::SeqCst));
     assert!(!proofs.committed.load(Ordering::SeqCst));
+}
+
+/// A stopped commit channel cancels the sibling proof futures after the private
+/// probe has started. Cleanup must cover this exit as well as a proof refusal.
+#[tokio::test]
+#[ignore = "R189-01: unresolved independent review regression; run explicitly"]
+async fn review_stopped_commit_channel_finishes_the_private_probe() {
+    let (runner, authority, installation, proofs, host) = context();
+    let operation = runner.complete_setup(&authority, host, &installation, true);
+    tokio::pin!(operation);
+    tokio::select! {
+        result = &mut operation => panic!("proof completed before release: {result:?}"),
+        ready = tokio::time::timeout(Duration::from_secs(3), async {
+            proofs.facts_started.notified().await;
+            proofs.canary_started.notified().await;
+        }) => ready.unwrap(),
+    }
+    proofs.commit_failure.notify_one();
+    assert!(operation.await.is_err());
+    assert!(!proofs.committed.load(Ordering::SeqCst));
+    assert!(
+        proofs.cleaned.load(Ordering::SeqCst),
+        "a stopped commit channel left the registered private probe without cleanup"
+    );
 }
