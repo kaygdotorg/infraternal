@@ -29,3 +29,5 @@ Functional packet/state/rollback/recovery and namespace-only tests run on infrat
 The fast gate uses the existing documented native qualification in `docs/verification/mesh-policy-verify/gates/gate-profile.toml`, `RUST_TEST_THREADS=1`, the private short test-state root and `TRACER_TEST_PORT=4493`. `gate-cargo` records that wrapper; it disables the compiler cache after an isolated namespace compiler attempt reported unreachable networking, without stopping or changing any shared cache process. `gate-python3` routes only the required RTT self-test to the locked VM; every other Python invocation is unchanged. Both static targets and all original budgets run. No gate failure is waived.
 
 Extract `raw-samples.tar.gz` here before running `python3 analyze.py`. Original summaries and raw traces are preserved unchanged inside the archive.
+
+`verification-logs.tar.gz` retains the exact build, gate, auth-repeat, failing and passing functional logs. Generated Python bytecode is excluded. The final head gate output is also quoted on #173.
