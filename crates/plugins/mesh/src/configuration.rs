@@ -119,6 +119,8 @@ pub fn chunks(
     old: Option<&Config>,
     new: &Config,
 ) -> Result<Vec<crate::dataplane::Chunk>, &'static str> {
+    #[cfg(feature = "cutoff-measure")]
+    let _encode = crate::cutoff_measure::Stage::new(new.node, new.version, "encode_chunks");
     if old.is_some_and(|old| old.node != new.node || old.addresses != new.addresses) {
         return Err("Mesh address transition needs overlap.");
     }

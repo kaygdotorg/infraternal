@@ -481,6 +481,8 @@ impl Node {
     // Keep the apply/fence/rollback transaction and its failure ordering visible together.
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, config: Config) -> io::Result<()> {
+        #[cfg(feature = "cutoff-measure")]
+        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
         if self
             .config
             .as_ref()
@@ -507,6 +509,8 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        #[cfg(feature = "cutoff-measure")]
+        drop(validation);
         if let Some(old) = &self.config {
             let endpoints_only = old.node == config.node
                 && old.addresses == config.addresses
@@ -557,6 +561,8 @@ impl Node {
             }
         }
 
+        #[cfg(feature = "cutoff-measure")]
+        let inventory = crate::cutoff_measure::Stage::new(config.node, config.version, "inventory");
         let proposed: Vec<_> = std::iter::once(config.addresses)
             .chain(config.peers.values().map(|peer| peer.peer.addresses))
             .collect();
@@ -581,6 +587,8 @@ impl Node {
             .filter(|key| !desired.contains(key))
             .copied()
             .collect();
+        #[cfg(feature = "cutoff-measure")]
+        drop(inventory);
         if changed.is_empty()
             && retired_keys.is_empty()
             && self.config.as_ref().is_some_and(|old| {
@@ -592,12 +600,24 @@ impl Node {
             // Route validation and the actual key inventory above still run.
             // Only access changes remain: one final firewall transaction is
             // sufficient, without an intermediate table or peer/route writes.
+            #[cfg(feature = "cutoff-measure")]
+            let firewall =
+                crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             self.firewall.install_pending(&config)?;
+            #[cfg(feature = "cutoff-measure")]
+            drop(firewall);
+            #[cfg(feature = "cutoff-measure")]
+            let persistence =
+                crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
             if let Err(error) = self.save(Some(&config), true) {
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
             }
+            #[cfg(feature = "cutoff-measure")]
+            drop(persistence);
+            #[cfg(feature = "cutoff-measure")]
+            let _retire = crate::cutoff_measure::Stage::new(config.node, config.version, "retire");
             self.config = Some(config);
             self.connection_cleanup_pending = true;
             return self.finish_connection_cleanup();

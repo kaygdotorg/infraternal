@@ -20,6 +20,9 @@ pub mod configuration;
 
 pub mod access_updates;
 
+#[cfg(feature = "cutoff-measure")]
+mod cutoff_measure;
+
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod netlink;
 

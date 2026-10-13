@@ -148,11 +148,15 @@ pub async fn run(
                     let Ok(input) = serde_json::to_vec(&chunk) else {
                         return;
                     };
+                    #[cfg(feature = "cutoff-measure")]
+                    let ack = crate::cutoff_measure::Stage::new(config.node, config.version, "ack");
                     let reply = channel
                         .call("mesh.configure", input)
                         .await
                         .ok()
                         .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok());
+                    #[cfg(feature = "cutoff-measure")]
+                    drop(ack);
                     if !reply.is_some_and(|reply| {
                         !chunk.last
                             || reply["applied"] == true && reply["version"] == config.version

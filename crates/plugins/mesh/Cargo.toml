@@ -9,6 +9,8 @@ license.workspace = true
 default = ["server"]
 server = ["dep:uuid"]
 ee = []
+# Diagnostic stage logging is removable and never enabled by a shipping role.
+cutoff-measure = []
 agent = ["dep:nix", "dep:openssl", "dep:zeroize"]
 
 [dependencies]

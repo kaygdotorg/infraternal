@@ -10,6 +10,8 @@ use crate::{
 /// # Errors
 /// Returns the original encoder's resource or transition refusal.
 pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static str> {
+    #[cfg(feature = "cutoff-measure")]
+    let _encode = crate::cutoff_measure::Stage::new(new.node, new.version, "compact_encode");
     let Some(old) = old.filter(|old| {
         old.node == new.node
             && old.local_key == new.local_key
