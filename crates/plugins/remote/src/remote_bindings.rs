@@ -45,6 +45,8 @@ struct Lease {
 /// The primary socket plus leased destination sockets behind one endpoint.
 pub struct Bindings {
     primary: Arc<dyn AsyncUdpSocket>,
+    /// The primary socket is bound to one address, not a wildcard.
+    primary_bound: bool,
     leases: Mutex<Arc<Vec<Lease>>>,
     generation: AtomicU64,
     next_lease: AtomicU64,
@@ -78,8 +80,12 @@ impl Bindings {
     /// Wrap the endpoint's primary (agent address) socket.
     #[must_use]
     pub fn new(primary: Arc<dyn AsyncUdpSocket>) -> Arc<Self> {
+        let primary_bound = primary
+            .local_addr()
+            .is_ok_and(|address| !address.ip().is_unspecified());
         Arc::new(Self {
             primary,
+            primary_bound,
             leases: Mutex::default(),
             generation: AtomicU64::new(0),
             next_lease: AtomicU64::new(0),
@@ -202,6 +208,18 @@ impl AsyncUdpSocket for Bindings {
         match self.outbound(transmit) {
             // A leased socket is bound to its own address: no source override.
             Some(socket) => socket.try_send(&Transmit {
+                destination: transmit.destination,
+                ecn: transmit.ecn,
+                contents: transmit.contents,
+                segment_size: transmit.segment_size,
+                src_ip: None,
+            }),
+            // A connection accepted on a lease keeps that lease's address as
+            // Quinn's source hint for life. After it moves to the primary path
+            // (or its lease is gone) that hint names an address the primary
+            // socket is not bound to, and the kernel refuses the datagram.
+            // A specifically bound primary chooses its own source.
+            None if self.primary_bound => self.primary.try_send(&Transmit {
                 destination: transmit.destination,
                 ecn: transmit.ecn,
                 contents: transmit.contents,
@@ -391,7 +409,8 @@ mod tests {
         let _ = receive(&bindings).await;
         drop(lease);
         assert_eq!(bindings.route_count.load(Ordering::Relaxed), 0);
-        send(&bindings, meta.addr, b"reply-4", None);
+        // A connection born on the lease still hints the lease address.
+        send(&bindings, meta.addr, b"reply-4", Some(leased_address.ip()));
         let (length, from) = peer.recv_from(&mut reply).await.unwrap();
         assert_eq!((&reply[..length], from), (&b"reply-4"[..], primary));
     }
