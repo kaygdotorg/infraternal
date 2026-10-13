@@ -40,7 +40,7 @@ else:
 handle = os.pidfd_open(pid)
 try:
     signal.pidfd_send_signal(handle, signal.SIGSTOP)
-    print('paused', flush=True)
+    print(f'paused {pid}', flush=True)
     sys.stdin.readline()
 finally:
     try:

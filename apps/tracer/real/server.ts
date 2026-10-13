@@ -10,7 +10,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer as createHttpsServer } from "node:https";
 import { request as httpRequest } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
@@ -35,6 +35,8 @@ export interface Bridge {
   output: Map<number, string>;
   /** Highest acknowledged input offset by stream. */
   acked: Map<number, bigint>;
+  /** Completed real PTY replays, including automatic rebinding on the same browser socket. */
+  replays: number;
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
@@ -54,6 +56,8 @@ export interface RealServer {
   recoveredAt?: number;
   /** Restarts only the server PID, retaining its detached session shims. */
   restart(whileStopped?: () => Promise<void>): Promise<void>;
+  /** Retain existing real TLS sockets when their upstream closes; replacements remain ordinary routes. */
+  retainBrowserRoutes(): void;
   /** Pause only the selected private upstream, preserving the browser/server connection. */
   pauseUpstream(component: "daemon" | "shim", whilePaused: () => Promise<void>): Promise<void>;
   dispose(): Promise<void>;
@@ -159,11 +163,14 @@ export async function startRealServer(options: {
   if (process.env.REAL_SERVER_LOG === "1") { child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); child.stdout?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); } else child.stderr?.resume();
 
   const bridges: Bridge[] = [];
+  const retainedBrowsers = new Set<WebSocket>();
+  const activeBrowsers = new Set<WebSocket>();
   const front = new WebSocketServer({ noServer: true });
   tls.on("upgrade", (request, socket, head) => {
     front.handleUpgrade(request, socket, head, (browser) => {
+      activeBrowsers.add(browser);
       const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
-      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), detached: [], control: [], cookie: request.headers.cookie ?? "" };
+      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Bootstrap frames can contain private sign-in inputs. Only protocol sockets enter diagnostics.
       const protocol = request.url === "/v1/ws";
       if (protocol) bridges.push(bridge);
@@ -189,15 +196,17 @@ export async function startRealServer(options: {
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
+          if (f.type === "Event" && stream !== 0 && f.eventJson.byteLength <= 1024
+            && JSON.parse(text.decode(f.eventJson)).type === "terminal.replay_complete") bridge.replays++;
           if (f.type === "Close") bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof (f as { reason?: unknown }).reason === "string" ? (f as { reason: string }).reason : JSON.stringify((f as { reason?: unknown }).reason)}`;
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
         later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
       });
       const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
-      upstream.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy = `server ${code}`; browser.close(); });
-      upstream.on("error", () => browser.close());
-      browser.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
+      upstream.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy = `server ${code}`; if (!retainedBrowsers.has(browser)) browser.close(); });
+      upstream.on("error", () => { if (!retainedBrowsers.has(browser)) browser.close(); });
+      browser.on("close", (code) => { activeBrowsers.delete(browser); retainedBrowsers.delete(browser); eraseQueue(); bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
     });
   });
 
@@ -215,6 +224,7 @@ export async function startRealServer(options: {
 
   const fixture: RealServer = {
     origin, backend, bridges, token: token.trim(), binary, dataDir: state, get pid() { return child.pid!; },
+    retainBrowserRoutes() { for (const browser of activeBrowsers) retainedBrowsers.add(browser); },
     async restart(whileStopped) {
       await stop();
       await whileStopped?.();
@@ -251,14 +261,33 @@ export async function startRealServer(options: {
       // This helper opens a pidfd, never signals a reused PID and resumes on stdin EOF.
       const ready = once(pause.stdout, "data");
       pause.stderr.resume();
+      let watchReplacement = true;
+      let replacement: Promise<void> | undefined;
       try {
         const status = await Promise.race([ready.then(([bytes]) => String(bytes).trim()), exited.then(() => "ended")]);
-        if (status !== "paused") throw new Error("private upstream pause failed");
+        if (!/^paused [1-9][0-9]*$/.test(status)) throw new Error("private upstream pause failed");
+        const pausedPid = Number(status.split(" ")[1]);
+        if (component === "daemon" && process.env.RESTART_MEASURE === "1") replacement = (async () => {
+          // The server replaces a stalled daemon without waiting for SIGCONT. Observe its own
+          // child before it becomes ready, rather than subtracting an artificially late resume.
+          while (watchReplacement) {
+            const candidateAt = performance.timeOrigin + performance.now();
+            const tasks = await readdir(`/proc/${serverPid}/task`);
+            const children = await Promise.all(tasks.map((task) => readFile(`/proc/${serverPid}/task/${task}/children`, "utf8").catch(() => "")));
+            if (children.some((ids) => ids.trim().split(/\s+/).some((pid) => Number(pid) > 0 && Number(pid) !== pausedPid))) {
+              fixture.recoveredAt = candidateAt;
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        })();
         await whilePaused();
-        fixture.recoveredAt = performance.timeOrigin + performance.now();
+        fixture.recoveredAt ??= performance.timeOrigin + performance.now();
       } finally {
+        watchReplacement = false;
         pause.stdin.end("resume\n");
         await exited;
+        await replacement;
       }
     },
     async dispose() {
