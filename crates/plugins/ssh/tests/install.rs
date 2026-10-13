@@ -2592,3 +2592,58 @@ async fn streamed_digest_refuses_a_short_file_or_a_changed_stream_before_launch(
         transaction.rollback().await.unwrap();
     }
 }
+
+#[test]
+fn optional_session_payload_is_architecture_scoped_and_refuses_symlinks() {
+    use infraternal_plugin_ssh::{install::BinaryPaths, probe::Architecture};
+    let f = Fixture::new();
+    let paths = BinaryPaths {
+        x86_64: f.binary.clone(),
+        aarch64: f.root.join("arm"),
+    };
+    assert_eq!(
+        paths.session_payload(Architecture::X86_64).unwrap(),
+        f.binary
+    );
+    let x86 = f.root.join("infraternal-x86_64-session-musl");
+    std::fs::write(&x86, b"trusted release fixture").unwrap();
+    assert_eq!(paths.session_payload(Architecture::X86_64).unwrap(), x86);
+    assert_eq!(
+        paths.session_payload(Architecture::Aarch64).unwrap(),
+        paths.aarch64
+    );
+    let arm = f.root.join("infraternal-aarch64-session-musl");
+    std::os::unix::fs::symlink(&f.binary, &arm).unwrap();
+    assert!(paths.session_payload(Architecture::Aarch64).is_err());
+    std::fs::remove_file(&x86).unwrap();
+    std::fs::create_dir(&x86).unwrap();
+    assert!(paths.session_payload(Architecture::X86_64).is_err());
+}
+
+#[tokio::test]
+async fn full_payload_restaging_preserves_the_running_session_build() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    let starter = f.root.join("session-build");
+    executable(
+        &starter,
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = __ssh-session ] || exit 1\nprintf 'SESSION {id}\\n'\nexec cat\n"
+        ),
+    );
+    let transaction = f.transaction();
+    let (session, channel) = transaction.stage_session(&starter).await.unwrap();
+    assert_eq!(session, id);
+    channel.write(b"before full upload\n").await.unwrap();
+    assert_eq!(channel.line(64).await.unwrap(), b"before full upload\n");
+    transaction.restart_setup(&f.binary, &f.join).await.unwrap();
+    assert_eq!(
+        std::fs::read(f.base().join("bin/live")).unwrap(),
+        std::fs::read(&f.binary).unwrap()
+    );
+    channel.write(b"after full upload\n").await.unwrap();
+    assert_eq!(channel.line(64).await.unwrap(), b"after full upload\n");
+    transaction.commit().await.unwrap();
+    channel.write(b"after commit\n").await.unwrap();
+    assert_eq!(channel.line(64).await.unwrap(), b"after commit\n");
+}
