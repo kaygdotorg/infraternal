@@ -1,8 +1,0 @@
-load=18.99 20.44 21.97 6/3145 936437
-Running as unit: run-p936438-i51219987.scope; invocation ID: 6070ffb920544e98a78d328396120505
-
-running 1 test
-test restart_preserves_operator_gateway_host_route ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
-

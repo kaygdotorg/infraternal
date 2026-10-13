@@ -1,7 +1,0 @@
-Running as unit: run-p4124407-i4124707.scope; invocation ID: 84483768ad35471bb242c4629408aca1
-
-running 1 test
-test refused_journal_retirement_keeps_stopping_until_explicit_retry ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.58s
-

@@ -1,9 +1,0 @@
-LOAD_START 52.73 54.72 49.98 30/1575 2901790
-Running as unit: run-p2901791-i2902091.scope; invocation ID: 5f0884f3c60c4ee1b52ee583599b827b
-
-running 1 test
-test firewall::tests::initial_apply_without_adoption_refuses_a_foreign_table ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.07s
-
-LOAD_END 52.73 54.72 49.98 31/1572 2901851

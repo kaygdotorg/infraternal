@@ -1,1 +1,0 @@
-After all owned verification processes exited: removed detached dev baseline through git worktree remove; removed only /home/kayg/.cache/codex-scratch/audit-ca-update (build targets, public signer snapshot and temporary bodies). Evidence preserved in this worktree. No other job cache or production files touched.

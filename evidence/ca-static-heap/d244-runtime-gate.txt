@@ -1,6 +1,0 @@
-key memory: x86_64-unknown-linux-musl; memlock=8388608 bytes
-Command
-  State   ready
-  Detail  Key memory initialization=1; locked pages and dump exclusion enabled
-  Next    Run this check under an 8 MiB memlock limit.
-key memory: aarch64-unknown-linux-musl runtime not checked (host x86_64; native execution required)

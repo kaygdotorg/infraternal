@@ -1,7 +1,0 @@
-Running as unit: run-p588768-i46680815.scope; invocation ID: 8bf2c5c6dd8940a7abe0027ae544e1c9
-
-running 1 test
-test bounded_owned_exit_reconnects_as_ended_with_status ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
-

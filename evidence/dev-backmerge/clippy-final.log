@@ -1,5 +1,0 @@
-    Blocking waiting for file lock on build directory
-    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-server)
-    Checking infraternal-fuzz v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/fuzz)
-    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10m 00s

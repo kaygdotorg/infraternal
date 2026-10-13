@@ -1,3 +1,0 @@
-/home/kayg/.cache/codex-scratch/addhost-round3/arm-target/aarch64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
-PT_INTERP: absent; size: 17943200 bytes (baseline 13555672 + allowance 262144 = max 13817816)
-binary exceeds the 13817816-byte size budget: 17943200 bytes

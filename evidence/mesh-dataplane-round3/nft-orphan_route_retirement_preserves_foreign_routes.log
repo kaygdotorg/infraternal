@@ -1,8 +1,0 @@
-load=19.85 28.23 33.01 20/3141 3797046
-Running as unit: run-p3797047-i49887076.scope; invocation ID: 5b18f3bf78984204aabe50a311d9b9b7
-
-running 1 test
-test orphan_route_retirement_preserves_foreign_routes ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
-

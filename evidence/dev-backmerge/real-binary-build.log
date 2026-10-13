@@ -1,4 +1,0 @@
-Running as unit: run-p3318087-i49408145.scope; invocation ID: 27165607cb534ec58358183c256c9092
-   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-server)
-   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.65s

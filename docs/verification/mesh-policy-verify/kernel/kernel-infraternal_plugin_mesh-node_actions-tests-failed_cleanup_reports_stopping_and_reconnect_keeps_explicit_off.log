@@ -1,7 +1,0 @@
-Running as unit: run-p4112527-i4112827.scope; invocation ID: a29b1fb139f04faf8ba1351b5bc4e044
-
-running 1 test
-test node_actions::tests::failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.59s
-

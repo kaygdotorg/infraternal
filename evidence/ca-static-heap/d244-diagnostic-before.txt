@@ -1,7 +1,0 @@
-Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
-Running as unit: run-p66692-i8454327.scope; invocation ID: 84dad69c252f48069878ae561ac8e509
-    Blocking waiting for file lock on build directory
-   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
-    Finished `release` profile [optimized] target(s) in 9m 35s
-{"action":"internal.key-memory-check","message":"Key memory refused","next":"Check the compiled provider and memlock limit.","state":"refused"}
-disabled_provider_diagnostic_exit=1

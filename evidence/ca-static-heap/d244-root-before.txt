@@ -1,3 +1,0 @@
-{"action":"server.serve","message":"Preparing the configured server","next":"Check the configured listener and retained public trust.","state":"starting"}
-{"action":"server.serve","message":"OpenSSL secure heap could not be locked and excluded from dumps; check the server memlock limit","next":"Check configuration and retained public server trust.","state":"refused"}
-root_baseline_exit=1

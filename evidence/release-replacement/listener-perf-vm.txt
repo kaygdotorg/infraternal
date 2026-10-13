@@ -1,8 +1,0 @@
-# Perf-VM same-PID self-replacement comparison; raw harness output follows.
-# Baseline source 22aeb7b2d8ed331f21564523b2fe633d4810e31e; SHA256 53415d308ee2bde2683d50a725e354f4814456bb10cc6ba88c2479f74392b7a8.
-# Round-4 image code from b63b05f5599801fc4820d766a2511354e1c13c0c; SHA256 9ce861fe7114340d4c03018bec2b3e8aa1744a8aab5536d791016be402b6c19b.
-# Run under flock /var/lock/perf-bench.lock on infraternal-perf-test (4 vCPU).
-{"machine": "infraternal-perf-test", "cores": 4, "load_start": [0.02001953125, 0.04345703125, 0.00634765625]}
-{"binary": "before/infraternal", "samples": 25, "gap_p50_ms": 9.105080011067912, "gap_max_ms": 17.465835000621155, "total_p50_ms": 10.281031994963996, "total_max_ms": 17.910968002979644, "refusal_samples": 176, "sampling_interval_ms": 1, "same_pid": true, "users": 50, "retained_hosts": 10000, "live_ptys": 0, "load_end": [0.02001953125, 0.04345703125, 0.00634765625]}
-{"machine": "infraternal-perf-test", "cores": 4, "load_start": [0.02001953125, 0.04345703125, 0.00634765625]}
-{"binary": "after/infraternal", "samples": 25, "gap_p50_ms": 10.692871001083404, "gap_max_ms": 14.592888008337468, "total_p50_ms": 50.20351900020614, "total_max_ms": 83.46792600059416, "refusal_samples": 200, "sampling_interval_ms": 1, "same_pid": true, "users": 50, "retained_hosts": 10000, "live_ptys": 0, "load_end": [0.02001953125, 0.04345703125, 0.00634765625]}

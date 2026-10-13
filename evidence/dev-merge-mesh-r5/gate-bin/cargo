@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Preserve the previously documented native gate qualification; release profiles stay unchanged.
-set -euo pipefail
-root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-exec /home/kayg/.nix-profile/bin/cargo --config "$root/gate-profile.toml" "$@"

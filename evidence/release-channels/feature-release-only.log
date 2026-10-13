@@ -1,4 +1,0 @@
-   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal-server)
-    Checking infraternal-plugin-release v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/plugins/release)
-   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/release-pipeline/crates/infraternal)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.25s

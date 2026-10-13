@@ -1,7 +1,0 @@
-Running as unit: run-p4112366-i4112666.scope; invocation ID: cbc8ce8d5fdf4ca4bc3e524704f3929d
-
-running 1 test
-test node::tests::externally_removed_interface_does_not_block_down ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.36s
-

@@ -1,4 +1,0 @@
-old Peer bytes=128 binary=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shared-writer-old-pty-test
-new Peer bytes=128 binary=/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2/shared-writer-new-shim-test
-Method: readelf --debug-dump=info, streamed structure name and byte size only; no process memory or credentials inspected. Old native real-shim red artifact versus new native shim unit artifact, both same Rust1.99 debug profile. These are type allocation sizes, not allocator-inclusive RSS.
-Immutable executable copies were saved before the green shipping rebuild; hashes in shared-writer-layout-artifact-hashes.txt.32 maximum peer objects/session x128B =4096B unchanged; excludes Vec storage, socket kernel memory and allocator overhead.

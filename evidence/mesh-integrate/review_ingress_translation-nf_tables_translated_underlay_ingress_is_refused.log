@@ -1,9 +1,0 @@
-LOAD_START 35.76 48.65 48.27 45/1645 2947829
-Running as unit: run-p2947830-i2948130.scope; invocation ID: fd62682f66dc4f3cbdea8695bee81ef9
-
-running 1 test
-test nf_tables_translated_underlay_ingress_is_refused ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.71s
-
-LOAD_END 35.76 48.65 48.27 45/1637 2948853

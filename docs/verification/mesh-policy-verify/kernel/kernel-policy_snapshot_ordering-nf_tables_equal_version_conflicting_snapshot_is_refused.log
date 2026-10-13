@@ -1,7 +1,0 @@
-Running as unit: run-p4099394-i4099694.scope; invocation ID: a915c787b92a40d5867fd1543cc49bd7
-
-running 1 test
-test nf_tables_equal_version_conflicting_snapshot_is_refused ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.51s
-

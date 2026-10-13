@@ -1,7 +1,0 @@
-Running as unit: run-p7930-i4202001.scope; invocation ID: d37b7b8c74834f97b254da2e2a216d54
-{"test": "unbound_identity_refused", "expected": true, "actual": false, "result": "FAIL"}
-{"test": "unbound_identity_not_permitted_ipv4", "expected": false, "actual": true, "result": "FAIL"}
-{"test": "unbound_identity_not_permitted_ipv6", "expected": false, "actual": true, "result": "FAIL"}
-{"test": "explicit_grant_permitted_ipv4", "expected": true, "actual": true, "result": "PASS"}
-{"test": "explicit_grant_permitted_ipv6", "expected": true, "actual": true, "result": "PASS"}
-{"backend": "nft", "checks": 5, "failures": 3, "machine": "infraternal-dev", "load": "68.41 65.05 54.76 57/1687 8478"}

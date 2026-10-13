@@ -1,8 +1,0 @@
-load=26.73 15.08 6.91 25/1474 96747
-Running as unit: run-p96748-i97048.scope; invocation ID: 5d9b5907210847f78b76dd9e43bdcbc0
-
-running 1 test
-test restart_preserves_operator_gateway_host_route ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.61s
-

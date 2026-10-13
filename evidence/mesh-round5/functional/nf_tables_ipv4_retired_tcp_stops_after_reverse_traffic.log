@@ -1,8 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.31s
-     Running tests/review_reverse_recreation.rs (/home/kayg/.cache/codex-scratch/mesh-policy-verify-r5/target/debug/deps/review_reverse_recreation-6414ba2cc8190679)
-
-running 1 test
-test nf_tables_ipv4_retired_tcp_stops_after_reverse_traffic ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 6.64s
-

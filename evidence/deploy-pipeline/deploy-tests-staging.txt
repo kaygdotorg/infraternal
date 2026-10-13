@@ -1,7 +1,0 @@
-.....Release build failed for aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; gate log retained
-.Build deferred: host capacity limit reached
-.........
-----------------------------------------------------------------------
-Ran 15 tests in 1.014s
-
-OK

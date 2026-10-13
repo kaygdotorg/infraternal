@@ -1,2 +1,0 @@
-Running as unit: run-p2095827-i6289728.scope; invocation ID: a1b6eca94d4d4204b6025794c6711897
-$ bun x tsc --project tsconfig.json

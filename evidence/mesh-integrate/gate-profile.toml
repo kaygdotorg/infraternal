@@ -1,7 +1,0 @@
-# Optimize project runtime code for the workspace RSS proof; leave dependency profiles unchanged.
-[profile.dev.package.infraternal]
-opt-level = 1
-[profile.dev.package.infraternal-agent]
-opt-level = 1
-[profile.dev.package.infraternal-plugin-api]
-opt-level = 1

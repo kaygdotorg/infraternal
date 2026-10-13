@@ -1,9 +1,0 @@
-machine infraternal-perf-test cores 4 load 0.03 0.01 0.00 1/219 219882
-baseline n=101 p50_ms=22.935 p99_ms=28.408
-combined n=101 p50_ms=27.431 p99_ms=32.940
-paired_delta n=101 p50_ms=4.438 max_ms=10.366 additional_ssh_roundtrips=0
-stale n=31 p50_ms=74.745 p99_ms=89.545 additional_ssh_roundtrips=0
-clear_check_increment_at_1600_hosts_serial_ms=7100.142 global_concurrent_hosts=8
-setup_lease rss_kib=1908 global_concurrent_hosts=8 scale_rss_kib=15264 deadline_seconds=180 periodic_work=none
-live_lease_refusal=PASS lease_retirement=PASS
-final_load 0.18 0.04 0.01 1/220 222475

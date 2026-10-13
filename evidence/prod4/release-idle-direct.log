@@ -1,8 +1,0 @@
-Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
-Running as unit: run-p574764-i8962363.scope; invocation ID: 36f48a704a434992b71f499419e942ef
-37.43 46.68 51.04 27/1992 574877
-event_idle label='empty infraternal agent' sessions=0 slices=0 seconds=2.201 rss_kib=4636
-event_idle label='unattached adopted shim' sessions=1 slices=0 seconds=2.201 rss_kib=5028
-event_idle label='all watched shims exited' sessions=0 slices=0 seconds=2.201 rss_kib=5164
-event_exit_latency source=real-daemon-leg-B-census signal=SIGKILL attached=false samples=100 p50_us=1836 p99_us=27383 max_us=68831 budget_us=400000 machine=infraternal-dev arch=x86_64 cores=12 load=['36.57', '45.91', '50.70']
-36.57 45.91 50.70 36/1890 578568

@@ -1,7 +1,0 @@
-Running as unit: run-p8498-i4202569.scope; invocation ID: 7004de09f94647d282581d0589a60898
-{"test": "unbound_identity_refused", "expected": true, "actual": false, "result": "FAIL"}
-{"test": "unbound_identity_not_permitted_ipv4", "expected": false, "actual": true, "result": "FAIL"}
-{"test": "unbound_identity_not_permitted_ipv6", "expected": false, "actual": true, "result": "FAIL"}
-{"test": "explicit_grant_permitted_ipv4", "expected": true, "actual": true, "result": "PASS"}
-{"test": "explicit_grant_permitted_ipv6", "expected": true, "actual": true, "result": "PASS"}
-{"backend": "nf_tables", "checks": 5, "failures": 3, "machine": "infraternal-dev", "load": "68.21 65.07 54.82 59/1655 9470"}

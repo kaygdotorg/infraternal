@@ -1,8 +1,0 @@
-load=17.95 20.20 21.88 8/3117 936733
-Running as unit: run-p936734-i51220283.scope; invocation ID: e1a20d507090473084fe50768b625942
-
-running 1 test
-test restart_retires_orphan_peer_host_routes ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
-

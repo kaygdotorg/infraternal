@@ -1,8 +1,0 @@
-# Records the successful isolated rerun after the existing concurrent recovery SQLite test failed, #154.
-Running as unit: run-p1416552-i39125064.scope; invocation ID: d095a4d39b464ef28867fe3b6167495d
-
-running 1 test
-test auth::tests::reviewer_tests::reviewer_disk_restart_and_concurrent_resume ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 304 filtered out; finished in 3.10s
-

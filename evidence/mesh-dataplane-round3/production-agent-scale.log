@@ -1,3 +1,0 @@
-load_before=34.84 29.58 29.88 51/1701 373936
-Running as unit: run-p373937-i374237.scope; invocation ID: 769c32f27c5342ffacde82ef1b246729
-{"apply_us_including_fsync": 262613, "chunks": 32, "down_us": 42516194, "idle_ticks_10s_off": 0, "idle_ticks_10s_on": 0, "load": "34.16 31.33 30.50 24/1716 390845", "one_endpoint_us_including_fsync": 22848, "peer_count": 1000, "public_cli": "pass", "rss_bytes_at_1000_nodes": 8781824000, "rss_bytes_off": 8372224, "rss_bytes_on": 8781824}

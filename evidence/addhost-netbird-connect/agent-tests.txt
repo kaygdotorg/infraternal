@@ -1,5 +1,0 @@
-    Blocking waiting for file lock on build directory
-error: failed to create directory `/home/kayg/.cache/codex-scratch/n195/target/debug/.fingerprint/infraternal-agent-81ad30b89970ab02`
-
-Caused by:
-  No space left on device (os error 28)

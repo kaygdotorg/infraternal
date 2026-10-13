@@ -1,7 +1,0 @@
-Running as unit: run-p4101905-i4102205.scope; invocation ID: 39fe531d027745c1b7a8e7341b1c0fae
-
-running 1 test
-test nft_node_local_mesh_delivery_remains_available ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.42s
-

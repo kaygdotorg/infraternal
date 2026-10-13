@@ -1,9 +1,0 @@
-   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/crates/plugins/mesh)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.08s
-     Running tests/canonical_host_binding.rs (/home/kayg/.cache/codex-scratch/mpv3-173/target/debug/deps/canonical_host_binding-8ea8ac1f81e3638f)
-
-running 1 test
-test enrollment_requires_canonical_host_uuid_spelling ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
-

@@ -1,3 +1,0 @@
-/home/kayg/.cache/codex-scratch/prod4/artifacts/base: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
-size_bytes=20093776
-f5fcda1a36f2270e458a1598a35d444f542a826b6d49fc88f0f876497b25fed1  /home/kayg/.cache/codex-scratch/prod4/artifacts/base

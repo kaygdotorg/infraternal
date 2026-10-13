@@ -1,5 +1,0 @@
-   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/.cache/codex-scratch/mesh-access-round4/baseline/crates/plugins/mesh)
-   Compiling infraternal-agent v0.1.0 (/home/kayg/.cache/codex-scratch/mesh-access-round4/baseline/crates/infraternal-agent)
-   Compiling infraternal-server v0.1.0 (/home/kayg/.cache/codex-scratch/mesh-access-round4/baseline/crates/infraternal-server)
-   Compiling infraternal v0.1.0 (/home/kayg/.cache/codex-scratch/mesh-access-round4/baseline/crates/infraternal)
-    Finished `release` profile [optimized] target(s) in 12m 25s

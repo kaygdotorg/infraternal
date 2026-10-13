@@ -1,9 +1,0 @@
-Actual scripts/release/build --channel edge; no publish/sign request.
-VERSION=edge-20261011T094255Z
---version=infraternal edge-20261011T094255Z (edge)
-
-VERSION: 22 bytes sha256=bfac3e71a47a94be1582fa7c5c14d543bab4b12ac7b8b4c269c2b90e885ca14a
-infraternal: 20295232 bytes sha256=8a1618c4ae25bc8b84663fefc2d015a419bd9a68a9550d94146c45c155d0b4ff
-infraternal-x86_64-musl: 20295232 bytes sha256=8a1618c4ae25bc8b84663fefc2d015a419bd9a68a9550d94146c45c155d0b4ff
-infraternal-aarch64-musl: 18073800 bytes sha256=840f1dd99a28a0f862f34ee454dec664ee9a8626c9b56246b7970cc17aed8309
-Both architecture payloads contain the same version stamp and have no PT_INTERP. Executed x86_64 --version and edge CLI workflow; aarch64 inspected, not executed. The edge CLI workflow confirms default settings remain stable.

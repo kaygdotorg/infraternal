@@ -1,8 +1,0 @@
-
-running 1 test
-METRIC failure_bytes=120 retained_events=1024 failure_storage_bytes=122880
-test bootstrap_status_mapping_covers_each_step_and_approved_mode ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.01s
-
-Running as unit: run-p456945-i4650919.scope; invocation ID: ad6f586f075c41809f13d85b35aec82f

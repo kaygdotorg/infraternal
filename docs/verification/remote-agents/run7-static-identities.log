@@ -1,7 +1,0 @@
-# Canonical measured full-feature executable identities and static checks for #78.
-target=x86_64-unknown-linux-musl bytes=18982128 sha256=9197abe38e5f16a7e8e34e4c37daf177ff8d959529305451c3382c802e982ccb
-ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
-PT_INTERP: absent
-target=aarch64-unknown-linux-musl bytes=15934232 sha256=e1669f13f7a7b99ee41c6f7efac9916fdee2f23f332cf131a97272447d806645
-ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
-PT_INTERP: absent

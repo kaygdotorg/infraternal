@@ -1,3 +1,4 @@
+# Repository ignore rules keep local build output and review artifacts out of Git.
 node_modules/
 target/
 .svelte-kit/
@@ -6,4 +7,7 @@ dist/
 .wrangler/
 .env*
 !.env.example
-*.log
+
+# Evidence and captures stay in job scratch and are attached to their issue.
+evidence/
+captures/

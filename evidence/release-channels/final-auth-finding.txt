@@ -1,3 +1,0 @@
-Third fullfast: terminal/shim pass; server284 pass,1 fail,35 ignored. Sole failure reviewer_disk_restart_and_concurrent_resume at auth/reviewer_tests.rs:67, recovery_start_clock returns SQLite database is locked (code5). No auth/test source changed. Preserve final-auth-partial-fast.log and compare isolated detacheddev test, then full retry. No lock timeout/assertion changes or waiver. Machine=infraternal-dev; load=20.52 24.62 26.23 22/3021 2428490
-
-crates/infraternal-server/src/auth/reviewer_tests.rs current=74a67478789a3246194e9a70baa00a3a077b2adc1e429b9c136130c3a12a9d92 dev=74a67478789a3246194e9a70baa00a3a077b2adc1e429b9c136130c3a12a9d92

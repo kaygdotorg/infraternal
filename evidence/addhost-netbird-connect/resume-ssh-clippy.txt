@@ -1,3 +1,0 @@
-    Blocking waiting for file lock on build directory
-    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/ssh)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.37s

@@ -1,8 +1,0 @@
-Running as unit: run-p4102223-i4102523.scope; invocation ID: 3cc7cbe43feb47debdc704e8d6aa3ee0
-
-running 1 test
-test bulk_retirement_preserves_identity_and_routes_at_1000_peers ... METRIC bulk_peer_retirement machine=infraternal-dev peers=1000 clear_us=166644 load=58.88 55.27 45.34 61/1579 4102735
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.96s
-

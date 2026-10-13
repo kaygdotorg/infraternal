@@ -1,7 +1,0 @@
-D215 #129 shim follow-up review checks, branch mesh-agent-transport, head cf64f1d2 (production changes remain uncommitted).
-
-Corrected the shared-input deferral implementation after independent review. Ordinary State/Resize/ReadFrom and fresh shared-writer negotiation continue while another writer waits for queue capacity. Fresh legacy input cannot consume reserved capacity. Completing a deferred frame releases its ticket; fresh trailing input gets a new ticket behind existing waiters.
-
-Behavioral red -> green: legacy control progress 5.65 s -> 2.75 s; fresh shared negotiation 5.33 s -> 0.38 s; two-peer FIFO regression failed with no renewed ticket, then passed. Exact production shim component PTY suite: 18 passed, 0 failed, 19.80 s. Sequenced-input checks: 7 passed, 0 failed. Strict shim Clippy passed in 2.52 s. Evidence: shim-legacy-final-all-pty-green.log, shim-legacy-final-provenance.json, and shim-deferral/snapshot.json in the owned scratch directory. A subsequent capability doc clarification changes comments only; isolated per-commit gates are pending.
-
-Independent re-review found no remaining confirmed shim or cancellation-safe RemoteLink blocker. This is functional evidence, not default shipping CLI or latency acceptance. Server ownership checks, atomic checkpoint gates, actual namespace 0/150/300 ms measurements and final fast gate remain pending.

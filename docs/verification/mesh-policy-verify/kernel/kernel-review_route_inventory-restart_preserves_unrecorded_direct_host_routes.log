@@ -1,7 +1,0 @@
-Running as unit: run-p4122928-i4123228.scope; invocation ID: 3c6e5a477ab3494086020ddc5699b054
-
-running 1 test
-test restart_preserves_unrecorded_direct_host_routes ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.96s
-

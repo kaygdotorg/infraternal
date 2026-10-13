@@ -1,2 +1,0 @@
-Running as unit: run-p596828-i8984427.scope; invocation ID: aeab6b6ac37046708b60d48ea0747e10
-permission denied while trying to connect to the docker API at unix:///var/run/docker.sock

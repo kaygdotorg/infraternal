@@ -1,2 +1,0 @@
-x86_64-unknown-linux-musl: 19976240 bytes; delta vs 1da30787 +1344; stripped/static; PT_INTERP absent
-aarch64-unknown-linux-musl: 17798168 bytes; delta vs 1da30787 +1344; stripped/static; PT_INTERP absent

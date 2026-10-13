@@ -1,4 +1,0 @@
-recipe=locked default release x86_64-unknown-linux-musl
-bytes=20153072
-/home/kayg/.cache/codex-scratch/ended-sessions-round3/head-static: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
-PT_INTERP=absent

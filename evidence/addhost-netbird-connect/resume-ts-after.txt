@@ -1,1 +1,0 @@
-$ bun x tsc --project tsconfig.json

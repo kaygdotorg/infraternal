@@ -1,9 +1,0 @@
-Running as unit: run-p1919901-i6113836.scope; invocation ID: d629c7ee66914551bb212884a099e1e6
-
-running 3 tests
-test release_verify::tests::verification_twenty_megabytes_fifty_runs ... ignored, run release-profile measurements in a weighted scope
-test release_verify::tests::trust_namespace_hash_trailing_data_and_manifest_ambiguity_are_refused ... ok
-test release_verify::tests::openssh_signatures_preserve_descriptor_and_reject_every_byte_mutation ... ok
-
-test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 346 filtered out; finished in 0.35s
-

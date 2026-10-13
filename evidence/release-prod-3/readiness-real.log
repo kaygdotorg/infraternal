@@ -1,7 +1,0 @@
-machine=infraternal-dev cores=12 load=75.76 63.27 54.91
-READINESS startup=tmux real_pty=true marker=true rc_executed=false elapsed_ms=2529.9
-READINESS startup=zellij real_pty=true marker=true rc_executed=false elapsed_ms=1342.2
-READINESS startup=menu real_pty=true marker=true rc_executed=false elapsed_ms=1238.2
-READINESS startup=bash real_pty=true marker=true rc_executed=false elapsed_ms=1382.0
-CLEANUP abandoned=False real_pty=true scope_active=false artifacts=0 elapsed_ms=358.4
-CLEANUP abandoned=True real_pty=true scope_active=false artifacts=0 elapsed_ms=9901.2

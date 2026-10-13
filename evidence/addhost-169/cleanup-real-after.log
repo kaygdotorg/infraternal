@@ -1,7 +1,0 @@
-Running as unit: run-p449634-i449934.scope; invocation ID: 4eccf057fe5e4a07b8e57ce70dd8a4ba
-READINESS startup=tmux real_pty=true marker=true rc_executed=false elapsed_ms=1281.2
-READINESS startup=zellij real_pty=true marker=true rc_executed=false elapsed_ms=1246.8
-READINESS startup=menu real_pty=true marker=true rc_executed=false elapsed_ms=1258.4
-READINESS startup=bash real_pty=true marker=true rc_executed=false elapsed_ms=1202.5
-CLEANUP abandoned=False real_pty=true scope_active=false artifacts=0 elapsed_ms=343.3
-CLEANUP abandoned=True real_pty=true scope_active=false artifacts=0 elapsed_ms=9913.6

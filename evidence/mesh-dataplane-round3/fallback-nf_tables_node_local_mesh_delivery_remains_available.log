@@ -1,8 +1,0 @@
-load=27.02 21.22 20.34 31/3448 4075181
-Running as unit: run-p4075182-i50165125.scope; invocation ID: 1661f71da3dd45f6a59ae36eb26f2ff2
-
-running 1 test
-test nf_tables_node_local_mesh_delivery_remains_available ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.29s
-

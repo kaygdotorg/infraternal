@@ -1,1 +1,0 @@
-packages/protocol/src/mesh.test.ts(173,5): error TS2353: Object literal may only specify known properties, and 'host_id' does not exist in type '{ name: string; public_key: readonly number[]; }'.

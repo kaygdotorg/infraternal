@@ -1,8 +1,0 @@
-Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
-Running as unit: run-p295946-i8683548.scope; invocation ID: 3561631823cf4fa18d7c478d2701ad40
-41.95 44.88 52.41 24/2039 295970
-event_idle label='empty infraternal agent' sessions=0 slices=0 seconds=2.201 rss_kib=4636
-event_idle label='unattached adopted shim' sessions=1 slices=0 seconds=2.204 rss_kib=5024
-event_idle label='all watched shims exited' sessions=0 slices=0 seconds=2.201 rss_kib=5160
-event_exit_latency source=real-daemon-leg-B-census signal=SIGKILL attached=false samples=100 p50_us=158080 p99_us=202253 max_us=211845 budget_us=400000 machine=infraternal-dev arch=x86_64 cores=12 load=['44.76', '44.40', '51.58']
-    Blocking waiting for file lock on build directory

@@ -1,9 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
-     Running tests/review_authorized_reenrollment.rs (/home/kayg/.cache/codex-scratch/mesh-access-round4/target/debug/deps/review_authorized_reenrollment-05e1f397d59f0e1c)
-
-running 2 tests
-test nf_tables_authorized_reenrollment_reaches_the_live_node ... ok
-test nft_authorized_reenrollment_reaches_the_live_node ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.84s
-

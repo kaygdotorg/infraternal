@@ -1,2 +1,0 @@
-# Retain reviewed measurement logs despite the repository transient-log exclusion.
-!*.log
