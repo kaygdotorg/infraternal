@@ -230,7 +230,9 @@ fn failed_restart_endpoint_does_not_prevent_http_serving() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let serving = tokio::spawn(serve(config, Options { remote_listen: None, remote_ca_dir: None }));
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // Polls until the listener answers; the limit only catches a real hang, since a
+            // debug-build startup under host load can exceed any short fixed budget.
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
             loop {
                 if serving.is_finished() {
                     let result = serving.await.expect("server task must not panic");

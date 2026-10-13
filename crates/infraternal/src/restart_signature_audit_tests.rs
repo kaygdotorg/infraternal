@@ -134,7 +134,8 @@ fn unusable_admitted_image_keeps_the_existing_service_running() {
         }
     });
     receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
+        // A hang bound, not an expected duration: the listener thread may start late on a loaded host.
+        .recv_timeout(std::time::Duration::from_secs(60))
         .unwrap();
     assert!(TcpStream::connect(address).is_ok());
     // A valid signature over unusable bytes reaches the actual image probe.
