@@ -203,6 +203,11 @@ impl WebSocketState {
         self
     }
 
+    #[cfg(feature = "ssh")]
+    pub(crate) fn session_notifications(&self) -> watch::Sender<u64> {
+        self.session_changes.clone()
+    }
+
     /// Wake authenticated session-list subscribers after the local host changes its live set.
     fn sessions_changed(&self) {
         self.session_changes

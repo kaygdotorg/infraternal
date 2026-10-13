@@ -97,6 +97,14 @@ impl InvitationIssuer {
     ) -> Result<JoinInvitation, StatusCode> {
         issue_invitation(self.0.clone(), cookie, request, Some((address, lookup))).await
     }
+    /// Same authority path as initial issue, retaining existing destination metadata.
+    pub(crate) async fn reissue(
+        &self,
+        cookie: &str,
+        request: InvitationRequest,
+    ) -> Result<JoinInvitation, StatusCode> {
+        issue_invitation(self.0.clone(), cookie, request, None).await
+    }
     pub(crate) fn ready(&self) -> bool {
         self.0.source.load().is_ok()
     }

@@ -143,6 +143,7 @@ pub(crate) fn default_runner(
             issuer,
             hosts,
             attempts: std::sync::Mutex::default(),
+            sessions_changed: std::sync::Mutex::default(),
         })
     } else {
         Arc::new(base)

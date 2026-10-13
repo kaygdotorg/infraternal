@@ -23,6 +23,11 @@ static TEST_LINKS: std::sync::LazyLock<
 
 /// Remote TCP keeps the existing mux; native QUIC fans raw streams into bounded actor delivery.
 enum LinkTransport {
+    #[cfg(feature = "ssh")]
+    Ssh {
+        channel: infraternal_plugin_ssh::duplex::Duplex,
+        _session: Arc<dyn infraternal_plugin_ssh::transport::SshSession>,
+    },
     Tcp {
         channel: TcpTls,
         receive: Mutex<Receive>,
@@ -128,6 +133,8 @@ impl RemoteLink {
     }
     fn retire(&self) {
         match &self.transport {
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => {}
             LinkTransport::Tcp { channel, .. } => channel.retire(),
             LinkTransport::Quic(link) => link.connection.close(0u32.into(), b""),
         }
@@ -174,6 +181,21 @@ impl RemoteLink {
                 Err(io::ErrorKind::PermissionDenied.into())
             },
             result = self.write_transport(stream, frame, muxed) => result,
+        }
+    }
+
+    #[cfg(feature = "ssh")]
+    pub(crate) fn ssh(
+        channel: infraternal_plugin_ssh::duplex::Duplex,
+        session: Arc<dyn infraternal_plugin_ssh::transport::SshSession>,
+    ) -> Self {
+        Self {
+            transport: LinkTransport::Ssh {
+                channel,
+                _session: session,
+            },
+            authority: None,
+            renewal: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -296,9 +318,15 @@ impl RemoteLink {
     async fn read_transport(
         &self,
         target: &mut BytesMut,
-        _scratch: &mut [u8],
+        #[allow(unused_variables)] scratch: &mut [u8],
     ) -> io::Result<usize> {
         match &self.transport {
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { channel, .. } => {
+                let count = channel.read(scratch).await?;
+                target.extend_from_slice(&scratch[..count]);
+                Ok(count)
+            }
             LinkTransport::Tcp {
                 channel,
                 receive,
@@ -642,6 +670,8 @@ impl RemoteLink {
             return Ok(());
         }
         match &self.transport {
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { channel, .. } => channel.write(muxed).await,
             LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
                 let terminal_close = stream != 0 && matches!(frame, Frame::Close { .. });

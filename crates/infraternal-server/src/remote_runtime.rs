@@ -97,6 +97,7 @@ struct Host {
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
     generation: Uuid,
+    changed: tokio::sync::watch::Sender<Uuid>,
     retirement: Retirement,
 }
 
@@ -187,6 +188,51 @@ impl RemoteHosts {
             .get(&id)
             .filter(|host| host.authority.permits())
             .map(|host| host.actor.clone())
+    }
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn cancelled(&self, id: Uuid) {
+        let Some(mut changed) = self
+            .0
+            .lock()
+            .await
+            .get(&id)
+            .map(|host| host.changed.subscribe())
+        else {
+            return;
+        };
+        loop {
+            let Some(authority) = self
+                .0
+                .lock()
+                .await
+                .get(&id)
+                .map(|host| host.authority.clone())
+            else {
+                return;
+            };
+            if !authority.permits() {
+                return;
+            }
+            tokio::select! {
+                () = authority.cancelled() => {},
+                result = changed.changed() => { if result.is_err() { return; } },
+            }
+        }
+    }
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn stop_provisioning(&self) {
+        self.0
+            .lock()
+            .await
+            .retain(|_, host| host.authority.installed());
+    }
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn installed(&self, id: Uuid) -> bool {
+        self.0
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|host| host.authority.permits() && host.authority.installed())
     }
     #[cfg(test)]
     pub(crate) async fn admission_for_test(&self, id: Uuid) -> Option<AuthorityGuard> {
@@ -288,6 +334,7 @@ impl RemoteHosts {
             } else {
                 ip.to_canonical()
             };
+            host.changed.send_replace(generation);
         } else {
             self.prove_paths(&mut link)?;
             let (actor, accepts) = EmbeddedAgent::remote(uid);
@@ -311,6 +358,7 @@ impl RemoteHosts {
                     actor,
                     accepts,
                     generation,
+                    changed: tokio::sync::watch::channel(generation).0,
                     retirement,
                 },
             );
@@ -389,7 +437,7 @@ impl RemoteHosts {
         Retirement(tokio::spawn(async move {
             // Healthy idle has only its certificate expiry deadline, never a
             // heartbeat. Ordinary socket loss keeps the actor for offset resume.
-            if let Some(source) = source {
+            if let Some(source) = source.filter(|_| authority.installed()) {
                 tokio::select! {
                     biased;
                     () = authority.cancelled() => {},

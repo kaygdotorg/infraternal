@@ -826,3 +826,7 @@ async fn late_native_detach_after_peer_stop_keeps_the_control_connection() {
     ));
     assert!(peer.close_reason().is_none());
 }
+
+#[cfg(feature = "ssh")]
+#[path = "remote_ssh_tests.rs"]
+mod ssh_bridge;

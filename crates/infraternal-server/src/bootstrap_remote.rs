@@ -24,6 +24,7 @@ pub(super) struct RemoteBackend {
     pub(super) issuer: InvitationIssuer,
     pub(super) hosts: RemoteHosts,
     pub(super) attempts: Mutex<HashMap<Uuid, Attempt>>,
+    pub(super) sessions_changed: Mutex<Option<tokio::sync::watch::Sender<u64>>>,
 }
 pub(super) struct Attempt {
     owner: String,
@@ -81,7 +82,9 @@ impl RemoteBackend {
         // background timer and cannot turn token redemption into online proof.
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                if let Some(actor) = self.hosts.actor(host).await {
+                if self.hosts.installed(host).await
+                    && let Some(actor) = self.hosts.actor(host).await
+                {
                     return actor;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -218,6 +221,113 @@ impl RemoteBackend {
     }
 }
 impl Backend for RemoteBackend {
+    fn session_notifications(&self, notify: tokio::sync::watch::Sender<u64>) {
+        if let Ok(mut current) = self.sessions_changed.lock() {
+            *current = Some(notify);
+        }
+    }
+    fn setup_cancelled(&self, host: Uuid) -> Operation<'_, ()> {
+        Box::pin(async move {
+            self.hosts.cancelled(host).await;
+            Ok(())
+        })
+    }
+    fn reissue_invitation<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            let uid = self.uid(authority, host)?;
+            let mut invitation = self
+                .issuer
+                .reissue(
+                    cookie(authority)?,
+                    InvitationRequest {
+                        host_id: host,
+                        mode: if uid == 0 {
+                            Mode::Rootful
+                        } else {
+                            Mode::Rootless
+                        },
+                        execution_uid: uid,
+                    },
+                )
+                .await
+                .map_err(|_| unavailable())?;
+            let stdin = serde_json::to_vec(&invitation);
+            invitation.token.zeroize();
+            Ok(JoinMaterial {
+                host,
+                url: format!("{}/remote/join", self.issuer.origin()),
+                stdin: Secret::new(stdin.map_err(|_| unavailable())?),
+            })
+        })
+    }
+    fn authority_cancelled<'a>(&'a self, authority: &'a Authority) -> Operation<'a, ()> {
+        Box::pin(async move {
+            let auth = self.base.auth.as_ref().ok_or_else(unavailable)?;
+            let mut events = auth.revocation_events();
+            loop {
+                self.authorize(authority).await?;
+                events.changed().await.map_err(|_| unavailable())?;
+            }
+        })
+    }
+    fn stop(&self) -> Operation<'_, ()> {
+        Box::pin(async move {
+            self.hosts.stop_provisioning().await;
+            Ok(())
+        })
+    }
+    fn early_terminal(&self) -> bool {
+        true
+    }
+    fn publish_terminal<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+        session_id: Uuid,
+        channel: infraternal_plugin_ssh::duplex::Duplex,
+        session: std::sync::Arc<dyn infraternal_plugin_ssh::transport::SshSession>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            let uid = self.uid(authority, host)?;
+            let guard = crate::remote_guard::AuthorityGuard::provisioning(
+                self.issuer.store().clone(),
+                &authority.owner,
+                host,
+                uid,
+            )
+            .await
+            .map_err(|_| unavailable())?;
+            self.hosts
+                .admit(guard, crate::remote_link::RemoteLink::ssh(channel, session))
+                .await
+                .map_err(|_| unavailable())?;
+            // Insert only under the same live owner capability; browser attach
+            // subsequently rechecks both this record and host ownership.
+            let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,unixepoch(),unixepoch(),? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL) ON CONFLICT(id) DO NOTHING")
+                .bind(session_id.as_bytes().as_slice()).bind(&authority.owner).bind(host.as_bytes().as_slice())
+                .bind(crate::auth::hash(cookie(authority)?)).bind(&authority.owner).bind(host.as_bytes().as_slice()).bind(&authority.owner)
+                .execute(&self.issuer.store().0).await.map_err(|_| unavailable())?;
+            if changed.rows_affected() != 1 {
+                let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=? AND remote_host_id=? AND closed_at IS NULL)")
+                    .bind(session_id.as_bytes().as_slice()).bind(&authority.owner).bind(host.as_bytes().as_slice()).fetch_one(&self.issuer.store().0).await.map_err(|_| unavailable())?;
+                if !owned {
+                    return Err(unavailable());
+                }
+            }
+            if let Ok(current) = self.sessions_changed.lock()
+                && let Some(current) = &*current
+            {
+                current.send_modify(|version| *version = version.wrapping_add(1));
+            }
+            self.authorize(authority).await
+        })
+    }
     fn resolve<'a>(
         &'a self,
         authority: &'a Authority,
@@ -1035,6 +1145,7 @@ mod tests {
                 issuer,
                 hosts: RemoteHosts::from_source(Some(source)),
                 attempts: Mutex::default(),
+                sessions_changed: Mutex::default(),
             }),
             pool,
             prior,

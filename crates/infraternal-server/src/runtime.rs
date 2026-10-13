@@ -597,6 +597,8 @@ async fn build_router_core(
     let ws_state = ws_state.with_remote_hosts(hosts.clone());
     #[cfg(feature = "remote")]
     enrollment_store.bind_plugins(&ws_state.plugins);
+    #[cfg(feature = "ssh")]
+    bootstrap.session_notifications(ws_state.session_notifications());
     #[cfg(not(feature = "remote"))]
     let listeners = None;
     if owns_node_workers {
