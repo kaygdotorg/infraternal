@@ -364,6 +364,33 @@ writer. Malformed requests retire their own stream. Owned supervisors and
 preparation/write tasks are cancelled on link retirement, component down or
 actor shutdown; the parked transport grants no additional session authority.
 
+
+### Native leg-B encrypted path copies (#201, D215, D263)
+
+`REMOTE_PATH_BACKUP` is additive Hello bit 6, advertised by native peers.
+It permits bounded copies of existing encrypted QUIC datagrams to the retained
+enrolled path while that same connection uses a plugin-proposed mesh path.
+The client enables copies only after the authenticated server Hello announces
+bit 6; the server enables a trusted peer lease only after the admitted client
+Hello announces it. Legacy peers keep their previous behavior. Cached native
+standby Hello also announces support. Frame layouts and protocol version remain
+unchanged, and no capability replaces mTLS, ledger admission or writer binding.
+
+The transport reuses its existing recent history, bounded to 64 datagrams and
+64 KiB of ciphertext per peer. One clock belongs to each endpoint socket,
+never a detached task. Its earliest 20 ms deadline sends the retained pending
+batch once, including younger retained entries so continuous eviction cannot
+starve copies. Successful copies are not scheduled again; a full socket can
+retry only within the same bounded history. Returning or disabling the path
+cancels copies; retiring the last peer lease releases the clock and cache.
+
+Receivers deliver every datagram to QUIC for authentication and packet-number
+deduplication. A bounded ciphertext-suffix cache filters recent duplicate
+routing hints, including differently batched GRO input. A suffix collision
+keeps a route hint rather than admitting or dropping data. The mesh liveness
+probe requires physical mesh arrival plus newly authenticated traffic:
+authenticated enrolled copies alone must not keep a dead mesh path selected.
+
 ## 9. Route liveness (D265, #199)
 
 Use the existing `Ping`/`Pong` layouts in both directions. With active terminal
