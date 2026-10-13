@@ -104,6 +104,13 @@ impl Drop for QuicLink {
 }
 
 impl RemoteLink {
+    /// The admitted logical QUIC tuple; TCP cannot move below its transport.
+    pub(crate) fn peer_address(&self) -> Option<std::net::SocketAddr> {
+        match &self.transport {
+            LinkTransport::Quic(link) => Some(link.connection.remote_address()),
+            LinkTransport::Tcp { .. } => None,
+        }
+    }
     pub(crate) fn authorize(mut self, authority: crate::remote_guard::AuthorityGuard) -> Self {
         self.authority = Some(authority);
         self

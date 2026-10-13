@@ -13,6 +13,8 @@ pub(crate) struct NodeBridge {
     pub authority: Option<crate::remote_guard::AuthorityGuard>,
     #[cfg(feature = "remote")]
     pub listeners: Option<crate::remote_runtime::RemoteHosts>,
+    #[cfg(feature = "remote")]
+    pub peer_routes: Option<crate::remote_runtime::PeerRouting>,
 }
 impl NodeChannel for NodeBridge {
     fn id(&self) -> &str {
@@ -29,6 +31,34 @@ impl NodeChannel for NodeBridge {
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.actor.changes()
+    }
+    fn route_peer(
+        &self,
+        address: std::net::SocketAddr,
+    ) -> PluginOperation<'_, Option<Box<dyn infraternal_plugin_api::server_path::ListenerLease>>>
+    {
+        Box::pin(async move {
+            #[cfg(feature = "remote")]
+            if let (Some(authority), Some(routes)) = (&self.authority, &self.peer_routes) {
+                authority
+                    .admit_operation()
+                    .await
+                    .map_err(|_| "Node authority ended.")?;
+                return routes
+                    .route_peer(authority.identity.host, address)
+                    .await
+                    .map(|lease| {
+                        lease.map(|lease| {
+                            Box::new(lease)
+                                as Box<dyn infraternal_plugin_api::server_path::ListenerLease>
+                        })
+                    })
+                    .map_err(|_| "Peer route refused.");
+            }
+            #[cfg(not(feature = "remote"))]
+            let _ = address;
+            Ok(None)
+        })
     }
     fn listen_server(
         &self,

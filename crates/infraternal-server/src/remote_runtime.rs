@@ -51,7 +51,41 @@ struct ListenerFactory {
     /// Leased destinations join the agent address's endpoint (one CID space).
     bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
 }
+/// Resolves an admitted tuple only during a call; node channels never own the
+/// host registry or listener factory through their routing capability.
+pub(crate) struct PeerRouting {
+    registry: std::sync::Weak<Mutex<HashMap<Uuid, Host>>>,
+    factory: std::sync::Weak<std::sync::Mutex<Option<Arc<ListenerFactory>>>>,
+}
+impl PeerRouting {
+    pub(crate) async fn route_peer(
+        &self,
+        id: Uuid,
+        alternate: SocketAddr,
+    ) -> io::Result<Option<infraternal_plugin_remote::remote_bindings::PeerBinding>> {
+        let Some(registry) = self.registry.upgrade() else {
+            return Ok(None);
+        };
+        let logical = registry
+            .lock()
+            .await
+            .get(&id)
+            .filter(|host| host.authority.permits())
+            .and_then(|host| host.peer);
+        let factory = self
+            .factory
+            .upgrade()
+            .and_then(|factory| factory.lock().ok().and_then(|factory| factory.clone()));
+        match (logical, factory) {
+            (Some(logical), Some(factory)) => {
+                factory.bindings.route_peer(logical, alternate).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+}
 struct Host {
+    peer: Option<SocketAddr>,
     ip: std::net::IpAddr,
     channel: Option<Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>>,
     uid: u32,
@@ -127,6 +161,14 @@ impl RemoteHosts {
             address: address.to_canonical(),
         }))
     }
+    /// Node channels are stored in this registry; a route handle must be weak
+    /// so it cannot retain its own actor registry after server shutdown.
+    fn peer_capability(&self) -> PeerRouting {
+        PeerRouting {
+            registry: Arc::downgrade(&self.0),
+            factory: Arc::downgrade(&self.3),
+        }
+    }
     pub(crate) async fn online(&self, id: Uuid) -> bool {
         self.actor(id).await.is_some_and(|actor| {
             matches!(
@@ -159,11 +201,12 @@ impl RemoteHosts {
         *self.2.lock().await = runtime.downgrade();
         let mut hosts = self.0.lock().await;
         for (id, host) in &mut *hosts {
-            Self::attach(runtime, *id, host).await?;
+            self.attach(runtime, *id, host).await?;
         }
         Ok(())
     }
     async fn attach(
+        &self,
         runtime: &crate::plugins::PluginRuntime,
         id: Uuid,
         host: &mut Host,
@@ -177,6 +220,7 @@ impl RemoteHosts {
                 actor: host.actor.clone(),
                 authority: Some(host.authority.clone()),
                 listeners: None,
+                peer_routes: Some(self.peer_capability()),
             });
         runtime
             .attach_node(channel.clone())
@@ -205,6 +249,7 @@ impl RemoteHosts {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         let generation = Uuid::new_v4();
+        let peer = link.peer_address();
         let server_paths = link.supports_server_paths();
         if let Some(host) = hosts.get_mut(&id) {
             if host.uid != uid {
@@ -215,6 +260,7 @@ impl RemoteHosts {
                 .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
             // Publish only after queue admission. A rejected replacement must
             // not alter a valid actor or cancel its existing retirement waiter.
+            host.peer = peer;
             host.generation = generation;
             host.server_paths = server_paths;
             host.retirement =
@@ -236,6 +282,7 @@ impl RemoteHosts {
             hosts.insert(
                 id,
                 Host {
+                    peer,
                     ip: if self.4 {
                         std::net::Ipv4Addr::UNSPECIFIED.into()
                     } else {
@@ -255,7 +302,7 @@ impl RemoteHosts {
         if let Some(runtime) = runtime
             && let Some(host) = hosts.get_mut(&id)
         {
-            Self::attach(&runtime, id, host).await?;
+            self.attach(&runtime, id, host).await?;
         }
         Ok(())
     }
@@ -274,6 +321,7 @@ impl RemoteHosts {
             }
             (host.actor.clone(), host.generation)
         };
+        let peer = link.peer_address();
         let server_paths = link.supports_server_paths();
         let (activated, activation) = tokio::sync::oneshot::channel();
         link.activation(activated)?;
@@ -294,6 +342,7 @@ impl RemoteHosts {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let generation = Uuid::new_v4();
+        host.peer = peer;
         host.generation = generation;
         host.server_paths = server_paths;
         host.retirement = self.retirement(id, generation, authority.clone(), actor);
@@ -301,7 +350,7 @@ impl RemoteHosts {
         // A parked underlay is a path replacement, not a new discovery source.
         // The existing remote registry retains the authoritative observed IP.
         if let Some(runtime) = runtime {
-            Self::attach(&runtime, id, host).await?;
+            self.attach(&runtime, id, host).await?;
         }
         Ok(())
     }

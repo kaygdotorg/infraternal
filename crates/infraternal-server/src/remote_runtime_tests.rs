@@ -651,3 +651,18 @@ async fn cancelled_native_read_retains_dequeued_packet() {
         "frame delivered only once"
     );
 }
+
+#[test]
+fn remote_peer_routing_capability_does_not_retain_the_host_registry() {
+    let hosts = RemoteHosts::default();
+    let weak = std::sync::Arc::downgrade(&hosts.0);
+    // The registry stores each admitted node channel, including its capability.
+    // A strong handle here would form a cycle and retain actors after shutdown.
+    let capability = hosts.peer_capability();
+    drop(hosts);
+    assert!(
+        weak.upgrade().is_none(),
+        "a node route capability retained its owning host registry"
+    );
+    drop(capability);
+}

@@ -760,6 +760,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
             actor: actor.clone(),
             authority: None,
             listeners: Some(hosts.clone()),
+            peer_routes: None,
         }))
         .await
         .unwrap();
