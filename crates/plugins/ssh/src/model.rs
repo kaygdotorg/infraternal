@@ -423,6 +423,9 @@ pub struct Event {
     /// Bound invitation identity; only done proves this host is ready.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_id: Option<uuid::Uuid>,
+    /// The existing shim session to attach, present on early terminal publication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
     #[serde(skip_serializing_if = "Option::is_none")]

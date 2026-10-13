@@ -48,6 +48,45 @@ impl Authority {
 /// `failed` retires only this batch's new invitation/certificate, even after logout;
 /// it must preserve prior enrolled authority and never invalidate another batch.
 pub trait Backend: Send + Sync {
+    /// Retained subscriptions follow host revocation across transport replacement.
+    fn setup_cancelled(&self, _: uuid::Uuid) -> Operation<'_, ()> {
+        Box::pin(std::future::pending())
+    }
+    /// Renew enrollment for the exact published host, using fresh requester authority.
+    fn reissue_invitation<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async { Err(Failure::unsupported("Host setup retry is unavailable.")) })
+    }
+    /// Detached setup observes revocation independently of the wizard socket.
+    fn authority_cancelled<'a>(&'a self, _: &'a Authority) -> Operation<'a, ()> {
+        Box::pin(std::future::pending())
+    }
+    /// Retire component-owned provisional transports after active setup drains.
+    fn stop(&self) -> Operation<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    /// Older adapters retain synchronous setup until they implement routing.
+    fn early_terminal(&self) -> bool {
+        false
+    }
+    fn publish_terminal<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: uuid::Uuid,
+        _: uuid::Uuid,
+        _: crate::duplex::Duplex,
+        _: Arc<dyn SshSession>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "Early terminal routing is unavailable.",
+            ))
+        })
+    }
+
     fn resolve<'a>(
         &'a self,
         authority: &'a Authority,
@@ -1105,6 +1144,7 @@ fn emit_with_leftovers(
         leftovers,
         authentication: metadata.authentication,
         host_id: metadata.host_id,
+        session_id: None,
         failure,
     });
     batch.changed.send_replace(sequence);
