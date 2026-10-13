@@ -704,7 +704,9 @@ impl Bootstrap {
                     saved.running = false;
                 }
             }
-            return;
+            if resources.announced {
+                return;
+            }
         }
         match result {
             Ok(()) => emit(
@@ -963,6 +965,7 @@ impl Bootstrap {
                         started,
                         None,
                     );
+                    resources.announced = true;
                     tokio::select! {
                         biased;
                         _ = self.backend.setup_cancelled(join.host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
@@ -1324,7 +1327,10 @@ async fn restore_previous(
 struct AttemptResources {
     installation: Option<Installation>,
     host: Option<uuid::Uuid>,
+    // Protect the real shim before a durable routing write can be cancelled.
     published: bool,
+    // Only an acknowledged publication may suppress the wizard failure event.
+    announced: bool,
 }
 
 // Retain only failed live-session transaction coordinates; success removes the
