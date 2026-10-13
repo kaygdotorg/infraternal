@@ -473,6 +473,8 @@ export class MuxConnection {
       }
       case "Ping":
         this.send(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+        // Incoming probes keep sampling alive when background tabs clamp timers.
+        this.sampleRoundTrip();
         return;
       case "Pong":
         this.acceptPong(frame.nonce);

@@ -880,6 +880,7 @@ export class TerminalClient {
 
   /** Retain this stream's writer/cursors while siblings continue on the healthy shared socket. */
   private retryStream(): void {
+    const wasConfirmed = this.attachmentConfirmed;
     if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.attached = false;
     this.attachmentConfirmed = false;
@@ -887,7 +888,9 @@ export class TerminalClient {
     if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone || this.streamRetryTimer !== 0) return;
     if (performance.now() - this.attachedAt >= STABLE_CONNECTION_MS) this.streamRetryAttempt = 0;
     this.config.hooks?.onDisconnected?.(false);
-    const delay = reconnectDelay(this.streamRetryAttempt++);
+    // A proven route gets one prompt reattach; repeated unconfirmed failures retain the bounded backoff.
+    const delay = wasConfirmed ? 5 + Math.random() * 5 : reconnectDelay(this.streamRetryAttempt);
+    this.streamRetryAttempt++;
     this.streamRetryTimer = window.setTimeout(() => {
       this.streamRetryTimer = 0;
       if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone || !this.conn.isWelcomed) return;
@@ -1872,7 +1875,7 @@ export class TerminalClient {
     this.config.status.hidden = message.length === 0;
   }
 
-  /** Samples RTT on attachment and typing; an idle terminal schedules no wakeups [81]. */
+  /** Attachment and typing refresh the latency sample; connection liveness continues at idle [D265]. */
   private startPings(): void {
     this.prediction?.setRoundTrip(undefined);
     this.config.onRoundTrip?.(undefined);
