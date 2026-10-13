@@ -1721,7 +1721,16 @@ where
             .expect("websocket message")
             .expect("websocket frame")
         {
-            Message::Binary(bytes) => return bytes,
+            Message::Binary(bytes) => {
+                if let Ok(decoded) = decode_muxed_frame(&bytes)
+                    && let Frame::Ping { nonce, sent_us } = decoded.frame
+                {
+                    client_ws_send(socket, decoded.stream_id, &Frame::Pong { nonce, sent_us })
+                        .await;
+                } else {
+                    return bytes;
+                }
+            }
             Message::Ping(bytes) => socket
                 .send(Message::Pong(bytes))
                 .await

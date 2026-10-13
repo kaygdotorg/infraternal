@@ -926,3 +926,40 @@ fn server_reload_mask_is_not_inherited_by_embedded_children() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[tokio::test]
+async fn half_open_infraternal_agent_route_loses_inventory_without_eof() {
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    let agent = EmbeddedAgent::from_test_socket(socket);
+    let mut inventory = agent.session_inventory();
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "liveness fixture",
+        },
+        &mut wire,
+    )
+    .unwrap();
+    peer.write_all(&wire).await.unwrap();
+    encode_muxed_frame_into(0, &Frame::Event { sub_id: 0, event_json: br#"{"type":"terminal.sessions.snapshot","session_ids":["01010101-0101-0101-0101-010101010101"]}"# }, &mut wire).unwrap();
+    peer.write_all(&wire).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), inventory.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        *inventory.borrow_and_update(),
+        SessionInventoryState::Available(_)
+    ));
+    let _attachment = agent.attach([1; 16], 0, 0, 2).await.unwrap();
+    // The peer is held open and its kernel buffers accept probes, but it never answers.
+    tokio::time::timeout(Duration::from_secs(3), inventory.changed())
+        .await
+        .expect("half-open upstream must expire without EOF")
+        .unwrap();
+    assert_eq!(*inventory.borrow(), SessionInventoryState::Unavailable);
+    drop(peer);
+}

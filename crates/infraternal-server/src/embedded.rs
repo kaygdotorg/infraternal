@@ -4,6 +4,7 @@
 use crate::remote_link::RemoteLink;
 #[cfg(not(feature = "remote"))]
 type RemoteLink = ();
+use crate::liveness::{Liveness, TICK};
 use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -89,6 +90,8 @@ pub(crate) enum TerminalOutput {
     Event { event_json: Bytes },
     /// Highest input sequence written to the PTY.
     Ack { in_seq_acked: u64 },
+    /// The shim answered an ordered state fence for this terminal route.
+    Pong { nonce: u64, sent_us: u64 },
     /// The agent retired one terminal stream.
     Closed { code: u16 },
 }
@@ -572,6 +575,11 @@ enum Incoming {
         nonce: u64,
         sent_us: u64,
     },
+    Pong {
+        stream_id: u32,
+        nonce: u64,
+        sent_us: u64,
+    },
     Disconnected,
 }
 
@@ -624,6 +632,8 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
+// One actor owns link replacement, bounded commands and all session routes.
+#[allow(clippy::too_many_lines)]
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
@@ -636,6 +646,9 @@ async fn run_actor(
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
+    let mut liveness = Liveness::new();
+    let mut ticks = tokio::time::interval(TICK);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         if connection.is_none() {
@@ -658,6 +671,7 @@ async fn run_actor(
                 }
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
+                liveness = Liveness::new();
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -668,7 +682,24 @@ async fn run_actor(
         let Some(link) = connection.as_mut() else {
             continue;
         };
+        // Nothing probes an unused host link. A later attachment gets a fresh lease.
+        if attachments.is_empty() {
+            liveness = Liveness::new();
+        }
         tokio::select! {
+            _ = ticks.tick(), if !attachments.is_empty() => {
+                let (nonce, sent_us) = liveness.ping();
+                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await)
+                    && let Some(old) = connection.take() {
+                        // Do not hold recovery behind graceful child reaping. The old process
+                        // gets its bounded TERM/KILL cleanup independently; shims survive it.
+                        tokio::spawn(async move { cleanup_connection(old).await; });
+                        routes.clear();
+                        for (_, call) in pending.drain() { call.refuse(AgentError::Unavailable); }
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
+                        first_attempt = true;
+                }
+            }
             replacement = source.replacement(), if source.remote() => {
                 #[cfg(feature = "remote")]
                 let Some(replacement) = replacement else { return; };
@@ -711,6 +742,10 @@ async fn run_actor(
                     }
                     continue;
                 };
+                if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
+                    liveness.pong(nonce, sent_us);
+                    continue;
+                }
                 if let Incoming::SessionInventory(ids) = incoming {
                     session_inventory
                         .send_replace(SessionInventoryState::Available(Arc::from(ids)));
@@ -1061,6 +1096,7 @@ async fn process_command(
                     px_w,
                     px_h,
                 },
+                Frame::Ping { nonce, sent_us } => Frame::Ping { nonce, sent_us },
                 Frame::Credit { bytes } => {
                     let Some(attachment) = attachments.get_mut(&attachment_id) else {
                         return false;
@@ -1477,6 +1513,20 @@ async fn process_incoming(
         Incoming::Ping { nonce, sent_us } => {
             write_frame(connection, CONTROL_STREAM, &Frame::Pong { nonce, sent_us }).await
         }
+        Incoming::Pong {
+            stream_id,
+            nonce,
+            sent_us,
+        } => {
+            let Some(attachment) = routes.get(&stream_id).and_then(|id| attachments.get(id)) else {
+                return true;
+            };
+            // A full consumer is already retired by ordinary output. Never block siblings for a probe.
+            let _ = attachment
+                .output
+                .try_send(TerminalOutput::Pong { nonce, sent_us });
+            true
+        }
         Incoming::ControlEvent | Incoming::SessionInventory(_) => true,
         Incoming::Disconnected | Incoming::Hello { .. } => false,
     }
@@ -1593,6 +1643,11 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                     },
                     Frame::Close { .. } if stream_id == CONTROL_STREAM => Incoming::Disconnected,
                     Frame::Close { code, .. } => Incoming::Close { stream_id, code },
+                    Frame::Pong { nonce, sent_us } if stream_id % 2 == 0 => Incoming::Pong {
+                        stream_id,
+                        nonce,
+                        sent_us,
+                    },
                     Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
                         Incoming::Ping { nonce, sent_us }
                     }
