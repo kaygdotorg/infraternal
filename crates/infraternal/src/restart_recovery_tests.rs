@@ -1,5 +1,6 @@
 //! Proves real same-PID sealed exec and late-refusal recovery with a live listener and memory-only CA handoff [217,224], #157.
 use super::*;
+use crate::restart_binary::fixture::RESTART_TEST_HANG_BOUND;
 use infraternal_server::{
     ca::{CaKeySource, CaMaterial},
     ca_memory::MemoryCaSource,
@@ -186,7 +187,7 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         while !directory.join("ready").exists() || !directory.join("recovered").exists() {
             if directory.join("ready").exists() {
                 recovery_deadline
-                    .get_or_insert_with(|| std::time::Instant::now() + Duration::from_secs(30));
+                    .get_or_insert_with(|| std::time::Instant::now() + RESTART_TEST_HANG_BOUND);
             }
             if child.try_wait().unwrap().is_some()
                 || std::time::Instant::now() >= recovery_deadline.unwrap_or(preparation_deadline)
@@ -204,11 +205,27 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         }
         let mut stream = std::net::TcpStream::connect(address).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(RESTART_TEST_HANG_BOUND))
             .unwrap();
         let mut alive = [0; 6];
         std::io::Read::read_exact(&mut stream, &mut alive).unwrap();
         assert_eq!(&alive, b"alive\n");
+        let output_deadline = std::time::Instant::now() + RESTART_TEST_HANG_BOUND;
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= output_deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "{case} child did not exit within its hang bound:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let output = child.wait_with_output().unwrap();
         std::fs::remove_dir_all(&directory).unwrap();
         assert!(

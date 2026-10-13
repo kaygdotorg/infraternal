@@ -65,7 +65,7 @@ fn relative_recovery_after_atomic_install_keeps_live_install_path() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + super::HANG_BOUND;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() >= deadline {
             child.kill().unwrap();

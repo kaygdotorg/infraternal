@@ -5,15 +5,8 @@
 mod deleted_path_review;
 
 use super::*;
-use crate::restart_binary::fixture::Signed;
+use crate::restart_binary::fixture::{RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed};
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
-
-/// Upper bound for waits on events that must happen (a child exits, a request is
-/// answered). It only stops a real hang from stalling the suite. Every wait ends
-/// as soon as its condition holds, so a generous bound costs nothing when the
-/// host is idle and avoids failures when many jobs share the build host. A bound
-/// that equals the expected duration would measure host load, not behaviour.
-const HANG_BOUND: Duration = Duration::from_secs(60);
 
 struct Directory(PathBuf);
 impl Directory {
@@ -72,7 +65,7 @@ fn strip_image(image: &Path) {
         .process_group(0)
         .spawn()
         .unwrap();
-    let output = bounded_output(child, Duration::from_secs(30), "strip test image");
+    let output = bounded_output(child, HANG_BOUND, "strip test image");
     assert!(
         output.status.success(),
         "strip test image failed: {}",
@@ -509,7 +502,12 @@ fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
             started.store(true, std::sync::atomic::Ordering::Release);
             let _ = nix::sys::wait::waitpid(pid, None);
         });
+        let startup_deadline = std::time::Instant::now() + HANG_BOUND;
         while !entered.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < startup_deadline,
+                "blocking waiter did not start before the hang bound"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         shutdown_runtime(runtime);

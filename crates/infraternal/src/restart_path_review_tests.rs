@@ -59,7 +59,7 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
         .spawn()
         .unwrap();
     // A refused or stalled child must not keep this functional review open.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + super::HANG_BOUND;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() >= deadline {
             child.kill().unwrap();
