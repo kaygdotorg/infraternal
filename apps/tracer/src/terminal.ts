@@ -246,6 +246,8 @@ export class TerminalClient {
   private ackedInSeq = 0n;
   private creditAvailable = 0;
   private attached = false;
+  /** A sent AttachTerm is only a request; the ordered, painted replay fence proves recovery. */
+  private attachmentConfirmed = false;
   private attachRequested = false;
   private openCallSent = false;
   private fitQueued = false;
@@ -434,7 +436,7 @@ export class TerminalClient {
     return client;
   }
 
-  get isConnected(): boolean { return this.attached; }
+  get isConnected(): boolean { return this.attachmentConfirmed; }
   get outputSequence(): bigint { return this.lastOutSeq; }
   get inputSequence(): bigint { return this.nextInSeq; }
   get inputAcknowledged(): bigint { return this.ackedInSeq; }
@@ -742,7 +744,7 @@ export class TerminalClient {
     this.cursorLayer = undefined;
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
-    if (this.attached) this.conn.streamAttached(false);
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.offRoundTrip();
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
@@ -786,6 +788,7 @@ export class TerminalClient {
         this.cancelStreamRetry();
         if (this.closed || this.exitReported || this.sessionGone) return;
         this.attached = false;
+        this.attachmentConfirmed = false;
         this.attachRequested = false;
         this.openCallSent = false;
         this.config.hooks?.onDisconnected?.(forced);
@@ -877,8 +880,9 @@ export class TerminalClient {
 
   /** Retain this stream's writer/cursors while siblings continue on the healthy shared socket. */
   private retryStream(): void {
-    if (this.attached) this.conn.streamAttached(false);
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.attached = false;
+    this.attachmentConfirmed = false;
     this.attachRequested = false;
     if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone || this.streamRetryTimer !== 0) return;
     if (performance.now() - this.attachedAt >= STABLE_CONNECTION_MS) this.streamRetryAttempt = 0;
@@ -945,12 +949,9 @@ export class TerminalClient {
     this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
     this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     this.resendUnacknowledgedInput();
-    this.setStatus("");
+    this.setStatus("Catching up…");
     this.hasAttached = true;
-    this.conn.streamAttached(true, this.streamId);
-    this.startPings();
     this.wakeTerminal();
-    this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
   /** The session this terminal shows, as a lowercase UUID. */
@@ -995,9 +996,10 @@ export class TerminalClient {
   private restartOn(sessionId: Uint8Array | undefined): void {
     this.cancelStreamRetry();
     this.streamRetryAttempt = 0;
-    if (this.attached) this.conn.streamAttached(false);
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.conn.closeStream(this.streamId);
     this.attached = false;
+    this.attachmentConfirmed = false;
     this.attachRequested = false;
     this.openCallSent = false;
     this.hasAttached = false;
@@ -1031,8 +1033,9 @@ export class TerminalClient {
     this.sessionGone = true;
     this.sessionGoneStatus = this.pendingExit?.status ?? status;
     this.cancelStreamRetry();
-    if (this.attached) this.conn.streamAttached(false);
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.attached = false;
+    this.attachmentConfirmed = false;
     this.attachRequested = false;
     // The server keeps absorbing this stream's in-flight frames until this Close (contracts/wire.md §4).
     this.conn.closeStream(this.streamId);
@@ -1294,6 +1297,13 @@ export class TerminalClient {
     if (this.replayResponseFence !== undefined && this.lastOutSeq >= this.replayResponseFence) {
       this.suppressReplayResponses = false;
       this.replayResponseFence = undefined;
+      if (this.attached && !this.attachmentConfirmed) {
+        this.attachmentConfirmed = true;
+        this.setStatus("");
+        this.conn.streamAttached(true, this.streamId);
+        this.startPings();
+        this.config.hooks?.onAttached?.(this.connectionIsResume, this);
+      }
     }
   }
 
