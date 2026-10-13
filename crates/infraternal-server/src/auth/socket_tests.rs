@@ -546,10 +546,13 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
 }
 
 #[cfg(feature = "mesh")]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)] // Keep one real socket's handshake, snapshot, edits, and invalidations ordered.
 async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
     let _guard = SERIAL.lock().await;
+    // This case checks ordered inventory behavior. Hold runtime time across
+    // real I/O; separate deadline cases still advance it and verify refusal.
+    let clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
@@ -716,6 +719,7 @@ async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
         panic!("mesh.list did not return a successful Result")
     };
     let list: Value = serde_json::from_slice(list_json).unwrap();
+    clock.progress();
     assert_eq!(list["nodes"][0]["node"]["id"], node_id);
     assert_eq!(list["tags"][0]["members"][0], node_id);
     server.abort();
