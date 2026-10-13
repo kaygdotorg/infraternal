@@ -1097,8 +1097,27 @@ impl Bootstrap {
                 let (release, approved) = tokio::sync::oneshot::channel();
                 tokio::try_join!(
                     async {
-                        self.backend.connected_facts(authority, host).await?;
-                        self.backend.terminal_canary(authority, host).await?;
+                        if published {
+                            // Each callback independently awaits installed authority,
+                            // ownership and UID admission. Both must succeed before
+                            // the commit signal; a failed sibling may leave only the
+                            // registered private canary to finish, never the user shell.
+                            if let Err(failure) = tokio::try_join!(
+                                self.backend.connected_facts(authority, host),
+                                self.backend.terminal_canary(authority, host),
+                            ) {
+                                let _ = tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    self.backend.cleanup_sessions(authority, host),
+                                )
+                                .await;
+                                return Err(failure);
+                            }
+                        } else {
+                            // Older adapters retain their existing proof ordering.
+                            self.backend.connected_facts(authority, host).await?;
+                            self.backend.terminal_canary(authority, host).await?;
+                        }
                         release.send(()).map_err(|()| {
                             Failure::install("The host commit command ended before terminal proof.")
                         })
@@ -1552,3 +1571,7 @@ impl infraternal_plugin_api::ComponentPlugin for Bootstrap {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "bootstrap_proof_tests.rs"]
+mod proof_tests;
