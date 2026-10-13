@@ -8,6 +8,7 @@ test("an overnight connection retains its writer and pending input when the serv
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, now: Date.now };
   let now = 1000;
   let retry: (() => void) | undefined;
+  let retryDelay = 0;
   const sockets: Socket[] = [];
   class Socket {
     static OPEN = 1;
@@ -28,7 +29,7 @@ test("an overnight connection retains its writer and pending input when the serv
   let connection: MuxConnection | undefined;
   try {
     Date.now = () => now;
-    globals.window = { setTimeout: (callback: () => void) => { retry = callback; return 1; }, clearTimeout() {} };
+    globals.window = { setTimeout: (callback: () => void, delay: number) => { retry = callback; retryDelay = delay; return 1; }, clearTimeout() {} };
     globals.location = { protocol: "https:", host: "restart.example.test" };
     globals.WebSocket = Socket;
     connection = new MuxConnection();
@@ -36,8 +37,11 @@ test("an overnight connection retains its writer and pending input when the serv
     sockets[0]!.onopen?.();
     const welcome = encodeMuxedFrame(0, { type: "Welcome", connectionId: new Uint8Array(16).fill(1), resumeToken: new Uint8Array(32).fill(2), resumeWindowSeconds: 120 });
     sockets[0]!.onmessage?.({ data: welcome.slice().buffer as ArrayBuffer });
+    connection.streamAttached(true, 1);
     now += 86_400_000;
     sockets[0]!.close();
+    expect(retryDelay).toBeGreaterThanOrEqual(5);
+    expect(retryDelay).toBeLessThan(10);
     retry?.();
     sockets[1]!.onopen?.();
     expect(resumed).toEqual([false, true]);
@@ -48,6 +52,10 @@ test("an overnight connection retains its writer and pending input when the serv
     retry?.();
     sockets[2]!.onopen?.();
     expect(resumed).toEqual([false, true, false]);
+    const hello = encodeMuxedFrame(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "restart-refusal" });
+    sockets[2]!.onmessage?.({ data: hello.slice().buffer as ArrayBuffer });
+    sockets[2]!.close();
+    expect(retryDelay).toBeGreaterThanOrEqual(50);
   } finally {
     connection?.dispose();
     Date.now = original.now;
