@@ -21,7 +21,10 @@ cleanup failures retain the new restrictive rules and retry forward before
 acknowledgment, including on replay or restart. They never restore old access. Reconnecting requests a snapshot.
 Control chunks fit the existing 8 KiB action-body resource bound.
 
-An enabled identity may advertise `compact_access: true`. Only after this
+A coordinator explicitly probes `mesh.identity` with `{"compact_access":true}`.
+A capable enabled node may then advertise `compact_access: true`; ordinary
+`{}` requests keep the strict legacy reply shape. A rejected probe is retried
+with `{}`, retaining ordinary peer chunks for older nodes. Only after this
 negotiation, an access-only delta may carry `access_updates`: ordered, disjoint
 inclusive node-ID ranges over existing ordered peers. Both endpoints must
 exist in the acknowledged base; holes introduce no peer or key. A concrete

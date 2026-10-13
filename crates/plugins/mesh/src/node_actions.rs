@@ -84,7 +84,7 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
     action(
         "mesh.identity",
         "Read enabled Mesh identity",
-        "Empty",
+        "MeshIdentityProbe",
         "OptionalMeshIdentity",
         Effect::Write,
         &[
@@ -184,6 +184,13 @@ impl Default for MeshNodePlugin {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Empty {}
+/// Optional explicit negotiation keeps ordinary replies compatible with strict older decoders.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityProbe {
+    #[serde(default)]
+    compact_access: bool,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 /// A bounded revision-pinned peer page request.
@@ -215,7 +222,7 @@ fn parse<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, PluginError>
 }
 /// Pure node action request. No kernel or filesystem operation occurs during parsing.
 pub enum Request {
-    Identity,
+    Identity { compact_access: bool },
     Up,
     Down,
     Status,
@@ -227,10 +234,15 @@ pub enum Request {
 /// Refuses unknown actions, alternate JSON forms, duplicate fields or oversized bodies.
 pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> {
     match action {
-        "mesh.identity" | "mesh.up" | "mesh.down" | "mesh.status" => {
+        "mesh.identity" => {
+            let probe: IdentityProbe = parse(input)?;
+            Ok(Request::Identity {
+                compact_access: probe.compact_access,
+            })
+        }
+        "mesh.up" | "mesh.down" | "mesh.status" => {
             let _: Empty = parse(input)?;
             Ok(match action {
-                "mesh.identity" => Request::Identity,
                 "mesh.up" => Request::Up,
                 "mesh.down" => Request::Down,
                 _ => Request::Status,
@@ -241,6 +253,17 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
         _ => Err(PluginError::UnknownAction),
     }
 }
+// Advertise extensions only after an explicit probe; ordinary callers receive the legacy shape.
+fn identity_response(
+    identity: Option<crate::dataplane::Identity>,
+    requested: bool,
+) -> Option<crate::dataplane::Identity> {
+    identity.map(|mut identity| {
+        identity.compact_access &= requested;
+        identity
+    })
+}
+
 impl AgentPlugin for MeshNodePlugin {
     fn preferred_server(&self) -> Option<std::net::IpAddr> {
         let mut owner = self.owner.lock().ok()?;
@@ -289,8 +312,11 @@ impl AgentPlugin for MeshNodePlugin {
         let mut owner = self.owner.lock().map_err(|_| PluginError::Rejected)?;
         let node = owner.node()?;
         let result = match request {
-            Request::Identity => {
-                json!(node.ensure().map_err(|_| PluginError::Rejected)?)
+            Request::Identity { compact_access } => {
+                json!(identity_response(
+                    node.ensure().map_err(|_| PluginError::Rejected)?,
+                    compact_access
+                ))
             }
             Request::Up => {
                 json!(node.up().map_err(|_| PluginError::Rejected)?)
@@ -618,5 +644,23 @@ mod tests {
             infraternal_plugin_api::ComponentPlugin::status(&plugin).active_work,
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod identity_upgrade_tests {
+    #[test]
+    fn ordinary_identity_reply_retains_the_legacy_shape() {
+        let identity = crate::dataplane::Identity {
+            public_key: crate::policy::model::PublicKey([1; 32]),
+            port: 44000,
+            compact_access: true,
+        };
+        let legacy = serde_json::json!(super::identity_response(Some(identity.clone()), false));
+        assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
+        assert_eq!(legacy["port"], 44000);
+        assert!(legacy.get("compact_access").is_none());
+        let negotiated = serde_json::json!(super::identity_response(Some(identity), true));
+        assert_eq!(negotiated["compact_access"], true);
     }
 }
