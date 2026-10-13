@@ -114,7 +114,7 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     await page.locator(".terminal-host textarea").first().focus();
     await page.keyboard.type("echo before-42", { delay: 5 });
     await page.keyboard.press("Enter");
-    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\nbefore-42\r?\n/);
+    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?before-42\r?\n/);
     console.log("restart fixture: initial typing works");
     const scale = Number(process.env.RESTART_SESSIONS ?? 1);
     if (!Number.isInteger(scale) || scale < 1 || scale > 72) throw new Error("invalid restart fixture scale");
@@ -189,7 +189,9 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       await page.keyboard.type("echo recovered-$((8*8))");
       await page.keyboard.press("Enter");
       try {
-        await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\nrecovered-64\r?\n/);
+        // Batched pending lines can be echoed before execution; an interactive
+        // shell may therefore prefix the next computed result with its prompt.
+        await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?recovered-64\r?\n/);
       } finally {
         console.log(`real route recovery: routes=${routes} superseded_routes=${supersededRoutes} stopped_routes=${stoppedRoutes} window_status=${await page.locator('.cl[data-view="console"] .ui-window').first().getAttribute("data-status")} connected=${await page.locator("#terminal-screen").getAttribute("data-connected")}`);
       }
@@ -197,12 +199,12 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     await expect.poll(authority).toEqual({ locked: !upstream, initialized: true });
     if (unlock) await unlockAuthority();
     await expect.poll(() => server.bridges.filter((b) => !b.closed).some((b) => b.acked.size > 0), { timeout: 15_000 }).toBe(true);
-    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\nwaiting-49\r?\n/);
+    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?waiting-49\r?\n/);
     await page.locator(".terminal-host").first().click({ position: { x: 40, y: 40 } });
     await page.locator(".terminal-host textarea").first().focus();
     await page.keyboard.type("echo after-48", { delay: 5 });
     await page.keyboard.press("Enter");
-    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\nafter-48\r?\n/);
+    await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\n(?:# )?after-48\r?\n/);
     await expect(page.locator('.cl[data-view="console"] .ui-window').first()).toHaveAttribute("data-status", "live");
     if (process.env.RESTART_CAPTURE_DIR) await page.screenshot({ path: resolve(process.env.RESTART_CAPTURE_DIR, `restart-${unlock ? "unlock" : "locked"}-ready.png`) });
     if (process.env.RESTART_MEASURE === "1") {
