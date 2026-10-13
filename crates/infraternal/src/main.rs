@@ -11,7 +11,11 @@ mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
 
-#[cfg(any(feature = "remote", all(feature = "plugin-agent", target_os = "linux")))]
+#[cfg(any(
+    feature = "remote",
+    feature = "session-payload",
+    all(feature = "plugin-agent", target_os = "linux")
+))]
 mod output;
 #[cfg(feature = "remote")]
 mod remote;
@@ -98,12 +102,17 @@ fn run_invocation() -> ExitCode {
         return result;
     }
     #[cfg(feature = "plugin-agent")]
-    if let Some(result) = embedded_cli::run_if_requested() {
+    if !shim_cli::PAYLOAD_ONLY
+        && let Some(result) = embedded_cli::run_if_requested()
+    {
         return result;
     }
     #[cfg(feature = "ssh")]
     if let Some(result) = ssh_internal::run_if_requested() {
         return result;
+    }
+    if shim_cli::PAYLOAD_ONLY {
+        return shim_cli::payload_entry();
     }
     // Global JSON is a flag; plugin ownership selects lazy metadata, while
     // root help and core discovery need all compiled definitions. Parsing and
