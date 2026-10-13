@@ -71,9 +71,8 @@ async def campaign(args):
         extra = ['--nf-tables'] if args.nf_tables else []
         peer2 = fixture.spawn(args.fixture,*extra,namespace_pid=third.pid)
         # Identity is public; the pair's initial templates retain the opposite key/endpoint.
-        identities = [
-            {'public_key':fixture.chunks[1]['upserted']['1']['peer']['key'], 'port':int(fixture.chunks[1]['upserted']['1']['peer']['endpoint'].split(':')[1])},
-            {'public_key':fixture.chunks[0]['upserted']['2']['peer']['key'], 'port':int(fixture.chunks[0]['upserted']['2']['peer']['endpoint'].split(':')[1])},
+        # Preserve advertised capabilities rather than reconstructing only key/port.
+        identities = [*fixture.identities,
             json.loads(await asyncio.wait_for(asyncio.to_thread(peer2.stdout.readline), 10))]
         nodes = [fixture.left,fixture.right,peer2]
         error_log = (args.evidence/'coordinator.log').open('w')

@@ -101,6 +101,7 @@ class Campaign:
         self.processes.append(self.left)
         self.right = self.spawn(fixture, *extra)
         identities = [json.loads(p.stdout.readline()) for p in (self.left, self.right)]
+        self.identities = identities
         self.addresses = [{"ipv4": "10.254.0.1", "ipv6": "fd01:203:405::1"},
                           {"ipv4": "10.254.0.2", "ipv6": "fd01:203:405::2"}]
         self.chunks = []
