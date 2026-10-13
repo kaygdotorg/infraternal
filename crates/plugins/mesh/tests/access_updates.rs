@@ -251,3 +251,35 @@ fn compact_identity_support_requires_an_explicit_strict_probe() {
         assert!(parse("mesh.identity", input).is_err());
     }
 }
+
+#[test]
+#[ignore = "requires an isolated user/network namespace"]
+fn ordinary_up_and_identity_keep_the_legacy_reply_shape() {
+    use infraternal_plugin_api::AgentPlugin;
+    assert_eq!(
+        std::fs::read_to_string("/proc/self/uid_map")
+            .unwrap()
+            .split_whitespace()
+            .last(),
+        Some("1")
+    );
+    let mut plugin = infraternal_plugin_mesh::node_actions::MeshNodePlugin::default();
+    let up: serde_json::Value =
+        serde_json::from_slice(&plugin.call("mesh.up", b"{}").unwrap()).unwrap();
+    let legacy: serde_json::Value =
+        serde_json::from_slice(&plugin.call("mesh.identity", b"{}").unwrap()).unwrap();
+    let probe: serde_json::Value = serde_json::from_slice(
+        &plugin
+            .call("mesh.identity", br#"{"compact_access":true}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    plugin.call("mesh.down", b"{}").unwrap();
+    assert_eq!(
+        up.as_object().unwrap().len(),
+        2,
+        "ordinary up must keep the strict legacy identity shape"
+    );
+    assert_eq!(legacy.as_object().unwrap().len(), 2);
+    assert_eq!(probe["compact_access"], true);
+}
