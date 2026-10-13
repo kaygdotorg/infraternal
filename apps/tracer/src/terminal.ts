@@ -951,7 +951,6 @@ export class TerminalClient {
     this.creditAvailable = INITIAL_CREDIT;
     this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
     this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
-    this.resendUnacknowledgedInput();
     this.setStatus("Catching up…");
     this.hasAttached = true;
     this.wakeTerminal();
@@ -1109,7 +1108,9 @@ export class TerminalClient {
     }
     const firstSequence = this.nextInSeq;
     this.nextInSeq += BigInt(encoded.byteLength);
-    if (this.attached) {
+    // An Attach request is not a ready shim: per-key frames would fill its
+    // bounded handshake queue. Retain them locally until replay confirms it.
+    if (this.attachmentConfirmed) {
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
         this.sendFrame(this.streamId, {
@@ -1120,7 +1121,7 @@ export class TerminalClient {
         offset += length;
       }
     }
-    // Predict after the bytes are on the socket: prediction never delays the send. The overlay is still
+    // Predict after retaining input and sending when ready: prediction never delays delivery. The overlay is still
     // drawn in this same task, so no host echo can be processed (and painted) before the prediction is.
     // `encoded` may alias inputScratch, which the queue has already copied; prediction copies what it keeps.
     this.prediction?.input(data, firstSequence, encoded, this.predictionSafe());
@@ -1302,6 +1303,7 @@ export class TerminalClient {
       this.replayResponseFence = undefined;
       if (this.attached && !this.attachmentConfirmed) {
         this.attachmentConfirmed = true;
+        this.resendUnacknowledgedInput();
         // Completing replay clears its wait, not an approximation or input-pressure warning.
         if (this.config.status.textContent === "Catching up…") this.setStatus("");
         this.conn.streamAttached(true, this.streamId);
