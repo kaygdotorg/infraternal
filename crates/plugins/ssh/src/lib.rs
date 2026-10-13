@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod duplex;
 pub mod install;
 mod lifecycle;
+pub mod stdio;
 
 pub mod manifest;
 pub mod master;
