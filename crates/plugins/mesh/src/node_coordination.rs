@@ -287,6 +287,7 @@ mod tests {
                     self.queried.notify_one();
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
+                            compact_access: false,
                             public_key: PublicKey([if self.server { 1 } else { 2 }; 32]),
                             port: 44000,
                         },

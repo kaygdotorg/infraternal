@@ -31,6 +31,7 @@ impl NodeChannel for PeerChannel {
         Box::pin(async move {
             if action == "mesh.identity" {
                 return Ok(serde_json::to_vec(&Some(Identity {
+                    compact_access: false,
                     public_key: PublicKey([2; 32]),
                     port: 51820,
                 }))

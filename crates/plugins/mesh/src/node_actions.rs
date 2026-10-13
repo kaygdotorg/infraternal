@@ -428,6 +428,7 @@ mod tests {
         plugin.call("mesh.up", b"{}").expect("up");
         let (_, key) = crate::wireguard::Key::generate().expect("public peer fixture");
         let mut chunk = Chunk {
+            access_updates: Vec::new(),
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
@@ -559,6 +560,7 @@ mod tests {
         let mut plugin = MeshNodePlugin::default();
         plugin.call("mesh.up", b"{}").expect("start");
         let chunk = Chunk {
+            access_updates: Vec::new(),
             local_key: None,
             server: None,
             node: NodeId(1),

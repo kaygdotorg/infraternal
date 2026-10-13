@@ -118,7 +118,11 @@ impl Node {
             if port == 51820 {
                 port = Device::allocate_port()?;
             }
-            node.identity = Some(Identity { public_key, port });
+            node.identity = Some(Identity {
+                public_key,
+                port,
+                compact_access: false,
+            });
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
@@ -219,7 +223,14 @@ impl Node {
             // A fresh interface cannot inherit ownership from an older lifetime.
             self.routes.clear();
             self.save(None, true)?;
-            Ok((Identity { public_key, port }, client))
+            Ok((
+                Identity {
+                    public_key,
+                    port,
+                    compact_access: false,
+                },
+                client,
+            ))
         })();
         match prepared {
             Ok((identity, client)) => {
@@ -308,6 +319,10 @@ impl Node {
         Ok(())
     }
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
+        // The wire type lands before capability advertisement and range staging.
+        if !chunk.access_updates.is_empty() {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         self.validate_binding(&chunk)?;
         if chunk.index == 0 {
             let current = self.config.as_ref().map(|config| config.version);
@@ -698,6 +713,7 @@ mod tests {
         use crate::policy::model::{Addresses, NodeId, PublicKey};
         let mut node = Node {
             identity: Some(Identity {
+                compact_access: false,
                 public_key: PublicKey([1; 32]),
                 port: 44000,
             }),

@@ -124,6 +124,7 @@ pub fn chunks(
     }
     let mut builder = Chunks {
         part: crate::dataplane::Chunk {
+            access_updates: Vec::new(),
             local_key: new.local_key,
             server: new.server,
             node: new.node,

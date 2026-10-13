@@ -12,6 +12,9 @@ use std::{collections::BTreeMap, net::SocketAddr};
 pub struct Identity {
     pub public_key: PublicKey,
     pub port: u16,
+    /// New coordinators use ranges only after the enabled receiver advertises support.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_access: bool,
 }
 
 /// Explicit pair rules replace this fallback, so port grants also narrow an open mesh.
@@ -91,4 +94,17 @@ pub struct Chunk {
     #[serde(default)]
     pub merged: BTreeMap<NodeId, PeerPolicy>,
     pub removed: Vec<NodeId>,
+    /// Negotiated, final access-only delta; snapshots retain ordinary peer chunks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access_updates: Vec<AccessUpdate>,
+}
+
+/// Ordered existing-node range whose directional rules change without peer identity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessUpdate {
+    pub first: NodeId,
+    pub last: NodeId,
+    pub inbound: TrafficPolicy,
+    pub outbound: TrafficPolicy,
 }

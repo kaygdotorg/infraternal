@@ -20,6 +20,7 @@ fn restart_retires_orphan_peer_host_routes() {
     let mut node = Node::restore(&directory).unwrap();
     node.up().unwrap();
     node.chunk(Chunk {
+        access_updates: Vec::new(),
         local_key: None,
         server: None,
         node: NodeId(1),

@@ -67,6 +67,7 @@ fn configure(node: &mut Node) {
     let chunk_count = peers.len().div_ceil(16);
     for (index, peers) in peers.chunks(16).enumerate() {
         let chunk = Chunk {
+            access_updates: Vec::new(),
             local_key: None,
             server: None,
             node: NodeId(1),
