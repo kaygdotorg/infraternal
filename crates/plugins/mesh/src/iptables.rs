@@ -37,7 +37,7 @@ impl Ownership {
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
-    apply_with_aliases(config, installed, &[], false, config)
+    apply_with_aliases(config, installed, &[], false, config, false)
 }
 pub(crate) fn apply_with_aliases(
     config: &Config,
@@ -45,6 +45,7 @@ pub(crate) fn apply_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
+    retain_guard: bool,
 ) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
@@ -58,29 +59,33 @@ pub(crate) fn apply_with_aliases(
         presence()?
     };
     let scripts = std::array::from_fn(|index| {
-        render_with_aliases(
+        let script = render_with_aliases(
             config,
             index == 1,
             installed[index],
             aliases,
             fence,
             connections,
-        )
+        );
+        if retain_guard {
+            // Only a complete, unchanged owned guard permits this selection.
+            // Filter rules and translated delivery checks still replace together.
+            script
+                .split_once("COMMIT\n")
+                .map_or_else(|| script.clone(), |(_, filter)| filter.to_owned())
+        } else {
+            script
+        }
     });
-    // Both families must pass preflight before either mutates. Independent
-    // families run together; join both outcomes before callers can roll back.
+    // Both families must pass preflight before either mutates. Keep serial
+    // commits: simultaneous frontend caches contend on one namespace generation.
     execute_families(&scripts, true)?;
     execute_families(&scripts, false)?;
     Ok(())
 }
 fn execute_families(scripts: &[String; 2], preflight: bool) -> io::Result<()> {
-    let outcomes = std::thread::scope(|scope| {
-        let ipv4 = scope.spawn(|| execute(TOOLS[0], &scripts[0], preflight));
-        let ipv6 = scope.spawn(|| execute(TOOLS[1], &scripts[1], preflight));
-        [ipv4.join(), ipv6.join()]
-    });
-    for outcome in outcomes {
-        outcome.map_err(|_| io::Error::other("Mesh filter worker ended."))??;
+    for (tool, script) in TOOLS.iter().zip(scripts) {
+        execute(tool, script, preflight)?;
     }
     Ok(())
 }

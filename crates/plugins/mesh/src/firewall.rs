@@ -160,6 +160,12 @@ impl Firewall {
                 aliases,
                 fence,
                 connections,
+                self.fallback_complete
+                    && self
+                        .previous
+                        .as_ref()
+                        .is_some_and(|old| old.addresses == config.addresses)
+                    && self.previous_aliases == aliases,
             ) {
                 if let Some(old) = &self.previous {
                     crate::iptables::apply_with_aliases(
@@ -168,6 +174,7 @@ impl Firewall {
                         &self.previous_aliases,
                         self.previous_fence,
                         old,
+                        false,
                     )?;
                 } else {
                     crate::iptables::remove()?;
