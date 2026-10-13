@@ -4,6 +4,8 @@ use super::*;
 use std::{io::Write, sync::Mutex};
 use tracing_subscriber::fmt::MakeWriter;
 
+const TEST_NAME: &str = "auth::tests::ca_administration_tests::audit_tests::unlock_audit_records_principal_time_outcome_without_material";
+
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
 impl Write for Capture {
@@ -24,6 +26,51 @@ impl<'a> MakeWriter<'a> for Capture {
 
 #[test]
 fn unlock_audit_records_principal_time_outcome_without_material() {
+    if std::env::var_os("INFRATERNAL_UNLOCK_AUDIT_CHILD").is_none() {
+        run_isolated_audit_test();
+        return;
+    }
+    verify_audit_events();
+}
+
+/// Keep the event assertions out of the process that runs the other tests.
+fn run_isolated_audit_test() {
+    // Tracing callsite interest is process-wide, so other tests can change
+    // whether this info event reaches a thread-local capture subscriber.
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env("INFRATERNAL_UNLOCK_AUDIT_CHILD", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "isolated unlock audit test failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "isolated unlock audit test exceeded its 60-second hang bound:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Verify all completion outcomes and ensure no unlock material enters the event.
+fn verify_audit_events() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .json()

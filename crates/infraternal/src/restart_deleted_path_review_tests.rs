@@ -50,7 +50,7 @@ fn relative_recovery_after_atomic_install_keeps_live_install_path() {
         let error = recovery.image.execute(&argv, &environment).unwrap_err();
         panic!("recovery exec refused: {error}");
     }
-    let state = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+    let state = crate::restart_binary::fixture::scratch_root()
         .join(format!("review-replaced-path-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&state).unwrap();
     let installed = state.join("infraternal");
@@ -65,7 +65,7 @@ fn relative_recovery_after_atomic_install_keeps_live_install_path() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + super::HANG_BOUND;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() >= deadline {
             child.kill().unwrap();

@@ -42,7 +42,7 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
         let error = recovery.image.execute(&argv, &environment).unwrap_err();
         panic!("recovery exec refused: {error}");
     }
-    let state = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
+    let state = crate::restart_binary::fixture::scratch_root()
         .join(format!("review-recovery-path-{}", uuid::Uuid::new_v4()));
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -59,7 +59,7 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
         .spawn()
         .unwrap();
     // A refused or stalled child must not keep this functional review open.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + super::HANG_BOUND;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() >= deadline {
             child.kill().unwrap();

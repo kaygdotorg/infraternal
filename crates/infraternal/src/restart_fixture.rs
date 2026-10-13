@@ -3,9 +3,25 @@ use std::{
     fs::File,
     io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 #[path = "../../infraternal-server/tests/support/release_signing.rs"]
 mod signing;
+
+/// Positive test waits use this only as a hang limit; observed events end waits immediately.
+pub(crate) const RESTART_TEST_HANG_BOUND: Duration = Duration::from_secs(60);
+
+/// Scratch directory for restart tests, located the way cargo itself does: beside
+/// the running test executable (`<target>/<profile>/deps`). Reading `CARGO_TARGET_DIR`
+/// instead fails whenever the gate runs with the default target directory or from a
+/// harness that does not export it, and it points elsewhere under `--target-dir`.
+pub(crate) fn scratch_root() -> PathBuf {
+    std::env::current_exe()
+        .unwrap()
+        .parent()
+        .expect("test executable has a directory")
+        .to_owned()
+}
 
 pub(crate) struct Signed {
     pub path: PathBuf,

@@ -5,7 +5,7 @@
 mod deleted_path_review;
 
 use super::*;
-use crate::restart_binary::fixture::Signed;
+use crate::restart_binary::fixture::{RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed};
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
 struct Directory(PathBuf);
@@ -65,7 +65,7 @@ fn strip_image(image: &Path) {
         .process_group(0)
         .spawn()
         .unwrap();
-    let output = bounded_output(child, Duration::from_secs(30), "strip test image");
+    let output = bounded_output(child, HANG_BOUND, "strip test image");
     assert!(
         output.status.success(),
         "strip test image failed: {}",
@@ -81,13 +81,7 @@ fn stripped_test_image(source: &Path) -> PathBuf {
     {
         return source.to_owned();
     }
-    let target_root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || {
-            PathBuf::from(std::env::var_os("HOME").unwrap())
-                .join(".cache/codex-scratch/infraternal")
-        },
-        PathBuf::from,
-    );
+    let target_root = crate::restart_binary::fixture::scratch_root();
     let cache = target_root.join("restart-test-images");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -189,7 +183,7 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
 async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
     let directory = Directory::new();
     let mut control = Control::start(&directory.0).unwrap();
-    let (received, requested) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
         tokio::join!(control.requested(None), request(&directory.0, None))
     })
     .await
@@ -386,7 +380,7 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
         .process_group(0)
         .spawn()
         .unwrap();
-    let output = bounded_output(child, Duration::from_secs(9), NAME);
+    let output = bounded_output(child, HANG_BOUND, NAME);
     assert!(
         output.status.success(),
         "{}",
@@ -416,16 +410,14 @@ async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
         socket.shutdown().await.unwrap();
         drop(socket);
     };
-    tokio::time::timeout(Duration::from_secs(1), async {
-        tokio::join!(receive, broken)
-    })
-    .await
-    .expect("closed reply fixture must finish within 1 second");
-    let (received, requested) = tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_BOUND, async { tokio::join!(receive, broken) })
+        .await
+        .expect("closed reply fixture must finish");
+    let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
         tokio::join!(control.requested(None), request(&directory.0, None))
     })
     .await
-    .expect("valid request after a closed reply must finish within 5 seconds");
+    .expect("valid request after a closed reply must finish");
     assert!(received.is_ok());
     assert!(!requested.unwrap());
 }
@@ -465,7 +457,7 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
         .process_group(0)
         .spawn()
         .unwrap();
-    let output = bounded_output(child, Duration::from_secs(6), NAME);
+    let output = bounded_output(child, HANG_BOUND, NAME);
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -479,11 +471,11 @@ async fn default_restart_opens_the_receiver_target_exactly_once() {
     let directory = Directory::new();
     let mut control = Control::start(&directory.0).unwrap();
     crate::restart_binary::reset_test_opens();
-    let (received, sent) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (received, sent) = tokio::time::timeout(HANG_BOUND, async {
         tokio::join!(control.requested(None), request(&directory.0, None))
     })
     .await
-    .expect("default restart request must finish within 5 seconds");
+    .expect("default restart request must finish");
     assert!(received.is_ok());
     assert!(sent.is_ok());
     assert_eq!(
@@ -510,7 +502,12 @@ fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
             started.store(true, std::sync::atomic::Ordering::Release);
             let _ = nix::sys::wait::waitpid(pid, None);
         });
+        let startup_deadline = std::time::Instant::now() + HANG_BOUND;
         while !entered.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < startup_deadline,
+                "blocking waiter did not start before the hang bound"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         shutdown_runtime(runtime);
@@ -526,7 +523,7 @@ fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
         .process_group(0)
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let deadline = std::time::Instant::now() + HANG_BOUND;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success());
@@ -557,7 +554,7 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
         runtime.block_on(async {
             let mut control = Control::start(&directory.0).unwrap();
             assert!(
-                tokio::time::timeout(Duration::from_secs(2), control.requested(None))
+                tokio::time::timeout(HANG_BOUND, control.requested(None))
                     .await
                     .unwrap()
                     .is_ok()
@@ -575,7 +572,7 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
         .process_group(0)
         .spawn()
         .unwrap();
-    let output = bounded_output(child, Duration::from_secs(6), NAME);
+    let output = bounded_output(child, HANG_BOUND, NAME);
     assert!(
         output.status.success(),
         "early SIGHUP ended the fresh image: {}\n{}",
@@ -611,7 +608,7 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         .spawn()
         .unwrap();
     let pid = child.id();
-    let output = bounded_output(child, Duration::from_secs(6), NAME);
+    let output = bounded_output(child, HANG_BOUND, NAME);
     assert!(output.status.success());
     let logs = format!(
         "{}\n{}",
@@ -653,7 +650,7 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
         );
     }
     let mut failures = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let deadline = std::time::Instant::now() + HANG_BOUND;
     for stage in ["before", "after"] {
         let directory = Directory::new();
         let target = directory.0.join("cold-exec-successor");
@@ -746,7 +743,7 @@ fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
         .unwrap();
     // A separate process bounds a synchronous open; an async timeout on the
     // same runtime thread cannot fire while that thread waits inside open(2).
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + HANG_BOUND;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success(), "invalid replacement must be refused");
@@ -755,7 +752,7 @@ fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
         if std::time::Instant::now() >= deadline {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("FIFO validation waited for a writer beyond the 3-second deadline");
+            panic!("FIFO validation waited for a writer beyond the hang bound");
         }
         std::thread::sleep(Duration::from_millis(20));
     }

@@ -192,7 +192,7 @@ mod tests {
     use std::os::unix::fs::FileExt;
     #[test]
     fn snapshot_refuses_every_mutation_and_preserves_source_offset() {
-        let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
+        let root = crate::restart_binary::fixture::scratch_root();
         let path = root.join(format!("image-{}", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"original").unwrap();
         let file = File::open(&path).unwrap();
@@ -237,7 +237,7 @@ mod tests {
             );
             return;
         }
-        let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
+        let root = crate::restart_binary::fixture::scratch_root();
         let fixture = root.join(format!("probe-{}", uuid::Uuid::new_v4()));
         assert!(
             Command::new("cc")
