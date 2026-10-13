@@ -74,4 +74,47 @@ mod tests {
             transaction.commit().await.unwrap();
         }
     }
+
+    /// Real-engine comparison at the 1000-node scale; deliberately excluded
+    /// from build-host gates because every performance number belongs on the VM.
+    #[tokio::test]
+    #[ignore = "Measure only on the perf VM under its benchmark lock, 31 batches of 1000 writes."]
+    async fn writer_begin_at_1000_nodes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let load = std::fs::read_to_string("/proc/loadavg").unwrap();
+        let mut samples = Vec::new();
+        // One shared server database serialises writer transactions. The
+        // smallest transaction exposes helper overhead without query work
+        // obscuring it; 1000 begins represent one write for each live node.
+        for _ in 0..31 {
+            let started = std::time::Instant::now();
+            for _ in 0..1000 {
+                begin_immediate(&pool)
+                    .await
+                    .unwrap()
+                    .commit()
+                    .await
+                    .unwrap();
+            }
+            samples.push(started.elapsed().as_nanos());
+        }
+        samples.sort_unstable();
+        println!(
+            "writer_begin nodes=1000 batches=31 engine=sqlite_memory writers=1 batch_p50_ns={} batch_p99_ns={} per_write_p50_ns={} per_write_p99_ns={} machine={} load={}",
+            samples[15],
+            samples[30],
+            samples[15] / 1000,
+            samples[30] / 1000,
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .unwrap()
+                .trim(),
+            load.trim(),
+        );
+    }
 }
