@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 test("the reviewed production source meets transfer budgets for fixed build metadata", async () => {
-  const root = join(homedir(), ".cache/codex-scratch/hosts-from-server-review");
+  const root = join(homedir(), ".cache/codex-scratch/hosts-from-server-r2/transfer");
   await mkdir(root, { recursive: true });
   const scratch = await mkdtemp(join(root, "transfer-"));
   try {
