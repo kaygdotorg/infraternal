@@ -1,0 +1,101 @@
+bun test v1.4.2 (744846f84)
+
+src/canvas/toolbar/palette-actions.test.ts:
+15 |   const cx = { state: { activeWin: current }, core: {}, views: new Map(), win: {
+16 |     split: (rec: WinRec) => targets.push(rec), newWindow: (rec: WinRec) => targets.push(rec), closeKey: (rec: WinRec) => targets.push(rec),
+17 |   } } as unknown as Ctx;
+18 |   // Passing the captured target reproduces a focus change during the pending chunk load.
+19 |   Reflect.apply(dispatchCanvasAction, undefined, [cx, { action: `canvas:${action}` }, selected]);
+20 |   expect(targets).toEqual([selected]);
+                       ^
+error: expect(received).toEqual(expected)
+
+  [
+    {
+      "model": {
+-       "id": "selected",
++       "id": "current",
+        "kind": "terminal",
+-     },
+-     "owner": {
+-       "wins": 
+- Map {
+-         "selected" => [Circular],
+-       }
+- ,
+      },
+    },
+  ]
+
+- Expected  - 8
++ Received  + 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/apps/tracer/src/canvas/toolbar/palette-actions.test.ts:20:19)
+(fail) a deferred split:right selection retains its original window [2.28ms]
+15 |   const cx = { state: { activeWin: current }, core: {}, views: new Map(), win: {
+16 |     split: (rec: WinRec) => targets.push(rec), newWindow: (rec: WinRec) => targets.push(rec), closeKey: (rec: WinRec) => targets.push(rec),
+17 |   } } as unknown as Ctx;
+18 |   // Passing the captured target reproduces a focus change during the pending chunk load.
+19 |   Reflect.apply(dispatchCanvasAction, undefined, [cx, { action: `canvas:${action}` }, selected]);
+20 |   expect(targets).toEqual([selected]);
+                       ^
+error: expect(received).toEqual(expected)
+
+  [
+    {
+      "model": {
+-       "id": "selected",
++       "id": "current",
+        "kind": "terminal",
+-     },
+-     "owner": {
+-       "wins": 
+- Map {
+-         "selected" => [Circular],
+-       }
+- ,
+      },
+    },
+  ]
+
+- Expected  - 8
++ Received  + 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/apps/tracer/src/canvas/toolbar/palette-actions.test.ts:20:19)
+(fail) a deferred new:below selection retains its original window [0.16ms]
+15 |   const cx = { state: { activeWin: current }, core: {}, views: new Map(), win: {
+16 |     split: (rec: WinRec) => targets.push(rec), newWindow: (rec: WinRec) => targets.push(rec), closeKey: (rec: WinRec) => targets.push(rec),
+17 |   } } as unknown as Ctx;
+18 |   // Passing the captured target reproduces a focus change during the pending chunk load.
+19 |   Reflect.apply(dispatchCanvasAction, undefined, [cx, { action: `canvas:${action}` }, selected]);
+20 |   expect(targets).toEqual([selected]);
+                       ^
+error: expect(received).toEqual(expected)
+
+  [
+    {
+      "model": {
+-       "id": "selected",
++       "id": "current",
+        "kind": "terminal",
+-     },
+-     "owner": {
+-       "wins": 
+- Map {
+-         "selected" => [Circular],
+-       }
+- ,
+      },
+    },
+  ]
+
+- Expected  - 8
++ Received  + 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/hosts-from-server/apps/tracer/src/canvas/toolbar/palette-actions.test.ts:20:19)
+(fail) a deferred close selection retains its original window [0.12ms]
+
+ 0 pass
+ 3 fail
+ 3 expect() calls
+Ran 3 tests across 1 file. [17.00ms]

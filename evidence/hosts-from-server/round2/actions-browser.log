@@ -1,0 +1,13 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-zmn5f95a.js, chunk-rjwmmgdn.js, chunk-35n5v7xr.js, chunk-trn2mj06.js, chunk-6bxnxfc3.js, chunk-9b9az3gs.js, chunk-g3r4pfyt.js, chunk-5zd06r4s.js, chunk-yvht96z9.js, chunk-sd2gqjf5.js, chunk-ah4s9szt.js, chunk-a6fj3zyq.js, chunk-gxvqf3b8.js, chunk-km50jzgh.js, chunk-xpw2sbew.js, chunk-161b4465.js, chunk-y3rsyt74.js, chunk-na49xj9e.js, chunk-0s9gbb26.js, chunk-g2gh0ry9.js, chunk-24dykp9m.js, chunk-wsnkpk0j.js, main.js, chunk-8n70sfjx.js, chunk-fn4w1xnh.js, chunk-9dhw6tbb.js, chunk-2p9nxk8e.js, chunk-e65ne01j.js, chunk-7e9bhar5.js, chunk-rhhmy1pd.js, chunk-vwwka7kk.js, chunk-8gqdshxw.js, chunk-4559gxnr.js, chunk-eck1nw3y.js, chunk-cgj2hv56.js, chunk-rt6zmhdt.js, chunk-rrjf28tf.js, chunk-32xw4vpz.js, chunk-xdkqreyn.js, chunk-63xp390b.js, chunk-zhxdjghf.js, chunk-jr5ezrdr.js, chunk-h6a21nm7.js, chunk-aw754c6n.js, chunk-axbkkqp1.js, chunk-wzkk9pe3.js, chunk-3xk04pcb.js, chunk-1dvvws9k.js, chunk-dmamnw85.js, chunk-hyqj7dxc.js, chunk-62k2s5wd.js, chunk-kyrc190h.js, chunk-cvghfkrn.js, chunk-xh7q66ee.js, chunk-6tfjez3x.js, chunk-krsrnfkk.js, chunk-hpzmhzhd.js, chunk-cmydzyx2.js, chunk-0jjnt2nm.js, chunk-9grp1f60.js, chunk-km88fxvt.js, chunk-vv0tqsr8.js, chunk-zbf71g59.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-vzq735wh.js, chunk-6h5vc12x.js, chunk-smrfvp7n.js, chunk-dzhhabhn.js, chunk-6n8hdntm.js
+[WebServer] latency proxy listening on http://localhost:4400; upstream port=4401
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4401
+
+Running 2 tests using 1 worker
+
+(node:418386) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/canvas.spec.ts:401:1 › palette: About infraternal opens Settings, About, and is found by version, build and commit (8.5s)
+  ✓  2 test/canvas.spec.ts:522:1 › lock: on macOS, ⌘K still opens the palette while locked and offers Unlock window (9.8s)
+
+  2 passed (26.3s)

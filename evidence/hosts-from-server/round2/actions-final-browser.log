@@ -1,0 +1,14 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-76sk4fy2.js, chunk-9bmj48r7.js, chunk-35n5v7xr.js, chunk-trn2mj06.js, chunk-e3vntyre.js, chunk-kjpx3f6s.js, chunk-g3r4pfyt.js, chunk-7xgxmsbv.js, chunk-yvht96z9.js, chunk-hx8c1fne.js, chunk-ah4s9szt.js, chunk-a6fj3zyq.js, chunk-gxvqf3b8.js, chunk-7k3887sw.js, chunk-xpw2sbew.js, chunk-sq671b9d.js, chunk-8aab45h1.js, chunk-na49xj9e.js, chunk-fe1ts125.js, chunk-g2gh0ry9.js, chunk-mq9qst7t.js, chunk-4wfnt50k.js, main.js, chunk-8n70sfjx.js, chunk-fn4w1xnh.js, chunk-9dhw6tbb.js, chunk-2h6x09cj.js, chunk-5ad27khf.js, chunk-es1y3dm9.js, chunk-tzqv4yts.js, chunk-md8thqtc.js, chunk-8gqdshxw.js, chunk-zqb2mb7f.js, chunk-eck1nw3y.js, chunk-cgj2hv56.js, chunk-ejet24k6.js, chunk-hf6dbrbm.js, chunk-jybrrdx2.js, chunk-565p1qjz.js, chunk-9jhmdpw1.js, chunk-s4z6ma8m.js, chunk-p71zesw3.js, chunk-h6a21nm7.js, chunk-1hcmm5ss.js, chunk-axbkkqp1.js, chunk-jt4jzscs.js, chunk-ggztjpzm.js, chunk-0n48pt7n.js, chunk-znn7sp53.js, chunk-rbc65pe8.js, chunk-dvsx4tzr.js, chunk-kyrc190h.js, chunk-essjjq3t.js, chunk-00tbvwqd.js, chunk-41cft7zt.js, chunk-sejersmg.js, chunk-evr5ykeq.js, chunk-t8m668g0.js, chunk-axgxd355.js, chunk-tdtb2d3v.js, chunk-ne8wgfhs.js, chunk-r8519xsh.js, chunk-b3naa0qf.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-ddc5rys2.js, chunk-6pp330mn.js, chunk-smrfvp7n.js, chunk-dzhhabhn.js, chunk-2dwf8xx6.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4403
+[WebServer] latency proxy listening on http://localhost:4402; upstream port=4403
+
+Running 3 tests using 1 worker
+
+(node:796848) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/canvas.spec.ts:401:1 › palette: About infraternal opens Settings, About, and is found by version, build and commit (7.6s)
+  ✓  2 test/canvas.spec.ts:522:1 › lock: on macOS, ⌘K still opens the palette while locked and offers Unlock window (7.2s)
+  ✓  3 test/hosts-removal-review.spec.ts:5:1 › an open palette removes withdrawn admission after opening its shell and reconnecting (10.7s)
+
+  3 passed (30.8s)
