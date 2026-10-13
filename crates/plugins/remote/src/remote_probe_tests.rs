@@ -116,3 +116,65 @@ async fn a_queued_probe_cannot_expire_before_the_socket_emits_it() {
         "a healthy path was declared dead while its probe was queued: {result:?}"
     );
 }
+
+#[tokio::test]
+async fn enrolled_copy_replies_cannot_keep_a_dead_mesh_path_alive() {
+    let ca = root();
+    let server = quinn::Endpoint::server(
+        server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate)).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let logical = server.local_addr().unwrap();
+    let socket = quinn::TokioRuntime
+        .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+        .unwrap();
+    let path = PathSocket::new(socket, logical);
+    let mut client = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        None,
+        path.clone(),
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
+    client.set_default_client_config(client_config(&leaf(&ca, false), &[ca.certificate]).unwrap());
+    let (dial, accept) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+        server.accept().await.unwrap().await
+    });
+    let dial = dial.unwrap();
+    let accept = accept.unwrap();
+    // This bound socket absorbs mesh packets but never answers. The retained
+    // enrolled server still authenticates and acknowledges encrypted copies.
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+    let before = authenticated_frames(&dial);
+    path.use_mesh(blackhole.local_addr().unwrap());
+    path.set_backup(true);
+    client.rebind_abstract(path.alias()).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        path_interrupted(
+            &dial,
+            &path,
+            Duration::from_millis(20),
+            Duration::from_millis(300),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(result, Ok(Err(ref error)) if error.kind() == io::ErrorKind::TimedOut),
+        "enrolled copies masked the dead mesh path: {result:?}"
+    );
+    assert_eq!(path.mesh_datagrams(), 0);
+    assert_ne!(
+        before,
+        authenticated_frames(&dial),
+        "the enrolled path must have authenticated replies"
+    );
+    assert!(
+        dial.close_reason().is_none(),
+        "detection must keep the connection"
+    );
+    drop(accept);
+    client.close(0u32.into(), b"");
+    server.close(0u32.into(), b"");
+}

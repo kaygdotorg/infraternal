@@ -327,7 +327,7 @@ pub async fn path_interrupted(
             _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
             _ = ticks.tick() => {
                 let silence = freshness.silence(connection);
-                if pending.is_some_and(|sent| silence < sent.elapsed()) {
+                if pending.is_some_and(|sent| path.heard_since(sent.into_std()) && silence < sent.elapsed()) {
                     pending = None;
                 }
                 if pending.is_none() {
@@ -346,7 +346,9 @@ pub async fn path_interrupted(
                 // Let an already-ready endpoint receive authenticate its ACK
                 // before deciding a timer that became ready in the same pass.
                 tokio::task::yield_now().await;
-                if freshness.silence(connection) >= sent.elapsed() {
+                // Authenticated enrolled copies preserve data but cannot prove
+                // the mesh. Require a response from its physical tuple too.
+                if !path.heard_since(sent.into_std()) || freshness.silence(connection) >= sent.elapsed() {
                     return Err(io::ErrorKind::TimedOut.into());
                 }
                 pending = None;
