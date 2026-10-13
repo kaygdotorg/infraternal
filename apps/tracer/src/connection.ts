@@ -275,9 +275,9 @@ export class MuxConnection {
   }
 
   /** A pong arrived (on any stream). */
-  acceptPong(nonce: bigint): void {
+  acceptPong(nonce: bigint, sentUs: bigint): void {
     const startedAt = this.pendingPings.get(nonce);
-    if (startedAt === undefined) return;
+    if (startedAt === undefined || sentUs !== BigInt(Math.round(startedAt * 1000))) return;
     const now = performance.now();
     // A renderer can wake with an old reply queued ahead of its timer. Enforce the
     // existing lease first; suspension must not become an hours-long learned RTT.
@@ -514,7 +514,7 @@ export class MuxConnection {
         this.sampleRoundTrip();
         return;
       case "Pong":
-        this.acceptPong(frame.nonce);
+        this.acceptPong(frame.nonce, frame.sentUs);
         return;
       case "Close":
         this.status(plainCloseReason(frame.reason, "The server closed the connection."));

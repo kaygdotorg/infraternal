@@ -877,7 +877,7 @@ export class TerminalClient {
         this.sendFrame(this.streamId, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
       case "Pong":
-        this.conn.acceptPong(frame.nonce);
+        this.conn.acceptPong(frame.nonce, frame.sentUs);
         return;
       case "Close":
         if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
