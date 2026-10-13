@@ -88,11 +88,40 @@ impl PreparedPayload {
 /// Negotiated sources share the existing bounded compressor and digest cache.
 struct Transfer {
     body: String,
+    digest: Arc<str>,
     raw_size: u64,
     gzip: Option<Arc<[u8]>>,
     zstd: Option<Arc<[u8]>>,
 }
 impl Transfer {
+    /// One staging program; only how `choice` is selected differs. The remote
+    /// selection runs under the setup lock; a declared choice comes from the
+    /// read-only check and is still verified by digest after staging.
+    fn body_with(&self, selection: &str) -> String {
+        format!(
+            "{PAYLOAD_CACHE}\nvalidate_cache\n{selection}\n{STAGE_TRANSACTION}\nprintf 'TRANSFER %s\\n' \"$choice\"\ncase \"$choice\" in\nreuse) ln \"$cache/payload\" \"$stage/payload\";;\nzstd) head -c {zstd_size} | zstd -dc > \"$stage/payload\";;\ngzip) head -c {gzip_size} | gzip -dc > \"$stage/payload\";;\nraw) head -c {raw_size} > \"$stage/payload\";;\n*) exit 1;;\nesac\nprintf '%s  %s\\n' {digest} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\nif [ \"$choice\" != reuse ]; then\n{PUBLISH_PAYLOAD_CACHE}\nfi",
+            digest = shell_quote(&self.digest),
+            zstd_size = self.zstd.as_ref().map_or(0, |bytes| bytes.len()),
+            gzip_size = self.gzip.as_ref().map_or(0, |bytes| bytes.len()),
+            raw_size = self.raw_size,
+        )
+    }
+
+    /// Choose from capabilities the check observed, so the payload can follow
+    /// the setup script without waiting for a remote selection receipt.
+    fn declared(&self, caps: &TransferCaps) -> crate::transport::TransferChoice {
+        use crate::transport::TransferChoice;
+        if caps.cache.as_deref() == Some(&*self.digest) {
+            TransferChoice::Reuse
+        } else if caps.zstd && self.zstd.is_some() {
+            TransferChoice::Zstd
+        } else if caps.gzip && self.gzip.is_some() {
+            TransferChoice::Gzip
+        } else {
+            TransferChoice::Raw
+        }
+    }
+
     fn input<'a>(&'a self, binary: &'a Path, invitation: &'a [u8]) -> Input<'a> {
         Input::Negotiated {
             raw: PayloadInput::File {
@@ -106,6 +135,70 @@ impl Transfer {
         }
     }
 }
+
+/// Public transfer facts reported by the read-only check (D255, #189). They
+/// only select an encoding; staging still verifies the payload digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TransferCaps {
+    zstd: bool,
+    gzip: bool,
+    /// SHA-256 of an owned cached payload, when one exists.
+    cache: Option<String>,
+}
+impl TransferCaps {
+    fn parse(line: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(line).ok()?.strip_suffix('\n')?;
+        let mut fields = text.strip_prefix("CAPS ")?.split(' ');
+        let zstd = match fields.next()? {
+            "zstd" => true,
+            "-" => false,
+            _ => return None,
+        };
+        let gzip = match fields.next()? {
+            "gzip" => true,
+            "-" => false,
+            _ => return None,
+        };
+        let cache = match fields.next()? {
+            "-" => None,
+            digest
+                if digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+            {
+                Some(digest.to_owned())
+            }
+            _ => return None,
+        };
+        fields
+            .next()
+            .is_none()
+            .then_some(Self { zstd, gzip, cache })
+    }
+}
+
+/// The read-only check's command channel, held open for one public setup script.
+/// `caps` is present only when the host reported transfer facts and reads the
+/// setup script with an exact reader, so payload bytes may follow it at once.
+pub struct Checked {
+    channel: crate::duplex::Duplex,
+    caps: Option<TransferCaps>,
+}
+
+// Rootless transfer facts for the check channel. Root installs keep the
+// remote selection under sudo: this account cannot read root's cache.
+const TRANSFER_PROBE: &str = r#"
+digest=-
+if (validate_cache) && [ -f "$cache/payload" ] && [ ! -L "$cache/payload" ]; then
+    digest=$(sha256sum < "$cache/payload" | cut -c1-64) || digest=-
+fi
+zstd=-
+if command -v zstd >/dev/null 2>&1; then zstd=zstd; fi
+gzip=-
+if command -v gzip >/dev/null 2>&1; then gzip=gzip; fi
+printf 'CAPS %s %s %s\n' "$zstd" "$gzip" "$digest"
+"#;
 
 impl Installation {
     #[must_use]
@@ -227,20 +320,21 @@ impl Installation {
                 Failure::install("The matching static infraternal binary is unavailable.")
             })?
             .len();
-        let body = format!(
-            "{PAYLOAD_CACHE}\nvalidate_cache\nchoice=raw\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {digest} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then choice=reuse; elif {has_zstd} && command -v zstd >/dev/null 2>&1; then choice=zstd; elif {has_gzip} && command -v gzip >/dev/null 2>&1; then choice=gzip; fi\n{STAGE_TRANSACTION}\nprintf 'TRANSFER %s\\n' \"$choice\"\ncase \"$choice\" in\nreuse) ln \"$cache/payload\" \"$stage/payload\";;\nzstd) head -c {zstd_size} | zstd -dc > \"$stage/payload\";;\ngzip) head -c {gzip_size} | gzip -dc > \"$stage/payload\";;\nraw) head -c {raw_size} > \"$stage/payload\";;\n*) exit 1;;\nesac\nprintf '%s  %s\\n' {digest} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\nif [ \"$choice\" != reuse ]; then\n{PUBLISH_PAYLOAD_CACHE}\nfi",
-            digest = shell_quote(&digest),
+        let quoted = shell_quote(&digest);
+        let selection = format!(
+            "choice=raw\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {quoted} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then choice=reuse; elif {has_zstd} && command -v zstd >/dev/null 2>&1; then choice=zstd; elif {has_gzip} && command -v gzip >/dev/null 2>&1; then choice=gzip; fi",
             has_zstd = if zstd.is_some() { "true" } else { "false" },
             has_gzip = if gzip.is_some() { "true" } else { "false" },
-            zstd_size = zstd.as_ref().map_or(0, |bytes| bytes.len()),
-            gzip_size = gzip.as_ref().map_or(0, |bytes| bytes.len()),
         );
-        Ok(Transfer {
-            body,
+        let mut transfer = Transfer {
+            body: String::new(),
+            digest,
             raw_size,
             gzip,
             zstd,
-        })
+        };
+        transfer.body = transfer.body_with(&selection);
+        Ok(transfer)
     }
 
     /// Keep the authenticated command channel through read-only admission and staging.
@@ -250,17 +344,30 @@ impl Installation {
     pub async fn check_channel(
         session: &dyn SshSession,
         check: &str,
-    ) -> Result<(crate::transport::CommandOutput, crate::duplex::Duplex), Failure> {
+    ) -> Result<(crate::transport::CommandOutput, Checked), Failure> {
+        // The probe never fails the check: missing facts fall back to the
+        // remote selection receipt. `dd bs=1` reads exactly the setup script,
+        // so payload bytes sent right behind it stay in the pipe for staging;
+        // a buffering `head` could consume them. Without dd, the server waits
+        // for the selection receipt before sending any payload byte.
+        let probe = Self::script_for(
+            InstallMode::Rootless,
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            &format!("{PAYLOAD_CACHE}\n{TRANSFER_PROBE}"),
+        );
         let script = format!(
-            "{SETUP_HEADER}setup_step connect {}\nprintf 'CHECK ready\\n'\nIFS= read -r setup_length\ncase \"$setup_length\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$setup_length\" -le 65536 ] || exit 1\nsetup_body=$(head -c \"$setup_length\")\nexec sh -c \"$setup_body\"\n",
-            shell_quote(check)
+            "{SETUP_HEADER}setup_step connect {}\ncaps=$(sh -c {} </dev/null 2>/dev/null) || caps=\n[ -z \"$caps\" ] || printf '%s\\n' \"$caps\"\nreader=head\nif command -v dd >/dev/null 2>&1; then reader=dd; fi\nprintf 'CHECK ready %s\\n' \"$reader\"\nIFS= read -r setup_length\ncase \"$setup_length\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$setup_length\" -le 65536 ] || exit 1\nif [ \"$reader\" = dd ]; then setup_body=$(dd bs=1 count=\"$setup_length\" 2>/dev/null); else setup_body=$(head -c \"$setup_length\"); fi\nexec sh -c \"$setup_body\"\n",
+            shell_quote(check),
+            shell_quote(&probe),
         );
         let channel = session.stream(&script).await?;
         if channel.line(32).await? != b"STEP connect\n" {
             return Err(invalid_setup().at(InstallStep::Connect));
         }
         let mut stdout = Vec::new();
-        loop {
+        let mut caps = None;
+        let exact = loop {
             let receipt = channel
                 .line(512)
                 .await
@@ -268,15 +375,30 @@ impl Installation {
             if let Some(failure) = parse_refusal(&receipt, InstallStep::Connect) {
                 return Err(crate::previous_attempt::classify(failure));
             }
-            if receipt == b"CHECK ready\n" {
-                break;
+            match receipt.as_slice() {
+                b"CHECK ready dd\n" => break true,
+                b"CHECK ready head\n" => break false,
+                _ => {}
+            }
+            if receipt.starts_with(b"CAPS ") {
+                if caps.is_some() {
+                    return Err(invalid_setup().at(InstallStep::Connect));
+                }
+                caps = Some(TransferCaps::parse(&receipt));
+                continue;
             }
             if stdout.len() + receipt.len() > 512 {
                 return Err(invalid_setup().at(InstallStep::Connect));
             }
             stdout.extend_from_slice(&receipt);
-        }
-        Ok((crate::transport::CommandOutput { stdout }, channel))
+        };
+        Ok((
+            crate::transport::CommandOutput { stdout },
+            Checked {
+                channel,
+                caps: caps.flatten().filter(|_| exact),
+            },
+        ))
     }
 
     /// Stage the verified payload and start a shim-owned shell on this SSH master.
@@ -296,41 +418,66 @@ impl Installation {
     pub async fn stage_session_on(
         &self,
         binary: &Path,
-        checked: Option<crate::duplex::Duplex>,
+        checked: Option<Checked>,
     ) -> Result<(uuid::Uuid, crate::duplex::Duplex), Failure> {
         let transfer = Self::negotiated_payload(binary).await?;
+        // A declared encoding lets the payload follow the setup script at once.
+        // Root mode keeps selection under sudo, where its own cache is visible.
+        let declared = checked
+            .as_ref()
+            .and_then(|checked| checked.caps.as_ref())
+            .filter(|_| self.mode == InstallMode::Rootless)
+            .map(|caps| transfer.declared(caps));
+        let upload = match declared {
+            Some(choice) => transfer.body_with(&format!("choice={}", choice.word())),
+            None => transfer.body.clone(),
+        };
         let start = "stage=\"$base/.bootstrap-lock\"\n[ \"$(cat \"$stage/transaction\")\" = \"$transaction\" ] || exit 72\nexec 9<&-\nexec \"$stage/payload\" __ssh-session --state \"$base/sessions\"";
         let script = format!(
             "{SETUP_HEADER}setup_step upload {}\nsetup_step start {}\n",
-            shell_quote(&self.script(&transfer.body)),
+            shell_quote(&self.script(&upload)),
             shell_quote(&self.script(start))
         );
-        let channel = if let Some(channel) = checked {
+        let channel = if let Some(checked) = checked {
             if script.len() > 65536 {
                 return Err(invalid_setup().at(InstallStep::Upload));
             }
-            channel
-                .write(format!("{}\n", script.len()).as_bytes())
+            let mut framed = format!("{}\n", script.len()).into_bytes();
+            framed.extend_from_slice(script.as_bytes());
+            checked
+                .channel
+                .write(&framed)
                 .await
                 .map_err(|_| invalid_setup().at(InstallStep::Upload))?;
-            channel
-                .write(script.as_bytes())
-                .await
-                .map_err(|_| invalid_setup().at(InstallStep::Upload))?;
-            channel
+            checked.channel
         } else {
             self.session.stream(&script).await?
         };
-        if channel.line(32).await? != b"STEP upload\n" {
-            return Err(invalid_setup().at(InstallStep::Upload));
-        }
-        let receipt = channel.line(64).await?;
-        if let Some(failure) = parse_refusal(&receipt, InstallStep::Upload) {
-            return Err(failure.in_mode(self.mode));
-        }
-        let choice = crate::transport::TransferChoice::parse(&receipt)
-            .ok_or_else(|| invalid_setup().at(InstallStep::Upload))?;
-        let written = send_transfer(&channel, &transfer, binary, choice).await;
+        let written = if let Some(choice) = declared {
+            // Bytes flow while the host takes its lock; a refusal receipt
+            // stops sending. The receipt must name the declared encoding.
+            let send = send_transfer(&channel, &transfer, binary, choice);
+            let receipt = self.upload_receipt(&channel, Some(choice));
+            tokio::pin!(send, receipt);
+            let mut written = None;
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut receipt => {
+                        result?;
+                        break;
+                    }
+                    result = &mut send, if written.is_none() => written = Some(result),
+                }
+            }
+            match written {
+                Some(written) => written,
+                None => send.await,
+            }
+        } else {
+            let choice = self.upload_receipt(&channel, None).await?;
+            send_transfer(&channel, &transfer, binary, choice).await
+        };
         if let Err(error) = &written
             && error.kind() != std::io::ErrorKind::BrokenPipe
         {
@@ -356,6 +503,24 @@ impl Installation {
             .filter(|id| receipt == format!("SESSION {id}\n").as_bytes())
             .ok_or_else(invalid_setup)?;
         Ok((id, channel))
+    }
+
+    /// Read the upload step's canonical selection receipt or named refusal.
+    async fn upload_receipt(
+        &self,
+        channel: &crate::duplex::Duplex,
+        declared: Option<crate::transport::TransferChoice>,
+    ) -> Result<crate::transport::TransferChoice, Failure> {
+        if channel.line(32).await? != b"STEP upload\n" {
+            return Err(invalid_setup().at(InstallStep::Upload));
+        }
+        let receipt = channel.line(64).await?;
+        if let Some(failure) = parse_refusal(&receipt, InstallStep::Upload) {
+            return Err(failure.in_mode(self.mode));
+        }
+        crate::transport::TransferChoice::parse(&receipt)
+            .filter(|choice| declared.is_none_or(|declared| declared == *choice))
+            .ok_or_else(|| invalid_setup().at(InstallStep::Upload))
     }
 
     async fn prepare_payload(&self, binary: &Path) -> Result<PreparedPayload, Failure> {
@@ -1198,4 +1363,42 @@ fn setup_step(index: usize) -> InstallStep {
 }
 fn invalid_setup() -> Failure {
     Failure::install("The host setup response was invalid.")
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins the check-time transfer record (#189).
+    use super::*;
+
+    #[test]
+    fn transfer_caps_accept_only_the_fixed_record() {
+        let digest = "a".repeat(64);
+        assert_eq!(
+            TransferCaps::parse(format!("CAPS zstd - {digest}\n").as_bytes()),
+            Some(TransferCaps {
+                zstd: true,
+                gzip: false,
+                cache: Some(digest.clone()),
+            })
+        );
+        assert_eq!(
+            TransferCaps::parse(b"CAPS - gzip -\n"),
+            Some(TransferCaps {
+                zstd: false,
+                gzip: true,
+                cache: None,
+            })
+        );
+        for invalid in [
+            "CAPS zstd gzip -".to_owned(),
+            "CAPS zstd gzip - extra\n".to_owned(),
+            "CAPS xz gzip -\n".to_owned(),
+            format!("CAPS zstd gzip {}\n", "A".repeat(64)),
+            format!("CAPS zstd gzip {}\n", "a".repeat(63)),
+            "CAPS  zstd gzip -\n".to_owned(),
+            "CAPS zstd gzip -\r\n".to_owned(),
+        ] {
+            assert_eq!(TransferCaps::parse(invalid.as_bytes()), None, "{invalid:?}");
+        }
+    }
 }

@@ -48,7 +48,7 @@ pub enum PayloadInput<'a> {
 }
 
 /// Public transfer choices never convey authority or diagnostic text.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferChoice {
     Raw,
     Gzip,
@@ -64,6 +64,16 @@ impl TransferChoice {
             b"TRANSFER zstd\n" => Some(Self::Zstd),
             b"TRANSFER reuse\n" => Some(Self::Reuse),
             _ => None,
+        }
+    }
+    /// The fixed word the staging program prints and selects on.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Gzip => "gzip",
+            Self::Zstd => "zstd",
+            Self::Reuse => "reuse",
         }
     }
 }
@@ -143,7 +153,7 @@ pub trait SshSession: Send + Sync {
     fn check_stream<'a>(
         &'a self,
         script: &'a str,
-    ) -> Operation<'a, (CommandOutput, Option<crate::duplex::Duplex>)> {
+    ) -> Operation<'a, (CommandOutput, Option<crate::install::Checked>)> {
         Box::pin(async move {
             self.run(script, Input::Empty)
                 .await

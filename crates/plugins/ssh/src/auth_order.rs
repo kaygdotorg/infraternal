@@ -67,7 +67,7 @@ impl AutoAuth {
         (
             Arc<dyn SshSession>,
             CommandOutput,
-            Option<crate::duplex::Duplex>,
+            Option<crate::install::Checked>,
         ),
         Failure,
     > {
@@ -96,7 +96,7 @@ impl AutoAuth {
         (
             Arc<dyn SshSession>,
             CommandOutput,
-            Option<crate::duplex::Duplex>,
+            Option<crate::install::Checked>,
             Authentication,
         ),
         Failure,
@@ -277,7 +277,7 @@ impl SshSession for Pending {
     fn check_stream<'a>(
         &'a self,
         script: &'a str,
-    ) -> Operation<'a, (CommandOutput, Option<crate::duplex::Duplex>)> {
+    ) -> Operation<'a, (CommandOutput, Option<crate::install::Checked>)> {
         Box::pin(self.select_check(script, true))
     }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
@@ -301,7 +301,7 @@ impl Pending {
         &self,
         script: &str,
         bridge: bool,
-    ) -> Result<(CommandOutput, Option<crate::duplex::Duplex>), Failure> {
+    ) -> Result<(CommandOutput, Option<crate::install::Checked>), Failure> {
         let mut selected = self.selected.lock().await;
         if let Some(session) = selected.as_ref().cloned() {
             drop(selected);

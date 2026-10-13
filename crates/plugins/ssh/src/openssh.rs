@@ -374,7 +374,7 @@ impl SshSession for Session {
     fn check_stream<'a>(
         &'a self,
         script: &'a str,
-    ) -> Operation<'a, (CommandOutput, Option<crate::duplex::Duplex>)> {
+    ) -> Operation<'a, (CommandOutput, Option<crate::install::Checked>)> {
         Box::pin(async move {
             crate::install::Installation::check_channel(self, script)
                 .await

@@ -46,7 +46,7 @@ impl SshSession for TimedSession {
         self.inner.stream(script)
     }
 
-    fn check_stream<'a>(&'a self, script: &'a str) -> Operation<'a, (CommandOutput, Option<infraternal_plugin_ssh::duplex::Duplex>)> {
+    fn check_stream<'a>(&'a self, script: &'a str) -> Operation<'a, (CommandOutput, Option<infraternal_plugin_ssh::install::Checked>)> {
         self.inner.check_stream(script)
     }
     fn setup_steps(&self) -> bool { self.inner.setup_steps() }

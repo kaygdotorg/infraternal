@@ -2297,3 +2297,235 @@ async fn negotiated_transfer_delivers_the_invitation_after_a_buffering_head() {
         let _ = install.rollback().await;
     }
 }
+
+/// A scripted remote that observes the exact byte order on the checked channel
+/// (#189): it never runs the setup program, it only records what arrived when.
+struct ScriptedRemote {
+    program: String,
+}
+impl SshSession for ScriptedRemote {
+    fn stream<'a>(
+        &'a self,
+        _script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        Box::pin(async move {
+            let mut command = Command::new("/usr/bin/python3");
+            command.args(["-c", &self.program]);
+            infraternal_plugin_ssh::duplex::Duplex::spawn(&mut command)
+        })
+    }
+    fn run<'a>(&'a self, _: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async { Err(Failure::install("The scripted remote has one channel.")) })
+    }
+}
+
+/// `reader` is what the remote reports for its setup-script reader. `then`
+/// runs after the framed setup script was read, with `script`, `exact(n)`,
+/// `quiet()` (true when no further byte arrives within 300 ms) and `out`.
+fn scripted_remote(caps: &str, reader: &str, then: &str) -> ScriptedRemote {
+    let caps = caps.replace('\n', "\\n");
+    ScriptedRemote {
+        program: format!(
+            r"
+import os, re, select, sys
+out = sys.stdout.buffer
+def exact(n):
+    data = b''
+    while len(data) < n:
+        chunk = os.read(0, n - len(data))
+        if not chunk: sys.exit(3)
+        data += chunk
+    return data
+def line():
+    data = b''
+    while not data.endswith(b'\n'):
+        byte = os.read(0, 1)
+        if not byte: sys.exit(3)
+        data += byte
+    return data
+def quiet():
+    return not select.select([0], [], [], 0.3)[0]
+def size(choice):
+    return int(re.search(choice.encode() + rb'\)[^\n]*?head -c (\d+)', script)[1])
+out.write(b'STEP connect\nINFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n{caps}CHECK ready {reader}\n')
+out.flush()
+script = exact(int(line()))
+{then}
+out.flush()
+os.execvp('cat', ['cat'])
+"
+        ),
+    }
+}
+
+async fn scripted_staging(
+    f: &Fixture,
+    remote: ScriptedRemote,
+) -> Result<(uuid::Uuid, infraternal_plugin_ssh::duplex::Duplex), Failure> {
+    let session = Arc::new(remote);
+    let (_, checked) = Installation::check_channel(session.as_ref(), "true")
+        .await
+        .unwrap();
+    let transaction = Installation::new(session, &f.target, &f.join).unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        transaction.stage_session_on(&f.binary, Some(checked)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("staging stalled: the payload and its receipts were serialized"))
+}
+
+fn large_fixture_binary(f: &Fixture, id: uuid::Uuid) {
+    // Large enough for the shared encodings; contents are public fixture bytes.
+    executable(
+        &f.binary,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
+            "x".repeat(100_000)
+        ),
+    );
+}
+
+#[tokio::test]
+async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    // The remote reads the whole payload before writing a single receipt. A
+    // server that waits for `STEP upload`/`TRANSFER` first would stall here.
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "dd",
+        &format!(
+            "choice = re.search(rb'\\nchoice=(\\w+)\\n', script)[1].decode()\nassert choice in ('zstd', 'gzip', 'raw'), choice\npayload = exact(size(choice))\nout.write(b'STEP upload\\nTRANSFER ' + choice.encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
+        ),
+    );
+    let (session, bridge) = scripted_staging(&f, remote).await.unwrap();
+    assert_eq!(session, id);
+    bridge.write(b"bridge bytes\n").await.unwrap();
+    assert_eq!(bridge.line(64).await.unwrap(), b"bridge bytes\n");
+}
+
+#[tokio::test]
+async fn buffering_setup_reader_receives_no_payload_until_selection() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    // Without an exact reader the remote keeps selecting under its lock, and
+    // no payload byte may follow the setup script before that receipt.
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "head",
+        &format!(
+            "assert b'\\nchoice=raw\\nif ' in script\nassert quiet(), 'payload followed the setup script'\nout.write(b'STEP upload\\nTRANSFER raw\\n'); out.flush()\npayload = exact(size('raw'))\nout.write(b'STEP start\\nSESSION {id}\\n')"
+        ),
+    );
+    assert_eq!(scripted_staging(&f, remote).await.unwrap().0, id);
+}
+
+#[tokio::test]
+async fn reported_cache_digest_selects_reuse_without_sending_payload() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    let digest = {
+        use sha2::Digest as _;
+        let bytes = sha2::Sha256::digest(std::fs::read(&f.binary).unwrap());
+        bytes.iter().fold(String::new(), |mut text, byte| {
+            write!(text, "{byte:02x}").unwrap();
+            text
+        })
+    };
+    let remote = scripted_remote(
+        &format!("CAPS zstd gzip {digest}\n"),
+        "dd",
+        &format!(
+            "assert b'\\nchoice=reuse\\n' in script\nassert quiet(), 'a reused payload was sent'\nout.write(b'STEP upload\\nTRANSFER reuse\\nSTEP start\\nSESSION {id}\\n')"
+        ),
+    );
+    assert_eq!(scripted_staging(&f, remote).await.unwrap().0, id);
+}
+
+#[tokio::test]
+async fn declared_transfer_refuses_a_different_selection_or_a_named_refusal() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "dd",
+        &format!("out.write(b'STEP upload\\nTRANSFER raw\\nSTEP start\\nSESSION {id}\\n')"),
+    );
+    let failure = scripted_staging(&f, remote).await.err().unwrap();
+    assert!(matches!(
+        failure.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+    ));
+    // A lock refusal arrives while payload bytes are still in flight.
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "dd",
+        "out.write(b'STEP upload\\nFAIL upload 72\\n'); out.flush(); sys.exit(0)",
+    );
+    let failure = scripted_staging(&f, remote).await.err().unwrap();
+    assert_eq!(failure.exit_status, Some(72));
+}
+
+#[tokio::test]
+async fn checked_staging_survives_a_buffering_payload_reader_and_reuses_the_cache() {
+    let f = Fixture::new();
+    executable(
+        &f.root.join("tools/sh"),
+        &format!(
+            "#!/usr/bin/python3\n\"\"\"Isolate public fixture scripts; preserve their stdin byte stream.\"\"\"\nimport os,sys\nargs=sys.argv[1:]\nif len(args)>1 and args[0]=='-c': args[1]=args[1].replace('$HOME', {root:?})\nos.execv('/bin/sh',['sh',*args])\n",
+            root = f.root.to_str().unwrap()
+        ),
+    );
+    // Reads whole stdio-sized blocks like getc/fread-based head implementations.
+    executable(
+        &f.root.join("tools/head"),
+        "#!/usr/bin/python3\nimport os, sys\nn = int(sys.argv[sys.argv.index('-c') + 1])\nbuf = b''\nwhile len(buf) < n:\n    chunk = os.read(0, 4096)\n    if not chunk:\n        break\n    buf += chunk\nview = memoryview(buf[:n])\nwhile view:\n    view = view[os.write(1, view):]\n",
+    );
+    let log = f.root.join("decoded");
+    for tool in ["zstd", "gzip"] {
+        executable(
+            &f.root.join(format!("tools/{tool}")),
+            &format!(
+                "#!/bin/sh\nprintf '{tool}\\n' >> '{}'\nexec /usr/bin/{tool} \"$@\"\n",
+                log.display()
+            ),
+        );
+    }
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    let check = "printf 'INFRATERNAL_CHECK_V1\\nLinux\\nx86_64\\nsystemd\\n1002\\nno\\nyes\\nyes\\nno\\nINFRATERNAL_SETUP_CLEAR\\n'";
+    for attempt in 0..2 {
+        let session = Arc::new(SingleCheckChannel {
+            local: Local {
+                root: f.root.clone(),
+            },
+            streams: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (_, checked) = Installation::check_channel(session.as_ref(), check)
+            .await
+            .unwrap();
+        let transaction = Installation::new(session.clone(), &f.target, &f.join).unwrap();
+        let (actual, bridge) = transaction
+            .stage_session_on(&f.binary, Some(checked))
+            .await
+            .unwrap();
+        assert_eq!(actual, id);
+        assert_eq!(
+            std::fs::read(f.base().join(".bootstrap-lock/payload")).unwrap(),
+            std::fs::read(&f.binary).unwrap()
+        );
+        bridge.write(b"\0\xffbridge\n").await.unwrap();
+        assert_eq!(bridge.line(64).await.unwrap(), b"\0\xffbridge\n");
+        drop(bridge);
+        transaction.rollback().await.unwrap();
+        // The first attempt decodes one compressed payload; the second finds
+        // the published cache through the check and sends nothing to decode.
+        let decoded = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(decoded.lines().count(), 1, "attempt {attempt}: {decoded}");
+    }
+}
