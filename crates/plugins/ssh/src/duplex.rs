@@ -57,6 +57,25 @@ impl Duplex {
         })
     }
 
+    /// Read a bounded canonical setup receipt without consuming protocol bytes.
+    /// # Errors
+    /// Refuses EOF or an oversized receipt without exposing remote output.
+    pub async fn line(&self, limit: usize) -> Result<Vec<u8>, Failure> {
+        let mut line = Vec::new();
+        let mut reader = self.read.lock().await;
+        while line.len() < limit {
+            let mut byte = [0];
+            if reader.read(&mut byte).await.map_err(|_| unavailable())? != 1 {
+                return Err(unavailable());
+            }
+            line.push(byte[0]);
+            if byte[0] == b'\n' {
+                return Ok(line);
+            }
+        }
+        Err(unavailable())
+    }
+
     /// Read one ready chunk, preserving partial progress across cancellation.
     /// # Errors
     /// Returns only local pipe errors; zero bytes denotes SSH channel closure.
