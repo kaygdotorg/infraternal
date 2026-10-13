@@ -181,6 +181,7 @@ rust_static_build_check() {
         rust_check_static_key_memory "$target" "${target_dir}/${target}/release/infraternal" || failed=1
     done
 
+    CARGO_TARGET_DIR="$target_dir" python3 scripts/test-static-size.py || failed=1
     rust_check_cli_stub "$x86_binary" "server" || failed=1
     rust_check_cli_stub "$x86_binary" "agent" || failed=1
     return "$failed"
