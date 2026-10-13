@@ -236,6 +236,7 @@ impl AsyncUdpSocket for Bindings {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        let generation = self.generation.load(Ordering::Acquire);
         let leases = self.snapshot();
         let sources = leases.len() + 1;
         // Rotate the first socket so a flood on one address cannot starve another.
@@ -265,6 +266,12 @@ impl AsyncUdpSocket for Bindings {
                 .is_some_and(|waker| waker.will_wake(cx.waker()))
         {
             *waker = Some(cx.waker().clone());
+        }
+        // Installing a lease can race the pending polls before receiver
+        // registration. Recheck after registration so neither side can miss
+        // the wakeup; the next poll includes the new socket without a timer.
+        if self.generation.load(Ordering::Acquire) != generation {
+            cx.waker().wake_by_ref();
         }
         Poll::Pending
     }
@@ -415,6 +422,89 @@ mod tests {
         assert_eq!((&reply[..length], from), (&b"reply-4"[..], primary));
     }
 
+    /// Runs a lease installation between a pending socket poll and receiver
+    /// registration, reproducing the notification race without sleeps.
+    struct InstallWhilePending {
+        inner: Arc<dyn AsyncUdpSocket>,
+        install: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+    impl fmt::Debug for InstallWhilePending {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("InstallWhilePending")
+                .finish_non_exhaustive()
+        }
+    }
+    impl AsyncUdpSocket for InstallWhilePending {
+        fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+            self.inner.clone().create_io_poller()
+        }
+        fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+            self.inner.try_send(transmit)
+        }
+        fn poll_recv(
+            &self,
+            cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+            meta: &mut [RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            let result = self.inner.poll_recv(cx, bufs, meta);
+            if result.is_pending()
+                && let Some(install) = self.install.lock().unwrap().take()
+            {
+                install();
+            }
+            result
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_installed_during_a_pending_poll_cannot_lose_the_receive_wakeup() {
+        let primary = Arc::new(InstallWhilePending {
+            inner: bound("127.0.0.1:0"),
+            install: Mutex::new(None),
+        });
+        let bindings = Bindings::new(primary.clone());
+        let leased = bound("127.0.0.3:0");
+        let destination = leased.local_addr().unwrap();
+        let keep = Arc::new(Mutex::new(None));
+        let owned = keep.clone();
+        let weak = Arc::downgrade(&bindings);
+        *primary.install.lock().unwrap() = Some(Box::new(move || {
+            *owned.lock().unwrap() = Some(weak.upgrade().unwrap().lease(leased).unwrap());
+            std::net::UdpSocket::bind("127.0.0.2:0")
+                .unwrap()
+                .send_to(b"ready", destination)
+                .unwrap();
+        }));
+        let mut receiver = tokio::spawn(async move {
+            let mut bytes = [0; 64];
+            let mut buffers = [IoSliceMut::new(&mut bytes)];
+            let mut metadata = [RecvMeta::default()];
+            // No timer inside this task: an outer timeout must not accidentally
+            // repoll the stranded socket and hide the missed notification.
+            let count =
+                std::future::poll_fn(|cx| bindings.poll_recv(cx, &mut buffers, &mut metadata))
+                    .await
+                    .unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(&bytes[..metadata[0].len], b"ready");
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut receiver).await;
+        if result.is_err() {
+            receiver.abort();
+            let _ = receiver.await;
+        }
+        assert!(
+            result.is_ok(),
+            "installing a lease lost the endpoint receive wakeup"
+        );
+        result.unwrap().unwrap();
+        drop(keep);
+    }
     #[tokio::test]
     async fn a_lease_added_while_waiting_is_polled_without_another_primary_datagram() {
         let bindings = Bindings::new(bound("127.0.0.1:0"));
