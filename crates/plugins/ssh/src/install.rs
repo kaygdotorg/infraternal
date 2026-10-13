@@ -3,7 +3,7 @@
 use crate::{
     model::{Failure, InstallMode, InstallStep, Target},
     probe::Architecture,
-    transport::{Input, PayloadInput, Secret, SshSession, shell_quote},
+    transport::{Input, PayloadInput, Secret, SshSession, TransferChoice, shell_quote},
 };
 use std::fmt::Write as _;
 use std::{
@@ -153,7 +153,6 @@ fi"#,
     /// Choose from capabilities the check observed, so the payload can follow
     /// the setup script without waiting for a remote selection receipt.
     fn declared(&self, caps: &TransferCaps) -> crate::transport::TransferChoice {
-        use crate::transport::TransferChoice;
         if caps.cache.as_deref() == Some(&*self.digest) {
             TransferChoice::Reuse
         } else if caps.zstd && self.zstd.is_some() {
@@ -165,7 +164,12 @@ fi"#,
         }
     }
 
-    fn input<'a>(&'a self, binary: &'a Path, invitation: &'a [u8]) -> Input<'a> {
+    fn input<'a>(
+        &'a self,
+        binary: &'a Path,
+        invitation: &'a [u8],
+        declared: Option<crate::transport::TransferChoice>,
+    ) -> Input<'a> {
         Input::Negotiated {
             raw: PayloadInput::File {
                 path: binary,
@@ -175,7 +179,7 @@ fi"#,
             zstd: self.zstd.as_deref(),
             invitation,
             payload_ack: true,
-            declared: None,
+            declared,
         }
     }
 }
@@ -228,6 +232,23 @@ impl TransferCaps {
 pub struct Checked {
     channel: crate::duplex::Duplex,
     caps: Option<TransferCaps>,
+}
+
+impl Checked {
+    /// Public encoding support from this same authenticated check channel.
+    /// This hint never selects reuse or skips the later digest verification.
+    #[must_use]
+    pub fn encoding(&self) -> Option<crate::transport::TransferChoice> {
+        self.caps.as_ref().map(|caps| {
+            if caps.zstd {
+                TransferChoice::Zstd
+            } else if caps.gzip {
+                TransferChoice::Gzip
+            } else {
+                TransferChoice::Raw
+            }
+        })
+    }
 }
 
 // Rootless transfer facts for the check channel. Root installs keep the
@@ -346,7 +367,7 @@ impl Installation {
             self.stage(binary).await?;
             return self.setup(join).await;
         }
-        self.transfer_setup(binary, join, None).await
+        self.transfer_setup(binary, join, None, None).await
     }
 
     /// Both initial staging and session-preserving restaging use the same
@@ -357,6 +378,7 @@ impl Installation {
         binary: &Path,
         join: &JoinMaterial,
         cleanup: Option<&str>,
+        hint: Option<crate::transport::TransferChoice>,
     ) -> Result<bool, Failure> {
         if join.host != self.host {
             return Err(Failure::install(
@@ -380,9 +402,21 @@ impl Installation {
             writeln!(upload, "sh -c {}", shell_quote(&guarded_cleanup))
                 .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
         }
-        upload.push_str(&transfer.body);
+        // Local compressor availability can differ from the remote check.
+        // Raw is always supported; reuse still requires remote hash selection.
+        let declared = hint.and_then(|choice| match choice {
+            TransferChoice::Reuse => None,
+            TransferChoice::Zstd if transfer.zstd.is_none() => Some(TransferChoice::Raw),
+            TransferChoice::Gzip if transfer.gzip.is_none() => Some(TransferChoice::Raw),
+            choice => Some(choice),
+        });
+        if let Some(choice) = declared {
+            upload.push_str(&transfer.body_with(&format!("choice={}", choice.word())));
+        } else {
+            upload.push_str(&transfer.body);
+        }
         let script = self.setup_script(join, Some(&upload))?;
-        let input = transfer.input(binary, join.stdin.expose());
+        let input = transfer.input(binary, join.stdin.expose(), declared);
         let output = self
             .session
             .run(&script, input)
@@ -946,6 +980,20 @@ exec "$payload" __ssh-session --state "$base/sessions" --session {id}
     /// # Errors
     /// Refuses foreign journals and any rollback/staging/setup failure.
     pub async fn restart_setup(&self, binary: &Path, join: &JoinMaterial) -> Result<bool, Failure> {
+        self.restart_setup_with(binary, join, None).await
+    }
+
+    /// Restage using public encoding support from this same SSH check.
+    /// Unknown/root/retry paths retain ordinary negotiation. Private enrollment
+    /// still waits for the exact selection and verified full-payload receipt.
+    /// # Errors
+    /// Refuses changed ownership, encoding, upload or enrollment as usual.
+    pub async fn restart_setup_with(
+        &self,
+        binary: &Path,
+        join: &JoinMaterial,
+        hint: Option<crate::transport::TransferChoice>,
+    ) -> Result<bool, Failure> {
         let retain = r#"
 preserve_session=yes
 stage="$base/.bootstrap-lock"
@@ -964,7 +1012,8 @@ fi
             // Recover only this journal before selecting the full payload.
             // The early shim keeps its open executable and private rendezvous;
             // no upload starts until its prompt has already been published.
-            self.transfer_setup(binary, join, Some(&cleanup)).await
+            self.transfer_setup(binary, join, Some(&cleanup), hint)
+                .await
         } else {
             self.session
                 .run(&self.script(&cleanup), Input::Empty)
