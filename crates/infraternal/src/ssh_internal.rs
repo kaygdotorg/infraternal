@@ -9,12 +9,18 @@ use std::{ffi::OsString, process::ExitCode};
 
 /// Run an internal SSH helper when argv names one; `None` leaves argv to the CLI.
 pub(crate) fn run_if_requested() -> Option<ExitCode> {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let command = args.first()?.to_str()?;
+    let mut arguments = std::env::args_os().skip(1);
+    let first = arguments.next()?;
+    let command = first.to_str()?;
+    // Public invocations keep their arguments with the public parser. Only a
+    // recognized private helper needs an owned argument list.
+    if !matches!(command, "__ssh-connect" | "__ssh-session") {
+        return None;
+    }
+    let args: Vec<OsString> = arguments.collect();
     match command {
-        "__ssh-connect" => Some(connect(&args[1..]).unwrap_or(ExitCode::from(2))),
-        #[cfg(feature = "remote")]
-        "__ssh-session" => Some(session(&args[1..]).unwrap_or(ExitCode::from(2))),
+        "__ssh-connect" => Some(connect(&args).unwrap_or(ExitCode::from(2))),
+        "__ssh-session" => Some(session(&args).unwrap_or(ExitCode::from(2))),
         _ => None,
     }
 }
@@ -32,7 +38,6 @@ fn connect(args: &[OsString]) -> Option<ExitCode> {
     }
 }
 
-#[cfg(feature = "remote")]
 fn session(args: &[OsString]) -> Option<ExitCode> {
     let (state, session) = match args {
         [flag, state] if flag == "--state" => (state, None),
@@ -65,7 +70,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "remote")]
     #[test]
     fn session_accepts_only_the_two_spawned_shapes() {
         for invalid in [

@@ -29,7 +29,7 @@ mod restart_image;
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
 mod ssh_internal;
-#[cfg(all(feature = "ssh", feature = "remote"))]
+#[cfg(feature = "ssh")]
 mod ssh_session;
 
 #[cfg(feature = "plugin-server")]
