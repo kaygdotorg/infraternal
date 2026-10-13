@@ -54,6 +54,8 @@ export interface RealServer {
   recoveredAt?: number;
   /** Restarts only the server PID, retaining its detached session shims. */
   restart(whileStopped?: () => Promise<void>): Promise<void>;
+  /** Pause only the selected private upstream, preserving the browser/server connection. */
+  pauseUpstream(component: "daemon" | "shim", whilePaused: () => Promise<void>): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -223,11 +225,41 @@ export async function startRealServer(options: {
       } else child.stderr?.resume();
       const deadline = Date.now() + 20_000;
       for (;;) {
-        try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) break; } catch { /* starting */ }
+        // The successful probe's start is a conservative availability boundary;
+        // a delayed health response must not subtract an RTT from recovery.
+        const candidateAt = performance.timeOrigin + performance.now();
+        try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) { fixture.recoveredAt = candidateAt; break; } } catch { /* starting */ }
         if (Date.now() > deadline) throw new Error("server restart failed");
         await new Promise((r) => setTimeout(r, 25));
       }
-      fixture.recoveredAt = performance.timeOrigin + performance.now();
+    },
+    async pauseUpstream(component, whilePaused) {
+      let serverPid = child.pid!;
+      if (unit) {
+        const show = spawn("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit], { stdio: ["ignore", "pipe", "ignore"] });
+        let result = "";
+        show.stdout.on("data", (bytes) => { result += bytes; });
+        const [code] = await once(show, "exit");
+        serverPid = Number(result.trim());
+        if (code !== 0 || !Number.isInteger(serverPid) || serverPid < 1) throw new Error("fixture server identity unavailable");
+      }
+      const sessionId = bridges.flatMap((bridge) => [...bridge.attached.values()].flat())[0]?.replaceAll("-", "");
+      if (!sessionId || !/^[0-9a-f]{32}$/.test(sessionId)) throw new Error("fixture session identity unavailable");
+      const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
+      const pause = spawn("python3", [resolve(import.meta.dirname, "pause-upstream.py"), component, String(serverPid), shimState, sessionId], { stdio: ["pipe", "pipe", "pipe"] });
+      const exited = once(pause, "exit");
+      // This helper opens a pidfd, never signals a reused PID and resumes on stdin EOF.
+      const ready = once(pause.stdout, "data");
+      pause.stderr.resume();
+      try {
+        const status = await Promise.race([ready.then(([bytes]) => String(bytes).trim()), exited.then(() => "ended")]);
+        if (status !== "paused") throw new Error("private upstream pause failed");
+        await whilePaused();
+        fixture.recoveredAt = performance.timeOrigin + performance.now();
+      } finally {
+        pause.stdin.end("resume\n");
+        await exited;
+      }
     },
     async dispose() {
       front.close();
