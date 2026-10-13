@@ -1,0 +1,12 @@
+{
+  "baseline_revision": "5d098cb828190e48e25f7b3e9312c8212c02a63f",
+  "baseline_original_unmodified": true,
+  "baseline_bytes": 22530608,
+  "baseline_sha256": "ec7152765a09ddeb7b98e303906e9feec3848545f4359848a5cd927db809d94f",
+  "first_gate_head_bytes": 22561104,
+  "first_gate_head_sha256": "5f7187db577d4948809eccac89bd41476a6d4133b4db8afe46e8ff2555433d88",
+  "ceiling_bytes": 16404816,
+  "release_profile": "unchanged",
+  "rustc": "1.99.0",
+  "target": "x86_64-unknown-linux-musl"
+}

@@ -1,0 +1,7 @@
+{
+  "source": "/home/kayg/.cache/codex-scratch/mesh-cutoff-fast/fuzz-target/x86_64-unknown-linux-gnu/release/mesh_node_json",
+  "executable_segments_sha256": "98a1fcf23829d6c875d2bf542562cb258dd7d2e489a858925ab6763179686d6e",
+  "source_sha256": "09f59c7b5d5dd667ad2b79f114b53fa030290bf21f6d6b29395f72fdecbe74c7",
+  "adapted_sha256": "8b9730d31d6517f8ff90a167994ebcf99f2d34d5e4d29913b76d067cceebb4ec",
+  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
+}

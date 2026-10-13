@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Reuse the documented native gate profile; release/dependency profiles stay unchanged.
+exec env RUSTC_WRAPPER= /home/kayg/.nix-profile/bin/cargo --config /home/kayg/Developer/infraternal/.worktrees/mesh-cutoff-fast/docs/verification/mesh-policy-verify/gates/gate-profile.toml "$@"

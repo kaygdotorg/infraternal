@@ -1,0 +1,7 @@
+{
+  "source": "/home/kayg/.cache/codex-scratch/mesh-cutoff-fast/target/release/examples/connection_state_fixture",
+  "executable_segments_sha256": "7a198ef4a0b7b8df89b361dd396a92feeac90ec356dca255d3ecc853f2918270",
+  "source_sha256": "b342a7e424fa1d15dcaa407747cf2e746ff8e9bb27ab25b6cb0ceccf1c5aedac",
+  "adapted_sha256": "b0fc609afd58a6a9250fa8f5d721895cb49d4649f1847f34d997de473e9eae08",
+  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
+}

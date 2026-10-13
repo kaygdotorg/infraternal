@@ -1,0 +1,7 @@
+{
+  "source": "/home/kayg/.cache/codex-scratch/mesh-cutoff-fast/target/release/examples/mesh_revocation_fixture",
+  "executable_segments_sha256": "9713f105ed70b9c5b345d9f6022203568db420379b37a6825e925953bcc5342f",
+  "source_sha256": "2bc9ab49be7774a5b3a69466c8369f0e1f2cd271f0ca2d9a192cabc0aa0f84cc",
+  "adapted_sha256": "5b0b9823f21b18daab7f5b84c095f964d04ab50a459b8235123a375cbbc4a8e2",
+  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
+}

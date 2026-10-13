@@ -1,0 +1,98 @@
+{
+  "node_fixture_rss_bytes": [
+    7712768,
+    7741440,
+    7667712
+  ],
+  "projected_1000_nodes_rss_bytes": 7741440000,
+  "coordinator_three_live_workers_rss_bytes": 21299200,
+  "result": "PASS",
+  "change": "DefaultTightening",
+  "backend": "nft",
+  "machine": "infraternal-perf-test",
+  "rtt_ms": 150,
+  "load": "0.55 0.47 0.46 1/3275 1202701",
+  "live_peers": 2,
+  "measured_underlay_rtt_ms": [
+    150.163,
+    150.169
+  ],
+  "installed_peers_before": [
+    1000,
+    1000,
+    1000
+  ],
+  "installed_peers_after": [
+    1000,
+    1000
+  ],
+  "change_started_ns": 148426422437965,
+  "last_apply_ns": 148431644449539,
+  "revocation_to_last_peer_refusing_us": 5222011.574,
+  "peers": [
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 1030,
+      "last_packet_us": 5158205.492,
+      "retired_us": 5184020.851
+    },
+    {
+      "peer": 1,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 1021,
+      "last_packet_us": 5115196.161,
+      "retired_us": 5184020.851
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 1030,
+      "last_packet_us": 5158207.949,
+      "retired_us": 5184020.851
+    },
+    {
+      "peer": 1,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 1021,
+      "last_packet_us": 5115178.487,
+      "retired_us": 5184020.851
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "udp",
+      "received": 1032,
+      "last_packet_us": 5169395.478,
+      "retired_us": 5222011.574
+    },
+    {
+      "peer": 2,
+      "family": "ipv4",
+      "protocol": "tcp",
+      "received": 1021,
+      "last_packet_us": 5115176.705,
+      "retired_us": 5222011.574
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "udp",
+      "received": 1032,
+      "last_packet_us": 5169396.093,
+      "retired_us": 5222011.574
+    },
+    {
+      "peer": 2,
+      "family": "ipv6",
+      "protocol": "tcp",
+      "received": 1021,
+      "last_packet_us": 5115190.327,
+      "retired_us": 5222011.574
+    }
+  ]
+}

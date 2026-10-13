@@ -1,0 +1,14 @@
+{
+  "base": "5d098cb828190e48e25f7b3e9312c8212c02a63f",
+  "code_head": "2a83a1d3fecf50872f79ea75807650d32262adc8",
+  "source_sha256": {
+    "crates/plugins/mesh/src/access_updates.rs": "54ba2dc24cede302a7327e7784ff4cd5572ec2257ff477535714e3de7032bec0",
+    "crates/plugins/mesh/src/dataplane.rs": "ef052b0b45b3988dfa9d40bcade17f3d9ad6eece6611bf14e07db11d174d8255",
+    "crates/plugins/mesh/src/node.rs": "1f632566acaced1c24c46b4fbd837ef1fe98a2ded9a7380adb84b386a2c9b584",
+    "crates/plugins/mesh/src/node_actions.rs": "97f42fdfcd02322c1eaba154420a9c7dc4a40b1044b1c1318b84b30fe03368b9",
+    "crates/plugins/mesh/src/node_coordination.rs": "b5f0c33d3d7c8c8d0e019e070c97e1a6e36bfd410d6ef7deac72a9307c30b239",
+    "crates/plugins/mesh/src/iptables.rs": "8abfa9537472f61868ded9bbc251ed035f71ca55a0eab1b5de21fe5a183670a7",
+    "crates/plugins/mesh/src/firewall.rs": "24f59421e7a0698ab382d5293df89678ef62430848a50c6e5a754bd0c836d159",
+    "scripts/mesh-revocation-proof.py": "b87560beb6cec9bb4d0bd7a8c797f0790cbe78c668ed16335968139188324bc5"
+  }
+}
