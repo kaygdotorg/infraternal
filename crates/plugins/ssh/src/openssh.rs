@@ -371,6 +371,16 @@ impl SshSession for Session {
         Box::pin(async move { crate::duplex::Duplex::spawn(&mut self.channel_command(script)?) })
     }
 
+    fn check_stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, (CommandOutput, Option<crate::duplex::Duplex>)> {
+        Box::pin(async move {
+            crate::install::Installation::check_channel(self, script)
+                .await
+                .map(|(output, channel)| (output, Some(channel)))
+        })
+    }
     fn setup_steps(&self) -> bool {
         true
     }

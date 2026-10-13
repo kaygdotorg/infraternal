@@ -296,7 +296,7 @@ impl Bootstrap {
         }
     }
 
-    /// Prepare only configured public payloads before accepting host setup.
+    /// Prepare configured public payloads without blocking HTTP admission.
     /// Missing files/tools retain the existing actionable per-host refusal/raw path.
     pub async fn prepare_payloads(&self) {
         let Ok(_activity) = self.activity() else {
@@ -838,11 +838,8 @@ impl Bootstrap {
             } else {
                 previous_attempt::check_script(target.mode)
             };
-            let early = self.backend.early_terminal() && session.session_bridge();
-            let (output, checked) = if early {
-                let (output, channel) =
-                    Installation::check_channel(session.as_ref(), &script).await?;
-                (output, Some(channel))
+            let (output, checked) = if self.backend.early_terminal() {
+                session.check_stream(&script).await?
             } else {
                 let output = session
                     .run(&script, Input::Empty)
@@ -850,6 +847,9 @@ impl Bootstrap {
                     .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
                 (output, None)
             };
+            // Automatic sign-in selects its authenticated adapter during the
+            // read-only check; query bridge support after that selection.
+            let early = self.backend.early_terminal() && session.session_bridge();
             // Preserve method evidence even if the authenticated host is unsupported.
             // Public metadata only; no provider or private material enters replay state.
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {

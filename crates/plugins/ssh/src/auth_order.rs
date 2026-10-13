@@ -62,15 +62,27 @@ impl AutoAuth {
         credentials: Credentials,
         mesh: MeshEvidence,
         script: &str,
-    ) -> Result<(Arc<dyn SshSession>, CommandOutput), Failure> {
+        bridge: bool,
+    ) -> Result<
+        (
+            Arc<dyn SshSession>,
+            CommandOutput,
+            Option<crate::duplex::Duplex>,
+        ),
+        Failure,
+    > {
         let session = self
             .transport
             .open(destination.clone(), credentials, mesh)
             .await?;
         // Only an allowlisted read-only check reaches this method; it proves auth.
         // Command-status failures do not qualify as SSH authentication refusals.
-        let output = session.run(script, Input::Empty).await?;
-        Ok((session, output))
+        let (output, channel) = if bridge {
+            session.check_stream(script).await?
+        } else {
+            (session.run(script, Input::Empty).await?, None)
+        };
+        Ok((session, output, channel))
     }
 
     async fn automatic(
@@ -79,7 +91,16 @@ impl AutoAuth {
         provider: Arc<dyn AuthProvider>,
         mesh: MeshEvidence,
         script: &str,
-    ) -> Result<(Arc<dyn SshSession>, CommandOutput, Authentication), Failure> {
+        bridge: bool,
+    ) -> Result<
+        (
+            Arc<dyn SshSession>,
+            CommandOutput,
+            Option<crate::duplex::Duplex>,
+            Authentication,
+        ),
+        Failure,
+    > {
         // OpenSSH performs its protocol none exchange inside a local-method
         // connection too. Unknown/manual hosts need no separate refusal login.
         // Trusted known network providers keep the earlier lazy network path;
@@ -128,14 +149,15 @@ impl AutoAuth {
                 ));
             }
             match self
-                .authenticate(&destination, credentials, mesh, script)
+                .authenticate(&destination, credentials, mesh, script, bridge)
                 .await
             {
-                Ok((session, output)) => {
+                Ok((session, output, channel)) => {
                     let evidence = session.authentication();
                     return Ok((
                         session,
                         output,
+                        channel,
                         Authentication {
                             method: if evidence
                                 .is_some_and(|receipt| receipt.method == AuthMethod::Network)
@@ -252,48 +274,82 @@ impl SshSession for Pending {
             .ok()
             .and_then(|metadata| *metadata)
     }
+    fn check_stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, (CommandOutput, Option<crate::duplex::Duplex>)> {
+        Box::pin(self.select_check(script, true))
+    }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
-            let mut selected = self.selected.lock().await;
-            if let Some(session) = &*selected {
-                let session = session.clone();
-                drop(selected);
+            if let Some(session) = self.selected.lock().await.as_ref().cloned() {
                 return session.run(script, input).await;
             }
-            // Authentication fallback can repeat only the fixed read-only check.
-            // Never replay an upload, join capability or mutating command.
-            if !authentication_check(script) || !matches!(input, Input::Empty) {
+            if !matches!(input, Input::Empty) {
                 return Err(Failure::install(
                     "SSH authentication requires the read-only system check.",
                 ));
             }
-            let provider = self
-                .provider
-                .lock()
-                .map_err(|_| Failure::install("The SSH credential scope is unavailable."))?
-                .take()
-                .ok_or_else(|| {
-                    Failure::install("The one-connection authentication attempt has ended.")
-                })?;
-            let adapter = AutoAuth::new(self.transport.clone());
-            let (session, output, authentication) = adapter
-                .automatic(self.destination.clone(), provider, self.mesh, script)
-                .await?;
-            *self
-                .authentication
-                .lock()
-                .map_err(|_| Failure::install("The SSH authentication result is unavailable."))? =
-                Some(authentication);
-            // Preserve the authenticated connection's exact public lookup;
-            // removal must forget its pin, including after method fallback.
-            *self
-                .trust_lookup
-                .lock()
-                .map_err(|_| Failure::install("The SSH trust result is unavailable."))? =
-                session.trust_lookup();
-            *selected = Some(session);
-            Ok(output)
+            self.select_check(script, false)
+                .await
+                .map(|(output, _)| output)
         })
+    }
+}
+impl Pending {
+    async fn select_check(
+        &self,
+        script: &str,
+        bridge: bool,
+    ) -> Result<(CommandOutput, Option<crate::duplex::Duplex>), Failure> {
+        let mut selected = self.selected.lock().await;
+        if let Some(session) = selected.as_ref().cloned() {
+            drop(selected);
+            return if bridge {
+                session.check_stream(script).await
+            } else {
+                session
+                    .run(script, Input::Empty)
+                    .await
+                    .map(|output| (output, None))
+            };
+        }
+        // Fallback may replay only the exact read-only check. The duplex channel
+        // stops at CHECK ready until the caller explicitly writes public setup.
+        if !authentication_check(script) {
+            return Err(Failure::install(
+                "SSH authentication requires the read-only system check.",
+            ));
+        }
+        let provider = self
+            .provider
+            .lock()
+            .map_err(|_| Failure::install("The SSH credential scope is unavailable."))?
+            .take()
+            .ok_or_else(|| {
+                Failure::install("The one-connection authentication attempt has ended.")
+            })?;
+        let (session, output, channel, authentication) = AutoAuth::new(self.transport.clone())
+            .automatic(
+                self.destination.clone(),
+                provider,
+                self.mesh,
+                script,
+                bridge,
+            )
+            .await?;
+        *self
+            .authentication
+            .lock()
+            .map_err(|_| Failure::install("The SSH authentication result is unavailable."))? =
+            Some(authentication);
+        *self
+            .trust_lookup
+            .lock()
+            .map_err(|_| Failure::install("The SSH trust result is unavailable."))? =
+            session.trust_lookup();
+        *selected = Some(session);
+        Ok((output, channel))
     }
 }
 

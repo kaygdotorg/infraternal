@@ -138,6 +138,18 @@ pub trait SshSession: Send + Sync {
             ))
         })
     }
+    /// Authenticate only a fixed read-only check, optionally retaining its
+    /// duplex channel for later public setup. Private input is never replayed.
+    fn check_stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, (CommandOutput, Option<crate::duplex::Duplex>)> {
+        Box::pin(async move {
+            self.run(script, Input::Empty)
+                .await
+                .map(|output| (output, None))
+        })
+    }
     /// Opt into fixed setup-step receipts; older adapters retain separate steps.
     fn setup_steps(&self) -> bool {
         false

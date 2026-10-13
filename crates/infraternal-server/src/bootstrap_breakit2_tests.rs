@@ -46,6 +46,9 @@ impl SshSession for TimedSession {
         self.inner.stream(script)
     }
 
+    fn check_stream<'a>(&'a self, script: &'a str) -> Operation<'a, (CommandOutput, Option<infraternal_plugin_ssh::duplex::Duplex>)> {
+        self.inner.check_stream(script)
+    }
     fn setup_steps(&self) -> bool { self.inner.setup_steps() }
     fn authentication(&self) -> Option<infraternal_plugin_ssh::auth_order::Authentication> {
         self.inner.authentication()
@@ -615,6 +618,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                         "METRIC breakit2 failed_step={:?} status={:?}",
                         failure.failed_step, failure.exit_status
                     );
+                }
+                if event.step == Step::Done && std::env::var_os("ADDHOST_INSTANT").is_some() {
+                    assert!(event.session_id.is_some(), "instant acceptance requires a published shim, never a legacy completion");
                 }
                 if event.step == Step::Done && let (Some(host), Some(session)) = (event.host_id, event.session_id) {
                     // Persist the native fixture's writer exactly as a browser

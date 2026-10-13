@@ -81,6 +81,9 @@ struct Session {
     failure: FailureKind,
 }
 impl SshSession for Session {
+    fn session_bridge(&self) -> bool {
+        self.success
+    }
     fn trust_lookup(&self) -> Option<String> {
         Some("[fixture]:2222".into())
     }
@@ -566,4 +569,42 @@ async fn ownership_checks_authenticate_once_without_replaying_a_different_check(
         );
         assert!(provider.requested.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn automatic_checked_channel_selects_bridge_after_read_only_authentication() {
+    let transport = Arc::new(Transport {
+        succeed_at: 2,
+        failure: FailureKind::Auth,
+        opens: Mutex::new(0),
+    });
+    let provider = Arc::new(Provider {
+        requested: Mutex::new(Vec::new()),
+    });
+    let session = AutoAuth::new(transport.clone())
+        .open(
+            Destination::parse("user@fixture").unwrap(),
+            Credentials::Automatic(provider.clone()),
+            MeshEvidence::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!session.session_bridge());
+    let (_, channel) = session
+        .check_stream(infraternal_plugin_ssh::probe::CHECK_SCRIPT)
+        .await
+        .unwrap();
+    // Legacy adapters can authenticate here while retaining their buffered
+    // check. Bootstrap must re-query the selected adapter before publication.
+    assert!(channel.is_none());
+    assert!(session.session_bridge());
+    assert_eq!(*transport.opens.lock().unwrap(), 2);
+    assert_eq!(
+        *provider.requested.lock().unwrap(),
+        vec![AuthMethod::ServerKey]
+    );
+    assert_eq!(
+        session.authentication().unwrap().method,
+        AuthMethod::ServerKey
+    );
 }
