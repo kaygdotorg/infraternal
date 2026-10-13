@@ -15,8 +15,8 @@
  * with them on every welcome, so a reconnect restores every stream independently. Closing a stream detaches it
  * and never ends the session.
  *
- * Round trips: pings are sampled on attachment and on typing, at most one per 2 s, and only while a stream is
- * attached; an idle connection schedules no wakeups [81].
+ * Liveness [D265]: bounded probes expire an open but unusable route. Disconnect notification runs before
+ * closing the socket: an intermediary may never deliver its close event. Streams retain unacknowledged input.
  */
 import { noteWsMessage } from "./perf-activity";
 import { plainCloseReason } from "./close-reasons";
@@ -61,6 +61,7 @@ export function reconnectDelay(attempt: number): number {
   const step = Math.min(RECONNECT_CEILING_MS, RECONNECT_FIRST_MS * 2 ** Math.min(attempt, 10));
   return step + Math.random() * (step / 2);
 }
+const LIVENESS_TICK_MS = 25;
 const MAX_SOCKETS = 12;
 const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
@@ -106,7 +107,7 @@ export interface ConnectionConfig {
   onConnectionChange?: (connected: boolean) => void;
 }
 
-interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number }
+interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 
 export class MuxConnection {
   private socket: WebSocket | undefined;
@@ -116,6 +117,12 @@ export class MuxConnection {
   private readonly calls = new Map<number, { resolve(value: Record<string, unknown>): void; reject(error: Error): void }>();
   private readonly rttListeners = new Set<(ms: number | undefined) => void>();
   private readonly pendingPings = new Map<bigint, number>();
+  private livenessTimer = 0;
+  private lastPongAt = 0;
+  // Unknown startup RTT uses the same bounded two-second grace as native routes.
+  // Once sampled, only the learned RTT plus scheduling allowance renews readiness.
+  private livenessRtt: number | undefined;
+  private lastRttReportAt = -Infinity;
   private readonly subscriptions = new Map<number, Subscription>();
   private readonly welcomeListeners = new Set<() => void>();
   private readonly attachListeners = new Set<() => void>();
@@ -127,11 +134,14 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  /** A confirmed terminal gets a short recovery window; persistent/refused connections retain backoff. */
+  private fastRecoveryUntil = 0;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
   private welcomedAt = 0;
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
+  private greeted = false;
   private resumeSent = false;
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
@@ -178,6 +188,8 @@ export class MuxConnection {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     try {
       const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
+      // Even an attachment closed before replay completes retains a server writer row.
+      if (frame.type === "AttachTerm") this.writersUsed.add(streamId);
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
       onSent?.(performance.now());
@@ -249,14 +261,14 @@ export class MuxConnection {
     return () => { this.rttListeners.delete(listener); };
   }
 
-  /** Samples the round trip: at most one ping per 2 s, only while something is attached. */
+  /** Pipeline bounded liveness probes so a missing response is noticed within RTT + 50 ms [D265]. */
   sampleRoundTrip(): void {
     const startedAt = performance.now();
-    if (this.attachedCount === 0 || this.closed || startedAt - this.lastPingAt < 2000) return;
+    if (!this.isWelcomed || this.closed || startedAt - this.lastPingAt < LIVENESS_TICK_MS) return;
     this.lastPingAt = startedAt;
     this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
     const nonce = this.nextPingNonce;
-    if (this.pendingPings.size >= 8) {
+    if (this.pendingPings.size >= 128) {
       const oldest = this.pendingPings.keys().next().value as bigint | undefined;
       if (oldest !== undefined) this.pendingPings.delete(oldest);
     }
@@ -265,29 +277,51 @@ export class MuxConnection {
   }
 
   /** A pong arrived (on any stream). */
-  acceptPong(nonce: bigint): void {
+  acceptPong(nonce: bigint, sentUs: bigint): void {
     const startedAt = this.pendingPings.get(nonce);
-    if (startedAt === undefined) return;
-    this.pendingPings.delete(nonce);
-    const ms = Math.max(1, performance.now() - startedAt);
-    for (const l of this.rttListeners) l(ms);
+    if (startedAt === undefined || sentUs !== BigInt(Math.round(startedAt * 1000))) return;
+    const now = performance.now();
+    // A renderer can wake with an old reply queued ahead of its timer. Enforce the
+    // existing lease first; suspension must not become an hours-long learned RTT.
+    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
+      this.retireUnresponsiveSocket();
+      return;
+    }
+    // A reply proves this direction works; discard older unanswered probes too.
+    for (const key of this.pendingPings.keys()) { if (key <= nonce) this.pendingPings.delete(key); }
+    this.lastPongAt = now;
+    const ms = Math.max(1, now - startedAt);
+    this.livenessRtt = Math.max(ms, this.livenessRtt === undefined ? ms : this.livenessRtt * 0.95);
+    // Probe frequency must not drive DOM/prediction updates more often than the former sampling cadence.
+    if (this.lastPongAt - this.lastRttReportAt >= 2000) {
+      this.lastRttReportAt = this.lastPongAt;
+      for (const l of this.rttListeners) l(ms);
+    }
   }
 
   /** Forces a WebSocket close for the opt-in resume probe. */
   forceDrop(): void {
+    const socket = this.socket;
+    if (!socket) return;
     this.forcedDrop = true;
-    this.socket?.close(4000, "tracer resume probe");
+    this.disconnect(socket);
+    socket.close(4000, "tracer resume probe");
   }
 
   /** Closes the socket so the connection restarts (every stream re-attaches on the next welcome). */
   forceClose(): void {
-    this.socket?.close();
+    const socket = this.socket;
+    if (!socket) return;
+    this.disconnect(socket);
+    socket.close();
   }
 
   /** Reports a violation of the wire contract and closes the socket (the browser rejects 1002 from script, so 4002). */
   fail(message: string): void {
-    for (const s of this.streams.values()) s.onStatus("The connection sent something unexpected and was closed. Reconnecting…");
-    try { this.socket?.close(4002, "invalid tracer frame"); } catch { this.socket?.close(); }
+    const socket = this.socket;
+    if (socket) this.disconnect(socket);
+    this.status("The connection sent something unexpected and was closed. Reconnecting…");
+    try { socket?.close(4002, "invalid tracer frame"); } catch { socket?.close(); }
   }
 
   dispose(): void {
@@ -319,8 +353,10 @@ export class MuxConnection {
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
     this.welcomed = false;
+    this.greeted = false;
 
     socket.onopen = () => {
+      if (this.socket !== socket || this.closed) return;
       const credentials = this.credentials;
       const sessionsToResume = [...this.streams.values()].some((s) => s.hasSession());
       const resumable = sessionsToResume && credentials !== undefined && Date.now() < credentials.deadline;
@@ -335,37 +371,77 @@ export class MuxConnection {
       for (const s of [...this.streams.values()]) s.onSocketOpen(resumable);
     };
     socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      if (this.socket !== socket || this.closed) return;
       const receivedAt = performance.now();
       if (!(event.data instanceof ArrayBuffer)) { this.fail("server sent a non-binary frame"); return; }
       noteWsMessage(event.data.byteLength);
       try {
         const message = new Uint8Array(event.data);
-        this.decoder?.feed(message, (streamId, frame) => this.dispatch(streamId, frame, message, receivedAt));
+        this.decoder?.feed(message, (streamId, frame) => {
+          // A Close or overdue Pong may retire this route midway through one message.
+          if (this.socket === socket && !this.closed) this.dispatch(streamId, frame, message, receivedAt);
+        });
       } catch {
-        this.fail("server sent an invalid wire frame");
+        if (this.socket === socket && !this.closed) this.fail("server sent an invalid wire frame");
       }
     };
-    socket.onerror = () => this.status("Connection interrupted. Reconnecting…");
-    socket.onclose = () => {
+    socket.onerror = () => {
       if (this.socket !== socket || this.closed) return;
-      const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
-      this.socket = undefined;
-      this.decoder = undefined;
-      this.welcomed = false;
-      this.attachedCount = 0;
-      this.config.onConnectionChange?.(false);
-      this.resetPings();
-      for (const call of this.calls.values()) call.reject(new Error("connection lost"));
-      this.calls.clear();
-      const forced = this.forcedDrop;
-      this.forcedDrop = false;
-      // A drop we asked for, or the end of a socket that worked for a while, is not a repeat failure.
-      if (lived || forced) this.retryAttempt = 0;
-      for (const s of [...this.streams.values()]) s.onDisconnected(forced);
-      this.status("Connection lost. Reconnecting…");
-      // With no stream left there is nothing to restore; the next `openStream` connects again.
-      if (this.streams.size > 0) this.scheduleReconnect();
+      this.disconnect(socket);
+      socket.close();
     };
+    socket.onclose = () => this.disconnect(socket);
+  }
+
+  /** Retire the route synchronously; closing a half-open socket need not produce an event. */
+  private disconnect(socket: WebSocket): void {
+    if (this.socket !== socket || this.closed) return;
+    const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
+    if (this.welcomed && this.attachedCount > 0) this.fastRecoveryUntil = performance.now() + STABLE_CONNECTION_MS;
+    else if (this.greeted || this.welcomed) this.fastRecoveryUntil = 0;
+    // The server retains a live writer indefinitely; its grace starts on disconnect
+    // (or startup recovery), not Welcome. Failed retries must never renew that grace.
+    if (this.welcomed && this.credentials) this.credentials.deadline = Date.now() + this.credentials.windowMs;
+    this.socket = undefined;
+    this.decoder = undefined;
+    this.welcomed = false;
+    this.attachedCount = 0;
+    this.config.onConnectionChange?.(false);
+    this.resetPings();
+    for (const call of this.calls.values()) call.reject(new Error("connection lost"));
+    this.calls.clear();
+    const forced = this.forcedDrop;
+    this.forcedDrop = false;
+    // A drop we asked for, or the end of a socket that worked for a while, is not a repeat failure.
+    if (lived || forced) this.retryAttempt = 0;
+    for (const s of [...this.streams.values()]) s.onDisconnected(forced);
+    this.status("Connection lost. Reconnecting…");
+    // With no stream left there is nothing to restore; the next `openStream` connects again.
+    if (this.streams.size > 0) this.scheduleReconnect();
+  }
+
+  private checkLiveness(): void {
+    this.livenessTimer = 0;
+    if (!this.isWelcomed || this.closed) return;
+    const now = performance.now();
+    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
+      this.retireUnresponsiveSocket();
+      return;
+    }
+    this.sampleRoundTrip();
+    // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
+    // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
+    const clock = performance.now();
+    const nextProbe = this.lastPingAt + LIVENESS_TICK_MS - clock;
+    const remaining = this.lastPongAt + (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50) - clock;
+    this.livenessTimer = window.setTimeout(() => this.checkLiveness(), Math.max(1, Math.min(nextProbe, remaining)));
+  }
+
+  private retireUnresponsiveSocket(): void {
+    const socket = this.socket;
+    if (!socket) return;
+    this.disconnect(socket);
+    socket.close(4000, "connection unresponsive");
   }
 
   private dispatch(streamId: number, frame: WireFrame, message: Uint8Array, receivedAt: number): void {
@@ -383,6 +459,7 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
+        this.greeted = true;
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
@@ -392,10 +469,15 @@ export class MuxConnection {
         this.credentials = {
           connectionId: frame.connectionId.slice(),
           resumeToken: frame.resumeToken.slice(),
-          deadline: Date.now() + frame.resumeWindowSeconds * 1000,
+          deadline: Infinity,
+          windowMs: frame.resumeWindowSeconds * 1000,
         };
         this.welcomed = true;
         this.welcomedAt = performance.now();
+        this.lastPongAt = this.welcomedAt;
+        // A network change may have a different RTT; relearn before enforcing its deadline.
+        this.livenessRtt = undefined;
+        this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
         if (!this.resumeSent) this.writersUsed.clear();
@@ -430,13 +512,15 @@ export class MuxConnection {
       }
       case "Ping":
         this.send(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+        // Incoming probes keep sampling alive when background tabs clamp timers.
+        this.sampleRoundTrip();
         return;
       case "Pong":
-        this.acceptPong(frame.nonce);
+        this.acceptPong(frame.nonce, frame.sentUs);
         return;
       case "Close":
         this.status(plainCloseReason(frame.reason, "The server closed the connection."));
-        this.socket?.close();
+        this.forceClose();
         return;
       default:
         this.fail("server sent a terminal frame on the control stream");
@@ -445,15 +529,20 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
-    // Jitter only lengthens a step (by up to half), so the first retry is never sooner than 50 ms and pages dropped
-    // together do not return in step.
-    const delay = reconnectDelay(this.retryAttempt);
+    // Positive jitter spreads retries across pages; first opens retain the ordinary backoff.
+    // An ordinary restart must regain typing within RTT + 50 ms [D259]. Once
+    // a terminal really worked, check promptly during that bounded recovery
+    // window, leaving one frame for paint. Refused or prolonged outages back off.
+    const delay = performance.now() < this.fastRecoveryUntil ? 5 + Math.random() * 5 : reconnectDelay(this.retryAttempt);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
   }
 
   private resetPings(): void {
+    window.clearTimeout(this.livenessTimer);
+    this.livenessTimer = 0;
     this.lastPingAt = -Infinity;
+    this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
     for (const l of this.rttListeners) l(undefined);
   }

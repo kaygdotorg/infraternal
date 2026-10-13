@@ -4,6 +4,7 @@
 use crate::remote_link::RemoteLink;
 #[cfg(not(feature = "remote"))]
 type RemoteLink = ();
+use crate::liveness::{Liveness, TICK};
 use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -89,6 +90,10 @@ pub(crate) enum TerminalOutput {
     Event { event_json: Bytes },
     /// Highest input sequence written to the PTY.
     Ack { in_seq_acked: u64 },
+    /// The shim answered an ordered state fence for this terminal route.
+    Pong { nonce: u64, sent_us: u64 },
+    /// The shared host link is rebinding; keep this stream and its input writer.
+    Reconnecting,
     /// The agent retired one terminal stream.
     Closed { code: u16 },
 }
@@ -138,6 +143,17 @@ impl AttachmentHandle {
         self.0
             .input
             .send(frame)
+            .await
+            .map_err(|_| AgentError::Unavailable)
+    }
+
+    /// Rebind a stalled route without changing its browser stream or shim writer.
+    pub async fn reconnect(&self) -> Result<(), AgentError> {
+        self.0
+            .commands
+            .send(Command::Reconnect {
+                attachment_id: self.0.id,
+            })
             .await
             .map_err(|_| AgentError::Unavailable)
     }
@@ -457,6 +473,9 @@ enum Command {
     Detach {
         attachment_id: u64,
     },
+    Reconnect {
+        attachment_id: u64,
+    },
 }
 
 struct AttachmentState {
@@ -683,6 +702,11 @@ enum Incoming {
         nonce: u64,
         sent_us: u64,
     },
+    Pong {
+        stream_id: u32,
+        nonce: u64,
+        sent_us: u64,
+    },
     Disconnected,
 }
 
@@ -760,6 +784,9 @@ async fn run_actor(
     let mut hot = ();
     #[cfg(not(feature = "remote"))]
     let mut writes = ();
+    let mut liveness = Liveness::new();
+    let mut ticks = tokio::time::interval(TICK);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         #[cfg(feature = "remote")]
@@ -782,7 +809,11 @@ async fn run_actor(
             // link, ordinary connect owns its greeting through completion.
             tokio::select! {
                 event = hot.next(&attachments) => {
-                    if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) { writes.stop().await; }
+                    if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
+                        writes.stop().await;
+                        // The promoted connection has not answered this route's probes yet.
+                        liveness = Liveness::new();
+                    }
                     process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
                 },
                 replacement = source.replacement() => {
@@ -814,6 +845,7 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
+                liveness = Liveness::new();
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -826,6 +858,10 @@ async fn run_actor(
         let Some(link) = connection.as_mut() else {
             continue;
         };
+        // Nothing probes an unused host link. A later attachment gets a fresh lease.
+        if attachments.is_empty() {
+            liveness = Liveness::new();
+        }
         #[cfg(feature = "remote")]
         let control_ready = writes.can_admit();
         #[cfg(not(feature = "remote"))]
@@ -844,17 +880,32 @@ async fn run_actor(
                     if let Peer::Remote(remote) = &link.peer { remote.retire_writer(stream).await; }
                     if stream == CONTROL_STREAM || !hot.ready(stream) {
                         writes.stop().await;
-                        if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; }
+                        if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending); }
                     }
                 }
             }
             event = next_priming(&mut hot, &attachments) => {
                 #[cfg(feature = "remote")]
-                if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) { writes.stop().await; }
+                if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
+                    writes.stop().await;
+                    // The promoted connection has not answered this route's probes yet.
+                    liveness = Liveness::new();
+                }
                 #[cfg(feature = "remote")]
                 process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
                 #[cfg(not(feature = "remote"))]
                 match event {}
+            }
+            _ = ticks.tick(), if !attachments.is_empty() => {
+                let (nonce, sent_us) = liveness.ping();
+                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await)
+                    && let Some(old) = connection.take() {
+                        #[cfg(feature = "remote")]
+                        writes.stop().await;
+                        connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
+                        first_attempt = true;
+                }
             }
             replacement = source.replacement(), if source.remote() => {
                 #[cfg(feature = "remote")]
@@ -868,7 +919,7 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() {
-                    connection_lost(old, &mut attachments, &mut routes, &mut pending).await;
+                    connection_lost(old, &mut attachments, &mut routes, &mut pending);
                     session_inventory.send_replace(SessionInventoryState::Unavailable);
                 }
             }
@@ -882,7 +933,7 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if writes.enabled() && matches!(&link.peer, Peer::Remote(remote) if remote.native())
                     && let Some(ok) = retain_owned_input(&command, &mut attachments, &mut routes, &mut writes) {
-                        if !ok { writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; } }
+                        if !ok { writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending); } }
                         continue;
                 }
                 let ok = process_command(
@@ -897,10 +948,10 @@ async fn run_actor(
                     if let Some(link) = link {
                         #[cfg(feature = "remote")]
                         writes.stop().await;
-                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending);
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
-                        first_attempt = false;
+                        first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                 }
             }
@@ -910,10 +961,10 @@ async fn run_actor(
                     if let Some(link) = link {
                         #[cfg(feature = "remote")]
                         writes.stop().await;
-                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending);
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
-                        first_attempt = false;
+                        first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                     continue;
                 };
@@ -925,7 +976,7 @@ async fn run_actor(
                     let stream = *stream_id;
                     writes.block(stream);
                     if let Peer::Remote(remote) = &link.peer { remote.retire_writer(stream).await; }
-                    if !hot.ready(stream) { writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending).await; } }
+                    if !hot.ready(stream) { writes.stop().await; if let Some(old) = connection.take() { connection_lost(old, &mut attachments, &mut routes, &mut pending); } }
                     continue;
                 }
                 #[cfg(feature = "remote")]
@@ -941,6 +992,10 @@ async fn run_actor(
                     && serde_json::from_slice::<serde_json::Value>(event_json).is_ok_and(|value|value["type"]=="plugin.event" || value["type"]=="plugins.resync") {
                     changes.send_replace(());continue;
                 }
+                if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
+                    liveness.pong(nonce, sent_us);
+                    continue;
+                }
                 if let Incoming::SessionInventory(ids) = incoming {
                     session_inventory
                         .send_replace(SessionInventoryState::Available(Arc::from(ids)));
@@ -951,10 +1006,10 @@ async fn run_actor(
                     if let Some(link) = link {
                         #[cfg(feature = "remote")]
                         writes.stop().await;
-                        connection_lost(link, &mut attachments, &mut routes, &mut pending).await;
+                        connection_lost(link, &mut attachments, &mut routes, &mut pending);
                         session_inventory.send_replace(SessionInventoryState::Unavailable);
                         backoff = after_loss(backoff, connected_at);
-                        first_attempt = false;
+                        first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                 }
             }
@@ -1128,7 +1183,7 @@ async fn process_priming(
         priming::Event::Incoming(Some(Incoming::Activate)) => {
             if let Ok((mut promoted, slots)) = hot.promote().await {
                 if let Some(old) = connection.take() {
-                    connection_lost(old, attachments, routes, pending).await;
+                    connection_lost(old, attachments, routes, pending);
                 }
                 let mut valid = true;
                 for (id, attachment) in attachments.iter_mut() {
@@ -1261,6 +1316,9 @@ fn retain_owned_input(
             writes.resize(a.stream_id, a.session_id, [cols, rows, px_w, px_h]);
             return Some(true);
         }
+        // Probes carry no retained input: the ordinary route sends them through
+        // the shim fence, including when this native writer owns input flights.
+        Frame::Ping { .. } => return None,
         _ => return Some(false),
     };
     let Some(end) = in_seq.checked_add(bytes.len() as u64) else {
@@ -1470,6 +1528,28 @@ async fn process_command(
             let _ = reply.send(Ok((attachment_id, stream_id)));
             true
         }
+        Command::Reconnect { attachment_id } => {
+            let Some(attachment) = attachments.get_mut(&attachment_id) else {
+                return true;
+            };
+            // A shared-link replacement already replays this attachment once.
+            if attachment.awaiting_ack {
+                return true;
+            }
+            if !write_frame(
+                connection,
+                attachment.stream_id,
+                &Frame::Close {
+                    code: 1013,
+                    reason: "terminal route unresponsive",
+                },
+            )
+            .await
+            {
+                return false;
+            }
+            reattach(connection, attachment).await
+        }
         Command::Input {
             attachment_id,
             frame,
@@ -1554,6 +1634,7 @@ async fn process_command(
                     px_w,
                     px_h,
                 },
+                Frame::Ping { nonce, sent_us } => Frame::Ping { nonce, sent_us },
                 Frame::Credit { bytes } => {
                     let Some(attachment) = attachments.get_mut(&attachment_id) else {
                         return false;
@@ -1632,28 +1713,37 @@ async fn reattach_all(
 ) -> bool {
     for (id, attachment) in attachments.iter_mut() {
         let stream_id = attachment.stream_id;
-        attachment.awaiting_ack = true;
-        attachment.replaying = true;
-        if !send_attach(
-            connection,
-            stream_id,
-            attachment.session_id,
-            attachment.last_out_seq,
-            attachment.last_in_seq,
-        )
-        .await
-        {
+        if !reattach(connection, attachment).await {
             return false;
         }
-        if attachment.credit != 0 {
-            let Ok(bytes) = u32::try_from(attachment.credit) else {
-                return false;
-            };
-            if !write_frame(connection, stream_id, &Frame::Credit { bytes }).await {
-                return false;
-            }
-        }
         routes.insert(stream_id, *id);
+    }
+    true
+}
+
+/// Close/Attach reuse the same durable writer; only unspent output credit returns.
+async fn reattach(connection: &mut AgentConnection, attachment: &mut AttachmentState) -> bool {
+    let stream_id = attachment.stream_id;
+    attachment.awaiting_ack = true;
+    attachment.replaying = true;
+    if !send_attach(
+        connection,
+        stream_id,
+        attachment.session_id,
+        attachment.last_out_seq,
+        attachment.last_in_seq,
+    )
+    .await
+    {
+        return false;
+    }
+    if attachment.credit != 0 {
+        let Ok(bytes) = u32::try_from(attachment.credit) else {
+            return false;
+        };
+        if !write_frame(connection, stream_id, &Frame::Credit { bytes }).await {
+            return false;
+        }
     }
     true
 }
@@ -2017,6 +2107,20 @@ async fn process_incoming(
         Incoming::Ping { nonce, sent_us } => {
             write_frame(connection, CONTROL_STREAM, &Frame::Pong { nonce, sent_us }).await
         }
+        Incoming::Pong {
+            stream_id,
+            nonce,
+            sent_us,
+        } => {
+            let Some(attachment) = routes.get(&stream_id).and_then(|id| attachments.get(id)) else {
+                return true;
+            };
+            // A full consumer is already retired by ordinary output. Never block siblings for a probe.
+            let _ = attachment
+                .output
+                .try_send(TerminalOutput::Pong { nonce, sent_us });
+            true
+        }
         Incoming::ControlEvent | Incoming::SessionInventory(_) => true,
         Incoming::Disconnected | Incoming::Hello { .. } => false,
     }
@@ -2104,11 +2208,8 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
     loop {
         match decode_muxed_frame(&connection.receive) {
             Ok(decoded) => {
-                let wire_len = decoded.wire_len;
-                let wire = connection.receive.split_to(wire_len).freeze();
-                let Ok(decoded) = decode_muxed_frame(&wire) else {
-                    return None;
-                };
+                let wire = connection.receive.split_to(decoded.wire_len).freeze();
+                let decoded = decode_muxed_frame(&wire).ok()?;
                 let stream_id = decoded.stream_id;
                 let frame = match decoded.frame {
                     #[cfg(feature = "remote")]
@@ -2150,6 +2251,11 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                     },
                     Frame::Close { .. } if stream_id == CONTROL_STREAM => Incoming::Disconnected,
                     Frame::Close { code, .. } => Incoming::Close { stream_id, code },
+                    Frame::Pong { nonce, sent_us } if stream_id % 2 == 0 => Incoming::Pong {
+                        stream_id,
+                        nonce,
+                        sent_us,
+                    },
                     Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
                         Incoming::Ping { nonce, sent_us }
                     }
@@ -2242,19 +2348,31 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
     )
 }
 
-async fn connection_lost(
-    mut connection: AgentConnection,
-    _attachments: &mut HashMap<u64, AttachmentState>,
+fn connection_lost(
+    connection: AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     pending: &mut HashMap<u32, PendingCall>,
 ) {
     routes.clear();
+    notify_reconnecting(attachments);
     for (_, call) in pending.drain() {
         call.refuse(AgentError::Unavailable);
     }
-    if let Some(pid) = connection.pid.take() {
-        stop_child(pid).await;
-    }
+    // An old child gets bounded TERM/KILL cleanup independently of recovery.
+    // Accepted shim input and surviving session processes remain authoritative.
+    tokio::spawn(cleanup_connection(connection));
+}
+
+/// A stalled host does not retire its surviving PTYs. A full consumer still
+/// retires locally; never hold shared reconnection behind one output queue.
+fn notify_reconnecting(attachments: &mut HashMap<u64, AttachmentState>) {
+    attachments.retain(|_, attachment| {
+        attachment
+            .output
+            .try_send(TerminalOutput::Reconnecting)
+            .is_ok()
+    });
 }
 
 async fn cleanup_connection(mut connection: AgentConnection) {

@@ -9,7 +9,8 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer as createHttpsServer } from "node:https";
 import { request as httpRequest } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
@@ -34,6 +35,8 @@ export interface Bridge {
   output: Map<number, string>;
   /** Highest acknowledged input offset by stream. */
   acked: Map<number, bigint>;
+  /** Completed real PTY replays, including automatic rebinding on the same browser socket. */
+  replays: number;
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
@@ -49,6 +52,14 @@ export interface RealServer {
   binary: string;
   dataDir: string;
   pid: number;
+  /** Epoch milliseconds from the monotonic clock, for perf-VM-only recovery measurements. */
+  recoveredAt?: number;
+  /** Restarts only the server PID, retaining its detached session shims. */
+  restart(whileStopped?: () => Promise<void>): Promise<void>;
+  /** Retain existing real TLS sockets when their upstream closes; replacements remain ordinary routes. */
+  retainBrowserRoutes(): void;
+  /** Pause only the selected private upstream, preserving the browser/server connection. */
+  pauseUpstream(component: "daemon" | "shim", whilePaused: () => Promise<void>, selectedSession?: string): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -69,6 +80,8 @@ export async function startRealServer(options: {
   hostname?: string;
   stateRoot?: string;
   remoteListen?: string;
+  /** Uses a private transient service with production's server-only stop behavior. */
+  systemd?: boolean;
   /** Public fixture certificate only; private TLS material remains in memory. */
   certificate?: (pem: string) => Promise<void>;
   /** Seeds controlled public host trust before any bootstrap operation. */
@@ -126,19 +139,40 @@ export async function startRealServer(options: {
   await new Promise<void>((r) => tls.listen(options.port ?? 0, address, r));
   const origin = `https://${hostname}:${(tls.address() as AddressInfo).port}`;
 
-  const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])], {
+  let unit: string | undefined;
+  const args = ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])];
+  const launch = (): ChildProcess => {
+    // A stopped transient unit may await garbage collection after its launcher
+    // exits. A fresh name avoids racing that collection while keeping the same data/runtime.
+    unit = options.systemd ? `s199-${randomUUID()}` : undefined;
+    return spawn(unit ? "systemd-run" : binary, unit ? ["--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "-p", "KillMode=process", `--setenv=XDG_RUNTIME_DIR=${runtime}`, `--setenv=ZDOTDIR=${resolve(root, "crates/infraternal/tests/profile")}`, binary, ...args] : args, {
     cwd: root, detached: true,
     env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
-  });
+    });
+  };
+  let child = launch();
+  const stop = async (): Promise<void> => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const stopped = once(child, "exit");
+    if (unit) {
+      const control = spawn("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+      const [code] = await once(control, "exit");
+      if (code !== 0) throw new Error("private fixture service stop failed");
+    } else child.kill("SIGTERM");
+    await stopped;
+  };
   if (process.env.REAL_SERVER_LOG === "1") { child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); child.stdout?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); } else child.stderr?.resume();
 
   const bridges: Bridge[] = [];
+  const retainedBrowsers = new Set<WebSocket>();
+  const activeBrowsers = new Set<WebSocket>();
   const front = new WebSocketServer({ noServer: true });
   tls.on("upgrade", (request, socket, head) => {
     front.handleUpgrade(request, socket, head, (browser) => {
+      activeBrowsers.add(browser);
       const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
-      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), detached: [], control: [], cookie: request.headers.cookie ?? "" };
+      const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Bootstrap frames can contain private sign-in inputs. Only protocol sockets enter diagnostics.
       const protocol = request.url === "/v1/ws";
       if (protocol) bridges.push(bridge);
@@ -164,15 +198,17 @@ export async function startRealServer(options: {
           if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
           if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
+          if (f.type === "Event" && stream !== 0 && f.eventJson.byteLength <= 1024
+            && JSON.parse(text.decode(f.eventJson)).type === "terminal.replay_complete") bridge.replays++;
           if (f.type === "Close") bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof (f as { reason?: unknown }).reason === "string" ? (f as { reason: string }).reason : JSON.stringify((f as { reason?: unknown }).reason)}`;
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
         later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
       });
       const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
-      upstream.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy = `server ${code}`; browser.close(); });
-      upstream.on("error", () => browser.close());
-      browser.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
+      upstream.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy = `server ${code}`; if (!retainedBrowsers.has(browser)) browser.close(); });
+      upstream.on("error", () => { if (!retainedBrowsers.has(browser)) browser.close(); });
+      browser.on("close", (code) => { activeBrowsers.delete(browser); retainedBrowsers.delete(browser); eraseQueue(); bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
     });
   });
 
@@ -202,18 +238,91 @@ export async function startRealServer(options: {
   }
   token = "";
 
-  return {
-    origin, backend, bridges, token: setupToken, binary, dataDir: state, pid: child.pid!,
+  const fixture: RealServer = {
+    origin, backend, bridges, token: setupToken, binary, dataDir: state, get pid() { return child.pid!; },
+    retainBrowserRoutes() { for (const browser of activeBrowsers) retainedBrowsers.add(browser); },
+    async restart(whileStopped) {
+      await stop();
+      await whileStopped?.();
+      child = launch();
+      if (process.env.REAL_SERVER_LOG === "1") {
+        child.stderr?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
+        child.stdout?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
+      } else child.stderr?.resume();
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        // The successful probe's start is a conservative availability boundary;
+        // a delayed health response must not subtract an RTT from recovery.
+        const candidateAt = performance.timeOrigin + performance.now();
+        try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) { fixture.recoveredAt = candidateAt; break; } } catch { /* starting */ }
+        if (Date.now() > deadline) throw new Error("server restart failed");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    },
+    async pauseUpstream(component, whilePaused, selectedSession) {
+      let serverPid = child.pid!;
+      if (unit) {
+        const show = spawn("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit], { stdio: ["ignore", "pipe", "ignore"] });
+        let result = "";
+        show.stdout.on("data", (bytes) => { result += bytes; });
+        const [code] = await once(show, "exit");
+        serverPid = Number(result.trim());
+        if (code !== 0 || !Number.isInteger(serverPid) || serverPid < 1) throw new Error("fixture server identity unavailable");
+      }
+      // Arrival order can differ from canvas order. Multi-window callers select
+      // the session whose executed marker identifies the focused window.
+      const sessionId = (selectedSession ?? bridges.flatMap((bridge) => [...bridge.attached.values()].flat())[0])?.replaceAll("-", "");
+      if (!sessionId || !/^[0-9a-f]{32}$/.test(sessionId)) throw new Error("fixture session identity unavailable");
+      const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
+      const pause = spawn("python3", [resolve(import.meta.dirname, "pause-upstream.py"), component, String(serverPid), shimState, sessionId], { stdio: ["pipe", "pipe", "pipe"] });
+      const exited = once(pause, "exit");
+      // This helper opens a pidfd, never signals a reused PID and resumes on stdin EOF.
+      const ready = once(pause.stdout, "data");
+      pause.stderr.resume();
+      let watchReplacement = true;
+      let replacement: Promise<void> | undefined;
+      try {
+        const status = await Promise.race([ready.then(([bytes]) => String(bytes).trim()), exited.then(() => "ended")]);
+        if (!/^paused [1-9][0-9]*$/.test(status)) throw new Error("private upstream pause failed");
+        const pausedPid = Number(status.split(" ")[1]);
+        if (component === "daemon" && process.env.RESTART_MEASURE === "1") replacement = (async () => {
+          // The server replaces a stalled daemon without waiting for SIGCONT. Observe its own
+          // child before it becomes ready, rather than subtracting an artificially late resume.
+          while (watchReplacement) {
+            const candidateAt = performance.timeOrigin + performance.now();
+            const tasks = await readdir(`/proc/${serverPid}/task`);
+            const children = await Promise.all(tasks.map((task) => readFile(`/proc/${serverPid}/task/${task}/children`, "utf8").catch(() => "")));
+            if (children.some((ids) => ids.trim().split(/\s+/).some((pid) => Number(pid) > 0 && Number(pid) !== pausedPid))) {
+              fixture.recoveredAt = candidateAt;
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        })();
+        await whilePaused();
+        fixture.recoveredAt ??= performance.timeOrigin + performance.now();
+      } finally {
+        watchReplacement = false;
+        pause.stdin.end("resume\n");
+        await exited;
+        await replacement;
+      }
+    },
     async dispose() {
       front.close();
       tls.close();
-      try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+      if (unit) await stop();
+      else try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
       // Reuse authenticated fixture teardown so detached shims cannot outlive
       // the runtime directory that identifies them. Never scan unrelated PIDs.
-      const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", resolve(runtime, "infraternal")], { cwd: root, stdio: "ignore" });
+      // Root measurements run in a private mount namespace whose /run and passwd
+      // belong to this fixture; ordinary jobs always use their XDG runtime directory.
+      const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
+      const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", shimState], { cwd: root, stdio: "ignore" });
       await once(cleanup, "exit");
       await rm(runtime, { recursive: true, force: true });
       await rm(state, { recursive: true, force: true });
     },
   };
+  return fixture;
 }

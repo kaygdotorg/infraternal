@@ -34,6 +34,7 @@ mod release_http;
 mod release_latest;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
+mod liveness;
 pub mod release_manifest;
 pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.

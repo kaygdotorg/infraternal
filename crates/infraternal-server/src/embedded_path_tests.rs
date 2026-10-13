@@ -53,7 +53,7 @@ async fn replacement_replays_only_the_unacknowledged_suffix_and_queued_input() {
             bytes: b"abcdef"
         }
     ));
-    connection_lost(old, &mut attachments, &mut routes, &mut pending).await;
+    connection_lost(old, &mut attachments, &mut routes, &mut pending);
     let (mut new, mut new_peer) = connection();
     assert!(reattach_all(&mut new, &mut attachments, &mut routes).await);
     let wire = receive(&mut new_peer).await;

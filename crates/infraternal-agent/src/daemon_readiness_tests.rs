@@ -166,7 +166,7 @@ async fn control_precedes_bulk_without_reordering_snapshot_notice() {
         ))
         .is_ok()
     );
-    assert!(control.try_send(Message::Pong(456, 0)).is_ok());
+    assert!(control.try_send(Message::Pong(0, 456, 0)).is_ok());
     let (written, mut frames) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
@@ -215,7 +215,7 @@ fn reply_lane_memory_at_1000_channels() {
     let mut bulk = Vec::with_capacity(1000);
     for nonce in 0..1000 {
         let (tx, rx) = mpsc::channel(8);
-        assert!(tx.try_send(Message::Pong(nonce, 0)).is_ok());
+        assert!(tx.try_send(Message::Pong(0, nonce, 0)).is_ok());
         bulk.push((tx, rx));
     }
     let one_lane = rss();
@@ -223,7 +223,7 @@ fn reply_lane_memory_at_1000_channels() {
     let mut control = Vec::with_capacity(1000);
     for nonce in 0..1000 {
         let (tx, rx) = mpsc::channel(8);
-        assert!(tx.try_send(Message::Pong(nonce, 0)).is_ok());
+        assert!(tx.try_send(Message::Pong(0, nonce, 0)).is_ok());
         control.push((tx, rx));
     }
     let elapsed = started.elapsed().as_micros();
@@ -324,7 +324,7 @@ async fn census_and_open_result_share_fifo_order() {
 #[tokio::test]
 async fn a_saturated_census_queue_cannot_establish_the_open_fence() {
     let (control, mut receiver) = mpsc::channel(1);
-    reply(&control, Message::Pong(1, 0)).unwrap();
+    reply(&control, Message::Pong(0, 1, 0)).unwrap();
     let registry = crate::lifecycle::Registry::default();
     let mut published = None;
     assert!(!publish_session_snapshot(&control, &registry, &mut published).unwrap());

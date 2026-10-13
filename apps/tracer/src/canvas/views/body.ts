@@ -27,7 +27,10 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       // The header's existing manager owns lazy loading, host selection and focus.
       const anchor = rec.card.root.querySelector<HTMLButtonElement>('[data-action="sessions"]');
       cx.sessionUi?.toggleManager(rec, anchor, event?.detail === 0 ? "keyboard" : "pointer");
-    } } : {}), changed: () => {
+    } } : {}), connectionChanged: () => {
+      rec.card.setStatus(rec.binding?.connected === false ? "connecting" : "live");
+      cx.sessionUi?.paint(rec);
+    }, changed: () => {
       cx.store.changed();
       // A session id the window just learned (a new shell was created on the server): the inventory knows it is open.
       if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session } : undefined);
@@ -35,6 +38,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       if (status === 0) cx.win.close(rec);
     }, refused: (message) => cx.sessionUi?.refused(rec, message) ?? false });
     rec.binding = binding;
+    if (binding.connected === false) rec.card.setStatus("connecting");
     binding.mount(body);
     return;
   }

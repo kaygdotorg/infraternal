@@ -25,11 +25,16 @@ impl CertificatePublisher for Publication {
     }
 }
 struct Peer {
-    connection: Connection,
-    transmit: Transmit,
-    receive: Receive,
+    connection: Arc<Connection>,
+    transmit: Arc<tokio::sync::Mutex<Transmit>>,
+    receive: mpsc::Receiver<bytes::Bytes>,
+    reader: tokio::task::JoinHandle<()>,
 }
 impl Peer {
+    /// Receive only application frames; the independent reader answers liveness during test waits.
+    async fn next(&mut self) -> bytes::Bytes {
+        self.receive.recv().await.unwrap()
+    }
     async fn connect(fixture: &Fixture, identity: &Identity) -> Self {
         let config =
             remote_tls::client_config(identity, std::slice::from_ref(&fixture.root)).unwrap();
@@ -40,12 +45,47 @@ impl Peer {
         )
         .await
         .unwrap();
+        let connection = Arc::new(connection);
+        let transmit = Arc::new(tokio::sync::Mutex::new(Transmit::default()));
+        let (queue, receive) = mpsc::channel(32);
+        let reader_connection = Arc::clone(&connection);
+        let reader_transmit = Arc::clone(&transmit);
+        let reader = tokio::spawn(async move {
+            let mut frames = Receive::default();
+            while let Ok(received) = frames.next(&reader_connection.channel).await {
+                if let Frame::Ping { nonce, sent_us } = received.frame {
+                    if reader_transmit
+                        .lock()
+                        .await
+                        .send(
+                            &reader_connection.channel,
+                            received.stream_id,
+                            &Frame::Pong { nonce, sent_us },
+                        )
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                } else {
+                    let mut wire = Vec::new();
+                    encode_muxed_frame_into(received.stream_id, &received.frame, &mut wire)
+                        .unwrap();
+                    if queue.send(wire.into()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
         let mut peer = Self {
             connection,
-            transmit: Transmit::default(),
-            receive: Receive::default(),
+            transmit,
+            receive,
+            reader,
         };
         peer.transmit
+            .lock()
+            .await
             .send(
                 &peer.connection.channel,
                 0,
@@ -57,10 +97,9 @@ impl Peer {
             )
             .await
             .unwrap();
+        let hello = peer.next().await;
         assert!(matches!(
-            peer.receive
-                .next(&peer.connection.channel)
-                .await
+            infraternal_protocol::decode_muxed_frame(&hello)
                 .unwrap()
                 .frame,
             Frame::Hello { .. }
@@ -81,12 +120,15 @@ impl Peer {
         let guard = hosts.admission_for_test(host).await.unwrap();
         let session = uuid::Uuid::new_v4();
         let terminal = actor.attach(*session.as_bytes(), 0, 0, 2).await.unwrap();
-        let attached = self.receive.next(&self.connection.channel).await.unwrap();
+        let attached_wire = self.next().await;
+        let attached = infraternal_protocol::decode_muxed_frame(&attached_wire).unwrap();
         assert!(
             matches!(attached.frame, Frame::AttachTerm { session_id, .. } if session_id == session.as_bytes())
         );
         assert_eq!(attached.stream_id, 2);
         self.transmit
+            .lock()
+            .await
             .send(&self.connection.channel, 2, &Frame::Ack { in_seq_acked: 0 })
             .await
             .unwrap();
@@ -98,15 +140,16 @@ impl Peer {
         let mut credit = Vec::new();
         encode_muxed_frame_into(1, &Frame::Credit { bytes: 1024 }, &mut credit).unwrap();
         input.send_frame(credit.into()).await.unwrap();
+        let credit_wire = self.next().await;
         assert!(matches!(
-            self.receive
-                .next(&self.connection.channel)
-                .await
+            infraternal_protocol::decode_muxed_frame(&credit_wire)
                 .unwrap()
                 .frame,
             Frame::Credit { bytes: 1024 }
         ));
         self.transmit
+            .lock()
+            .await
             .send(
                 &self.connection.channel,
                 2,
@@ -126,6 +169,8 @@ impl Peer {
         let frame = Frame::Result { call_id, ok, json };
         let bytes = control_bytes(&frame);
         self.transmit
+            .lock()
+            .await
             .send(&self.connection.channel, 0, &frame)
             .await
             .unwrap();
@@ -143,13 +188,10 @@ impl Peer {
         let sink = Arc::new(Publication(AtomicUsize::new(0), durable));
         let renewal =
             RenewalIdentity::new(identity, std::slice::from_ref(&fixture.root), sink.clone());
-        let requested = tokio::time::timeout(
-            Duration::from_secs(2),
-            self.receive.next(&self.connection.channel),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let requested = tokio::time::timeout(Duration::from_secs(2), self.next())
+            .await
+            .unwrap();
+        let requested = infraternal_protocol::decode_muxed_frame(&requested).unwrap();
         let mut wire_bytes = control_bytes(&requested.frame);
         let Frame::Call {
             call_id,
@@ -161,13 +203,10 @@ impl Peer {
         };
         let proof = renewal.action("transport.csr", input_json).unwrap();
         wire_bytes += self.control_result(call_id, true, &proof).await;
-        let delivered = tokio::time::timeout(
-            Duration::from_secs(2),
-            self.receive.next(&self.connection.channel),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let delivered = tokio::time::timeout(Duration::from_secs(2), self.next())
+            .await
+            .unwrap();
+        let delivered = infraternal_protocol::decode_muxed_frame(&delivered).unwrap();
         wire_bytes += control_bytes(&delivered.frame);
         let Frame::Call {
             call_id,
@@ -237,6 +276,8 @@ impl Peer {
         mut output: mpsc::Receiver<TerminalOutput>,
     ) {
         self.transmit
+            .lock()
+            .await
             .send(
                 &self.connection.channel,
                 2,
@@ -261,7 +302,8 @@ impl Peer {
         )
         .unwrap();
         input.send_frame(bytes.into()).await.unwrap();
-        let forwarded = self.receive.next(&self.connection.channel).await.unwrap();
+        let forwarded_wire = self.next().await;
+        let forwarded = infraternal_protocol::decode_muxed_frame(&forwarded_wire).unwrap();
         assert_eq!(forwarded.stream_id, 2);
         assert!(matches!(
             forwarded.frame,
@@ -271,6 +313,12 @@ impl Peer {
             }
         ));
         assert_eq!(input.stream_id(), 2);
+    }
+}
+
+impl Drop for Peer {
+    fn drop(&mut self) {
+        self.reader.abort();
     }
 }
 
@@ -288,12 +336,9 @@ async fn unlock_renews_live_identity_only_after_publication_ack_with_terminal_in
     let mut peer = Peer::connect(&fixture, &identity).await;
     let (input, output, guard) = peer.terminal(&fixture, host).await;
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            peer.receive.next(&peer.connection.channel)
-        )
-        .await
-        .is_err(),
+        tokio::time::timeout(Duration::from_millis(100), peer.next())
+            .await
+            .is_err(),
         "cold-locked signer issued renewal call"
     );
     fixture

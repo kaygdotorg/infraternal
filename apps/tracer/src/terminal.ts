@@ -246,6 +246,8 @@ export class TerminalClient {
   private ackedInSeq = 0n;
   private creditAvailable = 0;
   private attached = false;
+  /** A sent AttachTerm is only a request; the ordered, painted replay fence proves recovery. */
+  private attachmentConfirmed = false;
   private attachRequested = false;
   private openCallSent = false;
   private fitQueued = false;
@@ -434,7 +436,7 @@ export class TerminalClient {
     return client;
   }
 
-  get isConnected(): boolean { return this.attached; }
+  get isConnected(): boolean { return this.attachmentConfirmed; }
   get outputSequence(): bigint { return this.lastOutSeq; }
   get inputSequence(): bigint { return this.nextInSeq; }
   get inputAcknowledged(): bigint { return this.ackedInSeq; }
@@ -742,7 +744,7 @@ export class TerminalClient {
     this.cursorLayer = undefined;
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
-    if (this.attached) this.conn.streamAttached(false);
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.offRoundTrip();
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
@@ -786,6 +788,7 @@ export class TerminalClient {
         this.cancelStreamRetry();
         if (this.closed || this.exitReported || this.sessionGone) return;
         this.attached = false;
+        this.attachmentConfirmed = false;
         this.attachRequested = false;
         this.openCallSent = false;
         this.config.hooks?.onDisconnected?.(forced);
@@ -825,7 +828,19 @@ export class TerminalClient {
           const session = uuidBytes(requireString(notice.session_id));
           if (!this.sessionId || session.some((byte, index) => byte !== this.sessionId?.[index])) throw new Error("session mismatch");
           // Notices describe recovery; only the subsequent wire Snapshot advances the cursor.
-          if (notice.type === "terminal.snapshot" && notice.approximate === true) {
+          if (notice.type === "terminal.reconnecting") {
+            // The supervisor retains this writer and replays it on the new host link.
+            // Keep new input locally until the replacement's replay fence is painted.
+            if (this.attachmentConfirmed) {
+              this.conn.streamAttached(false);
+              this.config.hooks?.onDisconnected?.(false);
+            }
+            this.attachmentConfirmed = false;
+            this.connectionIsResume = true;
+            this.replayResponseFence = undefined;
+            this.suppressReplayResponses = true;
+            this.setStatus("Catching up…");
+          } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
@@ -862,7 +877,7 @@ export class TerminalClient {
         this.sendFrame(this.streamId, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         return;
       case "Pong":
-        this.conn.acceptPong(frame.nonce);
+        this.conn.acceptPong(frame.nonce, frame.sentUs);
         return;
       case "Close":
         if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
@@ -877,13 +892,17 @@ export class TerminalClient {
 
   /** Retain this stream's writer/cursors while siblings continue on the healthy shared socket. */
   private retryStream(): void {
-    if (this.attached) this.conn.streamAttached(false);
+    const wasConfirmed = this.attachmentConfirmed;
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.attached = false;
+    this.attachmentConfirmed = false;
     this.attachRequested = false;
     if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone || this.streamRetryTimer !== 0) return;
     if (performance.now() - this.attachedAt >= STABLE_CONNECTION_MS) this.streamRetryAttempt = 0;
     this.config.hooks?.onDisconnected?.(false);
-    const delay = reconnectDelay(this.streamRetryAttempt++);
+    // A proven route gets one prompt reattach; repeated unconfirmed failures retain the bounded backoff.
+    const delay = wasConfirmed ? 5 + Math.random() * 5 : reconnectDelay(this.streamRetryAttempt);
+    this.streamRetryAttempt++;
     this.streamRetryTimer = window.setTimeout(() => {
       this.streamRetryTimer = 0;
       if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone || !this.conn.isWelcomed) return;
@@ -944,13 +963,9 @@ export class TerminalClient {
     this.creditAvailable = INITIAL_CREDIT;
     this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
     this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
-    this.resendUnacknowledgedInput();
-    this.setStatus("");
+    this.setStatus("Catching up…");
     this.hasAttached = true;
-    this.conn.streamAttached(true, this.streamId);
-    this.startPings();
     this.wakeTerminal();
-    this.config.hooks?.onAttached?.(this.connectionIsResume, this);
   }
 
   /** The session this terminal shows, as a lowercase UUID. */
@@ -995,9 +1010,10 @@ export class TerminalClient {
   private restartOn(sessionId: Uint8Array | undefined): void {
     this.cancelStreamRetry();
     this.streamRetryAttempt = 0;
-    if (this.attached) this.conn.streamAttached(false);
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.conn.closeStream(this.streamId);
     this.attached = false;
+    this.attachmentConfirmed = false;
     this.attachRequested = false;
     this.openCallSent = false;
     this.hasAttached = false;
@@ -1031,8 +1047,9 @@ export class TerminalClient {
     this.sessionGone = true;
     this.sessionGoneStatus = this.pendingExit?.status ?? status;
     this.cancelStreamRetry();
-    if (this.attached) this.conn.streamAttached(false);
+    if (this.attachmentConfirmed) this.conn.streamAttached(false);
     this.attached = false;
+    this.attachmentConfirmed = false;
     this.attachRequested = false;
     // The server keeps absorbing this stream's in-flight frames until this Close (contracts/wire.md §4).
     this.conn.closeStream(this.streamId);
@@ -1103,7 +1120,9 @@ export class TerminalClient {
     }
     const firstSequence = this.nextInSeq;
     this.nextInSeq += BigInt(encoded.byteLength);
-    if (this.attached) {
+    // An Attach request is not a ready shim: per-key frames would fill its
+    // bounded handshake queue. Retain them locally until replay confirms it.
+    if (this.attachmentConfirmed) {
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
         this.sendFrame(this.streamId, {
@@ -1114,7 +1133,7 @@ export class TerminalClient {
         offset += length;
       }
     }
-    // Predict after the bytes are on the socket: prediction never delays the send. The overlay is still
+    // Predict after retaining input and sending when ready: prediction never delays delivery. The overlay is still
     // drawn in this same task, so no host echo can be processed (and painted) before the prediction is.
     // `encoded` may alias inputScratch, which the queue has already copied; prediction copies what it keeps.
     this.prediction?.input(data, firstSequence, encoded, this.predictionSafe());
@@ -1294,6 +1313,15 @@ export class TerminalClient {
     if (this.replayResponseFence !== undefined && this.lastOutSeq >= this.replayResponseFence) {
       this.suppressReplayResponses = false;
       this.replayResponseFence = undefined;
+      if (this.attached && !this.attachmentConfirmed) {
+        this.attachmentConfirmed = true;
+        this.resendUnacknowledgedInput();
+        // Completing replay clears its wait, not an approximation or input-pressure warning.
+        if (this.config.status.textContent === "Catching up…") this.setStatus("");
+        this.conn.streamAttached(true, this.streamId);
+        this.startPings();
+        this.config.hooks?.onAttached?.(this.connectionIsResume, this);
+      }
     }
   }
 
@@ -1861,7 +1889,7 @@ export class TerminalClient {
     this.config.status.hidden = message.length === 0;
   }
 
-  /** Samples RTT on attachment and typing; an idle terminal schedules no wakeups [81]. */
+  /** Attachment and typing refresh the latency sample; connection liveness continues at idle [D265]. */
   private startPings(): void {
     this.prediction?.setRoundTrip(undefined);
     this.config.onRoundTrip?.(undefined);

@@ -119,7 +119,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const exited = s?.state === "exited";
     // The new shell has a session now (or the person moved on): a refusal no longer applies.
     if (rec.model.sessionId) refusals.delete(rec);
-    rec.card.setStatus(exited || refusals.has(rec) ? "offline" : "live");
+    rec.card.setStatus(exited || refusals.has(rec) ? "offline" : rec.binding?.connected === false ? "connecting" : "live");
     const refusal = refusals.get(rec);
     let strip = body.querySelector<HTMLElement>(".cl-sx-strip");
     const view: StripView | undefined = exited && s ? stripOf(rec, s) : refusal && !s ? refusedStrip(rec, refusal) : undefined;

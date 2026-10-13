@@ -85,6 +85,16 @@ test("a wrapped-ring Snapshot paints echoes and keeps resize, scrollback, and th
   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.scrollbackRows ?? 0)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain(SNAPSHOT_MARKER);
 
+  // Like the theme regression, compare a settled scroll position. data-scrolled
+  // becomes true while the wheel animation is still approaching its target.
+  let previousViewportY = (await readTerminalState(page)).viewportY;
+  let stableViewportSamples = 0;
+  await expect.poll(async () => {
+    const viewportY = (await readTerminalState(page)).viewportY;
+    stableViewportSamples = Math.abs(viewportY - previousViewportY) < 0.001 ? stableViewportSamples + 1 : 0;
+    previousViewportY = viewportY;
+    return stableViewportSamples >= 2;
+  }, { timeout: 5_000, intervals: [50] }).toBe(true);
   const beforeThemeState = await readTerminalState(page);
   const beforeThemePixels = await canvasFingerprint(page);
   await page.keyboard.press("Control+Shift+K");

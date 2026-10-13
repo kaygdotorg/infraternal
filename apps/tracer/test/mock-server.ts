@@ -80,6 +80,11 @@ interface Connection {
   resumeAccepted: boolean;
   resumeExpected: boolean;
   welcomeTimer: ReturnType<typeof setTimeout> | undefined;
+  livenessTimer: ReturnType<typeof setTimeout> | undefined;
+  pendingPings: Map<bigint, number>;
+  nextPing: bigint;
+  lastPongAt: number;
+  rtt: number;
 }
 
 interface TraceEvent {
@@ -172,6 +177,7 @@ webSockets.on("connection", (socket, request) => {
     resumeAccepted: false,
     resumeExpected: false,
     welcomeTimer: undefined,
+    livenessTimer: undefined, pendingPings: new Map(), nextPing: 0n, lastPongAt: performance.now(), rtt: 1000,
   };
   connections.add(connection);
   socketOpenCount += 1;
@@ -191,6 +197,7 @@ webSockets.on("connection", (socket, request) => {
   socket.on("close", () => {
     socketCloseCount += 1;
     if (connection.welcomeTimer) clearTimeout(connection.welcomeTimer);
+    if (connection.livenessTimer) clearTimeout(connection.livenessTimer);
     connections.delete(connection);
   });
 });
@@ -781,17 +788,18 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       sendWelcome(connection);
       return;
     case "Call": {
-      // Like the server, an action it does not know is refused (the Mesh asks `mesh.list` and must be told no).
-      if (connection.welcomed && connection.session && frame.actionId.startsWith("mesh.")) {
-        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
-        return;
-      }
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "remote.host.list") {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"hosts":[],"next":null}') });
         return;
       }
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read") {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"os":"Linux"}') });
+        return;
+      }
+      // Refuse unsupported actions without retiring unrelated terminal streams.
+      // The product canvas also requests host facts during its first attachment.
+      if (connection.welcomed && frame.callId >= 1 && frame.actionId !== "ssh.session.open") {
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"unknown action"}') });
         return;
       }
       if (!connection.welcomed || frame.callId < 1 || frame.actionId !== "ssh.session.open") {
@@ -832,6 +840,14 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
     case "Ping":
       sendFrame(connection.socket, 0, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
       return;
+    case "Pong": {
+      const started = connection.pendingPings.get(frame.nonce);
+      if (started === undefined) return;
+      connection.lastPongAt = performance.now();
+      connection.rtt = Math.max(1, connection.lastPongAt - started);
+      for (const nonce of connection.pendingPings.keys()) if (nonce <= frame.nonce) connection.pendingPings.delete(nonce);
+      return;
+    }
     default:
       connection.socket.close(1002, "unexpected test-double control frame");
   }
@@ -1019,6 +1035,23 @@ function sendWelcome(connection: Connection): void {
     resumeToken: connection.session.resumeToken,
     resumeWindowSeconds: 120,
   });
+  connection.lastPongAt = performance.now();
+  connection.livenessTimer = setTimeout(() => probeConnection(connection), 25);
+}
+
+/** Mirror production server-driven liveness: an offline viewer must retire even if its Close cannot reach us. */
+function probeConnection(connection: Connection): void {
+  if (!isSocketOpen(connection.socket)) return;
+  const now = performance.now();
+  if (now - connection.lastPongAt >= connection.rtt + 50) {
+    connection.socket.close(4000, "connection unresponsive");
+    return;
+  }
+  const nonce = ++connection.nextPing;
+  if (connection.pendingPings.size >= 128) connection.pendingPings.delete(connection.pendingPings.keys().next().value!);
+  connection.pendingPings.set(nonce, now);
+  sendFrame(connection.socket, 0, { type: "Ping", nonce, sentUs: BigInt(Math.round(now * 1000)) });
+  connection.livenessTimer = setTimeout(() => probeConnection(connection), 25);
 }
 
 function sendFrame(socket: WebSocket, streamId: number, frame: WireFrame, traceStart?: bigint, traceLength = 0): void {

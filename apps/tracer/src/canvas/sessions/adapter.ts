@@ -16,6 +16,8 @@ import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import type { ViewId, WindowModel } from "../model/types";
 
 export interface SessionBinding {
+  /** Runtime attachment readiness; surviving inventory alone does not prove typing reaches the shim. */
+  readonly connected?: boolean;
   /** Puts the window's content (a live renderer, or a preview) into the card body. Called once. */
   mount(body: HTMLElement): void;
   /** Input focus: the next key goes to this session. */
@@ -53,7 +55,7 @@ export interface HostEntry {
 
 export interface SessionService {
   /** Binds a terminal window's model to its session (opening one when the model names none). */
-  bind(model: WindowModel, env: { view: ViewId; /** Open the existing window-header session picker. */ showSessions?: (event?: MouseEvent) => void; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void; /** The host refused to open a shell here; true when the window shows the reason itself (no toast then). */ refused?(message: string): boolean }): SessionBinding;
+  bind(model: WindowModel, env: { view: ViewId; /** Repaints readiness without persisting connection state in layouts. */ connectionChanged?(): void; /** Open the existing window-header session picker. */ showSessions?: (event?: MouseEvent) => void; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void; /** The host refused to open a shell here; true when the window shows the reason itself (no toast then). */ refused?(message: string): boolean }): SessionBinding;
   /** A model for a new shell on `host` (a split, a sidebar open, the palette). The shell starts when it is bound. */
   open(host: string, options?: { container?: string; from?: WindowModel; /** An existing session of the host to show (the sidebar, the palette, the manager). */ session?: string }): WindowModel;
   /** Hosts the person can open shells on. */

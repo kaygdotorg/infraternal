@@ -44,6 +44,36 @@ fn funded_attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
     }
 }
 
+/// Route probes cross the shim fence even when native input has its own bounded writer.
+#[cfg(feature = "remote")]
+#[test]
+fn native_input_retention_leaves_terminal_probes_to_the_route() {
+    let (output, _receiver) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(output))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut writes = writes::State::default();
+    writes.enable(&attachments);
+    let mut frame = Vec::new();
+    encode_muxed_frame_into(
+        1,
+        &Frame::Ping {
+            nonce: 7,
+            sent_us: 7,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    let command = Command::Input {
+        attachment_id: 1,
+        frame: Bytes::from(frame),
+    };
+    assert_eq!(
+        retain_owned_input(&command, &mut attachments, &mut routes, &mut writes),
+        None
+    );
+    assert_eq!(attachments.len(), 1);
+}
+
 #[test]
 fn replay_complete_notice_is_accepted_by_embedded_server() {
     let session_id = "00000000-0000-0000-0000-000000000001";
@@ -1033,3 +1063,39 @@ mod path_tests;
 
 #[path = "embedded_credit_tests.rs"]
 mod credit_tests;
+#[tokio::test]
+async fn half_open_infraternal_agent_route_loses_inventory_without_eof() {
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    let agent = EmbeddedAgent::from_test_socket(socket);
+    let mut inventory = agent.session_inventory();
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "liveness fixture",
+        },
+        &mut wire,
+    )
+    .unwrap();
+    peer.write_all(&wire).await.unwrap();
+    encode_muxed_frame_into(0, &Frame::Event { sub_id: 0, event_json: br#"{"type":"terminal.sessions.snapshot","session_ids":["01010101-0101-0101-0101-010101010101"]}"# }, &mut wire).unwrap();
+    peer.write_all(&wire).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), inventory.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        *inventory.borrow_and_update(),
+        SessionInventoryState::Available(_)
+    ));
+    let _attachment = agent.attach([1; 16], 0, 0, 2).await.unwrap();
+    // The peer is held open and its kernel buffers accept probes, but it never answers.
+    tokio::time::timeout(Duration::from_secs(3), inventory.changed())
+        .await
+        .expect("half-open upstream must expire without EOF")
+        .unwrap();
+    assert_eq!(*inventory.borrow(), SessionInventoryState::Unavailable);
+    drop(peer);
+}

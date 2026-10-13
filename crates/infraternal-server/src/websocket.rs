@@ -4,6 +4,7 @@ use crate::embedded::{
     AgentError, AttachmentHandle, EmbeddedAgent, SessionInventoryState, TerminalOutput,
     TerminalSize,
 };
+use crate::liveness::{Liveness, TICK};
 use crate::{
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
@@ -19,9 +20,7 @@ use axum::{
     routing::get,
 };
 use bytes::{Bytes, BytesMut};
-use futures_util::{
-    FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, stream::FuturesUnordered,
-};
+use futures_util::{FutureExt, SinkExt, Stream, StreamExt};
 use infraternal_plugin_api::{ActionDef, Operation, Permission, PluginDescriptor, SocketHost};
 use infraternal_protocol::{
     CLOSE_SESSION_GONE, DecodeError, Frame, MAX_FRAME_LEN, SESSION_GONE_REASON, decode_muxed_frame,
@@ -63,7 +62,7 @@ const MAX_RESUME_ROWS: i64 = 4096;
 const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
 const MAX_ENDED_SESSION_STATUSES: i64 = 128;
-// One slow host-facts poll per second can queue only a small bounded number per socket.
+// Bound unfinished host-facts and terminal-open calls on each socket.
 const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
@@ -71,7 +70,7 @@ const OUTPUT_CHANNEL_CAPACITY: usize = 4;
 const MAX_SOCKET_BUFFER: usize = MAX_FRAME_LEN + 10;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
 
-type PendingPluginCall = BoxFuture<'static, (u32, Result<Vec<u8>, AgentError>)>;
+type PendingPluginCall = (u32, Result<Vec<u8>, AgentError>);
 
 /// State shared by the authenticated browser socket route.
 #[derive(Clone)]
@@ -427,18 +426,61 @@ async fn run_socket(
     let (output_tx, mut output_rx) =
         mpsc::channel::<(u32, TerminalOutput)>(OUTPUT_CHANNEL_CAPACITY);
     // Poll plugin calls beside inbound frames; dropping this socket drops any unfinished waits.
-    let mut pending_plugin_calls = FuturesUnordered::<PendingPluginCall>::new();
+    // Calls keep polling while this loop authorizes another frame. An in-loop
+    // future can hold the only SQLite connection while the loop awaits that same
+    // pool; independent tasks avoid that cycle without raising the four-call bound.
+    // Shutdown below aborts and joins every call before releasing socket state.
+    let mut pending_plugin_calls = tokio::task::JoinSet::<PendingPluginCall>::new();
     let mut plugins = state.plugin_socket(&user_id, &session_token);
     let mut output_open = true;
     let mut receive_deadline = None;
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
+    let mut liveness = Liveness::new();
+    let mut ticks = tokio::time::interval(TICK);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut loop_result = Ok(());
     let mut expiry = socket_deadline(&state, &user_id, &session_token)
         .await
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
+        if attachments.is_empty() {
+            liveness = Liveness::new();
+        }
         tokio::select! {
+            _ = ticks.tick(), if !attachments.is_empty() => {
+                if liveness.expired() { break; }
+                // Rebind stalled session routes on the server; the healthy browser socket,
+                // sibling streams and durable input writer remain usable.
+                let expired_streams: Vec<u32> = attachments.iter()
+                    .filter_map(|(&id, a)| (!a.awaiting_ack && a.liveness.expired()).then_some(id)).collect();
+                for stream_id in expired_streams {
+                    let reconnect = attachments.get(&stream_id).filter(|a|
+                        matches!(*a.inventory.borrow(), SessionInventoryState::Available(_)))
+                        .map(|a| a.handle.clone());
+                    if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
+                        &state, &user_id, &session_token, &connection_id, stream_id,
+                        TerminalOutput::Reconnecting, &mut attachments, &mut ended, &mut sink, &mut encode,
+                    )).await.is_err() { loop_result = Err(()); break; }
+                    if let Some(handle) = reconnect
+                        && while_authorized(&state, &user_id, &session_token, true,
+                            async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() {
+                            loop_result = Err(()); break;
+                        }
+                }
+                if loop_result.is_err() { break; }
+                if while_authorized(&state, &user_id, &session_token, true, async {
+                    let (nonce, sent_us) = liveness.ping();
+                    send_frame(&mut sink, 0, &Frame::Ping { nonce, sent_us }, &mut encode).await?;
+                    for (&stream_id, attachment) in &mut attachments {
+                        if attachment.awaiting_ack { continue; }
+                        let (nonce, sent_us) = attachment.liveness.ping();
+                        encode_muxed_frame_into(stream_id, &Frame::Ping { nonce, sent_us }, &mut encode).map_err(|_| ())?;
+                        attachment.handle.send_frame(Bytes::copy_from_slice(&encode)).await.map_err(|_| ())?;
+                    }
+                    Ok(())
+                }).await.is_err() { break; }
+            }
             Some(reply) = plugins.recv() => {
                 let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
                 if while_authorized(&state, &user_id, &session_token, true,
@@ -481,6 +523,12 @@ async fn run_socket(
                         if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && decoded.stream_id == CONTROL_STREAM
+                        && let Frame::Pong { nonce, sent_us } = decoded.frame {
+                        liveness.pong(nonce, sent_us);
+                        continue;
+                    }
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
                         && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
@@ -551,15 +599,28 @@ async fn run_socket(
                     output_open = false;
                     continue;
                 };
+                // An internal route proof adds no terminal authority and sends no browser data.
+                // Authorizing every probe would make idle work scale with sessions × probe rate;
+                // revocation and every actual terminal frame retain their existing authority gates.
+                if let TerminalOutput::Pong { nonce, sent_us } = output {
+                    if let Some(attachment) = attachments.get_mut(&stream_id) {
+                        attachment.liveness.pong(nonce, sent_us);
+                    }
+                    continue;
+                }
                 if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
                     &mut attachments, &mut ended, &mut sink, &mut encode,
                 )).await.is_err() { break; }
             }
-            plugin_call = pending_plugin_calls.next(), if !pending_plugin_calls.is_empty() => {
-                let Some((call_id, result)) = plugin_call else { continue; };
+            plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
+                let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
                 let (ok, json) = match result {
                     Ok(json) => (true, json),
+                    Err(AgentError::OpenRefused(reason)) => {
+                        let Ok(json) = reason.json() else { break; };
+                        (false, json)
+                    }
                     Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
                 };
                 if while_authorized(&state, &user_id, &session_token, true,
@@ -569,6 +630,7 @@ async fn run_socket(
             }
         }
     }
+    pending_plugin_calls.shutdown().await;
     drop(plugins);
     drop(attachments);
     if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
@@ -877,11 +939,38 @@ where
             .await
             .is_ok()
         }
+        TerminalOutput::Pong { nonce, sent_us } => {
+            attachment.liveness.pong(nonce, sent_us);
+            return Ok(());
+        }
+        TerminalOutput::Reconnecting => {
+            attachment.awaiting_ack = true;
+            attachment.liveness = Liveness::new();
+            let notice = serde_json::to_vec(&json!({
+                "type": "terminal.reconnecting",
+                "session_id": uuid::Uuid::from_bytes(attachment.session_id).to_string(),
+            }))
+            .map_err(|_| ())?;
+            send_frame(
+                sink,
+                stream_id,
+                &Frame::Event {
+                    sub_id: 0,
+                    event_json: &notice,
+                },
+                encode,
+            )
+            .await
+            .is_ok()
+        }
         TerminalOutput::Ack { in_seq_acked } => {
             if in_seq_acked < attachment.last_in_acked
                 || (!attachment.awaiting_ack && in_seq_acked > attachment.input_sent_end)
             {
                 return Err(());
+            }
+            if attachment.awaiting_ack {
+                attachment.liveness = Liveness::new();
             }
             attachment.awaiting_ack = false;
             attachment.input_sent_end = attachment.input_sent_end.max(in_seq_acked);
@@ -1196,7 +1285,7 @@ async fn handle_client_frame<K>(
     user_id: &str,
     session_token: &str,
     owner: bool,
-    pending_plugin_calls: &mut FuturesUnordered<PendingPluginCall>,
+    pending_plugin_calls: &mut tokio::task::JoinSet<PendingPluginCall>,
     connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
@@ -1248,57 +1337,60 @@ where
                     .ok()
                     .map(|size| (size, None))
             };
-            let result = match request {
-                Some((size, host)) if size.valid() => {
-                    open_terminal(state, user_id, session_token, size, host).await
-                }
-                _ => Err(crate::embedded::AgentError::OpenRefused(
-                    infraternal_plugin_api::admission::OpenRefusal::Invalid,
-                )),
+            let valid = request.as_ref().is_some_and(|(size, _)| size.valid());
+            if let Some((size, host)) = request.filter(|(size, _)| size.valid())
+                && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS
+            {
+                let state = state.clone();
+                let user = user_id.to_owned();
+                let token = session_token.to_owned();
+                let browser_action = action_id == "ssh.session.open";
+                // Opening a PTY may wait for a remote login. Poll it alongside route
+                // proofs, input and revocation; never suspend the multiplexed receive loop.
+                // The existing bounded call queue owns cancellation on socket teardown.
+                pending_plugin_calls.spawn(async move {
+                    let result = while_authorized(&state, &user, &token, false, async {
+                        Ok(open_terminal(&state, &user, &token, size, host).await)
+                    })
+                    .await
+                    .unwrap_or(Err(AgentError::Unavailable));
+                    let result = result
+                        .map_err(|error| match error {
+                            AgentError::OpenRefused(_) => error,
+                            _ => AgentError::OpenRefused(
+                                infraternal_plugin_api::admission::OpenRefusal::Unavailable,
+                            ),
+                        })
+                        .and_then(|session| {
+                            let session_id = if browser_action {
+                                uuid::Uuid::from_bytes(session).to_string()
+                            } else {
+                                encode_session_id(&session)
+                            };
+                            serde_json::to_vec(&json!({"session_id": session_id}))
+                                .map_err(|_| AgentError::Unavailable)
+                        });
+                    (call_id, result)
+                });
+                return Ok(());
+            }
+            let refusal = if valid {
+                infraternal_plugin_api::admission::OpenRefusal::Unavailable
+            } else {
+                infraternal_plugin_api::admission::OpenRefusal::Invalid
             };
-            if !session_is_live(state, user_id, session_token).await {
-                return Err(());
-            }
-            match result {
-                Ok(session_id) => {
-                    let session_id = if action_id == "ssh.session.open" {
-                        uuid::Uuid::from_bytes(session_id).to_string()
-                    } else {
-                        encode_session_id(&session_id)
-                    };
-                    let json =
-                        serde_json::to_vec(&json!({"session_id": session_id})).map_err(|_| ())?;
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: true,
-                            json: &json,
-                        },
-                        encode,
-                    )
-                    .await
-                }
-                Err(error) => {
-                    let refusal = match error {
-                        crate::embedded::AgentError::OpenRefused(reason) => reason,
-                        _ => infraternal_plugin_api::admission::OpenRefusal::Unavailable,
-                    };
-                    let json = refusal.json().map_err(|_| ())?;
-                    send_frame(
-                        sink,
-                        CONTROL_STREAM,
-                        &Frame::Result {
-                            call_id,
-                            ok: false,
-                            json: &json,
-                        },
-                        encode,
-                    )
-                    .await
-                }
-            }
+            let json = refusal.json().map_err(|_| ())?;
+            send_frame(
+                sink,
+                CONTROL_STREAM,
+                &Frame::Result {
+                    call_id,
+                    ok: false,
+                    json: &json,
+                },
+                encode,
+            )
+            .await
         }
         Frame::Call {
             call_id,
@@ -1322,13 +1414,13 @@ where
                 let agent = state.agent.clone();
                 let action_id = action_id.to_owned();
                 let input_json = input_json.to_vec();
-                pending_plugin_calls.push(Box::pin(async move {
+                pending_plugin_calls.spawn(async move {
                     let result =
                         tokio::time::timeout(BACKEND_TIMEOUT, agent.call(action_id, input_json))
                             .await
                             .unwrap_or(Err(AgentError::Unavailable));
                     (call_id, result)
-                }));
+                });
                 return Ok(());
             }
             let result = Err(AgentError::Rejected);
@@ -1438,6 +1530,8 @@ where
                     credit: 0,
                     awaiting_ack: true,
                     needs_snapshot: false,
+                    liveness: Liveness::new(),
+                    inventory: agent.session_inventory(),
                 },
             );
             let sender = output_tx.clone();
@@ -1609,6 +1703,8 @@ struct ClientAttachment {
     credit: u64,
     awaiting_ack: bool,
     needs_snapshot: bool,
+    liveness: Liveness,
+    inventory: tokio::sync::watch::Receiver<SessionInventoryState>,
 }
 
 /// Browser plugin action adapter; dimensions arrive in the attachment's Resize.

@@ -713,9 +713,22 @@ async fn primed_fixture(
     .await
     .unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(25), receive.next(&warm))
-            .await
-            .is_err(),
+        tokio::time::timeout(Duration::from_millis(25), async {
+            loop {
+                // Promotion still sends no greeting. The active route now has
+                // ordinary liveness probes, which the fixture must answer.
+                let frame = receive.next(&warm).await.unwrap();
+                let Frame::Ping { nonce, sent_us } = frame.frame else {
+                    break;
+                };
+                transmit
+                    .send(&warm, 0, &Frame::Pong { nonce, sent_us })
+                    .await
+                    .unwrap();
+            }
+        })
+        .await
+        .is_err(),
         "promotion must not send a second greeting"
     );
     assert!(connection.close_reason().is_none());

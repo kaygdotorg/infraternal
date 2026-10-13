@@ -98,11 +98,18 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private retired: { status?: number } | undefined;
     private dropGhost: (() => void) | undefined;
     private ghostTimer = 0;
+    private connectedNow = false;
+    get connected(): boolean { return this.connectedNow; }
+    private setConnected(connected: boolean): void {
+      if (connected === this.connectedNow) return;
+      this.connectedNow = connected;
+      this.connectionChanged?.();
+    }
     /** Marks for the switch timeline (`sw:<n>:<step>`); a few microseconds each, read by the real specs. */
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
-    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string) => boolean) {}
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string) => boolean, private readonly connectionChanged?: () => void) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -125,6 +132,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       const client = this.client;
       if (!client || !model.sessionId || this.disposed || model.hostId !== this.model.hostId) return false;
       this.retired = undefined;
+      this.setConnected(false);
       this.keepScreen();
       this.painted = false;
       this.mark("retarget");
@@ -165,8 +173,9 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       // A silent attached session needs inventory too; a one-shot grace lets an initial prompt paint first.
       const hooks: TerminalHooks = {
         ...(first ? options.firstHooks : {}),
-        onAttached: (resumed, terminal) => { this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
+        onAttached: (resumed, terminal) => { this.setConnected(true); this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!firstSettled && this.client?.readScreenText().trim()) settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
+        onDisconnected: (forced) => { this.setConnected(false); if (first) options.firstHooks?.onDisconnected?.(forced); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
         onSessionGone: (status) => { if (first) settle(); options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status); },
@@ -237,6 +246,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     markGone(host: string, sessionId: string, status?: number): void {
       if (this.model.host !== host || this.model.sessionId !== sessionId) return;
       this.retired = status === undefined ? {} : { status };
+      this.setConnected(false);
       this.client?.markSessionGone(status);
     }
 
@@ -266,6 +276,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     openNew(): void {
       this.retired = undefined;
+      this.setConnected(false);
       this.painted = false;
       this.client?.openNewSession();
     }
@@ -288,7 +299,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
   return {
     bind(model, env): SessionBinding {
-      const b = new Binding(model, env.changed, env.exited, env.showSessions, env.refused);
+      const b = new Binding(model, env.changed, env.exited, env.showSessions, env.refused, env.connectionChanged);
       bindings.add(b);
       return b;
     },
