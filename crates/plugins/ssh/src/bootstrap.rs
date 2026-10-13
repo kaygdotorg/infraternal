@@ -306,13 +306,16 @@ impl Bootstrap {
             crate::probe::Architecture::X86_64,
             crate::probe::Architecture::Aarch64,
         ] {
-            let path = self.binaries.get(architecture);
-            if crate::payload::digest(path).await.is_ok() {
-                for codec in [
-                    crate::payload_encoding::Codec::Zstd,
-                    crate::payload_encoding::Codec::Gzip,
-                ] {
-                    let _ = crate::payload_encoding::encoded(path, codec).await;
+            let full = self.binaries.get(architecture);
+            let session_binary = self.binaries.session_payload(architecture).ok();
+            for path in session_binary.as_deref().into_iter().chain(Some(full)) {
+                if crate::payload::digest(path).await.is_ok() {
+                    for codec in [
+                        crate::payload_encoding::Codec::Zstd,
+                        crate::payload_encoding::Codec::Gzip,
+                    ] {
+                        let _ = crate::payload_encoding::encoded(path, codec).await;
+                    }
                 }
             }
         }
@@ -924,8 +927,11 @@ impl Bootstrap {
             );
             let setup = async {
                 if early {
-                    let (session_id, channel) =
-                        transaction.stage_session_on(&payload, checked).await?;
+                    let full = self.binaries.get(check.architecture);
+                    let session_binary = self.binaries.session_payload(check.architecture)?;
+                    let (session_id, channel) = transaction
+                        .stage_session_on(&session_binary, checked)
+                        .await?;
                     // Once a real shim exists, rollback must never remove its rendezvous
                     // or stop its shell while publication's durable write is in flight.
                     resources.published = true;
@@ -969,7 +975,16 @@ impl Bootstrap {
                     tokio::select! {
                         biased;
                         _ = self.backend.setup_cancelled(join.host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
-                        result = transaction.setup(&join) => result,
+                        result = async {
+                            if session_binary.as_path() == full {
+                                transaction.setup(&join).await
+                            } else {
+                                // The already-proven retry path retires only the upload
+                                // journal, preserving the shim and host identity. It
+                                // never truncates the executable's running inode.
+                                transaction.restart_setup(&payload, &join).await
+                            }
+                        } => result,
                     }
                 } else {
                     transaction.stage_and_setup(&payload, &join).await
