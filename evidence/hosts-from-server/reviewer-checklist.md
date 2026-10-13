@@ -4,7 +4,7 @@
 - `remote_hosts`, `remote_certificates` and `remote_host_bootstrap` remain the only host records. No new library, transport, identity map or permission model was selected.
 - The socket selects the account; request input cannot. Real SQLite tests include a second account's admitted host, tombstones, unredeemed invitations, and 1,001 rows with long destinations.
 - UUIDs select host routing. Duplicate names cannot rebound a shell locally. Online state comes from the admitted actor's current census; offline records remain listed.
-- SQL pages have item and byte limits; the client validates UUIDs, strings, booleans, cursor progress, uniqueness and the total host cap before atomic replacement.
+- SQL pages have item and byte limits; the client validates UUIDs, strings, booleans, cursor progress and uniqueness before atomic replacement. Round 2 removes the arbitrary total-host cutoff; imported review tests cover 10,000 and 10,001 offline admissions.
 - One coalesced watch source publishes durable admission/removal. Node observations belong to the generic plugin lifecycle; disabling it leaves no inventory worker or timer running. Subscription slots and epochs reject stale generations.
 - Author review reproduced stale client admission after refusal and result delivery after authorization ended under outbound backpressure. Both have failing-before tests and fixes. Read, serialization and queue admission remain inside live socket authority.
 - Socket-down guards prevent orphaned calls from being replayed on welcome; an offline-transition failing-before test covers that boundary.

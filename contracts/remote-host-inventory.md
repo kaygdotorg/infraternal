@@ -27,6 +27,9 @@ Pages are ordered by UUID, contain at most 128 hosts, and reserve a 60 KiB JSON
 budget inside the 64 KiB mux frame. Continue from the last delivered UUID when a
 page is truncated by either limit. A cursor selects position only; it cannot
 select an account or enlarge access.
+There is no total host-count cutoff: offline admissions are independent of live
+transport capacity. Clients continue through every bounded page before publishing
+the complete inventory.
 
 `Subscribe { topic: "remote.hosts" }` receives `{ type: "changed" }`, including
 one initial invalidation that closes the read/subscribe race. Notification is
@@ -47,3 +50,15 @@ A refused read or withdrawn feature clears remote admission; a transient network
 failure retains the last complete snapshot until reconnect. Disposal fences every
 pending result and unsubscribes. Offline hosts remain in the existing host list
 with their state, and palette actions route by UUID.
+
+The toolbar and the palette receive the same `SessionService` adapter through
+`cx.adapters.sessions`. `hosts()` exposes `{ id, name, user?, os?, online? }`,
+including offline hosts; `onChange(listener)` signals complete inventory,
+connectivity and removal updates. A new-window consumer opens with
+`cx.win.open(host.id)`, which routes through `sessions.open(id)` using the admitted
+UUID. Names can collide and are never the identity to select. The host-choice UI
+for New window remains designer work; this data path introduces no new surface.
+
+Palette rows stay synchronous. Canvas action dispatch is loaded on first
+selection from `palette-actions.on-demand.ts`, fenced by canvas disposal, so
+dispatch costs no sign-in transfer and remains within the unchanged D188 budgets.
