@@ -361,6 +361,10 @@ impl Session {
 }
 
 impl SshSession for Session {
+    fn session_bridge(&self) -> bool {
+        true
+    }
+
     fn stream<'a>(&'a self, script: &'a str) -> Operation<'a, crate::duplex::Duplex> {
         Box::pin(async move { crate::duplex::Duplex::spawn(&mut self.channel_command(script)?) })
     }

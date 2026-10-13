@@ -124,6 +124,10 @@ pub trait SshTransport: Send + Sync {
 
 /// A session owns ephemeral credentials and cleans them when its final owner drops it.
 pub trait SshSession: Send + Sync {
+    /// True only after this adapter can bridge an authenticated session.
+    fn session_bridge(&self) -> bool {
+        false
+    }
     /// Open a duplex command on this connection, never authenticate a new one.
     fn stream<'a>(&'a self, _: &'a str) -> Operation<'a, crate::duplex::Duplex> {
         Box::pin(async {

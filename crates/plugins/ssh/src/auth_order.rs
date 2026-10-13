@@ -211,6 +211,28 @@ struct Pending {
     trust_lookup: Mutex<Option<String>>,
 }
 impl SshSession for Pending {
+    fn session_bridge(&self) -> bool {
+        self.selected.try_lock().is_ok_and(|selected| {
+            selected
+                .as_ref()
+                .is_some_and(|session| session.session_bridge())
+        })
+    }
+    fn stream<'a>(&'a self, script: &'a str) -> Operation<'a, crate::duplex::Duplex> {
+        Box::pin(async move {
+            let session = self
+                .selected
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| {
+                    Failure::unsupported("Sign in before opening the SSH terminal bridge.")
+                })?;
+            session.stream(script).await
+        })
+    }
+
     fn setup_steps(&self) -> bool {
         self.selected.try_lock().is_ok_and(|selected| {
             selected
