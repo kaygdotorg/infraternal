@@ -71,9 +71,8 @@ async def campaign(args):
         extra = ['--nf-tables'] if args.nf_tables else []
         peer2 = fixture.spawn(args.fixture,*extra,namespace_pid=third.pid)
         # Identity is public; the pair's initial templates retain the opposite key/endpoint.
-        identities = [
-            {'public_key':fixture.chunks[1]['upserted']['1']['peer']['key'], 'port':int(fixture.chunks[1]['upserted']['1']['peer']['endpoint'].split(':')[1])},
-            {'public_key':fixture.chunks[0]['upserted']['2']['peer']['key'], 'port':int(fixture.chunks[0]['upserted']['2']['peer']['endpoint'].split(':')[1])},
+        # Preserve advertised capabilities rather than reconstructing only key/port.
+        identities = [*fixture.identities,
             json.loads(await asyncio.wait_for(asyncio.to_thread(peer2.stdout.readline), 10))]
         nodes = [fixture.left,fixture.right,peer2]
         error_log = (args.evidence/'coordinator.log').open('w')
@@ -84,33 +83,42 @@ async def campaign(args):
         initialized = set()
         installed = {}
         applied = {}
+        completed = {}
+        refusal_clocks = {}
         measuring = False
         initial_versions = {}
         locks = [asyncio.Lock() for _ in nodes]
         async def request(index, value):
+            def observe():
+                reply = proof.request(nodes[index], value)
+                if isinstance(reply, dict):
+                    reply['_observed_ns'] = time.monotonic_ns()
+                return reply
             async with locks[index]:
-                return await asyncio.wait_for(asyncio.to_thread(proof.request, nodes[index], value), 10)
+                return await asyncio.wait_for(asyncio.to_thread(observe), 10)
         revoked = asyncio.Event()
         frames_log = (args.evidence/'control-frames.jsonl').open('w')
         async def apply(frame):
+            dispatched_ns = time.monotonic_ns()
             index=frame['node'];chunk=frame['chunk']
             await asyncio.sleep(args.rtt_ms/2000)
             reply=await request(index, chunk)
-            frames_log.write(json.dumps({'node':index,'version':chunk['version'],'last':chunk['last'],'apply_us':reply['apply_us'],'at_ns':time.monotonic_ns()})+'\n');frames_log.flush()
+            frames_log.write(json.dumps({'node':index,'version':chunk['version'],'index':chunk['index'],'last':chunk['last'],'dispatched_ns':dispatched_ns,'apply_us':reply['apply_us'],'at_ns':reply['_observed_ns'],'refusing_ns':reply.get('refusing_ns')})+'\n');frames_log.flush()
             if chunk['last']:
                 if index not in initialized:
                     initialized.add(index);installed[index]=chunk['addresses'];initial_versions[index]=chunk['version']
-                elif measuring and index in (1,2) and chunk['version']>initial_versions[index]:
+                elif measuring and (index in (1,2) or args.change in ('RuleRemoval','DefaultTightening')) and chunk['version']>initial_versions[index]:
                     # Ignore startup replays and unrelated completed frames. The
                     # final acknowledgment must correspond to actual key removal.
                     if args.change in ('RuleRemoval','DefaultTightening') or len(await request(index, 'stats')) == 2 + args.extra_members:
-                        applied.setdefault(index, time.monotonic_ns())
+                        assert reply['applied'], 'final access update was refused'
+                        completed.setdefault(index, reply['_observed_ns'])
+                        refusal_clocks[index] = 'kernel-install' if reply.get('refusing_ns') else 'completion'
+                        applied.setdefault(index, reply.get('refusing_ns') or reply['_observed_ns'])
             if index == 0 and chunk['last']:
-                if args.nf_tables:
-                    for tool in ('iptables-nft','ip6tables-nft'):
-                        for chain in ('IFM_IN','IFM_OUT'): proof.run(tool,'-F',chain)
-                else:
-                    for chain in ('incoming','outgoing'): proof.run('nft','flush','chain','inet','infraternal_mesh',chain)
+                # Independent receiving enforcement needs the sender's filter
+                # removed. Its subprocesses cannot stall other completion records.
+                await asyncio.to_thread(fixture.remove_sender_filter, True)
             await asyncio.sleep(args.rtt_ms/2000)
             await send({'type':'Ack','call':frame['call'],'reply':{'applied':reply['applied'],'version':chunk['version']}})
         async def dispatch():
@@ -179,11 +187,13 @@ async def campaign(args):
         sender=asyncio.create_task(packets());tasks.add(sender)
         await asyncio.sleep(.3+args.rtt_ms/1000)
         applied.clear()
+        completed.clear()
         measuring = True
         started=time.monotonic_ns()
         await send({'type':'Change','operation':args.change} if args.change else {'type':'Revoke'})
         deadline=time.monotonic()+30
-        while len(applied)<2 or not revoked.is_set():
+        expected_nodes = 3 if args.change in ('RuleRemoval','DefaultTightening') else 2
+        while len(applied)<expected_nodes or not revoked.is_set():
             for task in apply_tasks:
                 if task.done(): task.result()
             assert time.monotonic()<deadline,'revocation publication timeout'
@@ -206,7 +216,7 @@ async def campaign(args):
         after=[len(await request(index, 'stats')) for index in (1,2)]
         assert after==[(3 if args.change in ('RuleRemoval','DefaultTightening') else 2)+args.extra_members]*2,after
         memory = [rss(node.pid) * 1024 for node in nodes]
-        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','change':args.change or 'PeerRetirement','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
+        summary={'node_fixture_rss_bytes':memory,'projected_1000_nodes_rss_bytes':max(memory)*1000,'coordinator_three_live_workers_rss_bytes':rss(coordinator.pid)*1024,'result':'PASS','public_journal':args.stateful,'change':args.change or 'PeerRetirement','backend':'nf_tables' if args.nf_tables else 'nft','machine':socket.gethostname(),'rtt_ms':args.rtt_ms,'load':Path('/proc/loadavg').read_text().strip(),'live_peers':2,'measured_underlay_rtt_ms':measured_rtt,'installed_peers_before':counts,'installed_peers_after':after,'change_started_ns':started,'last_apply_ns':last_apply,'durable_completion_us':(max(completed.values())-started)/1000,'refusal_clock': refusal_clocks,'revocation_to_last_peer_refusing_us':(last_apply-started)/1000,'peers':observed}
         await asyncio.wait_for(asyncio.gather(*apply_tasks), 10)
         coordinator.stdin.close()
         await asyncio.wait_for(coordinator.wait(), 5)
@@ -238,11 +248,22 @@ def main():
     parser.add_argument('--fixture',required=True);parser.add_argument('--coordinator',required=True)
     parser.add_argument('--evidence',type=Path,required=True);parser.add_argument('--nf-tables',action='store_true')
     parser.add_argument('--rtt-ms',type=int,choices=(0,150),default=0);parser.add_argument('--extra-members',type=int,default=997)
+    parser.add_argument('--stateful',action='store_true',help='Use the public-journal fixture and include persistence in apply')
+    parser.add_argument('--budget-ms',type=float,help='Fail after retaining evidence when change-to-last-refusal exceeds this budget')
     parser.add_argument('--change',choices=('PeerRetirement','RuleRemoval','DefaultTightening'))
     args=parser.parse_args();args.evidence.mkdir(parents=True,exist_ok=True)
+    if args.stateful:
+        state_root=args.evidence/'node-state'
+        state_root.mkdir(mode=0o700,exist_ok=True)
+        os.environ['INFRATERNAL_TEST_STATE_ROOT']=str(state_root.resolve())
     assert Path('/proc/self/uid_map').read_text().split()[2:]==['1'],'run inside unshare -Urn'
     os.environ['PATH']='/usr/sbin:'+os.environ.get('PATH','')
     summary=asyncio.run(campaign(args))
     (args.evidence/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+    if args.budget_ms is not None:
+        elapsed_ms=summary['revocation_to_last_peer_refusing_us']/1000
+        print(f'BUDGET change_to_last_refusal_ms={elapsed_ms:.3f} maximum_ms={args.budget_ms:.3f}',flush=True)
+        if elapsed_ms>args.budget_ms:
+            raise SystemExit(1)
     print('PASS=1 FAIL=0',flush=True)
 if __name__=='__main__': main()

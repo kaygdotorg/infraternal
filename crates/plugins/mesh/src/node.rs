@@ -34,6 +34,8 @@ pub struct Node {
     // A committed revision remains restrictive until exact retirement succeeds.
     connection_cleanup_pending: bool,
     client: Option<Client>,
+    #[cfg(feature = "cutoff-measure")]
+    refusing_at_ns: Option<u64>,
 }
 impl Default for Node {
     fn default() -> Self {
@@ -48,10 +50,19 @@ impl Default for Node {
             owned: false,
             connection_cleanup_pending: false,
             client: None,
+            #[cfg(feature = "cutoff-measure")]
+            refusing_at_ns: None,
         }
     }
 }
 impl Node {
+    /// Diagnostic firewall completion, valid only when the enclosing chunk returns applied.
+    #[cfg(feature = "cutoff-measure")]
+    #[must_use]
+    pub fn refusing_at_ns(&self) -> Option<u64> {
+        self.refusing_at_ns
+    }
+
     /// Use an explicitly selected supported packet-filter frontend in an isolated namespace.
     #[must_use]
     pub fn with_firewall(firewall: Firewall) -> Self {
@@ -118,7 +129,11 @@ impl Node {
             if port == 51820 {
                 port = Device::allocate_port()?;
             }
-            node.identity = Some(Identity { public_key, port });
+            node.identity = Some(Identity {
+                public_key,
+                port,
+                compact_access: true,
+            });
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
@@ -219,7 +234,14 @@ impl Node {
             // A fresh interface cannot inherit ownership from an older lifetime.
             self.routes.clear();
             self.save(None, true)?;
-            Ok((Identity { public_key, port }, client))
+            Ok((
+                Identity {
+                    public_key,
+                    port,
+                    compact_access: true,
+                },
+                client,
+            ))
         })();
         match prepared {
             Ok((identity, client)) => {
@@ -278,6 +300,10 @@ impl Node {
     /// # Errors
     /// Refuses stale/out-of-order/wrong-node chunks before changing installed state.
     pub fn chunk(&mut self, chunk: Chunk) -> io::Result<bool> {
+        #[cfg(feature = "cutoff-measure")]
+        {
+            self.refusing_at_ns = None;
+        }
         self.finish_connection_cleanup()?;
         let result = self.stage(chunk);
         if result.is_err() {
@@ -307,7 +333,25 @@ impl Node {
         }
         Ok(())
     }
+    // Keep version/binding checks and complete staging visible before installation.
+    #[allow(clippy::too_many_lines)]
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
+        if !chunk.access_updates.is_empty()
+            && (chunk.from_version.is_none()
+                || chunk.index != 0
+                || !chunk.last
+                || !chunk.upserted.is_empty()
+                || !chunk.merged.is_empty()
+                || !chunk.removed.is_empty()
+                || self
+                    .config
+                    .as_ref()
+                    .is_none_or(|old| old.server != chunk.server))
+        {
+            // A range action replaces only rules in the acknowledged complete
+            // base. It cannot hide identity changes or continue partial staging.
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         self.validate_binding(&chunk)?;
         if chunk.index == 0 {
             let current = self.config.as_ref().map(|config| config.version);
@@ -359,6 +403,7 @@ impl Node {
         pending.config.version = chunk.version;
         pending.config.default_policy = chunk.default_policy;
         pending.config.server = chunk.server;
+        crate::access_updates::apply(&mut pending.config, &chunk.access_updates)?;
         for node in chunk.removed {
             pending.config.peers.remove(&node);
         }
@@ -451,6 +496,8 @@ impl Node {
     // Keep the apply/fence/rollback transaction and its failure ordering visible together.
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, config: Config) -> io::Result<()> {
+        #[cfg(feature = "cutoff-measure")]
+        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
         if self
             .config
             .as_ref()
@@ -477,6 +524,8 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        #[cfg(feature = "cutoff-measure")]
+        drop(validation);
         if let Some(old) = &self.config {
             let endpoints_only = old.node == config.node
                 && old.addresses == config.addresses
@@ -527,6 +576,8 @@ impl Node {
             }
         }
 
+        #[cfg(feature = "cutoff-measure")]
+        let inventory = crate::cutoff_measure::Stage::new(config.node, config.version, "inventory");
         let proposed: Vec<_> = std::iter::once(config.addresses)
             .chain(config.peers.values().map(|peer| peer.peer.addresses))
             .collect();
@@ -551,6 +602,8 @@ impl Node {
             .filter(|key| !desired.contains(key))
             .copied()
             .collect();
+        #[cfg(feature = "cutoff-measure")]
+        drop(inventory);
         if changed.is_empty()
             && retired_keys.is_empty()
             && self.config.as_ref().is_some_and(|old| {
@@ -562,12 +615,28 @@ impl Node {
             // Route validation and the actual key inventory above still run.
             // Only access changes remain: one final firewall transaction is
             // sufficient, without an intermediate table or peer/route writes.
+            #[cfg(feature = "cutoff-measure")]
+            let firewall =
+                crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             self.firewall.install_pending(&config)?;
+            #[cfg(feature = "cutoff-measure")]
+            {
+                self.refusing_at_ns = crate::cutoff_measure::monotonic_ns();
+            }
+            #[cfg(feature = "cutoff-measure")]
+            drop(firewall);
+            #[cfg(feature = "cutoff-measure")]
+            let persistence =
+                crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
             if let Err(error) = self.save(Some(&config), true) {
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
             }
+            #[cfg(feature = "cutoff-measure")]
+            drop(persistence);
+            #[cfg(feature = "cutoff-measure")]
+            let _retire = crate::cutoff_measure::Stage::new(config.node, config.version, "retire");
             self.config = Some(config);
             self.connection_cleanup_pending = true;
             return self.finish_connection_cleanup();
@@ -623,6 +692,10 @@ impl Node {
                 Device::retain_recorded_routes(&self.routes, &proposed)?;
             }
             self.firewall.install_pending(&config)?;
+            #[cfg(feature = "cutoff-measure")]
+            {
+                self.refusing_at_ns = crate::cutoff_measure::monotonic_ns();
+            }
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
@@ -698,6 +771,7 @@ mod tests {
         use crate::policy::model::{Addresses, NodeId, PublicKey};
         let mut node = Node {
             identity: Some(Identity {
+                compact_access: true,
                 public_key: PublicKey([1; 32]),
                 port: 44000,
             }),

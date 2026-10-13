@@ -101,6 +101,7 @@ class Campaign:
         self.processes.append(self.left)
         self.right = self.spawn(fixture, *extra)
         identities = [json.loads(p.stdout.readline()) for p in (self.left, self.right)]
+        self.identities = identities
         self.addresses = [{"ipv4": "10.254.0.1", "ipv6": "fd01:203:405::1"},
                           {"ipv4": "10.254.0.2", "ipv6": "fd01:203:405::2"}]
         self.chunks = []
@@ -135,13 +136,17 @@ class Campaign:
         self.processes.append(p)
         return p
 
-    def remove_sender_filter(self):
+    def remove_sender_filter(self, include_incoming=False):
         # Only this job's disposable namespace is ever modified.
         if self.fallback:
+            chains = ["IFM_OUT", "IFM_IN"] if include_incoming else ["IFM_OUT"]
             for tool in ["iptables-nft", "ip6tables-nft"]:
-                proof.run(tool, "-F", "IFM_OUT")
+                for chain in chains:
+                    proof.run(tool, "-F", chain)
         else:
-            proof.run("nft", "flush", "chain", "inet", "infraternal_mesh", "outgoing")
+            chains = ["outgoing", "incoming"] if include_incoming else ["outgoing"]
+            for chain in chains:
+                proof.run("nft", "flush", "chain", "inet", "infraternal_mesh", chain)
 
     def apply(self, policy, only_live=False):
         self.version += 1

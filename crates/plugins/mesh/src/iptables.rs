@@ -33,11 +33,18 @@ impl Ownership {
         self.filter && self.guard && self.delivery
     }
 }
+/// Narrow installation plans are selected only after ownership and typed old/new comparison.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Update {
+    Full,
+    RetainGuard,
+    VerifiedRemoval,
+}
 /// Restore both address families. The caller retains a restrictive fence until both succeed.
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
-    apply_with_aliases(config, installed, &[], false, config)
+    apply_with_aliases(config, installed, &[], false, config, Update::Full)
 }
 pub(crate) fn apply_with_aliases(
     config: &Config,
@@ -45,6 +52,7 @@ pub(crate) fn apply_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
+    update: Update,
 ) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
@@ -57,33 +65,38 @@ pub(crate) fn apply_with_aliases(
     } else {
         presence()?
     };
-    // Preflight both families before mutating either. Restore batches are atomic
-    // per table; an interrupted table/family is fenced or rolled back by the caller.
-    for (index, tool) in TOOLS.iter().enumerate() {
-        test(
-            tool,
-            &render_with_aliases(
-                config,
-                index == 1,
-                installed[index],
-                aliases,
-                fence,
-                connections,
-            ),
-        )?;
+    let scripts = std::array::from_fn(|index| {
+        let script = render_with_aliases(
+            config,
+            index == 1,
+            installed[index],
+            aliases,
+            fence,
+            connections,
+        );
+        if update == Update::Full {
+            script
+        } else {
+            // Only a complete, unchanged owned guard permits this selection.
+            // Filter rules and translated delivery checks still replace together.
+            script
+                .split_once("COMMIT\n")
+                .map_or_else(|| script.clone(), |(_, filter)| filter.to_owned())
+        }
+    });
+    // Both families must pass preflight before either mutates. Keep serial
+    // commits: simultaneous frontend caches contend on one namespace generation.
+    // A proven typed removal introduces no new match form or untrusted text.
+    // Final transactions still validate; the owner rolls back partial failure.
+    if update != Update::VerifiedRemoval {
+        execute_families(&scripts, true)?;
     }
-    for (index, tool) in TOOLS.iter().enumerate() {
-        run(
-            tool,
-            &render_with_aliases(
-                config,
-                index == 1,
-                installed[index],
-                aliases,
-                fence,
-                connections,
-            ),
-        )?;
+    execute_families(&scripts, false)?;
+    Ok(())
+}
+fn execute_families(scripts: &[String; 2], preflight: bool) -> io::Result<()> {
+    for (tool, script) in TOOLS.iter().zip(scripts) {
+        execute(tool, script, preflight)?;
     }
     Ok(())
 }
@@ -204,9 +217,6 @@ fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
         Some(1) => Ok(false),
         _ => Err(io::ErrorKind::PermissionDenied.into()),
     }
-}
-fn test(tool: &str, script: &str) -> io::Result<()> {
-    execute(tool, script, true)
 }
 fn run(tool: &str, script: &str) -> io::Result<()> {
     execute(tool, script, false)

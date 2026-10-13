@@ -12,6 +12,23 @@ use std::{
 const NFT: &str = "/usr/sbin/nft";
 const TABLE: &str = "infraternal_mesh";
 
+// These plans only remove previously validated permissions. Changed identity,
+// routes, bindings or concrete rules require the ordinary two-family preflight.
+fn removes_only_permissions(old: &Config, next: &Config) -> bool {
+    old.node == next.node
+        && old.local_key == next.local_key
+        && old.server == next.server
+        && old.addresses == next.addresses
+        && old.peers.len() == next.peers.len()
+        && old.peers.iter().all(|(id, previous)| {
+            next.peers.get(id).is_some_and(|peer| {
+                peer.peer == previous.peer
+                    && (peer.inbound == TrafficPolicy::None || peer.inbound == previous.inbound)
+                    && (peer.outbound == TrafficPolicy::None || peer.outbound == previous.outbound)
+            })
+        })
+}
+
 /// The two owner-selected Linux frontends; kernel policy is retained independently of processes.
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Backend {
@@ -154,12 +171,33 @@ impl Firewall {
             self.adopt()?;
         }
         if self.is_fallback() {
+            let retain_guard = self.fallback_complete
+                && self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|old| old.addresses == config.addresses)
+                && self.previous_aliases == aliases;
+            let removal_only = retain_guard
+                && !fence
+                && !self.previous_fence
+                && connections == config
+                && self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|old| removes_only_permissions(old, config));
             if let Err(error) = crate::iptables::apply_with_aliases(
                 config,
                 self.fallback_complete,
                 aliases,
                 fence,
                 connections,
+                if removal_only {
+                    crate::iptables::Update::VerifiedRemoval
+                } else if retain_guard {
+                    crate::iptables::Update::RetainGuard
+                } else {
+                    crate::iptables::Update::Full
+                },
             ) {
                 if let Some(old) = &self.previous {
                     crate::iptables::apply_with_aliases(
@@ -168,6 +206,7 @@ impl Firewall {
                         &self.previous_aliases,
                         self.previous_fence,
                         old,
+                        crate::iptables::Update::Full,
                     )?;
                 } else {
                     crate::iptables::remove()?;
@@ -431,6 +470,36 @@ mod tests {
         dataplane::{DefaultPolicy, Peer, PeerPolicy},
         policy::model::{Addresses, NodeId, PublicKey},
     };
+    #[test]
+    fn removal_plan_cannot_add_permissions_or_change_identity() {
+        let old = config();
+        let mut next = old.clone();
+        for peer in next.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        assert!(removes_only_permissions(&old, &next));
+        assert!(!removes_only_permissions(&next, &old));
+        let mut changed = next.clone();
+        changed.server = Some(NodeId(u64::MAX));
+        assert!(!removes_only_permissions(&old, &changed));
+        changed = next.clone();
+        changed.local_key = Some(PublicKey([9; 32]));
+        assert!(!removes_only_permissions(&old, &changed));
+        changed = next.clone();
+        changed.addresses.ipv4 = "192.0.2.9".parse().expect("IPv4");
+        assert!(!removes_only_permissions(&old, &changed));
+        changed = next.clone();
+        changed.peers.values_mut().next().expect("peer").peer.key = PublicKey([9; 32]);
+        assert!(!removes_only_permissions(&old, &changed));
+        changed = next.clone();
+        changed.peers.remove(&NodeId(2));
+        assert!(!removes_only_permissions(&old, &changed));
+        changed = next;
+        changed.peers.values_mut().next().expect("peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::new());
+        assert!(!removes_only_permissions(&old, &changed));
+    }
+
     fn config() -> Config {
         let address = |id: u32| Addresses {
             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),

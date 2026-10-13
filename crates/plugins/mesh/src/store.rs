@@ -38,6 +38,8 @@ impl Snapshot {
     pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
         use crate::{api::MeshApiError, policy::model::MeshError};
         let (coordinator, endpoints, default, revision) = &self.0;
+        #[cfg(feature = "cutoff-measure")]
+        let _compile = crate::cutoff_measure::Stage::new(node, *revision, "compile");
         let mut config =
             configuration::compile(coordinator, node, *default, endpoints).map_err(|error| {
                 match error {

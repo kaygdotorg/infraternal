@@ -21,6 +21,22 @@ cleanup failures retain the new restrictive rules and retry forward before
 acknowledgment, including on replay or restart. They never restore old access. Reconnecting requests a snapshot.
 Control chunks fit the existing 8 KiB action-body resource bound.
 
+A coordinator explicitly probes `mesh.identity` with `{"compact_access":true}`.
+A capable enabled node may then advertise `compact_access: true`; ordinary
+`{}` requests keep the strict legacy reply shape. A rejected probe is retried
+with `{}`, retaining ordinary peer chunks for older nodes. Only after this
+negotiation, an access-only delta may carry `access_updates`: ordered, disjoint
+inclusive node-ID ranges over existing ordered peers. Both endpoints must
+exist in the acknowledged base; holes introduce no peer or key. A concrete
+directional rule replaces that direction; null leaves it unchanged. Grouping
+never crosses an unchanged protected peer. Identity, addresses, keys and
+endpoints remain unchanged. Ranges cannot overlap peer upserts,
+removals or port continuations. Snapshot chunks cannot contain range updates.
+The same exact base revision, local-key binding and final atomic installation
+and retirement apply. Legacy identities receive the original peer deltas.
+This keeps a uniform change at 1,000 peers within one bounded action/round trip
+without increasing the action budget [242,252,256].
+
 Full coordinator snapshots may include `local_key`, the public key bound to
 their local inventory identity. It must match the enabled kernel key and stay
 identical across every staged chunk. An accepted local node identity may change

@@ -26,6 +26,22 @@ async fn update_listener(
         *listener = Some((address, lease));
     }
 }
+// Probe before advertising an extension. Strict older nodes reject the probe,
+// then answer the ordinary request without enabling a new representation.
+async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
+    let reply = match channel
+        .call("mesh.identity", br#"{"compact_access":true}"#.to_vec())
+        .await
+    {
+        Ok(reply) => reply,
+        Err(_) => channel.call("mesh.identity", b"{}".to_vec()).await.ok()?,
+    };
+    serde_json::from_slice::<Option<Identity>>(&reply)
+        .ok()
+        .flatten()
+        .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0)
+}
+
 /// One event-driven worker belongs to the generic plugin lifecycle; disabling
 /// aborts and joins it. A disconnect never deletes durable mesh membership.
 // Keep acknowledged-version recovery and source invalidation in one event loop.
@@ -41,21 +57,14 @@ pub async fn run(
     let mut binding = None;
     let mut installed: Option<Snapshot> = None;
     let mut refresh_identity = true;
+    let mut compact_access = false;
     let mut listener: ServerListener = None;
     loop {
         if refresh_identity || binding.is_none() {
             refresh_identity = false;
-            let identity = channel
-                .call("mesh.identity", b"{}".to_vec())
-                .await
-                .ok()
-                .and_then(|reply| {
-                    serde_json::from_slice::<Option<Identity>>(&reply)
-                        .ok()
-                        .flatten()
-                })
-                .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0);
+            let identity = read_identity(channel.as_ref()).await;
             if let Some(identity) = identity {
+                compact_access = identity.compact_access;
                 let ip = channel.observed_ip();
                 let endpoint =
                     (!ip.is_unspecified()).then(|| std::net::SocketAddr::new(ip, identity.port));
@@ -128,7 +137,14 @@ pub async fn run(
             });
             if changed {
                 let was_delta = old.is_some();
-                let Ok(chunks) = configuration::chunks(old.as_ref(), &config) else {
+                // Never send additive fields to an older strict receiver. A
+                // refused compact delta still retries the original full snapshot.
+                let encoded = if compact_access {
+                    crate::access_updates::chunks(old.as_ref(), &config)
+                } else {
+                    configuration::chunks(old.as_ref(), &config)
+                };
+                let Ok(chunks) = encoded else {
                     return;
                 };
                 let mut failed = false;
@@ -139,11 +155,15 @@ pub async fn run(
                     let Ok(input) = serde_json::to_vec(&chunk) else {
                         return;
                     };
+                    #[cfg(feature = "cutoff-measure")]
+                    let ack = crate::cutoff_measure::Stage::new(config.node, config.version, "ack");
                     let reply = channel
                         .call("mesh.configure", input)
                         .await
                         .ok()
                         .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok());
+                    #[cfg(feature = "cutoff-measure")]
+                    drop(ack);
                     if !reply.is_some_and(|reply| {
                         !chunk.last
                             || reply["applied"] == true && reply["version"] == config.version
@@ -284,9 +304,14 @@ mod tests {
             let action = action.to_owned();
             Box::pin(async move {
                 if action == "mesh.identity" {
+                    // Model the strict legacy request parser to exercise fallback.
+                    if input != b"{}" {
+                        return Err("unsupported identity probe");
+                    }
                     self.queried.notify_one();
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
+                            compact_access: false,
                             public_key: PublicKey([if self.server { 1 } else { 2 }; 32]),
                             port: 44000,
                         },
