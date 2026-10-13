@@ -109,8 +109,9 @@ pub struct Chunk {
 pub struct AccessUpdate {
     pub first: NodeId,
     pub last: NodeId,
-    pub inbound: TrafficPolicy,
-    pub outbound: TrafficPolicy,
+    /// Null keeps this direction; a concrete rule replaces it.
+    pub inbound: Option<TrafficPolicy>,
+    pub outbound: Option<TrafficPolicy>,
 }
 
 // Deriving a struct decoder also accepts positional arrays. Range entries are

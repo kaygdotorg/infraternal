@@ -23,9 +23,11 @@ Control chunks fit the existing 8 KiB action-body resource bound.
 
 An enabled identity may advertise `compact_access: true`. Only after this
 negotiation, an access-only delta may carry `access_updates`: ordered, disjoint
-inclusive node-ID ranges with replacement inbound and outbound rules. Every
-ID in a range must already exist in the acknowledged base; identity, addresses,
-keys and endpoints remain unchanged. Ranges cannot overlap peer upserts,
+inclusive node-ID ranges over existing ordered peers. Both endpoints must
+exist in the acknowledged base; holes introduce no peer or key. A concrete
+directional rule replaces that direction; null leaves it unchanged. Grouping
+never crosses an unchanged protected peer. Identity, addresses, keys and
+endpoints remain unchanged. Ranges cannot overlap peer upserts,
 removals or port continuations. Snapshot chunks cannot contain range updates.
 The same exact base revision, local-key binding and final atomic installation
 and retirement apply. Legacy identities receive the original peer deltas.

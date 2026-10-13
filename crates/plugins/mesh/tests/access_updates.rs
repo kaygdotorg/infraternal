@@ -205,3 +205,35 @@ fn kernel_case(fallback: bool) {
     node.down().unwrap();
     assert!(!Device::owned().unwrap());
 }
+
+#[test]
+fn uniform_changes_fit_one_frame_after_churn_with_distinct_kept_services() {
+    use infraternal_plugin_mesh::policy::rules::{Port, Protocol};
+    let mut old = config();
+    old.peers = old
+        .peers
+        .into_iter()
+        .map(|(id, mut peer)| {
+            peer.outbound = TrafficPolicy::Ports(std::collections::BTreeSet::from([Port {
+                protocol: Protocol::Tcp,
+                number: u16::try_from(id.0).unwrap(),
+            }]));
+            (NodeId(id.0 * 100), peer)
+        })
+        .collect();
+    let mut next = old.clone();
+    next.version += 1;
+    next.default_policy = DefaultPolicy::Deny;
+    for peer in next.peers.values_mut() {
+        peer.inbound = TrafficPolicy::None;
+    }
+    let parts = infraternal_plugin_mesh::access_updates::chunks(Some(&old), &next).unwrap();
+    assert_eq!(
+        parts.len(),
+        1,
+        "churn and preserved distinct services cannot add round trips"
+    );
+    assert!(
+        serde_json::to_vec(&parts[0]).unwrap().len() <= infraternal_plugin_api::MAX_ACTION_BYTES
+    );
+}

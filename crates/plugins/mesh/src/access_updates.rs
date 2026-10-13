@@ -24,23 +24,28 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
         return configuration::chunks(old, new);
     };
     let mut updates: Vec<AccessUpdate> = Vec::new();
+    let mut previous_id = None;
     for (id, next) in &new.peers {
+        let adjacent = previous_id;
+        previous_id = Some(*id);
         let previous = &old.peers[id];
         if previous.inbound == next.inbound && previous.outbound == next.outbound {
             continue;
         }
+        let inbound = (previous.inbound != next.inbound).then(|| next.inbound.clone());
+        let outbound = (previous.outbound != next.outbound).then(|| next.outbound.clone());
         if let Some(last) = updates.last_mut()
-            && last.last.0.checked_add(1) == Some(id.0)
-            && last.inbound == next.inbound
-            && last.outbound == next.outbound
+            && Some(last.last) == adjacent
+            && last.inbound == inbound
+            && last.outbound == outbound
         {
             last.last = *id;
         } else {
             updates.push(AccessUpdate {
                 first: *id,
                 last: *id,
-                inbound: next.inbound.clone(),
-                outbound: next.outbound.clone(),
+                inbound,
+                outbound,
             });
         }
     }
@@ -62,20 +67,15 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
 
 /// Replace rules only for exact, existing, ordered disjoint inclusive ranges.
 /// # Errors
-/// Refuses missing IDs, reversed/overlapping ranges or arithmetic exhaustion.
+/// Refuses missing endpoints and reversed or overlapping ranges.
 #[cfg(feature = "agent")]
 pub fn apply(config: &mut Config, updates: &[AccessUpdate]) -> std::io::Result<()> {
     let mut previous = None;
     for update in updates {
-        let count = update
-            .last
-            .0
-            .checked_sub(update.first.0)
-            .and_then(|span| span.checked_add(1))
-            .ok_or(std::io::ErrorKind::InvalidData)?;
-        if previous.is_some_and(|last: NodeId| last >= update.first)
-            || u64::try_from(config.peers.range(update.first..=update.last).count()).ok()
-                != Some(count)
+        if update.first > update.last
+            || previous.is_some_and(|last: NodeId| last >= update.first)
+            || !config.peers.contains_key(&update.first)
+            || !config.peers.contains_key(&update.last)
         {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
@@ -84,8 +84,12 @@ pub fn apply(config: &mut Config, updates: &[AccessUpdate]) -> std::io::Result<(
     // Validate the entire body first. Refusal cannot leave partly replaced rules.
     for update in updates {
         for (_, peer) in config.peers.range_mut(update.first..=update.last) {
-            peer.inbound = update.inbound.clone();
-            peer.outbound = update.outbound.clone();
+            if let Some(inbound) = &update.inbound {
+                peer.inbound = inbound.clone();
+            }
+            if let Some(outbound) = &update.outbound {
+                peer.outbound = outbound.clone();
+            }
         }
     }
     Ok(())
@@ -167,20 +171,35 @@ mod tests {
     }
 
     #[test]
+    fn grouping_never_crosses_an_unchanged_protected_peer() {
+        let old = config();
+        let mut next = old.clone();
+        next.version += 1;
+        for id in [NodeId(3), NodeId(5)] {
+            next.peers.get_mut(&id).unwrap().inbound = TrafficPolicy::None;
+        }
+        let parts = chunks(Some(&old), &next).unwrap();
+        assert_eq!(parts[0].access_updates.len(), 2);
+        let mut reconstructed = old;
+        apply(&mut reconstructed, &parts[0].access_updates).unwrap();
+        assert_eq!(reconstructed.peers, next.peers);
+    }
+
+    #[test]
     fn malformed_ranges_refuse_before_any_rule_changes() {
         let original = config();
         let update = |first, last| AccessUpdate {
             first: NodeId(first),
             last: NodeId(last),
-            inbound: TrafficPolicy::None,
-            outbound: TrafficPolicy::None,
+            inbound: Some(TrafficPolicy::None),
+            outbound: Some(TrafficPolicy::None),
         };
         for updates in [
             vec![update(3, 5), update(4, 5)],
             vec![update(5, 3)],
             vec![update(3, u64::MAX)],
             vec![update(0, u64::MAX)],
-            vec![update(1, 3)],
+            vec![update(0, 3)],
         ] {
             let mut candidate = original.clone();
             assert_eq!(
@@ -191,8 +210,10 @@ mod tests {
         }
         let mut gap = original.clone();
         gap.peers.remove(&NodeId(4));
-        let unchanged = gap.clone();
-        assert!(apply(&mut gap, &[update(3, 5)]).is_err());
-        assert_eq!(gap, unchanged);
+        let before = gap.clone();
+        apply(&mut gap, &[update(3, 5)]).unwrap();
+        assert_eq!(gap.peers.len(), before.peers.len());
+        assert_eq!(gap.peers[&NodeId(1)], before.peers[&NodeId(1)]);
+        assert_eq!(gap.peers[&NodeId(3)].inbound, TrafficPolicy::None);
     }
 }
