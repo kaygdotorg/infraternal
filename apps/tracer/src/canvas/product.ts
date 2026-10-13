@@ -128,6 +128,13 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
   const authority = createAuthorityControl(core, { service: loadProvisioning });
+  let welcomedOnce = false;
+  const offAuthorityWelcome = connection.onWelcome(() => {
+    // A restart can lock the CA while this page retains its old unlocked state.
+    // Refresh independently of terminal replay; the existing shared action owns unlock.
+    if (welcomedOnce) void authority.refresh();
+    welcomedOnce = true;
+  });
   let readyRemoval: import("./context").Adapters["hostRemoval"];
   const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), remove: (id, name, anchor) => readyRemoval?.remove(id, name, anchor) };
   // Registry metadata is optional chrome: load it without delaying the first terminal.
@@ -180,6 +187,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       canvas.flush();
       offRoundTrip();
       offSessionInventory();
+      offAuthorityWelcome();
       authority.dispose();
       offMeshView();
       addHost.dispose();
