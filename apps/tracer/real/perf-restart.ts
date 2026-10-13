@@ -9,7 +9,9 @@ if (process.env.RESTART_MEASURE !== "1" || process.env.REAL_ROOT_NAMESPACE !== "
   throw new Error("restart measurements require the perf-VM driver and its private mount namespace");
 }
 console.log(`ENVIRONMENT machine=${hostname()} cores=${cpus().length} memory_bytes=${totalmem()} load=${(await readFile("/proc/loadavg", "utf8")).trim()} sessions=${process.env.RESTART_SESSIONS}`);
-const browser = await chromium.launch({ args: ["--disable-renderer-backgrounding", "--no-sandbox"] });
+// The private TLS front has a fixture certificate, unlike production's trusted certificate.
+// Trust it before the first handshake so certificate rejection/retry is not measured as recovery.
+const browser = await chromium.launch({ args: ["--disable-renderer-backgrounding", "--no-sandbox", "--ignore-certificate-errors"] });
 try {
   const mode = process.env.RESTART_MODE ?? "retained";
   if (!["retained", "closed", "daemon", "shim"].includes(mode)) throw new Error("invalid restart measurement mode");
