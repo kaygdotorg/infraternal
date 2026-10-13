@@ -17,6 +17,12 @@ struct Local {
 }
 struct Compound(Local);
 impl SshSession for Compound {
+    fn stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        self.0.stream(script)
+    }
     fn setup_steps(&self) -> bool {
         true
     }
@@ -2631,7 +2637,14 @@ async fn full_payload_restaging_preserves_the_running_session_build() {
             "#!/bin/sh\n[ \"$1\" = __ssh-session ] || exit 1\nprintf 'SESSION {id}\\n'\nexec cat\n"
         ),
     );
-    let transaction = f.transaction();
+    let transaction = Installation::new(
+        Arc::new(Compound(Local {
+            root: f.root.clone(),
+        })),
+        &f.target,
+        &f.join,
+    )
+    .unwrap();
     let (session, channel) = transaction.stage_session(&starter).await.unwrap();
     assert_eq!(session, id);
     channel.write(b"before full upload\n").await.unwrap();
@@ -2646,4 +2659,76 @@ async fn full_payload_restaging_preserves_the_running_session_build() {
     transaction.commit().await.unwrap();
     channel.write(b"after commit\n").await.unwrap();
     assert_eq!(channel.line(64).await.unwrap(), b"after commit\n");
+}
+
+/// Restaging after the early prompt must reuse compound upload/enrollment;
+/// separate rollback, cache lookup, upload and setup commands add SSH round trips.
+#[tokio::test]
+async fn session_restaging_uses_one_compound_command() {
+    struct Counted {
+        local: Local,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl SshSession for Counted {
+        fn setup_steps(&self) -> bool {
+            true
+        }
+        fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.local.run(script, input)
+        }
+    }
+    let f = Fixture::new();
+    let counted = Arc::new(Counted {
+        local: Local {
+            root: f.root.clone(),
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let transaction = Installation::new(counted.clone(), &f.target, &f.join).unwrap();
+    transaction.stage(&f.binary).await.unwrap();
+    counted.calls.store(0, std::sync::atomic::Ordering::SeqCst);
+    transaction.restart_setup(&f.binary, &f.join).await.unwrap();
+    assert_eq!(counted.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read(f.base().join("bin/live")).unwrap(),
+        std::fs::read(&f.binary).unwrap()
+    );
+    transaction.commit().await.unwrap();
+}
+
+/// A compound restage cannot turn another transaction's lease into permission
+/// to upload, enroll or remove its private journal.
+#[tokio::test]
+async fn compound_restaging_refuses_a_foreign_journal_before_upload() {
+    let f = Fixture::new();
+    let transaction = Installation::new(
+        Arc::new(Compound(Local {
+            root: f.root.clone(),
+        })),
+        &f.target,
+        &f.join,
+    )
+    .unwrap();
+    transaction.stage(&f.binary).await.unwrap();
+    let journal = f.base().join(".bootstrap-lock/transaction");
+    let original = std::fs::read(&journal).unwrap();
+    let foreign = uuid::Uuid::new_v4().simple().to_string();
+    std::fs::write(&journal, &foreign).unwrap();
+    let payload = f.base().join(".bootstrap-lock/payload");
+    let before = std::fs::read(&payload).unwrap();
+    let refusal = transaction
+        .restart_setup(&f.binary, &f.join)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.exit_status, Some(72));
+    assert!(matches!(
+        refusal.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+    ));
+    assert_eq!(std::fs::read_to_string(&journal).unwrap(), foreign);
+    assert_eq!(std::fs::read(&payload).unwrap(), before);
+    assert!(!f.base().join("state").exists());
+    std::fs::write(&journal, original).unwrap();
+    transaction.rollback().await.unwrap();
 }
