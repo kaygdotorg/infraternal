@@ -9,30 +9,51 @@ import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/proto
 import { startRealServer } from "./server";
 import type { RealServer } from "./server";
 
-/** Adds real, idle PTYs through authenticated production actions; private cookies remain in memory. */
-async function populate(server: RealServer, count: number): Promise<void> {
-  if (count === 0) return;
-  const socket = new WebSocket(server.backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: server.origin, Cookie: server.bridges[0]!.cookie } });
-  const decoder = new WebSocketFrameDecoder();
-  const send = (frame: Parameters<typeof encodeMuxedFrame>[1]) => socket.send(encodeMuxedFrame(0, frame));
+/** Adds private PTYs; optional attached scale uses the production per-socket cap and answers real probes. */
+async function populate(server: RealServer, count: number): Promise<() => void> {
+  const sockets: WebSocket[] = [];
+  const attached = process.env.RESTART_ATTACHED_SCALE === "1";
+  const cleanup = () => { for (const socket of sockets) socket.terminate(); };
   try {
-    await new Promise<void>((resolve, reject) => {
-      let opened = 0;
-      socket.on("error", reject);
-      socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data as Buffer)), (_stream, frame) => {
-        if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "restart-scale" });
-        if (frame.type === "Welcome") send({ type: "Call", callId: 1, actionId: "ssh.session.open", inputJson: new TextEncoder().encode("{}") });
-        if (frame.type === "Result") {
-          if (!frame.ok) { reject(new Error("scale fixture session open refused")); return; }
-          if (++opened === count) resolve();
-          else send({ type: "Call", callId: opened + 1, actionId: "ssh.session.open", inputJson: new TextEncoder().encode("{}") });
-        }
-      }));
-    });
-  } finally { socket.terminate(); }
+    for (let remaining = count; remaining > 0;) {
+      const batch = Math.min(remaining, attached ? 28 : count);
+      const socket = new WebSocket(server.backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: server.origin, Cookie: server.bridges[0]!.cookie } });
+      sockets.push(socket);
+      const decoder = new WebSocketFrameDecoder();
+      const send = (stream: number, frame: Parameters<typeof encodeMuxedFrame>[1]) => socket.send(encodeMuxedFrame(stream, frame));
+      await new Promise<void>((resolve, reject) => {
+        let opened = 0;
+        const acked = new Set<number>();
+        const open = () => send(0, { type: "Call", callId: opened + 1, actionId: "ssh.session.open", inputJson: new TextEncoder().encode("{}") });
+        socket.on("error", reject);
+        socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data as Buffer)), (stream, frame) => {
+          if (frame.type === "Hello") send(0, { type: "Hello", version: 1, caps: 0n, clientInfo: "restart-scale" });
+          if (frame.type === "Welcome") open();
+          if (frame.type === "Ping") send(stream, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
+          if (frame.type === "Result") {
+            if (!frame.ok) { reject(new Error("scale fixture session open refused")); return; }
+            if (attached) {
+              const result = JSON.parse(new TextDecoder().decode(frame.json)) as { session_id: string };
+              if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(result.session_id)) { reject(new Error("invalid fixture session identity")); return; }
+              const id = Buffer.from(result.session_id.replaceAll("-", ""), "hex");
+              const stream = opened * 2 + 1;
+              send(stream, { type: "AttachTerm", sessionId: id, lastOutSeq: 0n, lastInSeq: 0n });
+              send(stream, { type: "Credit", bytes: 1024 * 1024 });
+            }
+            if (++opened === batch) { if (!attached || acked.size === batch) resolve(); }
+            else open();
+          }
+          if (frame.type === "Ack") { acked.add(stream); if (opened === batch && acked.size === batch) resolve(); }
+        }));
+      });
+      remaining -= batch;
+    }
+    if (!attached) cleanup();
+    return cleanup;
+  } catch (error) { cleanup(); throw error; }
 }
 
-export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false): Promise<void> {
+export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false, upstream?: "daemon" | "shim"): Promise<void> {
   const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:4398" });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: unlock ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: unlock, hasTouch: unlock });
   const page = await context.newPage();
@@ -52,6 +73,7 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       socket.close();
     });
   });
+  let cleanupScale = () => {};
   page.on("pageerror", (error) => console.log("browser error kind:", error.name));
   try {
     const cdp = await context.newCDPSession(page);
@@ -96,7 +118,7 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     console.log("restart fixture: initial typing works");
     const scale = Number(process.env.RESTART_SESSIONS ?? 1);
     if (!Number.isInteger(scale) || scale < 1 || scale > 72) throw new Error("invalid restart fixture scale");
-    await populate(server, scale - 1);
+    cleanupScale = await populate(server, scale - 1);
     if (process.env.RESTART_MEASURE === "1") {
       const measurement = spawn("python3", [resolve(import.meta.dirname, "../../../scripts/restart-rss.py"), "/run/infraternal", String(server.pid)], { stdio: ["ignore", "pipe", "ignore"] });
       let result = "";
@@ -106,7 +128,7 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       console.log(result.trim());
     }
     if (process.env.RESTART_MEASURE === "1") await page.evaluate(async () => {
-      const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
+      const card = document.querySelector<HTMLElement>('.cl[data-view="console"] .ui-window')!;
       await new Promise<void>((done) => requestAnimationFrame(() => done()));
       const canvas = document.querySelector<HTMLCanvasElement>(".terminal-host canvas")!;
       const fingerprint = (): number => {
@@ -120,26 +142,29 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       (window as unknown as { restartProbe: typeof probe }).restartProbe = probe;
       new MutationObserver(() => {
         const now = performance.timeOrigin + performance.now();
-        if (stage.dataset.connected === "false" && !probe.lostAt) {
+        if (card.dataset.status === "connecting" && !probe.lostAt) {
           probe.lostAt = now;
           requestAnimationFrame(() => {
             probe.frameMs = performance.timeOrigin + performance.now() - probe.lostAt;
           });
         }
-        else if (stage.dataset.connected === "true" && probe.lostAt) probe.liveAt ||= now;
-      }).observe(stage, { attributes: true, attributeFilter: ["data-connected"] });
+        else if (card.dataset.status === "live" && probe.lostAt) probe.liveAt ||= now;
+      }).observe(card, { attributes: true, attributeFilter: ["data-status"] });
     });
     // Only the client's clock advances: expire resume credentials without expiring server auth.
     await page.evaluate(() => { const now = Date.now; Date.now = () => now() + 86_400_000; });
     if (retainBrowserRoute) supersededRoutes = routes;
-    await server.restart(async () => {
+    const disrupt = (during: () => Promise<void>) => upstream
+      ? server.pauseUpstream(upstream, during) : server.restart(during);
+    await disrupt(async () => {
       console.log("restart fixture: server stopped");
       console.log("restart fixture: bridge state", server.bridges.map((bridge) => ({ closed: bridge.closed, closedBy: bridge.closedBy })));
       console.log("restart fixture: page state", await page.locator("#terminal-screen").getAttribute("data-connected"));
       if (retainBrowserRoute) {
         await expect.poll(() => stoppedRoutes).toBeGreaterThan(0);
       } else {
-        await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "false");
+        // Other sessions may remain writable; readiness belongs to this window.
+        if (!upstream) await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "false");
         await expect(page.locator('.cl[data-view="console"] .ui-window').first()).toHaveAttribute("data-status", "connecting");
       }
       // GPU readback belongs before the path recovers: it must not delay the
@@ -169,7 +194,7 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
         console.log(`real route recovery: routes=${routes} superseded_routes=${supersededRoutes} stopped_routes=${stoppedRoutes} window_status=${await page.locator('.cl[data-view="console"] .ui-window').first().getAttribute("data-status")} connected=${await page.locator("#terminal-screen").getAttribute("data-connected")}`);
       }
     }
-    await expect.poll(authority).toEqual({ locked: true, initialized: true });
+    await expect.poll(authority).toEqual({ locked: !upstream, initialized: true });
     if (unlock) await unlockAuthority();
     await expect.poll(() => server.bridges.filter((b) => !b.closed).some((b) => b.acked.size > 0), { timeout: 15_000 }).toBe(true);
     await expect.poll(output, { timeout: 15_000 }).toMatch(/\r?\nwaiting-49\r?\n/);
@@ -183,10 +208,10 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
     if (process.env.RESTART_MEASURE === "1") {
       const probe = await page.evaluate(() => (window as unknown as { restartProbe: { liveAt: number; retained: boolean; frameMs: number } }).restartProbe);
       const recovery = Math.max(0, probe.liveAt - server.recoveredAt!);
-      const roundTrip = 2 * Number(process.env.REAL_ONE_WAY_MS ?? 0);
-      console.log(`METRIC restart_sessions=${scale} viewport=${unlock ? "393x852" : "1440x900"} ca_after_recovery=${unlock ? "unlocked" : "locked"} path_to_typable_ms=${recovery.toFixed(3)} rtt_ms=${roundTrip} budget_ms=${roundTrip + 50} last_screen_retained=${probe.retained} screen_restore_ms=0 first_verification_frame_ms=${probe.frameMs.toFixed(3)}`);
+      const roundTrip = Number(process.env.REAL_NETWORK_RTT_MS ?? 2 * Number(process.env.REAL_ONE_WAY_MS ?? 0));
+      console.log(`METRIC restart_sessions=${scale} viewport=${unlock ? "393x852" : "1440x900"} ca_after_recovery=${unlock || upstream ? "unlocked" : "locked"} mode=${upstream ?? (retainBrowserRoute ? "retained" : "closed")} transport=${process.env.REAL_NETWORK_RTT_MS ? "tcp-tls-netem" : "message-delay"} path_to_typable_ms=${recovery.toFixed(3)} rtt_ms=${roundTrip} budget_ms=${upstream ? roundTrip + 50 : roundTrip * 3 + 50} last_screen_retained=${probe.retained} screen_restore_ms=0 first_verification_frame_ms=${probe.frameMs.toFixed(3)}`);
       expect(probe.retained).toBe(true);
-      expect(recovery).toBeLessThanOrEqual(roundTrip + 50);
+      expect(recovery).toBeLessThanOrEqual(upstream ? roundTrip + 50 : roundTrip * 3 + 50);
     }
-  } finally { await server.dispose(); await context.close(); }
+  } finally { cleanupScale(); await server.dispose(); await context.close(); }
 }
