@@ -6,8 +6,10 @@ existing strict SSH adapter. Its read-only check and verified staging share one
 duplex command channel; after check/mode/ownership admission the trusted server
 sends a bounded public setup script (decimal length, at most 65,536 bytes). This
 envelope carries no credential and reuses existing canonical check, failure and
-transfer parsers. Legacy adapters retain buffered commands. Stage the matching compressed or verified reused
-payload, then launch a session shim and its shell over that same connection.
+transfer parsers. Automatic authentication may replay only that exact read-only
+check, selects its method before testing bridge support, and retains the
+selected command channel. Legacy adapters retain buffered commands. Stage the
+matching compressed or verified reused payload, then launch a session shim and its shell over that same connection.
 The canvas attaches through an SSH channel bridged to that shim. Install and
 join continue while the person types. The infraternal agent discovers the same
 shim, and the existing terminal actor replaces its SSH transport with the
@@ -94,3 +96,23 @@ The shim and shell stay inside their original login throughout installation
 and handover. The installed infraternal agent adopts the rendezvous and login
 identity, never moves an already running shell into a new login. Access
 revocation ends that person's login and terminals under the login contract.
+
+## Public payload barrier and warming
+
+The negotiated buffered-command compatibility path waits for `PAYLOAD ready\n`
+after the complete verified upload before sending private enrollment stdin.
+A host's bounded `head` reader may buffer past the frame boundary; withholding
+private bytes until it exits prevents over-read from consuming an invitation.
+The duplex shim-first path already has its separate verified upload receipt.
+Neither receipt authorizes a host or replaces the existing admission checks.
+
+Configured public payloads warm after the HTTP listener binds. The global
+four-entry cache index covers only lookup and eviction; each file identity and
+codec has its own single-flight cell. Compression runs outside the index lock.
+Component-off cancels warming through the existing activity lifecycle; missing
+codecs and non-improving encodings retain the raw transfer path.
+
+The SSH master uses `LogLevel=ERROR` to suppress remote login notices. Its
+selective `LogVerbose` override admits only the local `ssh_userauth2` method
+receipt, reduced by the existing constant-size recognizer without retaining
+raw diagnostic text. SSH control-socket admission remains the sign-in proof.
