@@ -250,7 +250,6 @@ impl Installation {
         &self,
         binary: &Path,
     ) -> Result<(uuid::Uuid, crate::duplex::Duplex), Failure> {
-        use tokio::io::AsyncReadExt;
         let transfer = Self::negotiated_payload(binary).await?;
         let start = "stage=\"$base/.bootstrap-lock\"\n[ \"$(cat \"$stage/transaction\")\" = \"$transaction\" ] || exit 72\nexec 9<&-\nexec \"$stage/payload\" __ssh-session --state \"$base/sessions\"";
         let script = format!(
@@ -268,46 +267,17 @@ impl Installation {
         }
         let choice = crate::transport::TransferChoice::parse(&receipt)
             .ok_or_else(|| invalid_setup().at(InstallStep::Upload))?;
-        let bytes = match choice {
-            crate::transport::TransferChoice::Reuse => None,
-            crate::transport::TransferChoice::Gzip => {
-                Some(transfer.gzip.as_deref().ok_or_else(invalid_setup)?)
-            }
-            crate::transport::TransferChoice::Zstd => {
-                Some(transfer.zstd.as_deref().ok_or_else(invalid_setup)?)
-            }
-            crate::transport::TransferChoice::Raw => {
-                let mut file = tokio::fs::File::open(binary)
-                    .await
-                    .map_err(|_| invalid_setup())?;
-                let mut buffer = vec![0; 65536];
-                let mut remaining = transfer.raw_size;
-                while remaining != 0 {
-                    let limit =
-                        usize::try_from(remaining.min(65536)).map_err(|_| invalid_setup())?;
-                    let count = file
-                        .read(&mut buffer[..limit])
-                        .await
-                        .map_err(|_| invalid_setup())?;
-                    if count == 0 {
-                        return Err(invalid_setup());
-                    }
-                    channel
-                        .write(&buffer[..count])
-                        .await
-                        .map_err(|_| invalid_setup())?;
-                    remaining -= count as u64;
-                }
-                None
-            }
-        };
-        if let Some(bytes) = bytes {
-            channel.write(bytes).await.map_err(|_| invalid_setup())?;
+        let written = send_transfer(&channel, &transfer, binary, choice).await;
+        if let Err(error) = &written
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(invalid_setup().at(InstallStep::Upload));
         }
         let receipt = channel.line(64).await?;
         if let Some(failure) = refusal(&receipt, InstallStep::Upload) {
             return Err(failure.in_mode(self.mode));
         }
+        written.map_err(|_| invalid_setup().at(InstallStep::Upload))?;
         if receipt != b"STEP start\n" {
             return Err(invalid_setup().at(InstallStep::Start));
         }
@@ -609,6 +579,38 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
         self.commit().await
     }
 
+    /// Retain the same authenticated master when rebuilding an early route.
+    #[must_use]
+    pub fn ssh_session(&self) -> Arc<dyn SshSession> {
+        self.session.clone()
+    }
+
+    /// Reattach the same shim after a setup failure; never launch a replacement shell.
+    /// # Errors
+    /// Refuses foreign ownership, missing payloads and a changed session receipt.
+    pub async fn resume_session(&self, id: uuid::Uuid) -> Result<crate::duplex::Duplex, Failure> {
+        let body = format!(
+            r#"
+[ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
+stage="$base/.bootstrap-lock"
+if [ -f "$stage/payload" ] && [ ! -L "$stage/payload" ]; then
+    [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+    payload="$stage/payload"
+else
+    [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] || exit 71
+    payload="$base/bin/live"
+fi
+exec 9<&-
+exec "$payload" __ssh-session --state "$base/sessions" --session {id}
+"#
+        );
+        let channel = self.session.stream(&self.script(&body)).await?;
+        if channel.line(64).await? != format!("SESSION {id}\n").as_bytes() {
+            return Err(invalid_setup());
+        }
+        Ok(channel)
+    }
+
     /// Retry the same owned installation without ending or replacing its shim.
     /// Existing fresh-host enrollment state stays with that host's private root.
     /// # Errors
@@ -642,6 +644,44 @@ fi
             .await?;
         Ok(())
     }
+}
+
+async fn send_transfer(
+    channel: &crate::duplex::Duplex,
+    transfer: &Transfer,
+    binary: &Path,
+    choice: crate::transport::TransferChoice,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+    let bytes = match choice {
+        crate::transport::TransferChoice::Reuse => None,
+        crate::transport::TransferChoice::Gzip => {
+            Some(transfer.gzip.as_deref().ok_or_else(invalid)?)
+        }
+        crate::transport::TransferChoice::Zstd => {
+            Some(transfer.zstd.as_deref().ok_or_else(invalid)?)
+        }
+        crate::transport::TransferChoice::Raw => {
+            let mut file = tokio::fs::File::open(binary).await?;
+            let mut buffer = vec![0; 65536];
+            let mut remaining = transfer.raw_size;
+            while remaining != 0 {
+                let limit = usize::try_from(remaining.min(65536)).map_err(|_| invalid())?;
+                let count = file.read(&mut buffer[..limit]).await?;
+                if count == 0 {
+                    return Err(invalid());
+                }
+                channel.write(&buffer[..count]).await?;
+                remaining -= count as u64;
+            }
+            None
+        }
+    };
+    if let Some(bytes) = bytes {
+        channel.write(bytes).await?;
+    }
+    Ok(())
 }
 
 // Every compound operation observes a fresh errexit child and emits only this
