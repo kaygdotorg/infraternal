@@ -88,13 +88,7 @@ fn stripped_test_image(source: &Path) -> PathBuf {
     {
         return source.to_owned();
     }
-    let target_root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || {
-            PathBuf::from(std::env::var_os("HOME").unwrap())
-                .join(".cache/codex-scratch/infraternal")
-        },
-        PathBuf::from,
-    );
+    let target_root = crate::restart_binary::fixture::scratch_root();
     let cache = target_root.join("restart-test-images");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
