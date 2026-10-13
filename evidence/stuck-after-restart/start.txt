@@ -1,1 +1,0 @@
-Start #199: branch stuck-after-restart, base/head 9ab4329c. Read contracts and all issue comments (0); no parent referenced. Read related deploy issue #195 history. Reproduce with private local fixtures only; no production access, processes or sessions. Push atomic commits only to origin/stuck-after-restart.
