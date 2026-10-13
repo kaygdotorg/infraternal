@@ -52,6 +52,8 @@ mod remote_admission;
 #[cfg(all(test, feature = "mesh-transport-proof"))]
 mod remote_autoswitch_probe;
 #[cfg(feature = "remote")]
+mod remote_bindings;
+#[cfg(feature = "remote")]
 pub mod remote_enrollment;
 #[cfg(feature = "remote")]
 mod remote_guard;

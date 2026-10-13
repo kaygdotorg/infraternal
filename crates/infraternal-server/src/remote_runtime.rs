@@ -48,6 +48,8 @@ struct ListenerFactory {
     address: SocketAddr,
     destinations: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
     limits: Arc<crate::remote_accept::Limits>,
+    /// Leased destinations join the agent address's endpoint (one CID space).
+    bindings: Arc<crate::remote_bindings::Bindings>,
 }
 struct Host {
     ip: std::net::IpAddr,
@@ -111,17 +113,7 @@ impl RemoteHosts {
         let listener = if factory.address.ip().is_unspecified() {
             None
         } else {
-            Some(
-                RemoteListeners::start_with_limits(
-                    SocketAddr::new(address, factory.address.port()),
-                    &factory.identity,
-                    &factory.roots,
-                    factory.store.clone(),
-                    overlay,
-                    factory.limits.clone(),
-                )
-                .await?,
-            )
+            Some(LeasedListener::start(&factory, address, overlay).await?)
         };
         *factory
             .destinations
@@ -374,14 +366,30 @@ async fn reserve_transports(
     address: SocketAddr,
     config: &quinn::ServerConfig,
     mut on_reserved: impl FnMut(SocketAddr) -> io::Result<()>,
-) -> io::Result<(quinn::Endpoint, TcpListener)> {
+) -> io::Result<(
+    quinn::Endpoint,
+    TcpListener,
+    Arc<crate::remote_bindings::Bindings>,
+)> {
+    use quinn::Runtime as _;
     let attempts = if address.port() == 0 { 16 } else { 1 };
     for _ in 0..attempts {
         let tcp = TcpListener::bind(address).await?;
         let reserved = tcp.local_addr()?;
         on_reserved(reserved)?;
-        match quinn::Endpoint::server(config.clone(), reserved) {
-            Ok(endpoint) => return Ok((endpoint, tcp)),
+        match std::net::UdpSocket::bind(reserved) {
+            Ok(socket) => {
+                let bindings = crate::remote_bindings::Bindings::new(
+                    quinn::TokioRuntime.wrap_udp_socket(socket)?,
+                );
+                let endpoint = quinn::Endpoint::new_with_abstract_socket(
+                    quinn::EndpointConfig::default(),
+                    Some(config.clone()),
+                    bindings.clone(),
+                    Arc::new(quinn::TokioRuntime),
+                )?;
+                return Ok((endpoint, tcp, bindings));
+            }
             Err(error) if address.port() == 0 && error.kind() == io::ErrorKind::AddrInUse => {}
             Err(error) => return Err(error),
         }
@@ -390,9 +398,54 @@ async fn reserve_transports(
     Err(io::ErrorKind::AddrInUse.into())
 }
 
+/// A leased mesh destination: its UDP socket joins the shared endpoint and its
+/// TCP fallback listener is its own. Dropping it releases both.
+pub(crate) struct LeasedListener {
+    _binding: crate::remote_bindings::LeasedBinding,
+    tasks: JoinSet<()>,
+    #[cfg(test)]
+    address: SocketAddr,
+}
+impl Drop for LeasedListener {
+    fn drop(&mut self) {
+        self.tasks.abort_all();
+    }
+}
+impl LeasedListener {
+    async fn start(
+        factory: &ListenerFactory,
+        address: std::net::IpAddr,
+        overlay: RemoteHosts,
+    ) -> io::Result<Self> {
+        use quinn::Runtime as _;
+        let address = SocketAddr::new(address, factory.address.port());
+        let tcp = TcpListener::bind(address).await?;
+        let socket = quinn::TokioRuntime.wrap_udp_socket(std::net::UdpSocket::bind(address)?)?;
+        let binding = factory.bindings.lease(socket)?;
+        let tls = Arc::new(remote_tls::server_config(
+            &factory.identity,
+            &factory.roots,
+        )?);
+        let mut tasks = JoinSet::new();
+        tasks.spawn(crate::remote_accept::tcp(
+            tcp,
+            tls,
+            overlay,
+            factory.store.clone(),
+            factory.limits.clone(),
+        ));
+        Ok(Self {
+            _binding: binding,
+            tasks,
+            #[cfg(test)]
+            address,
+        })
+    }
+}
+
 /// Owns an additional binding or the routing classification of an existing wildcard.
 pub(crate) struct AdditionalListener {
-    listener: Option<RemoteListeners>,
+    listener: Option<LeasedListener>,
     factory: Arc<ListenerFactory>,
     address: std::net::IpAddr,
 }
@@ -414,7 +467,7 @@ impl AdditionalListener {
     pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.as_ref().map_or(
             Ok(SocketAddr::new(self.address, self.factory.address.port())),
-            RemoteListeners::local_addr,
+            |listener| Ok(listener.address),
         )
     }
 }
@@ -423,6 +476,7 @@ impl AdditionalListener {
 pub(crate) struct RemoteListeners {
     tasks: JoinSet<()>,
     endpoint: quinn::Endpoint,
+    bindings: Arc<crate::remote_bindings::Bindings>,
     #[cfg(test)]
     pub(crate) diagnostic_hosts: RemoteHosts,
 }
@@ -469,6 +523,7 @@ impl RemoteListeners {
             address: listener.local_addr()?,
             destinations: std::sync::Mutex::default(),
             limits,
+            bindings: listener.bindings.clone(),
         };
         *hosts.3.lock().map_err(|_| io::ErrorKind::Other)? = Some(Arc::new(factory));
         Ok(listener)
@@ -484,7 +539,7 @@ impl RemoteListeners {
     ) -> io::Result<Self> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
-        let (endpoint, tcp) = reserve_transports(
+        let (endpoint, tcp, bindings) = reserve_transports(
             address,
             &remote_quic::server_config(identity, roots)?,
             |_| Ok(()),
@@ -502,6 +557,7 @@ impl RemoteListeners {
         Ok(Self {
             tasks,
             endpoint,
+            bindings,
             #[cfg(test)]
             diagnostic_hosts,
         })

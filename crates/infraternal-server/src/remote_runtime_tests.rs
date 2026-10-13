@@ -298,15 +298,16 @@ async fn ephemeral_listener_pair_retries_real_udp_collision_without_leaking_tcp(
     let config = remote_quic::server_config(&server, &[root]).unwrap();
     let mut collision = None;
     let mut attempts = 0;
-    let (endpoint, tcp) = reserve_transports("127.0.0.1:0".parse().unwrap(), &config, |address| {
-        attempts += 1;
-        if attempts == 1 {
-            collision = Some(std::net::UdpSocket::bind(address)?);
-        }
-        Ok(())
-    })
-    .await
-    .unwrap();
+    let (endpoint, tcp, _bindings) =
+        reserve_transports("127.0.0.1:0".parse().unwrap(), &config, |address| {
+            attempts += 1;
+            if attempts == 1 {
+                collision = Some(std::net::UdpSocket::bind(address)?);
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert_eq!(attempts, 2);
     assert_eq!(endpoint.local_addr().unwrap(), tcp.local_addr().unwrap());
     let failed = collision.as_ref().unwrap().local_addr().unwrap();
