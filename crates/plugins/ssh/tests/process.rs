@@ -310,3 +310,91 @@ async fn review_compound_refusal_preserves_receipt_when_invitation_pipe_closes()
     assert!(matches!(failure.failed_step, Some(InstallStep::Join)));
     assert_eq!(failure.exit_status, Some(71));
 }
+
+/// The public payload may precede transfer receipts, but its private tail must
+/// wait for both the declared selection and the verified staging receipt.
+#[tokio::test]
+async fn declared_payload_flows_before_receipts_and_private_input_waits() {
+    use infraternal_plugin_ssh::transport::{PayloadInput, TransferChoice};
+    let mut command = Command::new("/usr/bin/python3");
+    command.args([
+        "-c",
+        r"
+import os, select, sys
+out = sys.stdout.buffer
+payload = os.read(0, 12)
+assert payload == b'public-frame', payload
+assert not select.select([0], [], [], 0.05)[0], 'private input preceded verification'
+out.write(b'STEP upload\nTRANSFER raw\nPAYLOAD ready\n'); out.flush()
+private = sys.stdin.buffer.read()
+assert private == b'synthetic-invitation', private
+out.write(b'STEP join\nSTEP install\nSTEP start\nSTEP linger\nyes\nDONE\n')
+",
+    ]);
+    let result = execute(
+        &mut command,
+        Input::Negotiated {
+            raw: PayloadInput::Bytes(b"public-frame"),
+            gzip: None,
+            zstd: None,
+            invitation: b"synthetic-invitation",
+            payload_ack: true,
+            declared: Some(TransferChoice::Raw),
+        },
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    assert!(result.success);
+    assert!(infraternal_plugin_ssh::install::parse_transfer_setup(&result.stdout).unwrap());
+}
+
+/// A lying or missing transfer receipt must never release private stdin, even
+/// when the public source was optimistically sent from earlier capabilities.
+#[tokio::test]
+async fn declared_selection_mismatch_and_missing_verification_withhold_private_input() {
+    use infraternal_plugin_ssh::transport::{PayloadInput, TransferChoice};
+    for receipt in [
+        "TRANSFER gzip\nPAYLOAD ready\n",
+        "TRANSFER raw\nFAIL upload 1\n",
+    ] {
+        let path =
+            common::scratch().join(format!("private-barrier-{}", uuid::Uuid::new_v4().simple()));
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!(
+                "printf 'STEP upload\\n%s' {}; cat > {}",
+                shell_quote(receipt),
+                shell_quote(path.to_str().unwrap())
+            ),
+        ]);
+        let result = execute(
+            &mut command,
+            Input::Negotiated {
+                raw: PayloadInput::Bytes(b"public-frame"),
+                gzip: Some(b"other-public"),
+                zstd: None,
+                invitation: b"synthetic-invitation",
+                payload_ack: true,
+                declared: Some(TransferChoice::Raw),
+            },
+            Duration::from_secs(3),
+        )
+        .await;
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        assert!(
+            !bytes
+                .windows(b"synthetic-invitation".len())
+                .any(|b| b == b"synthetic-invitation")
+        );
+        assert!(
+            result.is_err()
+                || result.is_ok_and(|out| infraternal_plugin_ssh::install::parse_transfer_setup(
+                    &out.stdout
+                )
+                .is_err())
+        );
+        std::fs::remove_file(&path).ok();
+    }
+}
