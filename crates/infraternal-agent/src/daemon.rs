@@ -419,10 +419,20 @@ async fn run_channel(
         .as_os_str()
         .as_encoded_bytes()
         .ends_with(b" (deleted)");
-    let (manager, exe) = if anonymous {
-        (Manager::Detached, PathBuf::from("/proc/self/exe"))
+    // Detection is warmed in the background; only terminal.open awaits the
+    // single result, so the authenticated greeting and census can proceed first.
+    let manager = std::sync::Arc::new(tokio::sync::OnceCell::<Manager>::new());
+    let exe = if anonymous {
+        manager
+            .set(Manager::Detached)
+            .map_err(|_| sessions::invalid("init manager was already selected"))?;
+        PathBuf::from("/proc/self/exe")
     } else {
-        (Manager::detect().await, running)
+        let warm = manager.clone();
+        tokio::spawn(async move {
+            warm.get_or_init(Manager::detect).await;
+        });
+        running
     };
     let retirements = sessions::SessionEvents::new(&state)?;
     let mut registry = crate::lifecycle::Registry::default();
@@ -556,12 +566,14 @@ async fn run_channel(
                                 && (nix::unistd::Uid::effective().is_root() || input.uid == nix::unistd::Uid::effective().as_raw())
                                 && input.cols > 0 && input.rows > 0 && usize::from(input.cols) * usize::from(input.rows) <= 200_000 {
                                 let exe = exe.clone(); let state = state.clone();
+                                let manager = manager.clone();
                                 let plugins = plugins.clone(); let context = registry.context();
                                 // Admission shares mutable plugin settings with actions, but
                                 // waiting for its worker never parks terminal dispatch.
                                 opens.spawn(async move {
                                     let result = async {
                                         plugins.admit("terminal.open", context).await?;
+                                        let manager = *manager.get_or_init(Manager::detect).await;
                                         sessions::launch_with_readiness(&exe, &state, manager, input.uid, input.cols, input.rows, input.readiness).await.map_err(|error| match error.kind() {
                                             io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::PermissionDenied => OpenRefusal::Invalid,
                                             _ => OpenRefusal::ResourceUnavailable,
