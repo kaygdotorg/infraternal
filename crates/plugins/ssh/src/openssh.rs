@@ -411,8 +411,7 @@ impl SshSession for Session {
             } else if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n") {
                 failure.failed_step = crate::install::interrupted_transfer_step(&result.stdout);
             }
-            Err(failure)
-            .map_err(|error: Failure| error.at_ssh_boundary(true))
+            Err(failure).map_err(|error: Failure| error.at_ssh_boundary(true))
         })
     }
 }

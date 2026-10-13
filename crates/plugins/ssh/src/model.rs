@@ -420,7 +420,7 @@ pub struct Event {
     /// Present after the fixed authenticated check; never inferred from banners.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authentication: Option<Authentication>,
-    /// Bound invitation identity; only done proves this host is ready.
+    /// Host-bound invitation identity; done publishes an attachable terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_id: Option<uuid::Uuid>,
     /// The existing shim session to attach, present on early terminal publication.

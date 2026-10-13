@@ -48,6 +48,8 @@ impl Authority {
 /// `failed` retires only this batch's new invitation/certificate, even after logout;
 /// it must preserve prior enrolled authority and never invalidate another batch.
 pub trait Backend: Send + Sync {
+    /// Reuse the server's existing session inventory notification source.
+    fn session_notifications(&self, _: tokio::sync::watch::Sender<u64>) {}
     /// Retained subscriptions follow host revocation across transport replacement.
     fn setup_cancelled(&self, _: uuid::Uuid) -> Operation<'_, ()> {
         Box::pin(std::future::pending())
@@ -173,9 +175,127 @@ pub struct Bootstrap {
     batches: Arc<Semaphore>,
     deadline: Duration,
     lifecycle: Arc<Lifecycle>,
+    setup: Arc<crate::setup::Status>,
+    pending_setup: Arc<Mutex<HashMap<uuid::Uuid, SetupAttempt>>>,
 }
 
 impl Bootstrap {
+    /// Bind inventory publication to the server's existing watch, with no new task.
+    pub fn session_notifications(&self, notify: tokio::sync::watch::Sender<u64>) {
+        self.backend.session_notifications(notify);
+    }
+    /// Shared retained progress belongs to a host, not a wizard socket.
+    #[must_use]
+    pub fn setup_status(&self) -> Arc<crate::setup::Status> {
+        self.setup.clone()
+    }
+
+    /// Wait for host authority retirement without polling or a wizard lifetime.
+    pub fn setup_cancelled(&self, host: uuid::Uuid) -> Operation<'_, ()> {
+        self.backend.setup_cancelled(host)
+    }
+
+    /// Retry setup for a published shell under a newly authenticated capability.
+    /// The saved coordinates contain no invitation or browser login material.
+    /// # Errors
+    /// Refuses foreign/running attempts, component-off or saturated worker admission.
+    pub fn retry_setup(
+        &self,
+        owner: String,
+        session: Secret,
+        host: uuid::Uuid,
+    ) -> Result<(), Failure> {
+        let activity = self.activity().map_err(Failure::install)?;
+        let permit = self
+            .concurrency
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Failure::install("Host setup is busy. Try again shortly."))?;
+        let saved = {
+            let mut pending = lock(&self.pending_setup);
+            let saved = pending
+                .get_mut(&host)
+                .filter(|saved| saved.owner == owner && !saved.running)
+                .ok_or_else(|| {
+                    Failure::unsupported("This host has no failed setup steps to retry.")
+                })?;
+            self.setup.begin(&owner, host, saved.session_id)?;
+            saved.running = true;
+            saved.clone()
+        };
+        let authority = Authority {
+            owner,
+            batch: saved.batch,
+            session: Some(session),
+        };
+        let runner = self.clone();
+        tokio::spawn(async move {
+            let _activity = activity;
+            let _permit = permit;
+            runner.resume_setup(authority, host, saved).await;
+        });
+        Ok(())
+    }
+
+    async fn resume_setup(&self, authority: Authority, host: uuid::Uuid, saved: SetupAttempt) {
+        use crate::setup::{Stage, State};
+        let mut enabled = self.enabled_changes();
+        let work = async {
+            self.setup
+                .emit(&authority.owner, host, Stage::Install, State::Running, None)?;
+            let channel = saved.installation.resume_session(saved.session_id).await?;
+            self.backend
+                .publish_terminal(
+                    &authority,
+                    host,
+                    saved.session_id,
+                    channel,
+                    saved.installation.ssh_session(),
+                )
+                .await?;
+            let join = self.backend.reissue_invitation(&authority, host).await?;
+            saved
+                .installation
+                .restart_setup(&saved.binary, &join)
+                .await?;
+            drop(join);
+            for stage in [Stage::Install, Stage::Join, Stage::Start] {
+                self.setup
+                    .emit(&authority.owner, host, stage, State::Done, None)?;
+            }
+            self.setup
+                .emit(&authority.owner, host, Stage::Ready, State::Running, None)?;
+            self.complete_setup(&authority, host, &saved.installation, true)
+                .await?;
+            self.setup
+                .emit(&authority.owner, host, Stage::Ready, State::Done, None)
+        };
+        let result = tokio::select! {
+            biased;
+            _ = enabled.changed() => Err(Failure::install("SSH host provisioning is off.")),
+            _ = self.backend.authority_cancelled(&authority) => Err(Failure::unsupported("The setup request is no longer authorized.")),
+            _ = self.backend.setup_cancelled(host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
+            result = tokio::time::timeout(self.deadline, work) => result.unwrap_or_else(|_| Err(Failure::install("Host setup exceeded its time limit."))),
+        };
+        if let Err(failure) = &result {
+            self.backend
+                .record_failure(&saved.target, Some(host), Step::Install, failure);
+            let _ = self.setup.emit(
+                &authority.owner,
+                host,
+                setup_failure_stage(failure),
+                State::Failed,
+                Some(failure),
+            );
+        }
+        let mut pending = lock(&self.pending_setup);
+        if result.is_ok() {
+            pending.remove(&host);
+        } else if let Some(saved) = pending.get_mut(&host) {
+            saved.running = false;
+        }
+    }
+
     /// Prepare only configured public payloads before accepting host setup.
     /// Missing files/tools retain the existing actionable per-host refusal/raw path.
     pub async fn prepare_payloads(&self) {
@@ -213,6 +333,8 @@ impl Bootstrap {
             batches: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_BATCHES)),
             deadline: Duration::from_secs(crate::manifest::ATTEMPT_SECONDS),
             lifecycle: Lifecycle::new(),
+            setup: Arc::default(),
+            pending_setup: Arc::default(),
         }
     }
 
@@ -367,6 +489,7 @@ impl Bootstrap {
                 }),
                 changed,
                 cancel,
+                socket_closed: watch::channel(false).0,
                 _permit: permit,
             }),
         };
@@ -415,6 +538,7 @@ impl Bootstrap {
                 attempt,
                 authentication: None,
                 host_id: None,
+                session_id: None,
             },
         );
         let runner = self.clone();
@@ -437,6 +561,7 @@ impl Bootstrap {
         auth_once: Option<OneUseAuth>,
     ) {
         let mut cancel = batch.cancel.subscribe();
+        let mut socket_closed = batch.socket_closed.subscribe();
         let started = Instant::now();
         let mut resources = AttemptResources::default();
         let cancelled = Failure::install("Host installation was cancelled.");
@@ -445,11 +570,12 @@ impl Bootstrap {
         // Queued plaintext never waits behind the full 180-second install limit.
         // It belongs to this future, not HostState, and drops on timeout/cancellation.
         let queue_limit = auth_once.as_ref().map(OneUseAuth::remaining);
-        let admission = if *cancel.borrow() {
+        let admission = if *cancel.borrow() || *socket_closed.borrow() {
             Err(cancelled.clone())
         } else {
             tokio::select! {
                 _ = cancel.changed() => Err(cancelled.clone()),
+                _ = socket_closed.changed() => Err(cancelled.clone()),
                 permit = async {
                     if let Some(limit) = queue_limit {
                         match tokio::time::timeout(limit, self.concurrency.clone().acquire_owned()).await {
@@ -467,9 +593,25 @@ impl Bootstrap {
         } else if *cancel.borrow() {
             Err(cancelled)
         } else {
-            tokio::select! {
-                _ = cancel.changed() => Err(cancelled),
-                result = tokio::time::timeout(self.deadline, self.run(&batch, &target, attempt, started, &mut resources, auth_once)) => result.unwrap_or_else(|_| Err(Failure::install("Host installation exceeded its time limit."))),
+            let mut closed = batch.socket_closed.subscribe();
+            let mut detached = false;
+            let running = tokio::time::timeout(
+                self.deadline,
+                self.run(&batch, &target, attempt, started, &mut resources, auth_once),
+            );
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.changed() => break Err(cancelled),
+                    _ = self.backend.authority_cancelled(&batch.authority) => break Err(cancelled),
+                    () = async { if *closed.borrow() { return; } let _ = closed.changed().await; }, if !detached => {
+                        let published = lock(&batch.history).metadata.get(&target.id).is_some_and(|m| m.session_id.is_some());
+                        if !published { break Err(cancelled); }
+                        detached = true;
+                    },
+                    result = &mut running => break result.unwrap_or_else(|_| Err(Failure::install("Host installation exceeded its time limit."))),
+                }
             }
         };
         if let Err(failure) = &result {
@@ -481,40 +623,55 @@ impl Bootstrap {
                 .map_or(Step::Check, |event| event.step);
             self.backend
                 .record_failure(&target, resources.host, phase, failure);
-            if let Some(host) = resources.host {
-                let _ = self.backend.retire_failed(&batch.authority, host);
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    self.backend.cleanup_sessions(&batch.authority, host),
-                )
-                .await;
+            if resources.published
+                && let Some(host) = resources.host
+            {
+                let stage = setup_failure_stage(failure);
+                let _ = self.setup.emit(
+                    &batch.authority.owner,
+                    host,
+                    stage,
+                    crate::setup::State::Failed,
+                    Some(failure),
+                );
             }
-            if let Some(installation) = resources.installation {
-                let cleanup =
-                    tokio::time::timeout(Duration::from_secs(30), installation.rollback()).await;
-                if !matches!(cleanup, Ok(Ok(()))) {
-                    if let Some(state) = lock(&batch.states).get_mut(&target.id) {
-                        state.cleanup = Some(installation.cleanup_coordinates());
-                    }
-                    emit(
-                        &batch,
-                        &target,
-                        attempt,
-                        Step::Install,
-                        "Automatic cleanup could not finish. Retry when SSH is available.",
-                        started,
-                        None,
-                    );
+            if !resources.published {
+                if let Some(host) = resources.host {
+                    let _ = self.backend.retire_failed(&batch.authority, host);
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.backend.cleanup_sessions(&batch.authority, host),
+                    )
+                    .await;
                 }
-            }
-            if let Some(host) = resources.host {
-                // Invalidate invitations/partial new authority through the trusted
-                // backend; it must preserve an existing enrolled installation.
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    self.backend.failed(&batch.authority, host),
-                )
-                .await;
+                if let Some(installation) = resources.installation {
+                    let cleanup =
+                        tokio::time::timeout(Duration::from_secs(30), installation.rollback())
+                            .await;
+                    if !matches!(cleanup, Ok(Ok(()))) {
+                        if let Some(state) = lock(&batch.states).get_mut(&target.id) {
+                            state.cleanup = Some(installation.cleanup_coordinates());
+                        }
+                        emit(
+                            &batch,
+                            &target,
+                            attempt,
+                            Step::Install,
+                            "Automatic cleanup could not finish. Retry when SSH is available.",
+                            started,
+                            None,
+                        );
+                    }
+                }
+                if let Some(host) = resources.host {
+                    // Invalidate invitations/partial new authority through the trusted
+                    // backend; it must preserve an existing enrolled installation.
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.backend.failed(&batch.authority, host),
+                    )
+                    .await;
+                }
             }
         }
         let mut states = lock(&batch.states);
@@ -526,6 +683,17 @@ impl Bootstrap {
         }
         // Keep state and completion event ordered: retry after failed cannot race
         // the final event from its predecessor.
+        if resources.published {
+            if let Some(host) = resources.host {
+                let mut pending = lock(&self.pending_setup);
+                if result.is_ok() {
+                    pending.remove(&host);
+                } else if let Some(saved) = pending.get_mut(&host) {
+                    saved.running = false;
+                }
+            }
+            return;
+        }
         match result {
             Ok(()) => emit(
                 &batch,
@@ -704,10 +872,12 @@ impl Bootstrap {
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
             metadata.host_id = Some(join.host);
         }
+        let early = self.backend.early_terminal() && session.session_bridge();
+        // Resolve through the trusted payload source before either early shell or setup.
         let payload = self
             .payload(batch, target, attempt, started, check.architecture)
             .await?;
-        resources.installation = Some(Installation::new(session, target, &join)?);
+        resources.installation = Some(Installation::new(session.clone(), target, &join)?);
         let transaction = resources
             .installation
             .as_ref()
@@ -721,23 +891,93 @@ impl Bootstrap {
             started,
             None,
         );
-        let linger = transaction
-            .stage_and_setup(&payload, &join)
-            .await
-            .map_err(|mut error| {
-                if error.message == "The matching static infraternal binary is unavailable." {
-                    error.missing_binary = Some(Box::new(crate::model::MissingBinary {
-                        architecture: match check.architecture {
-                            crate::probe::Architecture::X86_64 => "x86_64",
-                            crate::probe::Architecture::Aarch64 => "aarch64",
-                        },
-                        path: payload.display().to_string(),
-                    }));
+        let setup = async {
+            if early {
+                let (session_id, channel) = transaction.stage_session(&payload).await?;
+                // Once a real shim exists, rollback must never remove its rendezvous
+                // or stop its shell while publication's durable write is in flight.
+                resources.published = true;
+                if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+                    metadata.session_id = Some(session_id);
                 }
-                error
-            })?;
+                self.setup
+                    .begin(&batch.authority.owner, join.host, session_id)?;
+                lock(&self.pending_setup).insert(
+                    join.host,
+                    SetupAttempt {
+                        owner: batch.authority.owner.clone(),
+                        batch: batch.authority.batch,
+                        target: target.clone(),
+                        session_id,
+                        installation: transaction.clone(),
+                        binary: payload.clone(),
+                        running: true,
+                    },
+                );
+                self.setup.emit(
+                    &batch.authority.owner,
+                    join.host,
+                    crate::setup::Stage::Install,
+                    crate::setup::State::Running,
+                    None,
+                )?;
+                self.backend
+                    .publish_terminal(&batch.authority, join.host, session_id, channel, session)
+                    .await?;
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Done,
+                    "The terminal is ready; setup steps continue.",
+                    started,
+                    None,
+                );
+                tokio::select! {
+                    biased;
+                    _ = self.backend.setup_cancelled(join.host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
+                    result = transaction.setup(&join) => result,
+                }
+            } else {
+                transaction.stage_and_setup(&payload, &join).await
+            }
+        };
+        let linger = setup.await.map_err(|mut error| {
+            if error.message == "The matching static infraternal binary is unavailable." {
+                error.missing_binary = Some(Box::new(crate::model::MissingBinary {
+                    architecture: match check.architecture {
+                        crate::probe::Architecture::X86_64 => "x86_64",
+                        crate::probe::Architecture::Aarch64 => "aarch64",
+                    },
+                    path: payload.display().to_string(),
+                }));
+            }
+            error
+        })?;
+        if early {
+            for stage in [
+                crate::setup::Stage::Install,
+                crate::setup::Stage::Join,
+                crate::setup::Stage::Start,
+            ] {
+                self.setup.emit(
+                    &batch.authority.owner,
+                    join.host,
+                    stage,
+                    crate::setup::State::Done,
+                    None,
+                )?;
+            }
+            self.setup.emit(
+                &batch.authority.owner,
+                join.host,
+                crate::setup::Stage::Ready,
+                crate::setup::State::Running,
+                None,
+            )?;
+        }
         drop(join); // Capability plaintext is erased immediately after its stdin handoff.
-        if !linger {
+        if !linger && !early {
             emit(
                 batch,
                 target,
@@ -751,40 +991,75 @@ impl Bootstrap {
         let host = resources
             .host
             .ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Facts,
-            "Waiting for authenticated host facts.",
-            started,
-            None,
-        );
-        let (release, approved) = tokio::sync::oneshot::channel();
-        tokio::try_join!(
-            async {
-                self.backend.connected_facts(&batch.authority, host).await?;
-                emit(
-                    batch,
-                    target,
-                    attempt,
-                    Step::Connect,
-                    "Checking a terminal through the infraternal agent.",
-                    started,
-                    None,
-                );
-                self.backend.terminal_canary(&batch.authority, host).await?;
-                release.send(()).map_err(|()| {
-                    Failure::install("The host commit command ended before terminal proof.")
-                })
-            },
-            transaction.commit_after(approved),
-        )?;
-        // Completion also discharges durable retirement ownership. Reporting
-        // Done without that acknowledgement would promise authority that a
-        // subsequent startup correctly retires as unfinished provisioning.
-        self.backend.completed(&batch.authority, host).await?;
+        if !early {
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Facts,
+                "Waiting for authenticated host facts.",
+                started,
+                None,
+            );
+        }
+        if !early {
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Connect,
+                "Checking a terminal through the infraternal agent.",
+                started,
+                None,
+            );
+        }
+        self.complete_setup(&batch.authority, host, transaction, early)
+            .await?;
+        if early {
+            self.setup.emit(
+                &batch.authority.owner,
+                host,
+                crate::setup::Stage::Ready,
+                crate::setup::State::Done,
+                None,
+            )?;
+        }
         Ok(())
+    }
+
+    /// Initial setup and retry share the same admitted proof/commit path.
+    /// Retiring host authority cancels both proof and remote commit together.
+    async fn complete_setup(
+        &self,
+        authority: &Authority,
+        host: uuid::Uuid,
+        installation: &Installation,
+        published: bool,
+    ) -> Result<(), Failure> {
+        let proof = async {
+            let (release, approved) = tokio::sync::oneshot::channel();
+            tokio::try_join!(
+                async {
+                    self.backend.connected_facts(authority, host).await?;
+                    self.backend.terminal_canary(authority, host).await?;
+                    release.send(()).map_err(|()| {
+                        Failure::install("The host commit command ended before terminal proof.")
+                    })
+                },
+                installation.commit_after(approved),
+            )?;
+            // Completion discharges durable retirement only after proof and commit.
+            self.backend.completed(authority, host).await
+        };
+        if published {
+            tokio::select! {
+                biased;
+                _ = self.backend.setup_cancelled(host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
+                result = proof => result,
+            }
+        } else {
+            proof.await
+        }
     }
 
     /// Confirm only this failed attempt's public observation; the caller supplies
@@ -1015,6 +1290,28 @@ async fn restore_previous(
 struct AttemptResources {
     installation: Option<Installation>,
     host: Option<uuid::Uuid>,
+    published: bool,
+}
+
+// Retain only failed live-session transaction coordinates; success removes the
+// record so its SSH master and ephemeral authentication material can retire.
+#[derive(Clone)]
+struct SetupAttempt {
+    owner: String,
+    batch: uuid::Uuid,
+    target: Target,
+    session_id: uuid::Uuid,
+    installation: Installation,
+    binary: std::path::PathBuf,
+    running: bool,
+}
+fn setup_failure_stage(failure: &Failure) -> crate::setup::Stage {
+    match failure.failed_step {
+        Some(InstallStep::Join) => crate::setup::Stage::Join,
+        Some(InstallStep::Start) => crate::setup::Stage::Start,
+        Some(InstallStep::Readiness) => crate::setup::Stage::Ready,
+        _ => crate::setup::Stage::Install,
+    }
 }
 
 struct PendingFresh {
@@ -1038,6 +1335,7 @@ struct HostMetadata {
     attempt: u32,
     authentication: Option<Authentication>,
     host_id: Option<uuid::Uuid>,
+    session_id: Option<uuid::Uuid>,
 }
 struct History {
     sequence: u64,
@@ -1051,10 +1349,11 @@ pub(crate) struct BatchInner {
     history: Mutex<History>,
     changed: watch::Sender<u64>,
     pub(crate) cancel: watch::Sender<bool>,
+    socket_closed: watch::Sender<bool>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-/// Socket lifetime cancels work; tasks retain state only until cleanup finishes.
+/// Socket closure cancels unpublished work; published terminals keep bounded setup alive.
 pub struct Batch {
     inner: Arc<BatchInner>,
 }
@@ -1080,7 +1379,7 @@ impl Batch {
 }
 impl Drop for Batch {
     fn drop(&mut self) {
-        self.inner.cancel.send_replace(true);
+        self.inner.socket_closed.send_replace(true);
     }
 }
 
@@ -1144,7 +1443,7 @@ fn emit_with_leftovers(
         leftovers,
         authentication: metadata.authentication,
         host_id: metadata.host_id,
-        session_id: None,
+        session_id: metadata.session_id,
         failure,
     });
     batch.changed.send_replace(sequence);
@@ -1181,6 +1480,13 @@ impl infraternal_plugin_api::ComponentPlugin for Bootstrap {
     fn set_enabled(&self, enabled: bool) -> infraternal_plugin_api::PluginOperation<'_, ()> {
         Box::pin(async move {
             self.lifecycle.set_enabled(enabled).await;
+            if !enabled {
+                lock(&self.pending_setup).clear();
+                self.backend
+                    .stop()
+                    .await
+                    .map_err(|_| "SSH terminal retirement failed.")?;
+            }
             Ok(())
         })
     }

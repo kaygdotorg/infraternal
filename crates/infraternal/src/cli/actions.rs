@@ -622,7 +622,6 @@ fn ssh_askpass_action() -> ActionDefinition {
     .with_cli_handler(CliHandler::SshAskpass)
 }
 
-
 /// Runs the private session bridge only after the generated CLI validates its state path.
 #[cfg(all(feature = "ssh", feature = "remote"))]
 fn ssh_session_action() -> ActionDefinition {
@@ -635,7 +634,10 @@ fn ssh_session_action() -> ActionDefinition {
             "Use only from the authenticated SSH bootstrap process.",
         ],
         JsonSchema::object(
-            [("state".to_owned(), JsonSchema::string("Private session state directory."))],
+            [(
+                "state".to_owned(),
+                JsonSchema::string("Private session state directory."),
+            )],
             ["state".to_owned()],
         ),
         JsonSchema::command_result(),
