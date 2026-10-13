@@ -806,6 +806,9 @@ async fn run_actor(
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
     let mut connection: Option<AgentConnection> = None;
+    // Keep the old SSH channel until the new transport proves writer replay.
+    // A failed replacement can still reattach the same shim through SSH.
+    let mut fallback: Option<AgentConnection> = None;
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
@@ -870,13 +873,10 @@ async fn run_actor(
                 tokio::time::sleep(backoff).await;
             }
             first_attempt = false;
-            if let Ok(mut fresh) = source.connect().await {
-                if !reattach_all(&mut fresh, &mut attachments, &mut routes).await {
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                    routes.clear();
-                    cleanup_connection(fresh).await;
-                    continue;
-                }
+            if let Some(fresh) =
+                connect_with_fallback(&mut source, &mut attachments, &mut routes, &mut fallback)
+                    .await
+            {
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
@@ -967,7 +967,7 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() {
-                    connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                    retain_fallback(old, &mut fallback, &mut routes, &mut pending).await;
                     session_inventory.send_replace(SessionInventoryState::Unavailable);
                 }
             }
@@ -1047,6 +1047,7 @@ async fn run_actor(
                 if let Incoming::SessionInventory(ids) = incoming {
                     session_inventory
                         .send_replace(SessionInventoryState::Available(Arc::from(ids)));
+                    retire_fallback(&attachments, &mut fallback).await;
                     continue;
                 }
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
@@ -1060,8 +1061,73 @@ async fn run_actor(
                         first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                 }
+                retire_fallback(&attachments, &mut fallback).await;
             }
         }
+    }
+}
+
+async fn connect_with_fallback(
+    source: &mut Source,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    fallback: &mut Option<AgentConnection>,
+) -> Option<AgentConnection> {
+    // A replacement that dies before its first writer Ack has consumed its
+    // admission. Restore SSH before waiting for an unrelated future admission.
+    #[cfg(feature = "remote")]
+    if fallback.is_some() && matches!(source, Source::Remote { pending: None, .. }) {
+        return restore_fallback(fallback, attachments, routes).await;
+    }
+    if let Ok(mut fresh) = source.connect().await {
+        if reattach_all(&mut fresh, attachments, routes).await {
+            return Some(fresh);
+        }
+        routes.clear();
+        cleanup_connection(fresh).await;
+    }
+    restore_fallback(fallback, attachments, routes).await
+}
+
+async fn retain_fallback(
+    old: AgentConnection,
+    fallback: &mut Option<AgentConnection>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+) {
+    routes.clear();
+    for (_, call) in pending.drain() {
+        call.refuse(AgentError::Unavailable);
+    }
+    if let Some(previous) = fallback.replace(old) {
+        cleanup_connection(previous).await;
+    }
+}
+
+async fn restore_fallback(
+    fallback: &mut Option<AgentConnection>,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+) -> Option<AgentConnection> {
+    let mut old = fallback.take()?;
+    if reattach_all(&mut old, attachments, routes).await {
+        Some(old)
+    } else {
+        cleanup_connection(old).await;
+        None
+    }
+}
+
+async fn retire_fallback(
+    attachments: &HashMap<u64, AttachmentState>,
+    fallback: &mut Option<AgentConnection>,
+) {
+    if attachments
+        .values()
+        .all(|attachment| !attachment.awaiting_ack)
+        && let Some(old) = fallback.take()
+    {
+        cleanup_connection(old).await;
     }
 }
 
