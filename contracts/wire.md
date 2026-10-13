@@ -288,9 +288,11 @@ frames are binary, because they carry each keystroke and each output chunk.
 - WebSocket admission reserves the 16-per-user and 256-global permits at
   upgrade, including sockets without Hello. Hello/Resume and incomplete wire
   frames have five-second completion deadlines; writes are bounded at one
-  second. After Hello, an empty receive buffer waits without a liveness timer:
-  healthy idle terminals have zero scheduler activations [41]. The former
-  thirty-second idle-read deadline caused periodic disconnect/reconnect work.
+  second. After Hello, an empty receive buffer has no idle-read deadline.
+  Active terminal routes use the bounded liveness probes in §9 [D265];
+  these supersede the former zero-idle-probe rule. An unused host route has
+  no probe timer. The former thirty-second idle-read deadline caused periodic
+  disconnect/reconnect work.
   Axum reassembles RFC WebSocket fragments internally; unseen post-Hello
   fragments are bounded by the 4 MiB message/frame limit, admission permits,
   and live authority expiry/revocation, rather than an idle-read timer. A begun
@@ -312,3 +314,40 @@ frames are binary, because they carry each keystroke and each output chunk.
 `Hello.version` is 1. New features use `caps` bits. A side sends a new frame
 type only if the peer announced the matching cap. Frames `0xF0–0xFF` never
 change.
+
+
+## 9. Route liveness (D265, #199)
+
+Use the existing `Ping`/`Pong` layouts in both directions. With active terminal
+routes the server probes the browser control stream, the shared infraternal
+daemon control stream and each attached terminal stream. Terminal-stream Pong
+on leg B follows the selected shim writer's existing `InputStateRequest` fence;
+a daemon control reply alone never establishes session readiness. One shim
+fence may be in flight per data link and is discarded when that link is parked.
+
+Probe replies echo nonce and timestamp. Only a new correlated reply renews a
+route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
+Probes are pipelined with bounded state, so detecting a broken direction does
+not first wait for another full request/response cycle. The initial RTT is
+unknown; after sampling, expiry follows the measured RTT with a small scheduling
+allowance. Liveness traffic must not drive the latency pill or terminal painter
+at the probe frequency. Initial unpainted windows remain connecting; previously
+confirmed windows are monitored continuously through reconnect and replay.
+
+A stalled session attachment closes transiently and reattaches the same stream
+on the healthy browser connection. Its durable writer retains acknowledged and
+unacknowledged input. A stalled browser route becomes disconnected before the
+client requests WebSocket closure: an intermediary need not deliver a close
+event. Replacement sockets ignore all late events from the retired route. A
+shared daemon link is replaced independently of graceful child reaping; session
+shims remain alive. None of these paths ends a session or bypasses authority
+expiry/revocation. An existing local session does not require the CA to be
+unlocked; connection readiness follows painted, session-bound replay rather
+than inventory membership.
+
+The client's first WebSocket message contains Hello and, when resuming, its
+adjacent Resume. Resume capabilities never enter URLs or HTTP headers. Measure
+reused/resumed paths against RTT + 50 ms, and fresh TCP/TLS/upgrade paths against
+3 × RTT + 50 ms, through real TLS on the pinned VM. Preserve the last screen and
+keep input typed during recovery. Logs, screenshots and measurements belong on
+the issue [D262].
