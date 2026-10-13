@@ -2625,3 +2625,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        code cost) and decided after measurement. Rejected for now: a
        second warm connection per open tab (an idle socket per tab works
        against D260's lean principle).
+266. **App windows are captured at the source's full rate (owner,
+     2026-10-13, #146; extends D232, D254):** "the window that is being
+     captured must be captured at the max frame rate." Capture never caps
+     a window below what it draws (120 Hz on a ProMotion Mac); the viewer
+     shows it at its own display's rate. Safari pages run near 60 Hz, but
+     many people view infraternal in Chromium or Firefox, which can present
+     120 Hz, so measurements and budgets cover Chromium, Firefox and Safari,
+     not Safari alone. Lowering the rate of windows nobody is watching, and
+     combining windows into one stream, are measured before any decision;
+     neither may lower the rate of a window being captured for a viewer.
