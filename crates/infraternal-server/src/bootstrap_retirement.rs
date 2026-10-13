@@ -65,9 +65,11 @@ impl EnrollmentStore {
     /// Returns storage failure without partially retiring the intent journal.
     pub(crate) async fn retire_unfinished_bootstraps(&self) -> Result<(), sqlx::Error> {
         let mut transaction = self.0.begin().await?;
-        sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, MAX(created_at, unixepoch())) WHERE id IN (SELECT host_id FROM remote_bootstrap_retirement_intents)")
+        sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, MAX(created_at, unixepoch())) WHERE id IN (SELECT host_id FROM remote_bootstrap_retirement_intents) AND NOT EXISTS(SELECT 1 FROM terminal_sessions s WHERE s.remote_host_id=remote_hosts.id AND s.user_id=remote_hosts.owner_id AND s.closed_at IS NULL)")
             .execute(&mut *transaction).await?;
-        sqlx::query("DELETE FROM remote_bootstrap_retirement_intents")
+        // A published session belongs to its person across server restart.
+        // Keep its setup obligation; never apply unpublished-host retirement.
+        sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id IN (SELECT id FROM remote_hosts WHERE revoked_at IS NOT NULL)")
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await
@@ -177,6 +179,24 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+    #[tokio::test]
+    async fn startup_preserves_a_published_live_session_and_its_setup_intent() {
+        let (store, pool, host) = enrolled().await;
+        intent(&store, host).await;
+        let session = Uuid::new_v4();
+        sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) VALUES(?,'owner',100,100,?)")
+            .bind(session.as_bytes().as_slice()).bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        store.retire_unfinished_bootstraps().await.unwrap();
+        assert_eq!(store.admit(&[1; 32], 100).await.unwrap().host, host);
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=?)",
+        )
+        .bind(host.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(pending, "published setup remains recoverable after restart");
     }
 }
 
