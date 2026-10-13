@@ -71,14 +71,16 @@ impl PeerRouting {
             .await
             .get(&id)
             .filter(|host| host.authority.permits())
-            .and_then(|host| host.peer);
+            .and_then(|host| host.peer.map(|peer| (peer, host.caps)));
         let factory = self
             .factory
             .upgrade()
             .and_then(|factory| factory.lock().ok().and_then(|factory| factory.clone()));
         match (logical, factory) {
-            (Some(logical), Some(factory)) => {
-                factory.bindings.route_peer(logical, alternate).map(Some)
+            (Some((logical, caps)), Some(factory)) => {
+                let route = factory.bindings.route_peer(logical, alternate)?;
+                route.set_backup(caps & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0);
+                Ok(Some(route))
             }
             _ => Ok(None),
         }
@@ -89,7 +91,7 @@ struct Host {
     ip: std::net::IpAddr,
     channel: Option<Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>>,
     uid: u32,
-    server_paths: bool,
+    caps: u64,
     authority: AuthorityGuard,
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
@@ -216,7 +218,8 @@ impl RemoteHosts {
                 id: id.to_string(),
                 ip: host.ip,
                 server: false,
-                server_paths: host.server_paths,
+                server_paths: host.caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+                    != 0,
                 actor: host.actor.clone(),
                 authority: Some(host.authority.clone()),
                 listeners: None,
@@ -250,7 +253,7 @@ impl RemoteHosts {
         }
         let generation = Uuid::new_v4();
         let peer = link.peer_address();
-        let server_paths = link.supports_server_paths();
+        let caps = link.peer_capabilities();
         if let Some(host) = hosts.get_mut(&id) {
             if host.uid != uid {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -262,7 +265,7 @@ impl RemoteHosts {
             // not alter a valid actor or cancel its existing retirement waiter.
             host.peer = peer;
             host.generation = generation;
-            host.server_paths = server_paths;
+            host.caps = caps;
             host.retirement =
                 self.retirement(id, generation, authority.clone(), host.actor.clone());
             host.authority = authority;
@@ -290,7 +293,7 @@ impl RemoteHosts {
                     },
                     channel: None,
                     uid,
-                    server_paths,
+                    caps,
                     authority,
                     actor,
                     accepts,
@@ -322,7 +325,7 @@ impl RemoteHosts {
             (host.actor.clone(), host.generation)
         };
         let peer = link.peer_address();
-        let server_paths = link.supports_server_paths();
+        let caps = link.peer_capabilities();
         let (activated, activation) = tokio::sync::oneshot::channel();
         link.activation(activated)?;
         actor
@@ -344,7 +347,7 @@ impl RemoteHosts {
         let generation = Uuid::new_v4();
         host.peer = peer;
         host.generation = generation;
-        host.server_paths = server_paths;
+        host.caps = caps;
         host.retirement = self.retirement(id, generation, authority.clone(), actor);
         host.authority = authority;
         // A parked underlay is a path replacement, not a new discovery source.

@@ -37,7 +37,7 @@ pub(crate) struct RemoteLink {
     transport: LinkTransport,
     authority: Option<crate::remote_guard::AuthorityGuard>,
     renewal: std::sync::atomic::AtomicBool,
-    server_paths: bool,
+    peer_caps: u64,
     greeting_sent: bool,
     priming: Arc<std::sync::Mutex<Option<crate::remote_standby::Priming>>>,
 }
@@ -183,7 +183,7 @@ impl RemoteLink {
         let mut receive = Receive::default();
         let (prefix, greeting_sent) =
             greeting(&channel, &mut receive, admission.as_deref_mut()).await?;
-        let server_paths = supports_server_paths(&prefix);
+        let peer_caps = peer_caps(&prefix);
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
         Ok(Self {
@@ -194,7 +194,7 @@ impl RemoteLink {
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            server_paths,
+            peer_caps,
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(
                 admission.and_then(|admission| admission.priming.take()),
@@ -217,7 +217,7 @@ impl RemoteLink {
         let mut receive = Receive::default();
         let (prefix, greeting_sent) =
             greeting(control.as_ref(), &mut receive, admission.as_deref_mut()).await?;
-        let server_paths = supports_server_paths(&prefix);
+        let peer_caps = peer_caps(&prefix);
         let hello = infraternal_protocol::decode_muxed_frame(&prefix).map_err(io::Error::other)?;
         remote_quic::negotiate_binding(&connection, &hello.frame)?;
         let (output, bulk) = mpsc::channel(32);
@@ -254,7 +254,7 @@ impl RemoteLink {
             }),
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            server_paths,
+            peer_caps,
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(
                 admission.and_then(|admission| admission.priming.take()),
@@ -555,8 +555,12 @@ impl RemoteLink {
         }
     }
 
+    pub(crate) fn peer_capabilities(&self) -> u64 {
+        self.peer_caps
+    }
+    #[cfg(test)]
     pub(crate) fn supports_server_paths(&self) -> bool {
-        self.server_paths
+        self.peer_caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS != 0
     }
 
     pub(crate) fn supports_renewal(&self) -> bool {
@@ -651,9 +655,16 @@ impl RemoteLink {
     }
 }
 
-fn supports_server_paths(prefix: &[u8]) -> bool {
-    matches!(infraternal_protocol::decode_muxed_frame(prefix), Ok(infraternal_protocol::DecodedMuxedFrame { frame: Frame::Hello { caps, .. }, .. })
-        if caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS != 0)
+fn peer_caps(prefix: &[u8]) -> u64 {
+    match infraternal_protocol::decode_muxed_frame(prefix) {
+        Ok(infraternal_protocol::DecodedMuxedFrame {
+            frame: Frame::Hello {
+                version: 1, caps, ..
+            },
+            ..
+        }) => caps,
+        _ => 0,
+    }
 }
 
 /// A ledger-admitted candidate may prove liveness without replacing the host.

@@ -117,7 +117,8 @@ impl Admission {
                             version: 1,
                             caps: infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
                                 | infraternal_plugin_api::channel::REMOTE_STANDBY
-                                | if prime { infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS } else { 0 },
+                                | if prime { infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS } else { 0 }
+                                | if channel.native_stream_id().is_some() { infraternal_plugin_api::channel::REMOTE_PATH_BACKUP } else { 0 },
                             client_info: "infraternal server",
                         },
                     )

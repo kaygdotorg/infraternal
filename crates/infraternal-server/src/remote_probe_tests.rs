@@ -57,7 +57,8 @@ async fn quic_candidate_proof_waits_for_hello_and_preserves_its_suffix() {
         &Frame::Hello {
             version: 1,
             caps: remote_quic::REMOTE_WRITER_BINDING
-                | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS,
+                | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+                | infraternal_plugin_api::channel::REMOTE_PATH_BACKUP,
             client_info: "fixture",
         },
         &mut combined,
@@ -76,6 +77,10 @@ async fn quic_candidate_proof_waits_for_hello_and_preserves_its_suffix() {
     channel.write(&combined).await.unwrap();
     let link = constructor.await.unwrap().unwrap();
     assert!(link.supports_server_paths());
+    assert_ne!(
+        link.peer_capabilities() & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP,
+        0
+    );
     let mut bytes = BytesMut::new();
     let mut scratch = vec![0; 4096];
     link.read(&mut bytes, &mut scratch).await.unwrap();
@@ -168,6 +173,10 @@ async fn tls_candidate_proof_waits_for_hello_and_preserves_its_suffix() {
     client.channel.write(&combined).await.unwrap();
     let link = accepting.await.unwrap().unwrap();
     assert!(!link.supports_server_paths(), "old Hello stays compatible");
+    assert_eq!(
+        link.peer_capabilities() & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP,
+        0
+    );
     let mut bytes = BytesMut::new();
     let mut scratch = vec![0; 4096];
     link.read(&mut bytes, &mut scratch).await.unwrap();
