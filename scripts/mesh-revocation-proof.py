@@ -87,8 +87,13 @@ async def campaign(args):
         initial_versions = {}
         locks = [asyncio.Lock() for _ in nodes]
         async def request(index, value):
+            def observe():
+                reply = proof.request(nodes[index], value)
+                if isinstance(reply, dict):
+                    reply['_observed_ns'] = time.monotonic_ns()
+                return reply
             async with locks[index]:
-                return await asyncio.wait_for(asyncio.to_thread(proof.request, nodes[index], value), 10)
+                return await asyncio.wait_for(asyncio.to_thread(observe), 10)
         revoked = asyncio.Event()
         frames_log = (args.evidence/'control-frames.jsonl').open('w')
         async def apply(frame):
@@ -96,7 +101,7 @@ async def campaign(args):
             index=frame['node'];chunk=frame['chunk']
             await asyncio.sleep(args.rtt_ms/2000)
             reply=await request(index, chunk)
-            frames_log.write(json.dumps({'node':index,'version':chunk['version'],'index':chunk['index'],'last':chunk['last'],'dispatched_ns':dispatched_ns,'apply_us':reply['apply_us'],'at_ns':time.monotonic_ns()})+'\n');frames_log.flush()
+            frames_log.write(json.dumps({'node':index,'version':chunk['version'],'index':chunk['index'],'last':chunk['last'],'dispatched_ns':dispatched_ns,'apply_us':reply['apply_us'],'at_ns':reply['_observed_ns']})+'\n');frames_log.flush()
             if chunk['last']:
                 if index not in initialized:
                     initialized.add(index);installed[index]=chunk['addresses'];initial_versions[index]=chunk['version']
@@ -104,13 +109,11 @@ async def campaign(args):
                     # Ignore startup replays and unrelated completed frames. The
                     # final acknowledgment must correspond to actual key removal.
                     if args.change in ('RuleRemoval','DefaultTightening') or len(await request(index, 'stats')) == 2 + args.extra_members:
-                        applied.setdefault(index, time.monotonic_ns())
+                        applied.setdefault(index, reply['_observed_ns'])
             if index == 0 and chunk['last']:
-                if args.nf_tables:
-                    for tool in ('iptables-nft','ip6tables-nft'):
-                        for chain in ('IFM_IN','IFM_OUT'): proof.run(tool,'-F',chain)
-                else:
-                    for chain in ('incoming','outgoing'): proof.run('nft','flush','chain','inet','infraternal_mesh',chain)
+                # Independent receiving enforcement needs the sender's filter
+                # removed. Its subprocesses cannot stall other completion records.
+                await asyncio.to_thread(fixture.remove_sender_filter, True)
             await asyncio.sleep(args.rtt_ms/2000)
             await send({'type':'Ack','call':frame['call'],'reply':{'applied':reply['applied'],'version':chunk['version']}})
         async def dispatch():
