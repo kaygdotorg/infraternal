@@ -49,7 +49,7 @@ struct ListenerFactory {
     destinations: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
     limits: Arc<crate::remote_accept::Limits>,
     /// Leased destinations join the agent address's endpoint (one CID space).
-    bindings: Arc<crate::remote_bindings::Bindings>,
+    bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
 }
 struct Host {
     ip: std::net::IpAddr,
@@ -369,7 +369,7 @@ async fn reserve_transports(
 ) -> io::Result<(
     quinn::Endpoint,
     TcpListener,
-    Arc<crate::remote_bindings::Bindings>,
+    Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
 )> {
     use quinn::Runtime as _;
     let attempts = if address.port() == 0 { 16 } else { 1 };
@@ -379,7 +379,7 @@ async fn reserve_transports(
         on_reserved(reserved)?;
         match std::net::UdpSocket::bind(reserved) {
             Ok(socket) => {
-                let bindings = crate::remote_bindings::Bindings::new(
+                let bindings = infraternal_plugin_remote::remote_bindings::Bindings::new(
                     quinn::TokioRuntime.wrap_udp_socket(socket)?,
                 );
                 let endpoint = quinn::Endpoint::new_with_abstract_socket(
@@ -401,7 +401,7 @@ async fn reserve_transports(
 /// A leased mesh destination: its UDP socket joins the shared endpoint and its
 /// TCP fallback listener is its own. Dropping it releases both.
 pub(crate) struct LeasedListener {
-    _binding: crate::remote_bindings::LeasedBinding,
+    _binding: infraternal_plugin_remote::remote_bindings::LeasedBinding,
     tasks: JoinSet<()>,
     #[cfg(test)]
     address: SocketAddr,
@@ -476,7 +476,7 @@ impl AdditionalListener {
 pub(crate) struct RemoteListeners {
     tasks: JoinSet<()>,
     endpoint: quinn::Endpoint,
-    bindings: Arc<crate::remote_bindings::Bindings>,
+    bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
     #[cfg(test)]
     pub(crate) diagnostic_hosts: RemoteHosts,
 }

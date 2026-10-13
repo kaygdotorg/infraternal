@@ -43,7 +43,7 @@ struct Lease {
 }
 
 /// The primary socket plus leased destination sockets behind one endpoint.
-pub(crate) struct Bindings {
+pub struct Bindings {
     primary: Arc<dyn AsyncUdpSocket>,
     leases: Mutex<Arc<Vec<Lease>>>,
     generation: AtomicU64,
@@ -64,7 +64,7 @@ impl fmt::Debug for Bindings {
 }
 
 /// Removes its socket and every reply route through it when dropped.
-pub(crate) struct LeasedBinding {
+pub struct LeasedBinding {
     bindings: Arc<Bindings>,
     id: u64,
 }
@@ -75,7 +75,9 @@ impl Drop for LeasedBinding {
 }
 
 impl Bindings {
-    pub(crate) fn new(primary: Arc<dyn AsyncUdpSocket>) -> Arc<Self> {
+    /// Wrap the endpoint's primary (agent address) socket.
+    #[must_use]
+    pub fn new(primary: Arc<dyn AsyncUdpSocket>) -> Arc<Self> {
         Arc::new(Self {
             primary,
             leases: Mutex::default(),
@@ -89,10 +91,10 @@ impl Bindings {
     }
 
     /// Add one bound destination socket; the endpoint driver is woken to poll it.
-    pub(crate) fn lease(
-        self: &Arc<Self>,
-        socket: Arc<dyn AsyncUdpSocket>,
-    ) -> io::Result<LeasedBinding> {
+    ///
+    /// # Errors
+    /// Returns the socket's local-address error.
+    pub fn lease(self: &Arc<Self>, socket: Arc<dyn AsyncUdpSocket>) -> io::Result<LeasedBinding> {
         let ip = socket.local_addr()?.ip().to_canonical();
         let id = self.next_lease.fetch_add(1, Ordering::Relaxed);
         {
