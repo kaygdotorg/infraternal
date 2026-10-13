@@ -110,14 +110,7 @@ async fn execute_inner(
         .stderr
         .take()
         .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
-    let negotiated = matches!(&input, Input::Negotiated { .. });
-    let payload_ack = matches!(
-        &input,
-        Input::Negotiated {
-            payload_ack: true,
-            ..
-        }
-    );
+    let (negotiated, payload_ack, declared) = transfer_options(&input);
     let (choice, selected) = tokio::sync::oneshot::channel();
     let (ready, received) = tokio::sync::oneshot::channel();
     let operation = async {
@@ -126,7 +119,15 @@ async fn execute_inner(
             let (stdout, stderr) = tokio::try_join!(
                 async {
                     if negotiated {
-                        negotiated_output(stdout, stdout_limit, choice, ready, payload_ack).await
+                        negotiated_output(
+                            stdout,
+                            stdout_limit,
+                            choice,
+                            ready,
+                            payload_ack,
+                            declared,
+                        )
+                        .await
                     } else {
                         bounded(stdout, stdout_limit).await
                     }
@@ -253,6 +254,19 @@ async fn bounded(
     Ok(bytes)
 }
 
+/// Declared public sources always require verified staging before private
+/// stdin, even if a caller omitted the older optional acknowledgment flag.
+fn transfer_options(input: &Input<'_>) -> (bool, bool, Option<TransferChoice>) {
+    match input {
+        Input::Negotiated {
+            payload_ack,
+            declared,
+            ..
+        } => (true, *payload_ack || declared.is_some(), *declared),
+        _ => (false, false, None),
+    }
+}
+
 /// Keep commit release and ordinary input under the same bounded child lifecycle.
 async fn write_input(
     mut stdin: tokio::process::ChildStdin,
@@ -267,9 +281,16 @@ async fn write_input(
             zstd,
             invitation,
             payload_ack,
-            declared: _,
+            declared,
         } => {
-            let payload = match selected.await.ok().flatten() {
+            // Only public content can flow before the fixed selection receipt.
+            // The reader independently checks that it names this exact source.
+            let selection = if declared.is_some() {
+                declared
+            } else {
+                selected.await.ok().flatten()
+            };
+            let payload = match selection {
                 Some(TransferChoice::Raw) => Some(raw),
                 Some(TransferChoice::Gzip) => Some(PayloadInput::Bytes(gzip.ok_or_else(|| {
                     Failure::install("The requested payload encoding is unavailable.")
@@ -285,7 +306,7 @@ async fn write_input(
             }
             // A stdio-based bounded reader can discard bytes beyond the payload.
             // Its verified receipt proves that reader exited before private input.
-            if payload_ack && received.await.is_err() {
+            if (payload_ack || declared.is_some()) && received.await.is_err() {
                 return Ok(());
             }
             stdin
@@ -339,6 +360,7 @@ async fn negotiated_output(
     choice: tokio::sync::oneshot::Sender<Option<TransferChoice>>,
     ready: tokio::sync::oneshot::Sender<()>,
     payload_ack: bool,
+    declared: Option<TransferChoice>,
 ) -> Result<Vec<u8>, Failure> {
     let mut prefix = Vec::new();
     let mut lines = 0;
@@ -361,6 +383,15 @@ async fn negotiated_output(
     let selected = prefix
         .strip_prefix(b"STEP upload\n")
         .and_then(TransferChoice::parse);
+    if let (Some(expected), Some(selected)) = (declared, selected)
+        && expected.word() != selected.word()
+    {
+        // Dropping readiness closes the private-input barrier. A remote's
+        // different encoder cannot reinterpret bytes already sent publicly.
+        return Err(Failure::install(
+            "The payload transfer selection was invalid.",
+        ));
+    }
     let _ = choice.send(selected);
     if payload_ack && selected.is_some() {
         // Read only the public readiness receipt; leave final setup output in
