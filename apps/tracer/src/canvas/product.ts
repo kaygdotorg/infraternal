@@ -130,7 +130,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       for (const host of hosts) {
         if (!host.hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
         sessions.registerHost({ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });
-        canvas.cx.win.open(host.hostId);
+        if (host.sessionId) {
+          inventory.attach(host.hostId, host.sessionId);
+          canvas.cx.win.openSession(host.hostId, host.sessionId);
+        } else canvas.cx.win.open(host.hostId);
         applyIdentities([{ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
       }
     } },

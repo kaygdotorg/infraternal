@@ -94,6 +94,8 @@ export interface ProvisioningService {
 export interface EnrolledHost {
   /** The admitted remote host UUID returned by the server. */
   hostId?: string;
+  /** An already-running shim session; opening the canvas must attach to it. */
+  sessionId?: string;
   address?: string;
   /** Stable key in the wizard: the discovered id or the typed host. */
   id: string;

@@ -634,7 +634,7 @@ export class Wizard {
   }
 
   private enrolledOf(job: Job): EnrolledHost {
-    return { id: job.entry.id, ...(job.view.hostId ? { hostId: job.view.hostId } : {}), address: this.addressText(job.entry), name: job.entry.label, user: job.entry.user, os: job.entry.os, mode: job.root ? "root" : "rootless" };
+    return { id: job.entry.id, ...(job.view.hostId ? { hostId: job.view.hostId } : {}), ...(job.view.sessionId ? { sessionId: job.view.sessionId } : {}), address: this.addressText(job.entry), name: job.entry.label, user: job.entry.user, os: job.entry.os, mode: job.root ? "root" : "rootless" };
   }
 
   /** Runs one attempt for a failed host again: on its open run, or on a fresh run when that ended. */

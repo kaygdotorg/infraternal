@@ -244,3 +244,12 @@ describe("leftovers pause (#169)", () => {
     expect(awaitingFresh(fold(signedIn, bare))).toBe(false);
   });
 });
+
+test("early terminal publication selects only its canonical host-bound shim session", () => {
+  const host = "12345678-1234-1234-1234-123456789abc";
+  const session = "abcdefab-1234-1234-1234-123456789abc";
+  expect(fold(event("done", { host_id: host, session_id: session })).sessionId).toBe(session);
+  expect(fold(event("connect", { host_id: host, session_id: session })).sessionId).toBeUndefined();
+  expect(fold(event("done", { host_id: "host", session_id: session })).sessionId).toBeUndefined();
+  expect(fold(event("done", { host_id: host, session_id: "shell" })).sessionId).toBeUndefined();
+});

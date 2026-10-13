@@ -85,6 +85,8 @@ export interface BootstrapEvent {
   authentication?: AuthenticationInfo;
   /** The server-owned admitted host UUID, present only after successful installation. */
   host_id?: string;
+  /** Existing shim-owned session published before background setup finishes (D255). */
+  session_id?: string;
 }
 
 /** A refused command (`{"error":{...}}`) or malformed request (`{"error":"..."}`). No attempt is created. */
@@ -169,7 +171,10 @@ function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined 
   if (typeof sequence !== "number" || typeof target !== "string" || typeof attempt !== "number" || typeof step !== "string" || !STEPS.includes(step)
     || typeof message !== "string" || typeof elapsed !== "number") return undefined;
   const event: BootstrapEvent = { sequence, target, attempt, step: step as BootstrapStep, message, elapsed_ms: elapsed, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
-  if (value.step === "done" && isCanonicalUuid(value.host_id)) event.host_id = value.host_id;
+  if (value.step === "done" && isCanonicalUuid(value.host_id)) {
+    event.host_id = value.host_id;
+    if (isCanonicalUuid(value.session_id)) event.session_id = value.session_id;
+  }
   const failure = parseFailure(value.failure);
   if (failure) event.failure = failure;
   const leftovers = parseLeftovers(value.leftovers);
@@ -295,6 +300,7 @@ export class ProvisioningRun {
 export interface TargetView {
   state: "pending" | "running" | "done" | "failed";
   hostId?: string;
+  sessionId?: string;
   attempt: number;
   /** Index into `PHASES` of the latest phase entered (a failure keeps the phase it happened in). */
   phase: number;
@@ -321,7 +327,7 @@ export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
   // The sign-in method sticks for the attempt, so a later failure still knows it got past authentication.
   const base: TargetView = { ...(fresh ? { ...pendingTarget(), attempt: event.attempt } : view) };
   if (event.authentication) base.authentication = event.authentication;
-  if (event.step === "done") return { ...base, ...(isCanonicalUuid(event.host_id) ? { hostId: event.host_id } : {}), state: "done", phase: PHASES.length, message: event.message, failure: undefined, leftovers: undefined, elapsedMs: event.elapsed_ms };
+  if (event.step === "done") return { ...base, ...(isCanonicalUuid(event.host_id) ? { hostId: event.host_id, ...(isCanonicalUuid(event.session_id) ? { sessionId: event.session_id } : {}) } : {}), state: "done", phase: PHASES.length, message: event.message, failure: undefined, leftovers: undefined, elapsedMs: event.elapsed_ms };
   if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, leftovers: event.leftovers, elapsedMs: event.elapsed_ms };
   // Earlier-setup leftovers are a pause inside the open attempt (a `check` event, #169): the attempt stays running and
   // waits for `startFresh`. The next event of the attempt clears the pause.
