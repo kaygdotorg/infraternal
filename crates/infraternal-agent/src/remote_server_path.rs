@@ -228,7 +228,10 @@ fn report(
     registry.set_server_link(ServerLink {
         kind: current.map_or(ServerLinkKind::Disconnected, |(kind, _)| kind),
         endpoint: current.map(|(_, address)| address),
-        source_port: None,
+        source_port: link.and_then(|link| link.path.as_ref()).and_then(|path| {
+            use quinn::AsyncUdpSocket as _;
+            path.local_addr().ok().map(|address| address.port())
+        }),
         reason,
     });
 }
