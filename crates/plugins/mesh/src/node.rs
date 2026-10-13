@@ -121,7 +121,7 @@ impl Node {
             node.identity = Some(Identity {
                 public_key,
                 port,
-                compact_access: false,
+                compact_access: true,
             });
             node.client = Some(Client::new()?);
             if !node.enabled {
@@ -227,7 +227,7 @@ impl Node {
                 Identity {
                     public_key,
                     port,
-                    compact_access: false,
+                    compact_access: true,
                 },
                 client,
             ))
@@ -318,10 +318,24 @@ impl Node {
         }
         Ok(())
     }
+    // Keep version/binding checks and complete staging visible before installation.
+    #[allow(clippy::too_many_lines)]
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
-        // The wire type lands before capability advertisement and range staging.
-        if !chunk.access_updates.is_empty() {
-            return Err(io::ErrorKind::Unsupported.into());
+        if !chunk.access_updates.is_empty()
+            && (chunk.from_version.is_none()
+                || chunk.index != 0
+                || !chunk.last
+                || !chunk.upserted.is_empty()
+                || !chunk.merged.is_empty()
+                || !chunk.removed.is_empty()
+                || self
+                    .config
+                    .as_ref()
+                    .is_none_or(|old| old.server != chunk.server))
+        {
+            // A range action replaces only rules in the acknowledged complete
+            // base. It cannot hide identity changes or continue partial staging.
+            return Err(io::ErrorKind::InvalidData.into());
         }
         self.validate_binding(&chunk)?;
         if chunk.index == 0 {
@@ -374,6 +388,7 @@ impl Node {
         pending.config.version = chunk.version;
         pending.config.default_policy = chunk.default_policy;
         pending.config.server = chunk.server;
+        crate::access_updates::apply(&mut pending.config, &chunk.access_updates)?;
         for node in chunk.removed {
             pending.config.peers.remove(&node);
         }
@@ -713,7 +728,7 @@ mod tests {
         use crate::policy::model::{Addresses, NodeId, PublicKey};
         let mut node = Node {
             identity: Some(Identity {
-                compact_access: false,
+                compact_access: true,
                 public_key: PublicKey([1; 32]),
                 port: 44000,
             }),

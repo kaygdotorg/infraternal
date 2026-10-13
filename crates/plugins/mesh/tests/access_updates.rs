@@ -49,7 +49,6 @@ fn config() -> Config {
 
 #[cfg(feature = "agent")]
 #[test]
-#[ignore = "Fail-first additive wire regression; enable after node range staging is implemented."]
 fn negotiated_access_chunk_is_accepted_by_the_strict_action_parser() {
     let old = config();
     let mut next = old.clone();
@@ -88,4 +87,122 @@ fn default_tightening_at_1000_peers_fits_one_round_trip() {
     assert!(
         serde_json::to_vec(&parts[0]).unwrap().len() <= infraternal_plugin_api::MAX_ACTION_BYTES
     );
+}
+
+#[test]
+fn range_objects_reject_unknown_duplicate_and_positional_fields() {
+    let old = config();
+    let mut next = old.clone();
+    next.version += 1;
+    let chunk = configuration::chunks(Some(&old), &next).unwrap().remove(0);
+    let mut wire = serde_json::to_value(chunk).unwrap();
+    for update in [
+        serde_json::json!([3, 1002, "None", "None"]),
+        serde_json::json!({"first":3,"last":1002,"inbound":"None","outbound":"None","unknown":true}),
+    ] {
+        wire["access_updates"] = serde_json::json!([update]);
+        assert!(
+            infraternal_plugin_mesh::node_actions::parse_action(
+                "mesh.configure",
+                &serde_json::to_vec(&wire).unwrap()
+            )
+            .is_err()
+        );
+    }
+    wire["access_updates"] =
+        serde_json::json!([{"first":3,"last":1002,"inbound":"None","outbound":"None"}]);
+    let duplicate = serde_json::to_string(&wire)
+        .unwrap()
+        .replace("\"first\":3", "\"first\":3,\"first\":4");
+    assert!(
+        infraternal_plugin_mesh::node_actions::parse_action("mesh.configure", duplicate.as_bytes())
+            .is_err()
+    );
+}
+
+#[test]
+#[ignore = "Run in an isolated user/network namespace with CAP_NET_ADMIN."]
+fn nft_compact_delta_preserves_identity_and_refuses_invalid_bases() {
+    kernel_case(false);
+}
+
+#[test]
+#[ignore = "Run in an isolated user/network namespace with CAP_NET_ADMIN."]
+fn nf_tables_compact_delta_preserves_identity_and_refuses_invalid_bases() {
+    kernel_case(true);
+}
+
+fn kernel_case(fallback: bool) {
+    use infraternal_plugin_mesh::{access_updates, node::Node, wireguard::Device};
+    assert_eq!(
+        std::fs::read_to_string("/proc/self/uid_map")
+            .unwrap()
+            .split_whitespace()
+            .nth(2),
+        Some("1"),
+        "isolated namespace required"
+    );
+    let mut node = if fallback {
+        Node::with_firewall(infraternal_plugin_mesh::firewall::Firewall::nf_tables())
+    } else {
+        Node::default()
+    };
+    let identity = node.up().unwrap();
+    assert!(identity.compact_access);
+    let mut old = config();
+    old.local_key = Some(identity.public_key);
+    old.server = None;
+    for (id, peer) in &mut old.peers {
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&id.0.to_le_bytes());
+        key[31] = 128;
+        peer.peer.key = PublicKey(key);
+    }
+    for part in configuration::chunks(None, &old).unwrap() {
+        node.chunk(part).unwrap();
+    }
+    assert_eq!(Device::counters().unwrap().len(), 1000);
+    let mut next = old.clone();
+    next.version += 1;
+    next.default_policy = DefaultPolicy::Deny;
+    for peer in next.peers.values_mut() {
+        peer.inbound = TrafficPolicy::None;
+        peer.outbound = TrafficPolicy::None;
+    }
+    let parts = access_updates::chunks(Some(&old), &next).unwrap();
+    assert_eq!(parts.len(), 1);
+    let valid = &parts[0];
+    for variant in 0..7 {
+        let mut invalid = valid.clone();
+        match variant {
+            0 => invalid.from_version = Some(0),
+            1 => invalid.from_version = None,
+            2 => invalid.last = false,
+            3 => invalid.removed.push(NodeId(3)),
+            4 => invalid.access_updates[0].last = NodeId(u64::MAX),
+            5 => invalid.local_key = Some(PublicKey([9; 32])),
+            _ => invalid
+                .access_updates
+                .push(invalid.access_updates[0].clone()),
+        }
+        assert_eq!(
+            node.chunk(invalid).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(node.config(), Some(&old));
+    }
+    node.chunk(valid.clone()).unwrap();
+    assert_eq!(node.config(), Some(&next));
+    assert_eq!(Device::counters().unwrap().len(), 1000);
+    assert_eq!(
+        node.ensure().unwrap().unwrap().public_key,
+        identity.public_key
+    );
+    // Ordinary complete snapshots remain the recovery path after a lost ACK.
+    for part in configuration::chunks(None, &next).unwrap() {
+        node.chunk(part).unwrap();
+    }
+    assert_eq!(node.config(), Some(&next));
+    node.down().unwrap();
+    assert!(!Device::owned().unwrap());
 }
