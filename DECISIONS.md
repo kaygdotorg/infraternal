@@ -2566,3 +2566,29 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      screenshots and evidence). Rejected: a short per-job evidence README in
      the repo (owner: evidence belongs to the issue), and Git LFS (another
      server-side store for what the issue already holds).
+263. **Dogfooding cut-over, logs and alerts (owner, 2026-10-13, grill
+     round 1; extends D243, D164, D260, D261):**
+     - **Cut-over waits for #199:** production moves to the dev build (the
+       last classic restart, then handoff deploys) only after the fix for
+       windows that stop taking input across a server restart is merged.
+       The owner then starts the new calternal-dev VM on it to dogfood
+       instead of tmux or zellij.
+     - **One-time size exception (D243):** the cut-over may ship the larger
+       dev binary once. Owner: "this is really a one-time exception"; the
+       size work (#198) must cut it down and ratchet the gate right after.
+     - **New machines start on SSH, then move to the mesh by themselves:**
+       add-host connects over the network sign-in (NetBird) or SSH, the
+       machine joins our mesh (D164), and its traffic switches to the mesh
+       path automatically and fast as part of add-host; NetBird stays as a
+       fallback until the mesh has run a week without problems.
+     - **Log retention per kind of machine (D261):** quiet 30 d, laptop
+       14 d, CI 14 d, web 7 d, database 7 d, proxy 3 d, Kubernetes 3 d,
+       edge 30 d, each also capped at 5% of free disk, whichever ends first.
+     - **Quota counts compressed bytes on disk.**
+     - **Alerts go to everyone with the "get alerts" verb** on the machine;
+       whoever adds a machine gets that verb automatically.
+     - **Compose mode (D130) comes after dogfooding;** the Boot Machines
+       questions (#156) wait until mesh and dogfooding are stable.
+     - **Logs nodes are planned next (no build yet):** a machine can be
+       marked a "logs" node that stores all logs synced from other
+       machines. To be grilled before anything is built.
