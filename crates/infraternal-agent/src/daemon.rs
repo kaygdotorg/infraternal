@@ -914,6 +914,7 @@ async fn terminal_run(
     let mut deadline = None;
     let mut finished_peer = false;
     // One state fence in flight bounds shim work even if probes are pipelined over the network.
+    // It belongs to the data socket: parking that socket must clear its pending fence.
     let mut probe = None;
     loop {
         if let Some(frame) = pending.take() {
@@ -1074,7 +1075,7 @@ async fn terminal_run(
                                 if detached {
                                     // The preceding relink/state exchange crossed this shim, even when output is parked.
                                     emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
-                                    session = None;
+                                    session = None; probe = None;
                                     continue;
                                 }
                                 if probe.is_none() {
@@ -1092,7 +1093,7 @@ async fn terminal_run(
                             // accepted input survives until the PTY writes it.
                             let written = input_state(peer).await?;
                             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
-                            session = None;
+                            session = None; probe = None;
                             output.retry_recovery();
                         }
                     }
@@ -1104,7 +1105,7 @@ async fn terminal_run(
                     None => false,
                 };
                 if !finished_peer {
-                    output.expire(Instant::now()); session = None; pending = None;
+                    output.expire(Instant::now()); session = None; probe = None; pending = None;
                 }
                 deadline = None;
             }
@@ -1129,7 +1130,7 @@ async fn terminal_run(
                         // live mux stream, but neither busy-loop nor block PTY.
                         let json = serde_json::to_vec(&serde_json::json!({"type":"terminal.snapshot_unavailable", "session_id":uuid::Uuid::from_bytes(id), "seq":output.cursor()}))?;
                         emit(&tx, Message::Event(stream, json)).await?;
-                        session = None;
+                        session = None; probe = None;
                     }
                     Shim::Error(..) => { emit(&tx, Message::Close(stream, "shim refused terminal request")).await?; return Ok(()); }
                     _ => return Err(sessions::invalid("unexpected shim relay frame")),
