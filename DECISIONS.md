@@ -2592,3 +2592,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Logs nodes are planned next (no build yet):** a machine can be
        marked a "logs" node that stores all logs synced from other
        machines. To be grilled before anything is built.
+264. **S1 decided without an AVX-512 measurement; revisit later (owner,
+     2026-10-13, #175; amends D257 S1):** the static build drops OpenSSL's
+     AVX-512 AES-GCM code (about 659 KB) now. None of our machines can run
+     it (i9-9900K, Ryzen 5 3600, Apple M2 Max, the production VPS's generic
+     CPU), so D257's condition cannot be measured here. OpenSSL keeps its
+     AES-NI and AVX2 assembly, which encrypts several GB/s per core,
+     far above anything infraternal carries over OpenSSL today (the host
+     daemon's TLS link: terminal output, at most tens of Mbit/s for app
+     windows). Browser and QUIC traffic use ring and are unaffected.
+     **Revisit** when infraternal carries bulk data near gigabit rates over
+     OpenSSL (backups, file transfer) or when an AVX-512 machine is at
+     hand: measure, and restore the code if bulk throughput drops more than
+     5% or keystroke latency changes.
