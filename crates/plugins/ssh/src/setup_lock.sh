@@ -27,11 +27,13 @@ start_setup_lease() {
     # setup step must not collide with our own inherited parent guard. Keep the
     # recovery receipt first, then bound the readiness checks and require the
     # exact transaction descriptor before releasing our copy of that lock.
+    # The child closes it within microseconds; a short sleep keeps this off
+    # the add-host critical path (#189) under about the same two-second bound.
     lease_checks=0
     while [ -L "/proc/$lease_pid/fd/9" ]; do
         lease_checks=$((lease_checks + 1))
-        [ "$lease_checks" -le 200 ] || exit 73
-        sleep 0.01
+        [ "$lease_checks" -le 1000 ] || exit 73
+        sleep 0.001
     done
     [ "$(readlink "/proc/$lease_pid/fd/7" 2>/dev/null || :)" = "$stage" ] || exit 73
     exec 7<&-
