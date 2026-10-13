@@ -127,11 +127,14 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  /** A confirmed terminal gets a short recovery window; persistent/refused connections retain backoff. */
+  private fastRecoveryUntil = 0;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
   private welcomedAt = 0;
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
+  private greeted = false;
   private resumeSent = false;
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
@@ -178,6 +181,8 @@ export class MuxConnection {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     try {
       const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
+      // Even an attachment closed before replay completes retains a server writer row.
+      if (frame.type === "AttachTerm") this.writersUsed.add(streamId);
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
       onSent?.(performance.now());
@@ -319,6 +324,7 @@ export class MuxConnection {
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
     this.welcomed = false;
+    this.greeted = false;
 
     socket.onopen = () => {
       const credentials = this.credentials;
@@ -349,6 +355,8 @@ export class MuxConnection {
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
       const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
+      if (this.welcomed && this.attachedCount > 0) this.fastRecoveryUntil = performance.now() + STABLE_CONNECTION_MS;
+      else if (this.greeted || this.welcomed) this.fastRecoveryUntil = 0;
       // The server retains a live writer indefinitely; its grace starts on disconnect
       // (or startup recovery), not Welcome. Failed retries must never renew that grace.
       if (this.welcomed && this.credentials) this.credentials.deadline = Date.now() + this.credentials.windowMs;
@@ -386,6 +394,7 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
+        this.greeted = true;
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
@@ -449,9 +458,11 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
-    // Jitter only lengthens a step (by up to half), so the first retry is never sooner than 50 ms and pages dropped
-    // together do not return in step.
-    const delay = reconnectDelay(this.retryAttempt);
+    // Positive jitter spreads retries across pages; first opens retain the ordinary backoff.
+    // An ordinary restart must regain typing within RTT + 50 ms [D259]. Once
+    // a terminal really worked, check promptly during that bounded recovery
+    // window, leaving one frame for paint. Refused or prolonged outages back off.
+    const delay = performance.now() < this.fastRecoveryUntil ? 5 + Math.random() * 5 : reconnectDelay(this.retryAttempt);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
   }
