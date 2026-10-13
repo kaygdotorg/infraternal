@@ -33,11 +33,18 @@ impl Ownership {
         self.filter && self.guard && self.delivery
     }
 }
+/// Narrow installation plans are selected only after ownership and typed old/new comparison.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Update {
+    Full,
+    RetainGuard,
+    VerifiedRemoval,
+}
 /// Restore both address families. The caller retains a restrictive fence until both succeed.
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
-    apply_with_aliases(config, installed, &[], false, config, false)
+    apply_with_aliases(config, installed, &[], false, config, Update::Full)
 }
 pub(crate) fn apply_with_aliases(
     config: &Config,
@@ -45,7 +52,7 @@ pub(crate) fn apply_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
-    retain_guard: bool,
+    update: Update,
 ) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
     // Repeated updates reuse the owned two-family state and avoid discovery processes.
@@ -67,19 +74,23 @@ pub(crate) fn apply_with_aliases(
             fence,
             connections,
         );
-        if retain_guard {
+        if update == Update::Full {
+            script
+        } else {
             // Only a complete, unchanged owned guard permits this selection.
             // Filter rules and translated delivery checks still replace together.
             script
                 .split_once("COMMIT\n")
                 .map_or_else(|| script.clone(), |(_, filter)| filter.to_owned())
-        } else {
-            script
         }
     });
     // Both families must pass preflight before either mutates. Keep serial
     // commits: simultaneous frontend caches contend on one namespace generation.
-    execute_families(&scripts, true)?;
+    // A proven typed removal introduces no new match form or untrusted text.
+    // Final transactions still validate; the owner rolls back partial failure.
+    if update != Update::VerifiedRemoval {
+        execute_families(&scripts, true)?;
+    }
     execute_families(&scripts, false)?;
     Ok(())
 }
