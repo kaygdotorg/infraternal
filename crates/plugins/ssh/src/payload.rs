@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{os::unix::fs::MetadataExt, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
-// A server has two payloads. Keep this bound even when settings point at new
+// A server has two architectures with full and optional session payloads. Keep this bound even when settings point at new
 // files; no host, attempt or version can grow the process cache indefinitely.
 static CACHE: PayloadCache = PayloadCache {
     entries: Mutex::const_new(Vec::new()),
@@ -62,7 +62,7 @@ impl PayloadCache {
         let digest = tokio::task::spawn_blocking(move || hash(&path, identity))
             .await
             .map_err(|_| unreadable())??;
-        if entries.len() == 2 {
+        if entries.len() == 4 {
             entries.remove(0);
         }
         entries.push(Entry {
@@ -185,13 +185,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_changes_keep_at_most_two_entries() {
+    async fn settings_changes_keep_at_most_four_entries() {
         let fixture = Fixture::new();
         let cache = PayloadCache::default();
         for index in 0..8 {
             let path = fixture.file(&index.to_string(), &[index]);
             cache.digest(&path).await.unwrap();
-            assert!(cache.entries.lock().await.len() <= 2);
+            assert!(cache.entries.lock().await.len() <= 4);
         }
     }
 
