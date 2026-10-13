@@ -59,12 +59,32 @@ pub async fn run(
     let mut refresh_identity = true;
     let mut compact_access = false;
     let mut listener: ServerListener = None;
+    let mut transport_port = None;
+    let mut peer_route: Option<(
+        std::net::SocketAddr,
+        Box<dyn infraternal_plugin_api::server_path::ListenerLease>,
+    )> = None;
     loop {
         if refresh_identity || binding.is_none() {
             refresh_identity = false;
             let identity = read_identity(channel.as_ref()).await;
             if let Some(identity) = identity {
                 compact_access = identity.compact_access;
+                transport_port = if !channel.is_server() && channel.supports_server_paths() {
+                    // Status is extensible; keep the strict identity response
+                    // unchanged for older coordinators. The control channel
+                    // authenticates these public local socket coordinates.
+                    channel
+                        .call("mesh.status", b"{}".to_vec())
+                        .await
+                        .ok()
+                        .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok())
+                        .and_then(|reply| reply["server_link"]["source_port"].as_u64())
+                        .and_then(|port| u16::try_from(port).ok())
+                        .filter(|port| *port != 0)
+                } else {
+                    None
+                };
                 let ip = channel.observed_ip();
                 let endpoint =
                     (!ip.is_unspecified()).then(|| std::net::SocketAddr::new(ip, identity.port));
@@ -136,6 +156,22 @@ pub async fn run(
                     || old.peers != config.peers
             });
             if changed {
+                if !channel.is_server()
+                    && let Some(port) = transport_port.filter(|port| *port != 0)
+                {
+                    let address = std::net::SocketAddr::new(config.addresses.ipv4.into(), port);
+                    if peer_route
+                        .as_ref()
+                        .is_none_or(|(current, _)| *current != address)
+                    {
+                        // Retire the old mapping before registering the new one;
+                        // the live enrolled connection remains authoritative.
+                        peer_route = None;
+                        if let Ok(Some(lease)) = channel.route_peer(address).await {
+                            peer_route = Some((address, lease));
+                        }
+                    }
+                }
                 let was_delta = old.is_some();
                 // Never send additive fields to an older strict receiver. A
                 // refused compact delta still retries the original full snapshot.
@@ -183,6 +219,7 @@ pub async fn run(
         if binding.is_none() {
             // Local off and membership removal own listener teardown too.
             listener = None;
+            peer_route = None;
         } else if channel.is_server()
             && let Some(snapshot) = &installed
             && let Some(node) = binding
@@ -218,6 +255,7 @@ mod tests {
     }
     struct Channel {
         server: bool,
+        path_capable: AtomicBool,
         leases: Arc<AtomicUsize>,
         refuse_listener: AtomicBool,
         listened: tokio::sync::Notify,
@@ -236,6 +274,7 @@ mod tests {
             let (notices, _) = tokio::sync::watch::channel(());
             Arc::new(Self {
                 server,
+                path_capable: AtomicBool::new(server),
                 leases: Arc::default(),
                 refuse_listener: AtomicBool::new(false),
                 listened: tokio::sync::Notify::new(),
@@ -278,7 +317,23 @@ mod tests {
             self.server
         }
         fn supports_server_paths(&self) -> bool {
-            self.server
+            self.path_capable.load(Ordering::Acquire)
+        }
+        fn route_peer(
+            &self,
+            address: std::net::SocketAddr,
+        ) -> PluginOperation<'_, Option<Box<dyn infraternal_plugin_api::server_path::ListenerLease>>>
+        {
+            Box::pin(async move {
+                assert!(!self.server);
+                assert_eq!(address.port(), 43210);
+                assert_ne!(address.ip(), self.observed_ip());
+                self.leases.fetch_add(1, Ordering::AcqRel);
+                Ok(Some(Box::new(Lease(self.leases.clone()))
+                    as Box<
+                        dyn infraternal_plugin_api::server_path::ListenerLease,
+                    >))
+            })
         }
         fn listen_server(
             &self,
@@ -318,9 +373,19 @@ mod tests {
                     ))
                     .map_err(|_| "encoding failed");
                 }
+                if action == "mesh.status" {
+                    return Ok(br#"{"server_link":{"source_port":43210}}"#.to_vec());
+                }
                 assert_eq!(action, "mesh.configure");
+                if !self.server && self.supports_server_paths() {
+                    assert_eq!(
+                        self.leases.load(Ordering::Acquire),
+                        1,
+                        "routing must be ready before configuration publishes the path"
+                    );
+                }
                 assert!(input.len() <= infraternal_plugin_api::MAX_ACTION_BYTES);
-                if !self.server {
+                if !self.server && !self.supports_server_paths() {
                     assert!(
                         serde_json::from_slice::<serde_json::Value>(&input)
                             .unwrap()
@@ -368,6 +433,33 @@ mod tests {
             .unwrap();
         service
     }
+    #[tokio::test]
+    async fn peer_route_precedes_configuration_and_retires_with_the_node() {
+        let service = service().await;
+        let channel = Channel::new();
+        channel.path_capable.store(true, Ordering::Release);
+        let worker = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        channel.wait().await;
+        assert_eq!(channel.leases.load(Ordering::Acquire), 1);
+        channel.enabled.store(false, Ordering::Release);
+        channel.changed();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while channel.leases.load(Ordering::Acquire) != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        worker.abort();
+        let _ = worker.await;
+        assert_eq!(channel.leases.load(Ordering::Acquire), 0);
+    }
+
     #[tokio::test]
     async fn refused_listener_replacement_preserves_the_current_lease() {
         let channel = Channel::with_server(true);
