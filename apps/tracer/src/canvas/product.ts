@@ -12,7 +12,7 @@
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
 import { onDemand } from "../on-demand";
-import { hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
+import { ensureHostMarks, hostPlatformFromOs, type HostPlatform } from "../../../../packages/ui/src/host-icons";
 import { ConnectionPool, MuxConnection } from "../connection";
 import { isCanonicalUuid } from "../identifiers";
 import type { CoreScreen } from "../core-screen";
@@ -70,7 +70,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       connection.call("host.facts.read", { includeLive: false }).then((facts) => {
         if (typeof facts.os !== "string" || facts.os.length > 256) return;
         embedded.os = hostPlatformFromOs(facts.os);
-        canvasReady?.();
+        // The mark's artwork loads on first sight; the pill shows the machine glyph until it can draw the real one.
+        void ensureHostMarks([embedded.os]).then(() => canvasReady?.());
       }, () => undefined);
     },
   });
