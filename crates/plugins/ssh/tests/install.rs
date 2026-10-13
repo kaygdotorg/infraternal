@@ -2649,7 +2649,21 @@ async fn full_payload_restaging_preserves_the_running_session_build() {
     assert_eq!(session, id);
     channel.write(b"before full upload\n").await.unwrap();
     assert_eq!(channel.line(64).await.unwrap(), b"before full upload\n");
-    transaction.restart_setup(&f.binary, &f.join).await.unwrap();
+    // Force a real compressed full transfer after the distinct session image.
+    let full = format!(
+        "{}\n#{}\n",
+        std::fs::read_to_string(&f.binary).unwrap(),
+        "x".repeat(100_000)
+    );
+    std::fs::write(&f.binary, full).unwrap();
+    transaction
+        .restart_setup_with(
+            &f.binary,
+            &f.join,
+            Some(infraternal_plugin_ssh::transport::TransferChoice::Gzip),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         std::fs::read(f.base().join("bin/live")).unwrap(),
         std::fs::read(&f.binary).unwrap()
@@ -2718,7 +2732,11 @@ async fn compound_restaging_refuses_a_foreign_journal_before_upload() {
     let payload = f.base().join(".bootstrap-lock/payload");
     let before = std::fs::read(&payload).unwrap();
     let refusal = transaction
-        .restart_setup(&f.binary, &f.join)
+        .restart_setup_with(
+            &f.binary,
+            &f.join,
+            Some(infraternal_plugin_ssh::transport::TransferChoice::Raw),
+        )
         .await
         .unwrap_err();
     assert_eq!(refusal.exit_status, Some(72));
