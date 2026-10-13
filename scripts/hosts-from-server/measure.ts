@@ -11,9 +11,12 @@ const hostCount = Number(process.env.HOST_INVENTORY_COUNT ?? "1000");
 const trials = Number(process.env.HOST_INVENTORY_TRIALS ?? "12");
 if (!Number.isSafeInteger(hostCount) || hostCount < 1 || !Number.isSafeInteger(trials) || trials < 1) throw new Error("Positive host/trial counts required");
 const results: Record<string, unknown> = { machine: (await readFile("/proc/sys/kernel/hostname", "utf8")).trim(), loadBefore: (await readFile("/proc/loadavg", "utf8")).trim(), hosts: hostCount, samples: trials, rttMs: 300, tracerTestPort: process.env.TRACER_TEST_PORT, firstFrameDefinition: "first glyph draw on the visible terminal canvas" };
+const variants = [["baseline", process.env.BASELINE_DIST], ["candidate", process.env.CANDIDATE_DIST]] as const;
+const ordered = process.env.HOST_INVENTORY_REVERSE === "1" ? [...variants].reverse() : variants;
+results.variantOrder = ordered.map(([variant]) => variant);
 const browser = await chromium.launch({ headless: true, args: ["--disable-renderer-backgrounding"] });
 try {
-  for (const [variant, dist] of [["baseline", process.env.BASELINE_DIST], ["candidate", process.env.CANDIDATE_DIST]] as const) {
+  for (const [variant, dist] of ordered) {
     process.env.TRACER_DIST = dist;
     const server = await startRealServer({ latencyMs: 150, timedControls: true, stateRoot: resolve(job, "state") });
     try {
@@ -46,7 +49,7 @@ for n in range(1,int(sys.argv[2])+1):
 c.commit()`, server.dataDir, String(hostCount)], { stdio: ["ignore", "ignore", "ignore"] });
       if (seeded.status !== 0) throw new Error("Public admitted-host fixture failed");
       await setup.close();
-      const samples: number[] = [], inventoryBeforeFrame: boolean[] = [];
+      const samples: number[] = [], inventoryBeforeFrame: boolean[] = [], phases: Record<string, number>[] = [];
       for (let trial = 0; trial < trials; trial++) {
         const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 } });
         await context.addCookies(cookies);
@@ -69,6 +72,7 @@ c.commit()`, server.dataDir, String(hostCount)], { stdio: ["ignore", "ignore", "
         await returning.waitForFunction(() => (window as unknown as { __hostFrame?: number }).__hostFrame !== undefined);
         const first = await returning.evaluate(() => ({ relative: (window as unknown as { __hostFrame: number }).__hostFrame, origin: performance.timeOrigin }));
         samples.push(first.relative);
+        phases.push(await returning.evaluate(() => Object.fromEntries(["mount", "client", "attached", "painted"].map((phase) => [phase, performance.getEntriesByName(`sw:1:${phase}`)[0]?.startTime ?? -1]))));
         const bridge = server.bridges.at(-1);
         inventoryBeforeFrame.push(bridge?.control.some((row) => row.dir === "up" && row.detail === "remote.host.list" && row.at !== undefined && row.at <= first.origin + first.relative) ?? false);
         if (variant === "candidate") {
@@ -79,7 +83,7 @@ c.commit()`, server.dataDir, String(hostCount)], { stdio: ["ignore", "ignore", "
         await context.close();
       }
       const sorted = [...samples].sort((a,b) => a-b);
-      results[variant] = { firstFrameMs: samples, p50Ms: sorted[Math.floor((trials - 1) / 2)], sampleMaxMs: sorted.at(-1), inventoryAskedBeforeFirstFrame: inventoryBeforeFrame };
+      results[variant] = { firstFrameMs: samples, phases, p50Ms: sorted[Math.floor((trials - 1) / 2)], sampleMaxMs: sorted.at(-1), inventoryAskedBeforeFirstFrame: inventoryBeforeFrame };
     } finally { await server.dispose(); }
   }
 } finally { await browser.close(); }
