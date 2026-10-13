@@ -309,19 +309,18 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     run_channel(&socket, state, None, None, service.registry.clone()).await
 }
 
-/// Dispatch an admitted remote server connection through the same session and shim path.
-/// The dialer must authenticate the server and supply the locally enrolled uid;
+/// Dispatch an admitted SSH or enrolled connection through the same session and shim path.
+/// The caller must authenticate the transport and supply its checked execution uid;
 /// neither browser JSON nor an untrusted peer can select that identity. Returning
 /// drops every attachment and launch task, but never terminates surviving shims.
 /// # Errors
 /// Refuses invalid greeting, unsafe state, wrong uid and malformed terminal frames.
-#[cfg(feature = "remote")]
 pub async fn run_authenticated(
     channel: &impl Channel,
     state: Option<PathBuf>,
     execution_uid: u32,
 ) -> io::Result<()> {
-    run_authenticated_with_renewal(channel, state, execution_uid, None).await
+    dispatch_authenticated(channel, state, execution_uid, None, None).await
 }
 
 /// Dispatch remote terminal and bounded certificate control actions on one authenticated channel.
@@ -347,6 +346,19 @@ pub async fn run_authenticated_with_installation(
     execution_uid: u32,
     renewal: Option<&RenewalIdentity>,
     installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+) -> io::Result<()> {
+    dispatch_authenticated(channel, state, execution_uid, renewal, installation).await
+}
+
+// SSH admission and enrolled transports use the same UID/writer fence and
+// cancellation boundary. The session-only build needs no certificate control
+// or installation plugin, but must never fall back to embedded authorization.
+async fn dispatch_authenticated(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+    renewal: Option<&RenewalIdentity>,
+    installation: Option<&crate::plugins::Installation>,
 ) -> io::Result<()> {
     if channel.native_stream_id().is_some_and(|writer| writer != 0)
         || execution_uid != nix::unistd::Uid::effective().as_raw()
@@ -392,9 +404,7 @@ pub(crate) async fn run_authenticated_with_plugins(
     run_channel(channel, state, Some(execution_uid), renewal, plugins).await
 }
 
-#[cfg(feature = "remote")]
 struct RetireChannel<'a, C: Channel>(&'a C);
-#[cfg(feature = "remote")]
 impl<C: Channel> Drop for RetireChannel<'_, C> {
     fn drop(&mut self) {
         self.0.retire();
