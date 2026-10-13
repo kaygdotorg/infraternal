@@ -202,3 +202,7 @@ mod tests {
         assert_eq!(recent.bytes, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "remote_peer_routes_bench.rs"]
+mod bench;
