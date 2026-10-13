@@ -28,11 +28,15 @@ pub(crate) struct Event {
 
 struct Events {
     include_peer: fn(SocketAddr) -> bool,
+    routes: Option<Arc<infraternal_plugin_remote::remote_bindings::Bindings>>,
     first: BTreeMap<(Kind, SocketAddr, u32), Event>,
     overflow: bool,
 }
 impl Events {
-    fn record(&mut self, event: Event) {
+    fn record(&mut self, mut event: Event) {
+        if let Some(routes) = &self.routes {
+            event.peer = routes.physical_peer(event.peer);
+        }
         if !(self.include_peer)(event.peer) {
             return;
         }
@@ -57,6 +61,7 @@ impl Capture {
         // peer addresses can contribute milestones or consume its record bound.
         let events = Arc::new(Mutex::new(Events {
             include_peer,
+            routes: None,
             first: BTreeMap::new(),
             overflow: false,
         }));
@@ -68,6 +73,18 @@ impl Capture {
         Self(events)
     }
 
+    /// Resolve the retained connection's logical tuple to its current physical
+    /// path at each callback, so an in-place move has a real byte boundary.
+    pub(crate) fn with_routes(
+        self,
+        routes: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
+    ) -> Self {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .routes = Some(routes);
+        self
+    }
     pub(crate) fn events(&self) -> Vec<Event> {
         let events = self
             .0

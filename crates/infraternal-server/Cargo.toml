@@ -14,7 +14,7 @@ default = ["mesh", "cli-plugin", "ssh", "release"]
 cli-plugin = []
 mesh = ["dep:infraternal-plugin-mesh"]
 # Opt-in namespace proof compiles the existing node engine in this test process.
-mesh-transport-proof = ["mesh", "remote", "infraternal-agent/mesh", "infraternal-plugin-mesh/test-support"]
+mesh-transport-proof = ["mesh", "remote", "infraternal-agent/mesh", "infraternal-plugin-mesh/test-support", "infraternal-plugin-remote/test-support"]
 ee = ["infraternal-plugin-mesh?/ee", "infraternal-agent/ee"]
 remote = ["infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn"]
 

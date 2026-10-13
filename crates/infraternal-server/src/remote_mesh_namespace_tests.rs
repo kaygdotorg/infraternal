@@ -892,7 +892,8 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     let capture = crate::remote_autoswitch_probe::Capture::start(|peer| match peer.ip() {
         std::net::IpAddr::V4(ip) => ip.octets()[..2] == [10, 254] || ip.octets() == [10, 220, 0, 2],
         std::net::IpAddr::V6(_) => false,
-    });
+    })
+    .with_routes(listeners.bindings.clone());
     let enabled_wall = std::time::SystemTime::now();
     let moved = tokio::time::Instant::now();
     runtime.set_enabled("mesh", true).await.unwrap();
