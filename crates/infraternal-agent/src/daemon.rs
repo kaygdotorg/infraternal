@@ -1361,3 +1361,7 @@ mod readiness_exit_tests;
 #[cfg(test)]
 #[path = "daemon_liveness_tests.rs"]
 mod liveness_tests;
+
+#[cfg(test)]
+#[path = "daemon_authenticated_tests.rs"]
+mod authenticated_tests;
