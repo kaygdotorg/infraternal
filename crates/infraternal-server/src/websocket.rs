@@ -559,6 +559,15 @@ async fn run_socket(
                     output_open = false;
                     continue;
                 };
+                // An internal route proof adds no terminal authority and sends no browser data.
+                // Authorizing every probe would make idle work scale with sessions × probe rate;
+                // revocation and every actual terminal frame retain their existing authority gates.
+                if let TerminalOutput::Pong { nonce, sent_us } = output {
+                    if let Some(attachment) = attachments.get_mut(&stream_id) {
+                        attachment.liveness.pong(nonce, sent_us);
+                    }
+                    continue;
+                }
                 if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
                     &mut attachments, &mut ended, &mut sink, &mut encode,
