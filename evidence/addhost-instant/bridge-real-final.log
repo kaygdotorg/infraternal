@@ -1,0 +1,1 @@
+PASS: shim-owned early shell; same session/writer; pending input executes once; output resumes

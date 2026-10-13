@@ -1,0 +1,69 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.89s
+     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/infraternal_server-2b41f9a781da1a4b)
+
+running 1 test
+test auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 461 filtered out; finished in 1.03s
+
+     Running tests/catalog_startup.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/catalog_startup-aaa67b96f806e820)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/enrollment.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/enrollment-f8c8851b8c9d5a62)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/mesh_parser.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/mesh_parser-ac13b245e0437b5f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_plugin.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/mesh_review_plugin-6b48cb7d3425026c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_policy.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/mesh_review_policy-7050ced1caf06297)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mesh_review_role_scope.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/mesh_review_role_scope-7a678f43af147c24)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/plugin_host_review.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/plugin_host_review-5a266e2ec6433e84)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/plugin_settings_review.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/plugin_settings_review-370f939cdc29fbfb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/remote_plugin_contract.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/remote_plugin_contract-8246142670fd0bfe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/review_mesh_host_removal.rs (/home/kayg/.cache/codex-scratch/addhost-instant/baseline-target/debug/deps/review_mesh_host_removal-104da5583c552127)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+BASELINE_EXIT=0

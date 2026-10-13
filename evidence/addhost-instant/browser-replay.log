@@ -1,0 +1,72 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-s2a35m61.js, chunk-nrq0b5pb.js, chunk-h5mgdykc.js, chunk-hfpt1dvz.js, chunk-288q3tke.js, chunk-czgt2nbx.js, chunk-5ya0a0pp.js, chunk-hwvcdaet.js, chunk-y8hjyc65.js, chunk-9e07kgea.js, chunk-k6gmjf97.js, chunk-53ka8tp5.js, chunk-6gtm055g.js, chunk-6vfvnb6h.js, chunk-caryt9qe.js, chunk-7eq3m09w.js, chunk-fx1ezvdm.js, chunk-g2gh0ry9.js, chunk-rjn1jhsb.js, chunk-qdcbpw8b.js, chunk-7zr2pqgb.js, chunk-na49xj9e.js, main.js, chunk-pktj0qtf.js, chunk-mqfdvw2d.js, chunk-mgmrd0t1.js, chunk-sm2nphpy.js, chunk-j10ypj8w.js, chunk-ktm0h30j.js, chunk-fv0xejdy.js, chunk-8gqdshxw.js, chunk-cz0wxffq.js, chunk-ad884mg3.js, chunk-de89b94k.js, chunk-whqvzd3b.js, chunk-z7747a2d.js, chunk-y5nk0zcd.js, chunk-wqszy0xt.js, chunk-50v9v4ez.js, chunk-w1rsqf4a.js, chunk-02cnvssj.js, chunk-axbkkqp1.js, chunk-wf13ffgj.js, chunk-dpxd0xxz.js, chunk-snx94xkg.js, chunk-4hsp1jcs.js, chunk-wyrf7hqt.js, chunk-ga99vctn.js, chunk-tk7hraxt.js, chunk-tkp84k4k.js, chunk-ttbfav78.js, chunk-9ys8crq1.js, chunk-5hqx6ekb.js, chunk-3mya831a.js, chunk-f19dcy3d.js, chunk-p182p5gd.js, chunk-7w1hmpd7.js, chunk-090r6s21.js, chunk-0dy0g8wg.js, chunk-pypn8rex.js, chunk-xxzx8zfe.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-y7wcsdp5.js, chunk-qmqkx9m3.js, chunk-0qmaxw8n.js, chunk-rhea1djy.js, chunk-mf3svkaz.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4998
+[WebServer] latency proxy listening on http://localhost:4997; upstream port=4998
+
+Running 30 tests using 1 worker
+
+(node:2154146) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 test/addhost-wizard.spec.ts:46:1 › the toolbar button and the palette open the wizard (25.6s)
+  ✓   2 test/addhost-wizard.spec.ts:60:1 › network access: detected, shown by name, and the host lands in Console and the sidebar (34.4s)
+  ✓   3 test/addhost-wizard.spec.ts:81:1 › closing the flow window from its own frame ends the wizard (15.7s)
+  ✓   4 test/addhost-wizard.spec.ts:90:1 › the server's own key is the fallback when the network does not sign in (20.6s)
+  ✓   5 test/addhost-wizard.spec.ts:99:1 › a batch shows every host's own progress and opens every host (28.5s)
+  ✓   6 test/addhost-wizard.spec.ts:110:1 › all automatic methods refused: asked to choose, and a password is sent once and never kept (28.6s)
+  ✓   7 test/addhost-wizard.spec.ts:136:1 › a pasted private key signs in as the user's key (26.4s)
+  ✓   8 test/addhost-wizard.spec.ts:149:1 › a saved key (unlocked with the passkey) is offered only when the browser holds one (36.5s)
+  ✓   9 test/addhost-wizard.spec.ts:162:1 › without a saved key the choice does not offer one (31.0s)
+  ✓  10 test/addhost-wizard.spec.ts:170:1 › the server key is shown to copy; adding it and trying again signs in (22.1s)
+  ✓  11 test/addhost-wizard.spec.ts:185:1 › a locked server key is still shown, with the reason (20.7s)
+  ✓  12 test/addhost-wizard.spec.ts:193:1 › no server key to show: the choice is paste or password only (17.5s)
+  ✓  13 test/addhost-wizard.spec.ts:202:1 › an unknown host key shows its fingerprint and is never trusted without a click (32.5s)
+  ✓  14 test/addhost-wizard.spec.ts:219:1 › a host that does not answer: what happened, Retry, and the one-line install from the host (28.2s)
+  ✓  15 test/addhost-wizard.spec.ts:235:1 › a mesh policy block says possible, not certain (15.5s)
+  ✘  16 test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can (32.0s)
+(node:2264241) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  17 test/addhost-wizard.spec.ts:270:1 › one refusal without choose_method still offers another way to sign in (22.7s)
+  ✓  18 test/addhost-wizard.spec.ts:277:1 › empty, loading and error states of discovery (32.2s)
+  ✓  19 test/addhost-wizard.spec.ts:302:1 › an SSH config pasted into the field becomes chips (10.1s)
+  ✓  20 test/addhost-wizard.spec.ts:316:1 › closing mid-install asks first, and cancelling ends the run (14.6s)
+  ✓  21 test/addhost-wizard.spec.ts:331:1 › the wizard works on a phone and keeps the footer on screen (9.6s)
+  ✓  22 test/addhost-wizard.spec.ts:355:3 › fresh CA explains passkey confirmation before starting SSH (13.6s)
+  ✓  23 test/addhost-wizard.spec.ts:355:3 › locked CA explains passkey confirmation before starting SSH (19.0s)
+  ✓  24 test/addhost-wizard.spec.ts:373:1 › a canvas flow remains nonmodal (9.1s)
+  ✓  25 test/addhost-wizard.spec.ts:379:1 › Escape in the palette leaves the add-host flow open (9.8s)
+  ✓  26 test/addhost-wizard.spec.ts:393:1 › Tab can leave a canvas flow (7.8s)
+  ✓  27 test/addhost-wizard.spec.ts:402:1 › a typed root login requires consent and cannot pretend to install as a user (10.9s)
+  ✓  28 test/addhost-wizard.spec.ts:425:1 › leftovers: one Start fresh continues the same setup to done (14.5s)
+  ✓  29 test/addhost-wizard.spec.ts:445:1 › leftovers: Back returns to the host list and Start fresh needs the server's challenge (15.3s)
+  ✓  30 test/addhost-wizard.spec.ts:459:1 › a setup that is still running: wait, then try again (16.0s)
+
+
+  1) test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can 
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: getByRole('heading', { name: 'Setting up broken.lab didn\'t finish' })
+    Expected: visible
+    Timeout: 15000ms
+    Error: element(s) not found
+
+    Call log:
+      - Expect "toBeVisible" with timeout 15000ms
+      - waiting for getByRole('heading', { name: 'Setting up broken.lab didn\'t finish' })
+
+
+      256 |   await page.locator(".ui-chip-remove").click({ force: true });
+      257 |   await addTyped(page, "broken.lab");
+    > 258 |   await expect(page.getByRole("heading", { name: "Setting up broken.lab didn't finish" })).toBeVisible({ timeout: 15_000 });
+          |                                                                                            ^
+      259 |   // The failure names its step, so the advice does too (not a chore like "restore access").
+      260 |   await expect(page.getByText("The infraternal agent was installed but didn't start.", { exact: false })).toBeVisible();
+      261 |   await expect(page.getByText("restore access", { exact: false })).toHaveCount(0);
+        at /home/kayg/Developer/infraternal/.worktrees/addhost-instant/apps/tracer/test/addhost-wizard.spec.ts:258:92
+
+    Error Context: test-results/addhost-wizard-an-unsuppor-c57e4-ried-an-install-failure-can/error-context.md
+
+  1 failed
+    test/addhost-wizard.spec.ts:248:1 › an unsupported host cannot be retried; an install failure can 
+  29 passed (11.4m)
+BROWSER_EXIT=1

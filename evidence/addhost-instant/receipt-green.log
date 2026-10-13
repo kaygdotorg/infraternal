@@ -1,0 +1,16 @@
+   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-instant/crates/plugins/ssh)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.96s
+     Running tests/process.rs (/home/kayg/.cache/codex-scratch/addhost-instant/target/debug/deps/process-14dc44b3a2686c7a)
+
+running 8 tests
+test completed_helper_retires_descendants_with_closed_pipes ... ok
+test negotiated_sources_require_an_exact_receipt_before_private_input ... ok
+test oversized_remote_output_is_bounded_and_active_timeout_is_enforced ... ok
+test cancellation_retires_the_helper_descendant_too ... ok
+test review_compound_refusal_preserves_receipt_when_invitation_pipe_closes ... ok
+test unavailable_negotiated_codec_never_sends_invitation ... ok
+test reviewer_ssh_helper_does_not_inherit_server_reload_mask ... ok
+test group_identity_is_retained_until_inherited_pipes_finish ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+

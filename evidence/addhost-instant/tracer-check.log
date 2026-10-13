@@ -1,0 +1,2 @@
+$ bun x tsc --project tsconfig.json
+CHECK_EXIT=0

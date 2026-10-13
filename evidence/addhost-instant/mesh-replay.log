@@ -1,0 +1,16 @@
+
+running 1 test
+test auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory ... 
+thread 'auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory' (2374972) panicked at crates/infraternal-server/src/auth/tests.rs:1731:17:
+server closed websocket unexpectedly: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    auth::tests::socket_tests::mesh_calls_and_subscriptions_deliver_scoped_live_inventory
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 366 filtered out; finished in 4.43s
+
+REPLAY_EXIT=101
