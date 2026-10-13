@@ -1,58 +1,241 @@
-//! Experiments with physical peer routing below the existing authenticated QUIC connection; test support only until namespace validation [164,243,263].
+//! Moves an established server connection between its enrolled path and the mesh path below QUIC, keeping every stream and writer [164,215,263], #201.
+//!
+//! The host's QUIC connection always names the enrolled server address (its
+//! logical remote). This socket decides where those datagrams physically go:
+//! to that address, or to the server's mesh address. Datagrams from either
+//! physical address are reported as coming from the logical one, so the
+//! client connection never sees an address change and keeps its streams,
+//! writer bindings and congestion state. The server sees the host's new
+//! source and validates it with QUIC's own path migration.
+//!
+//! The mesh address is supplied by the host's own applied mesh configuration
+//! (trusted routing), never learned from UDP. A mapped datagram grants no
+//! authority: the connection's packet keys still authenticate every byte.
+//!
+//! While the mesh path is unproven or failing, datagrams sent on it are kept
+//! (bounded) until the mesh answers. Returning to the enrolled path resends
+//! them at once instead of waiting for loss recovery timers; QUIC discards
+//! any duplicate by packet number.
 
 use quinn::{
     AsyncUdpSocket, UdpPoller,
-    udp::{RecvMeta, Transmit},
+    udp::{EcnCodepoint, RecvMeta, Transmit},
 };
 use std::{
+    collections::VecDeque,
+    fmt,
     io::{self, IoSliceMut},
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     task::{Context, Poll},
+    time::Instant,
 };
 
-/// Routes one exact peer tuple while retaining the logical QUIC address. This
-/// adapter does not authenticate or authorize a peer: the existing connection
-/// still checks packet keys, replay protection and the enrolled identity.
-/// Use a fresh underlying socket with `Endpoint::rebind_abstract`, so its retained
-/// previous socket and this adapter never compete to poll the same descriptor.
-#[derive(Debug)]
-pub struct PeerSocket {
-    socket: Arc<dyn AsyncUdpSocket>,
-    logical: SocketAddr,
-    physical: SocketAddr,
+/// Unanswered mesh datagrams kept for an immediate resend (bytes, count).
+const RESEND_BYTES: usize = 64 * 1024;
+const RESEND_DATAGRAMS: usize = 64;
+
+struct Sent {
+    contents: Vec<u8>,
+    segment_size: Option<usize>,
+    ecn: Option<EcnCodepoint>,
 }
 
-impl PeerSocket {
-    /// The caller supplies trusted routing addresses, not data learned from UDP.
+struct Paths {
+    mesh: Option<SocketAddr>,
+    resend: VecDeque<Sent>,
+    resend_bytes: usize,
+    mesh_heard: Option<Instant>,
+}
+
+/// Physical routing for one connection's logical server address.
+pub struct PathSocket {
+    socket: Arc<dyn AsyncUdpSocket>,
+    logical: SocketAddr,
+    on_mesh: AtomicBool,
+    paths: Mutex<Paths>,
+    /// Datagrams received from the mesh address, for proof and liveness.
+    mesh_datagrams: AtomicU64,
+    heard: tokio::sync::Notify,
+}
+
+impl fmt::Debug for PathSocket {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PathSocket")
+            .field("logical", &self.logical)
+            .field("on_mesh", &self.on_mesh.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+/// The physical path currently carrying the connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Path {
+    Enrolled,
+    Mesh(SocketAddr),
+}
+
+impl PathSocket {
+    /// `logical` is the enrolled server address the connection was dialed to.
     #[must_use]
-    pub fn new(socket: Arc<dyn AsyncUdpSocket>, logical: SocketAddr, physical: SocketAddr) -> Self {
-        Self {
+    pub fn new(socket: Arc<dyn AsyncUdpSocket>, logical: SocketAddr) -> Arc<Self> {
+        Arc::new(Self {
             socket,
             logical,
-            physical,
+            on_mesh: AtomicBool::new(false),
+            paths: Mutex::new(Paths {
+                mesh: None,
+                resend: VecDeque::new(),
+                resend_bytes: 0,
+                mesh_heard: None,
+            }),
+            mesh_datagrams: AtomicU64::new(0),
+            heard: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// The enrolled server address that the connection names.
+    #[must_use]
+    pub fn logical(&self) -> SocketAddr {
+        self.logical
+    }
+
+    /// Current physical path.
+    #[must_use]
+    pub fn path(&self) -> Path {
+        match self.paths.lock() {
+            Ok(paths) if self.on_mesh.load(Ordering::Acquire) => {
+                paths.mesh.map_or(Path::Enrolled, Path::Mesh)
+            }
+            _ => Path::Enrolled,
+        }
+    }
+
+    /// Send every following datagram to `mesh`. The caller then triggers a
+    /// transmission (see [`PathSocket::alias`]) and waits for [`PathSocket::heard_since`].
+    pub fn use_mesh(&self, mesh: SocketAddr) {
+        if let Ok(mut paths) = self.paths.lock() {
+            if paths.mesh != Some(mesh) {
+                paths.mesh_heard = None;
+            }
+            paths.mesh = Some(mesh);
+            paths.resend.clear();
+            paths.resend_bytes = 0;
+            self.on_mesh.store(true, Ordering::Release);
+        }
+    }
+
+    /// Return to the enrolled address and resend the unanswered mesh datagrams there.
+    /// The mesh address stays mapped, so its late replies are still accepted.
+    pub fn use_enrolled(&self) {
+        let pending = match self.paths.lock() {
+            Ok(mut paths) => {
+                self.on_mesh.store(false, Ordering::Release);
+                paths.resend_bytes = 0;
+                std::mem::take(&mut paths.resend)
+            }
+            Err(_) => return,
+        };
+        for sent in pending {
+            // Best effort: a full socket buffer leaves the rest to QUIC's own recovery.
+            let _ = self.socket.try_send(&Transmit {
+                destination: self.logical,
+                ecn: sent.ecn,
+                contents: &sent.contents,
+                segment_size: sent.segment_size,
+                src_ip: None,
+            });
+        }
+    }
+
+    /// Forget the mesh address entirely (component off or address change).
+    pub fn forget_mesh(&self) {
+        self.use_enrolled();
+        if let Ok(mut paths) = self.paths.lock() {
+            paths.mesh = None;
+            paths.mesh_heard = None;
+        }
+    }
+
+    /// Whether a datagram arrived from the mesh address at or after `since`.
+    #[must_use]
+    pub fn heard_since(&self, since: Instant) -> bool {
+        self.paths
+            .lock()
+            .ok()
+            .and_then(|paths| paths.mesh_heard)
+            .is_some_and(|heard| heard >= since)
+    }
+
+    /// Datagrams received from the mesh address so far.
+    #[must_use]
+    pub fn mesh_datagrams(&self) -> u64 {
+        self.mesh_datagrams.load(Ordering::Acquire)
+    }
+
+    /// Wait for the next datagram from the mesh address.
+    pub async fn mesh_heard(&self) {
+        self.heard.notified().await;
+    }
+
+    /// A distinct socket handle over the same routing state. Rebinding the
+    /// endpoint to it makes the connection announce itself at once (QUIC
+    /// sends a PING with a fresh connection ID after a local address change)
+    /// without opening a second descriptor; the endpoint may poll both handles
+    /// until the new one carries traffic, and both apply the same mapping.
+    #[must_use]
+    pub fn alias(self: &Arc<Self>) -> Arc<dyn AsyncUdpSocket> {
+        Arc::new(Alias(self.clone()))
+    }
+
+    fn keep(&self, transmit: &Transmit<'_>) {
+        if let Ok(mut paths) = self.paths.lock() {
+            if paths.resend.len() == RESEND_DATAGRAMS
+                || paths.resend_bytes + transmit.contents.len() > RESEND_BYTES
+            {
+                // The oldest datagram is the most likely to have been retransmitted by now.
+                if let Some(old) = paths.resend.pop_front() {
+                    paths.resend_bytes -= old.contents.len();
+                }
+            }
+            if transmit.contents.len() <= RESEND_BYTES {
+                paths.resend_bytes += transmit.contents.len();
+                paths.resend.push_back(Sent {
+                    contents: transmit.contents.to_vec(),
+                    segment_size: transmit.segment_size,
+                    ecn: transmit.ecn,
+                });
+            }
         }
     }
 }
 
-impl AsyncUdpSocket for PeerSocket {
+impl AsyncUdpSocket for PathSocket {
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
         self.socket.clone().create_io_poller()
     }
 
     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+        if transmit.destination != self.logical || !self.on_mesh.load(Ordering::Acquire) {
+            return self.socket.try_send(transmit);
+        }
+        let Some(mesh) = self.paths.lock().ok().and_then(|paths| paths.mesh) else {
+            return self.socket.try_send(transmit);
+        };
         self.socket.try_send(&Transmit {
-            destination: if transmit.destination == self.logical {
-                self.physical
-            } else {
-                transmit.destination
-            },
+            destination: mesh,
             ecn: transmit.ecn,
             contents: transmit.contents,
             segment_size: transmit.segment_size,
             src_ip: transmit.src_ip,
-        })
+        })?;
+        self.keep(transmit);
+        Ok(())
     }
 
     fn poll_recv(
@@ -61,20 +244,36 @@ impl AsyncUdpSocket for PeerSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        match self.socket.poll_recv(cx, bufs, meta) {
-            Poll::Ready(Ok(count)) => {
-                // Only the exact configured tuple is normalized; another source
-                // port remains foreign to Quinn. Datagram length, GRO stride,
-                // ECN and destination metadata retain their socket semantics.
-                for received in &mut meta[..count] {
-                    if received.addr == self.physical {
-                        received.addr = self.logical;
-                    }
-                }
-                Poll::Ready(Ok(count))
+        let count = match self.socket.poll_recv(cx, bufs, meta) {
+            Poll::Ready(Ok(count)) => count,
+            other => return other,
+        };
+        let mesh = match self.paths.lock() {
+            Ok(paths) => paths.mesh,
+            Err(_) => None,
+        };
+        let Some(mesh) = mesh else {
+            return Poll::Ready(Ok(count));
+        };
+        let mut heard = false;
+        // Only the exact trusted mesh tuple is normalized; any other source
+        // stays foreign to the client connection, which drops it.
+        for received in &mut meta[..count] {
+            if received.addr == mesh {
+                received.addr = self.logical;
+                heard = true;
             }
-            other => other,
         }
+        if heard {
+            if let Ok(mut paths) = self.paths.lock() {
+                paths.mesh_heard = Some(Instant::now());
+                paths.resend.clear();
+                paths.resend_bytes = 0;
+            }
+            self.mesh_datagrams.fetch_add(1, Ordering::AcqRel);
+            self.heard.notify_waiters();
+        }
+        Poll::Ready(Ok(count))
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -91,93 +290,64 @@ impl AsyncUdpSocket for PeerSocket {
     }
 }
 
+#[derive(Debug)]
+struct Alias(Arc<PathSocket>);
+impl AsyncUdpSocket for Alias {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        self.0.clone().create_io_poller()
+    }
+    fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+        self.0.try_send(transmit)
+    }
+    fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        self.0.poll_recv(cx, bufs, meta)
+    }
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.0.local_addr()
+    }
+    fn max_transmit_segments(&self) -> usize {
+        self.0.max_transmit_segments()
+    }
+    fn max_receive_segments(&self) -> usize {
+        self.0.max_receive_segments()
+    }
+    fn may_fragment(&self) -> bool {
+        self.0.may_fragment()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    //! Exercise actual UDP routing without changing payloads or treating datagrams as authority.
+    //! Real UDP: mapping, resend on return, and that payloads are never altered.
     use super::*;
     use quinn::Runtime as _;
-    use std::{io::IoSliceMut, sync::Arc};
+    use std::{io::IoSliceMut, sync::Arc, time::Duration};
 
-    #[tokio::test]
-    async fn translated_udp_preserves_payload_and_normalizes_only_the_exact_peer() {
-        let physical = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let foreign = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let logical = "127.0.0.2:7443".parse().unwrap();
-        let socket = quinn::TokioRuntime
-            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
-            .unwrap();
-        let local = socket.local_addr().unwrap();
-        let segments = (
-            socket.max_transmit_segments(),
-            socket.max_receive_segments(),
-        );
-        let fragment = socket.may_fragment();
-        let translated = Arc::new(PeerSocket::new(
-            socket,
-            logical,
-            physical.local_addr().unwrap(),
-        ));
-        assert_eq!(translated.local_addr().unwrap(), local);
-        assert_eq!(
-            (
-                translated.max_transmit_segments(),
-                translated.max_receive_segments()
-            ),
-            segments
-        );
-        assert_eq!(translated.may_fragment(), fragment);
-        send(translated.clone(), logical, b"public-route-proof").await;
-        let mut bytes = [0; 64];
-        let (length, peer) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            physical.recv_from(&mut bytes),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(&bytes[..length], b"public-route-proof");
-        assert_eq!(peer, local);
-        physical.send_to(b"public-reply", local).await.unwrap();
-        let metadata = receive(&translated, &mut bytes).await;
-        assert_eq!(metadata.addr, logical);
-        assert_eq!(&bytes[..metadata.len], b"public-reply");
-        assert_eq!(metadata.dst_ip, Some(local.ip()));
-        foreign.send_to(b"foreign-peer", local).await.unwrap();
-        let metadata = receive(&translated, &mut bytes).await;
-        assert_eq!(metadata.addr, foreign.local_addr().unwrap());
-        assert_eq!(&bytes[..metadata.len], b"foreign-peer");
-        send(translated, foreign.local_addr().unwrap(), b"unmapped-send").await;
-        let (length, peer) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            foreign.recv_from(&mut bytes),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(&bytes[..length], b"unmapped-send");
-        assert_eq!(peer, local);
-    }
-
-    async fn send(socket: Arc<PeerSocket>, destination: std::net::SocketAddr, contents: &[u8]) {
-        let mut writable = socket.clone().create_io_poller();
-        let transmit = quinn::udp::Transmit {
+    async fn send(socket: &Arc<PathSocket>, destination: SocketAddr, contents: &[u8]) {
+        let transmit = Transmit {
             destination,
             contents,
             ecn: None,
             segment_size: None,
             src_ip: None,
         };
+        let mut writable = socket.clone().create_io_poller();
         std::future::poll_fn(|cx| {
             loop {
                 match socket.try_send(&transmit) {
-                    Ok(()) => return std::task::Poll::Ready(Ok(())),
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    Ok(()) => return Poll::Ready(Ok(())),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         match writable.as_mut().poll_writable(cx) {
-                            std::task::Poll::Ready(Ok(())) => {}
+                            Poll::Ready(Ok(())) => {}
                             other => return other,
                         }
                     }
-                    Err(error) => return std::task::Poll::Ready(Err(error)),
+                    Err(error) => return Poll::Ready(Err(error)),
                 }
             }
         })
@@ -185,11 +355,11 @@ mod tests {
         .unwrap();
     }
 
-    async fn receive(socket: &PeerSocket, bytes: &mut [u8]) -> quinn::udp::RecvMeta {
+    async fn receive(socket: &PathSocket, bytes: &mut [u8]) -> RecvMeta {
         let mut buffers = [IoSliceMut::new(bytes)];
-        let mut metadata = [quinn::udp::RecvMeta::default()];
+        let mut metadata = [RecvMeta::default()];
         let count = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            Duration::from_secs(5),
             std::future::poll_fn(|cx| socket.poll_recv(cx, &mut buffers, &mut metadata)),
         )
         .await
@@ -197,5 +367,80 @@ mod tests {
         .unwrap();
         assert_eq!(count, 1);
         metadata[0]
+    }
+
+    async fn arrival(peer: &tokio::net::UdpSocket) -> Vec<u8> {
+        let mut bytes = [0; 256];
+        let (length, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        bytes[..length].to_vec()
+    }
+
+    #[tokio::test]
+    async fn mesh_route_maps_only_the_trusted_tuple_and_resends_unanswered_datagrams() {
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let foreign = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let socket = PathSocket::new(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.2:0").unwrap())
+                .unwrap(),
+            logical,
+        );
+        let local = socket.local_addr().unwrap();
+        assert_eq!(socket.path(), Path::Enrolled);
+        send(&socket, logical, b"enrolled").await;
+        assert_eq!(arrival(&enrolled).await, b"enrolled");
+
+        socket.use_mesh(mesh.local_addr().unwrap());
+        assert_eq!(socket.path(), Path::Mesh(mesh.local_addr().unwrap()));
+        let switched = Instant::now();
+        send(&socket, logical, b"first-mesh").await;
+        send(&socket, logical, b"second-mesh").await;
+        assert_eq!(arrival(&mesh).await, b"first-mesh");
+        assert_eq!(arrival(&mesh).await, b"second-mesh");
+        // Unanswered: returning resends both, in order, on the enrolled path.
+        socket.use_enrolled();
+        assert_eq!(socket.path(), Path::Enrolled);
+        assert_eq!(arrival(&enrolled).await, b"first-mesh");
+        assert_eq!(arrival(&enrolled).await, b"second-mesh");
+
+        socket.use_mesh(mesh.local_addr().unwrap());
+        send(&socket, logical, b"answered").await;
+        assert_eq!(arrival(&mesh).await, b"answered");
+        mesh.send_to(b"mesh-reply", local).await.unwrap();
+        let mut bytes = [0; 64];
+        let metadata = receive(&socket, &mut bytes).await;
+        assert_eq!(
+            metadata.addr, logical,
+            "the connection keeps its logical peer"
+        );
+        assert_eq!(&bytes[..metadata.len], b"mesh-reply");
+        assert!(socket.heard_since(switched));
+        assert_eq!(socket.mesh_datagrams(), 1);
+        // The reply answered the outstanding datagram: nothing is resent.
+        socket.use_enrolled();
+        send(&socket, logical, b"marker").await;
+        assert_eq!(
+            arrival(&enrolled).await,
+            b"marker",
+            "answered datagrams are never resent"
+        );
+        // A late mesh reply after returning is still the logical peer.
+        mesh.send_to(b"late-mesh", local).await.unwrap();
+        let metadata = receive(&socket, &mut bytes).await;
+        assert_eq!(
+            (metadata.addr, &bytes[..metadata.len]),
+            (logical, &b"late-mesh"[..])
+        );
+
+        // A foreign source keeps its own address and never counts as the mesh.
+        foreign.send_to(b"foreign", local).await.unwrap();
+        let metadata = receive(&socket, &mut bytes).await;
+        assert_eq!(metadata.addr, foreign.local_addr().unwrap());
+        assert_eq!(socket.mesh_datagrams(), 2);
     }
 }

@@ -13,7 +13,7 @@ use infraternal_plugin_api::{
 };
 #[cfg(feature = "transport")]
 pub mod remote_native;
-#[cfg(all(feature = "transport", any(test, feature = "test-support")))]
+#[cfg(feature = "transport")]
 pub mod remote_path_socket;
 #[cfg(feature = "transport")]
 pub mod remote_quic;
