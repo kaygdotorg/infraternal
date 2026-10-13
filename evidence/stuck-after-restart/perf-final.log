@@ -1,0 +1,45 @@
+ENVIRONMENT machine=infraternal-perf-test cores=4 memory_bytes=8262782976 load=0.51 0.56 0.57 1/260 2295612 sessions=72
+restart fixture: signed in
+restart fixture: authority status {
+  initialized: false,
+  locked: true,
+}
+restart fixture: CA initialized
+restart fixture: initial typing works
+METRIC shim_count=72 shim_rss_mean_bytes=4153287 shim_rss_total_bytes=299036672 shim_rss_max_bytes=4157440 daemon_rss_bytes=5492736 server_rss_bytes=20025344
+restart fixture: server stopped
+restart fixture: bridge state [
+  {
+    closed: true,
+    closedBy: "server 1006",
+  }
+]
+restart fixture: page state false
+restart fixture: disconnected indicator confirmed
+restart fixture: queued text entered
+restart fixture: queued return entered
+restart fixture: server restarted
+METRIC restart_sessions=72 viewport=1440x900 ca_after_recovery=locked path_to_typable_ms=207.369 rtt_ms=150 budget_ms=200 last_screen_retained=true screen_restore_ms=0 first_verification_frame_ms=6.700
+3167 | 
+3168 | // packages/isomorphic/stackTrace.ts
+3169 | function captureRawStack() {
+3170 |   const stackTraceLimit = Error.stackTraceLimit;
+3171 |   Error.stackTraceLimit = 50;
+3172 |   const error = new Error();
+                           ^
+error: expect(received).toBeLessThanOrEqual(expected)
+
+Expected: <= 200
+Received:    207.369384765625
+ matcherResult: {
+  message: "expect(received).toBeLessThanOrEqual(expected)\n\nExpected: <= 200\nReceived:    207.369384765625",
+  pass: false,
+  name: "toBeLessThanOrEqual",
+},
+
+      at captureRawStack (/root/infraternal-bench/stuck-after-restart/repo/apps/tracer/node_modules/playwright-core/lib/coreBundle.js:3172:21)
+      at callMatcherAsStep (/root/infraternal-bench/stuck-after-restart/repo/apps/tracer/node_modules/playwright/lib/matchers/expect.js:12877:57)
+      at exerciseRestart (/root/infraternal-bench/stuck-after-restart/repo/apps/tracer/real/restart-fixture.ts:153:24)
+      at processTicksAndRejections (native:7:39)
+
+Bun v1.4.2 (Linux x64)

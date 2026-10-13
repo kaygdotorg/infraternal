@@ -1,0 +1,28 @@
+bun test v1.4.2 (744846f84)
+
+src/connection-restart.test.ts:
+38 |     sockets[0]!.onmessage?.({ data: welcome.slice().buffer as ArrayBuffer });
+39 |     now += 86_400_000;
+40 |     sockets[0]!.close();
+41 |     retry?.();
+42 |     sockets[1]!.onopen?.();
+43 |     expect(resumed).toEqual([false, true]);
+                         ^
+error: expect(received).toEqual(expected)
+
+  [
+    false,
+-   true,
++   false,
+  ]
+
+- Expected  - 1
++ Received  + 1
+
+      at <anonymous> (/home/kayg/Developer/infraternal/.worktrees/stuck-after-restart/apps/tracer/src/connection-restart.test.ts:43:21)
+(fail) an overnight connection retains its writer and pending input when the server restarts [11.69ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [49.00ms]

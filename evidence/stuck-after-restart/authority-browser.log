@@ -1,0 +1,15 @@
+[WebServer] $ bun run build.ts
+[WebServer] built chunk-2xsp833h.js, chunk-0wtgt3qq.js, chunk-6zjp6k9r.js, chunk-a22wt75m.js, chunk-e0vg2j9a.js, chunk-g1k5qgfb.js, chunk-p8w36wjb.js, chunk-5rm1099t.js, chunk-257nxd2c.js, chunk-3b3q2j7w.js, chunk-kjpft1zy.js, chunk-53ka8tp5.js, chunk-6gtm055g.js, chunk-41npshb9.js, chunk-ga5842hv.js, chunk-ghv265y7.js, chunk-6s4rvgqt.js, chunk-csbc9b3b.js, chunk-6tya3029.js, chunk-t2hvwt0r.js, chunk-ykvgkw1z.js, chunk-na49xj9e.js, main.js, chunk-fkqw7qgm.js, chunk-fn4w1xnh.js, chunk-f0qjh70n.js, chunk-mcg5c3sz.js, chunk-1gn7mp22.js, chunk-8hbvars9.js, chunk-jv99pfx2.js, chunk-8gqdshxw.js, chunk-tt050h6j.js, chunk-h4axxvgp.js, chunk-qdqkhs2p.js, chunk-cgj2hv56.js, chunk-kc2ppdvp.js, chunk-2ermxk26.js, chunk-07w0j9xt.js, chunk-2vwwwztc.js, chunk-2yh4k4m4.js, chunk-46xrb165.js, chunk-axbkkqp1.js, chunk-b7h8xjhf.js, chunk-9tc02ykg.js, chunk-fdjrhtgt.js, chunk-2qg5kvds.js, chunk-ec0f34hz.js, chunk-7k0pmfc0.js, chunk-qqq8z4tp.js, chunk-bzqedt3v.js, chunk-s6f0te26.js, chunk-s8tkvsxs.js, chunk-hyvakjsm.js, chunk-qeq094pg.js, chunk-nnwp6t07.js, chunk-vgt531t8.js, chunk-8v50e0pe.js, chunk-v04nmc00.js, chunk-shfwpgd9.js, chunk-kd6rmw7c.js, chunk-g21kwhgg.js, backdrop.worker.js, faulty-terminal.worker.js, chunk-pvy56w0p.js, chunk-6cvmrpay.js, chunk-smrfvp7n.js, chunk-0qyesdmy.js, chunk-35ej3g5f.js
+[WebServer] tracer TEST DOUBLE listening on http://localhost:4500
+[WebServer] latency proxy listening on http://localhost:4499; upstream port=4500
+
+Running 4 tests using 1 worker
+
+(node:4193780) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 test/ca-unlock.spec.ts:42:3 › locked then unlocked (desktop) (18.9s)
+  ✓  2 test/ca-unlock.spec.ts:42:3 › locked then unlocked (phone) (13.2s)
+  ✓  3 test/ca-unlock.spec.ts:71:1 › the palette row runs the ceremony and the lock clears (10.7s)
+  ✓  4 test/ca-unlock.spec.ts:84:1 › already unlocked: no palette row, Settings says Unlocked with no button (10.7s)
+
+  4 passed (1.1m)

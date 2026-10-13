@@ -1,0 +1,23 @@
+$ bun x tsc --project tsconfig.json
+bun test v1.4.2 (744846f84)
+
+src/connection-pool.test.ts:
+(pass) terminals fill the first socket, then open another, and a released slot is reused first [1.21ms]
+(pass) 54 windows need two sockets, and the pool stops opening sockets at its cap [5.40ms]
+
+src/connection-restart.test.ts:
+(pass) an overnight connection retains its writer and pending input when the server restarts [8.62ms]
+
+src/canvas/sessions/live.test.ts:
+(pass) an enrolled host opens by UUID and splits keep that authority [1.16ms]
+(pass) unknown and ambiguous labels never open an embedded shell [0.18ms]
+(pass) removed hosts disappear from inventory and cannot route a new shell [0.31ms]
+
+src/canvas/sessions/gone-review.test.ts:
+(pass) selecting a known gone session keeps its final exited state [1.06ms]
+(pass) a known retired status survives repeated selection and generic ended answers [0.25ms]
+
+ 8 pass
+ 0 fail
+ 29 expect() calls
+Ran 8 tests across 4 files. [52.00ms]
