@@ -102,6 +102,7 @@ impl Transfer {
             gzip: self.gzip.as_deref(),
             zstd: self.zstd.as_deref(),
             invitation,
+            payload_ack: true,
         }
     }
 }
@@ -540,8 +541,12 @@ impl Installation {
                 "exit 0; fi",
                 "if [ \"$1\" = upload ]; then exit \"$status\"; fi; exit 0; fi",
             );
-            writeln!(script, "setup_step upload {}", argument(upload))
-                .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
+            writeln!(
+                script,
+                "setup_step upload {}\nprintf 'PAYLOAD ready\\n'",
+                argument(upload)
+            )
+            .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
         }
         for (name, body) in [
             ("join", setup_scripts::join(&join.url)),

@@ -75,6 +75,8 @@ pub enum Input<'a> {
         gzip: Option<&'a [u8]>,
         zstd: Option<&'a [u8]>,
         invitation: &'a [u8],
+        /// Wait for verified staging before exposing private stdin to its reader.
+        payload_ack: bool,
     },
     /// Public payload first, then private invitation; never concatenate/copy secrets.
     PayloadAndInvitation {

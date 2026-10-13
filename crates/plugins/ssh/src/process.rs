@@ -111,14 +111,22 @@ async fn execute_inner(
         .take()
         .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
     let negotiated = matches!(&input, Input::Negotiated { .. });
+    let payload_ack = matches!(
+        &input,
+        Input::Negotiated {
+            payload_ack: true,
+            ..
+        }
+    );
     let (choice, selected) = tokio::sync::oneshot::channel();
+    let (ready, received) = tokio::sync::oneshot::channel();
     let operation = async {
-        let write = write_input(stdin, input, selected);
+        let write = write_input(stdin, input, selected, received);
         let read = async {
             let (stdout, stderr) = tokio::try_join!(
                 async {
                     if negotiated {
-                        negotiated_output(stdout, stdout_limit, choice).await
+                        negotiated_output(stdout, stdout_limit, choice, ready, payload_ack).await
                     } else {
                         bounded(stdout, stdout_limit).await
                     }
@@ -250,6 +258,7 @@ async fn write_input(
     mut stdin: tokio::process::ChildStdin,
     input: Input<'_>,
     selected: tokio::sync::oneshot::Receiver<Option<TransferChoice>>,
+    received: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), Failure> {
     match input {
         Input::Negotiated {
@@ -257,6 +266,7 @@ async fn write_input(
             gzip,
             zstd,
             invitation,
+            payload_ack,
         } => {
             let payload = match selected.await.ok().flatten() {
                 Some(TransferChoice::Raw) => Some(raw),
@@ -271,6 +281,11 @@ async fn write_input(
             };
             if let Some(payload) = payload {
                 write_payload(&mut stdin, payload).await?;
+            }
+            // A stdio-based bounded reader can discard bytes beyond the payload.
+            // Its verified receipt proves that reader exited before private input.
+            if payload_ack && received.await.is_err() {
+                return Ok(());
             }
             stdin
                 .write_all(invitation)
@@ -321,6 +336,8 @@ async fn negotiated_output(
     mut stdout: tokio::process::ChildStdout,
     limit: usize,
     choice: tokio::sync::oneshot::Sender<Option<TransferChoice>>,
+    ready: tokio::sync::oneshot::Sender<()>,
+    payload_ack: bool,
 ) -> Result<Vec<u8>, Failure> {
     let mut prefix = Vec::new();
     let mut lines = 0;
@@ -344,6 +361,33 @@ async fn negotiated_output(
         .strip_prefix(b"STEP upload\n")
         .and_then(TransferChoice::parse);
     let _ = choice.send(selected);
+    if payload_ack && selected.is_some() {
+        // Read only the public readiness receipt; leave final setup output in
+        // its existing canonical shape for the shared refusal decoder.
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0];
+            if prefix.len() + line.len() >= limit
+                || stdout
+                    .read(&mut byte)
+                    .await
+                    .map_err(|_| Failure::install("The SSH output pipe closed."))?
+                    == 0
+            {
+                break;
+            }
+            line.push(byte[0]);
+            if byte[0] == b'\n' {
+                if line == b"PAYLOAD ready\n" {
+                    line.clear();
+                    let _ = ready.send(());
+                    break;
+                }
+                prefix.append(&mut line);
+            }
+        }
+        prefix.append(&mut line);
+    }
     let mut rest = bounded(stdout, limit.saturating_sub(prefix.len())).await?;
     prefix.append(&mut rest);
     Ok(prefix)

@@ -2258,3 +2258,42 @@ async fn duplex_check_refuses_named_failures_and_oversized_records_before_stagin
     );
     assert!(!f.base().exists());
 }
+
+/// Shadow review (#189): the negotiated transfer frames the payload with
+/// `head -c N` and then lets the join step read the private invitation from
+/// the same stdin. A `head` that reads through a stdio buffer takes more than N bytes from a pipe, so the
+/// invitation never reaches `join`. The system GNU head passes; the buffered
+/// head models the other supported userlands and must pass too.
+#[tokio::test]
+async fn negotiated_transfer_delivers_the_invitation_after_a_buffering_head() {
+    for buffered in [false, true] {
+        let fixture = Fixture::new();
+        executable(
+            &fixture.binary,
+            "#!/bin/sh\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\nmkdir -p \"$state\"\ncat > \"$state/invitation\"\n",
+        );
+        if buffered {
+            // Reads whole stdio-sized blocks like getc/fread-based head
+            // implementations, then writes only the first N bytes.
+            executable(
+                &fixture.root.join("tools/head"),
+                "#!/usr/bin/python3\nimport os, sys, time\nn = int(sys.argv[sys.argv.index('-c') + 1])\nbuf = b''\nwhile len(buf) < n:\n    time.sleep(0.05)\n    chunk = os.read(0, 4096)\n    if not chunk:\n        break\n    buf += chunk\nview = memoryview(buf[:n])\nwhile view:\n    view = view[os.write(1, view):]\n",
+            );
+        }
+        let session = Arc::new(Compound(Local {
+            root: fixture.root.clone(),
+        }));
+        let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+        let result = install
+            .stage_and_setup(&fixture.binary, &fixture.join)
+            .await;
+        let delivered = std::fs::read(fixture.base().join("state/invitation")).unwrap_or_default();
+        assert!(
+            result.is_ok() && delivered == fixture.join.stdin.expose(),
+            "buffered head={buffered}: setup={:?} invitation bytes delivered={}",
+            result.as_ref().err().map(|error| &error.message),
+            delivered.len()
+        );
+        let _ = install.rollback().await;
+    }
+}
