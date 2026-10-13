@@ -18,6 +18,8 @@ pub mod remote_native;
 #[cfg(feature = "transport")]
 pub mod remote_path_socket;
 #[cfg(feature = "transport")]
+mod remote_peer_routes;
+#[cfg(feature = "transport")]
 pub mod remote_quic;
 #[cfg(feature = "transport")]
 pub mod remote_renewal;

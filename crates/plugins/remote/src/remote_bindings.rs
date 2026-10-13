@@ -13,6 +13,7 @@
 //! follow a migration; the learned peer route can. Routes are hints, never
 //! authority: the connection's keys authenticate every datagram either way.
 
+use crate::remote_peer_routes::Peers;
 use quinn::{
     AsyncUdpSocket, UdpPoller,
     udp::{RecvMeta, Transmit},
@@ -54,6 +55,8 @@ pub struct Bindings {
     route_count: AtomicUsize,
     cursor: AtomicUsize,
     receiver: Mutex<Option<Waker>>,
+    peers: Mutex<Peers>,
+    peer_count: AtomicUsize,
 }
 
 impl fmt::Debug for Bindings {
@@ -76,6 +79,18 @@ impl Drop for LeasedBinding {
     }
 }
 
+/// Owns one admitted peer's routing aliases; retirement retains no replay buffer.
+pub struct PeerBinding {
+    bindings: Arc<Bindings>,
+    logical: SocketAddr,
+    id: u64,
+}
+impl Drop for PeerBinding {
+    fn drop(&mut self) {
+        self.bindings.remove_peer(self.logical, self.id);
+    }
+}
+
 impl Bindings {
     /// Wrap the endpoint's primary (agent address) socket.
     #[must_use]
@@ -93,7 +108,99 @@ impl Bindings {
             route_count: AtomicUsize::new(0),
             cursor: AtomicUsize::new(0),
             receiver: Mutex::new(None),
+            peers: Mutex::default(),
+            peer_count: AtomicUsize::new(0),
         })
+    }
+
+    /// Lease an exact alternative tuple supplied through the admitted peer's
+    /// control channel. A NAT mapping may have changed its enrolled source port.
+    /// No UDP packet can create an alias or change its identity.
+    /// # Errors
+    /// Refuses conflicting aliases, unspecified addresses, or poisoned state.
+    pub fn route_peer(
+        self: &Arc<Self>,
+        logical: SocketAddr,
+        alternate: SocketAddr,
+    ) -> io::Result<PeerBinding> {
+        if logical == alternate || alternate.ip().is_unspecified() || alternate.port() == 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let id = self.next_lease.fetch_add(1, Ordering::Relaxed);
+        let mut peers = self.peers.lock().map_err(|_| io::ErrorKind::Other)?;
+        if !peers.insert(id, logical, alternate) {
+            return Err(io::ErrorKind::AddrInUse.into());
+        }
+        self.peer_count
+            .store(peers.logical.len(), Ordering::Release);
+        Ok(PeerBinding {
+            bindings: self.clone(),
+            logical,
+            id,
+        })
+    }
+
+    fn remove_peer(&self, logical: SocketAddr, id: u64) {
+        if let Ok(mut peers) = self.peers.lock() {
+            peers.remove(logical, id);
+            self.peer_count
+                .store(peers.logical.len(), Ordering::Release);
+        }
+    }
+
+    /// Normalize only leased tuples and replay encrypted data when the physical
+    /// path changes. Packet numbers, not routing hints, own deduplication.
+    fn receive_peer(&self, lease: Option<u64>, meta: &mut [RecvMeta]) {
+        if self.peer_count.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let mut replay = Vec::new();
+        if let Ok(mut peers) = self.peers.lock() {
+            for received in meta {
+                let physical = received.addr;
+                let logical = peers.alternate.get(&physical).copied().unwrap_or(physical);
+                if let Some(peer) = peers.logical.get_mut(&logical) {
+                    if peer.physical != physical || peer.binding != lease {
+                        peer.physical = physical;
+                        peer.binding = lease;
+                        replay.push((logical, peer.recent.take()));
+                    }
+                    peer.local = received.dst_ip;
+                    received.addr = logical;
+                }
+            }
+        }
+        for (logical, pending) in replay {
+            self.learn(
+                lease,
+                &[RecvMeta {
+                    addr: logical,
+                    ..RecvMeta::default()
+                }],
+            );
+            for sent in pending {
+                // A full socket buffer leaves recovery to QUIC; no detached
+                // worker or unbounded retransmission queue outlives the lease.
+                let _ = self.try_send(&Transmit {
+                    destination: logical,
+                    contents: &sent.contents,
+                    segment_size: sent.segment_size,
+                    ecn: sent.ecn,
+                    src_ip: None,
+                });
+            }
+        }
+    }
+
+    /// Public physical coordinates for opt-in diagnostics; never identity.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn physical_peer(&self, logical: SocketAddr) -> SocketAddr {
+        self.peers
+            .lock()
+            .ok()
+            .and_then(|peers| peers.logical.get(&logical).map(|peer| peer.physical))
+            .unwrap_or(logical)
     }
 
     /// Add one bound destination socket; the endpoint driver is woken to poll it.
@@ -205,10 +312,35 @@ impl AsyncUdpSocket for Bindings {
     }
 
     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
-        match self.outbound(transmit) {
+        let mut peers = (self.peer_count.load(Ordering::Acquire) != 0)
+            .then(|| self.peers.lock().ok())
+            .flatten();
+        let peer = peers
+            .as_mut()
+            .and_then(|peers| peers.logical.get_mut(&transmit.destination));
+        let physical = peer
+            .as_ref()
+            .map_or(transmit.destination, |peer| peer.physical);
+        // Keep source selection coherent with the alias's physical destination.
+        // A wildcard primary must use the packet's local destination: Quinn's
+        // connection-local IP is immutable, and a route may own several IPs.
+        let (socket, source) = if let Some(peer) = peer.as_ref() {
+            (
+                peer.binding.and_then(|id| {
+                    self.snapshot()
+                        .iter()
+                        .find(|lease| lease.id == id)
+                        .map(|lease| lease.socket.clone())
+                }),
+                peer.local,
+            )
+        } else {
+            (self.outbound(transmit), transmit.src_ip)
+        };
+        let result = match socket {
             // A leased socket is bound to its own address: no source override.
             Some(socket) => socket.try_send(&Transmit {
-                destination: transmit.destination,
+                destination: physical,
                 ecn: transmit.ecn,
                 contents: transmit.contents,
                 segment_size: transmit.segment_size,
@@ -220,14 +352,24 @@ impl AsyncUdpSocket for Bindings {
             // socket is not bound to, and the kernel refuses the datagram.
             // A specifically bound primary chooses its own source.
             None if self.primary_bound => self.primary.try_send(&Transmit {
-                destination: transmit.destination,
+                destination: physical,
                 ecn: transmit.ecn,
                 contents: transmit.contents,
                 segment_size: transmit.segment_size,
                 src_ip: None,
             }),
-            None => self.primary.try_send(transmit),
+            None => self.primary.try_send(&Transmit {
+                destination: physical,
+                src_ip: source,
+                ..*transmit
+            }),
+        };
+        if result.is_ok()
+            && let Some(peer) = peer
+        {
+            peer.recent.keep(transmit);
         }
+        result
     }
 
     fn poll_recv(
@@ -251,6 +393,7 @@ impl AsyncUdpSocket for Bindings {
             };
             match socket.poll_recv(cx, bufs, meta) {
                 Poll::Ready(Ok(count)) => {
+                    self.receive_peer(lease, &mut meta[..count]);
                     self.learn(lease, &meta[..count]);
                     return Poll::Ready(Ok(count));
                 }
@@ -420,6 +563,117 @@ mod tests {
         send(&bindings, meta.addr, b"reply-4", Some(leased_address.ip()));
         let (length, from) = peer.recv_from(&mut reply).await.unwrap();
         assert_eq!((&reply[..length], from), (&b"reply-4"[..], primary));
+    }
+
+    #[tokio::test]
+    async fn peer_route_preserves_the_logical_tuple_and_replays_on_return() {
+        let bindings = Bindings::new(bound("127.0.0.1:0"));
+        let primary = bindings.local_addr().unwrap();
+        let leased = bound("127.0.0.3:0");
+        let destination = leased.local_addr().unwrap();
+        let _listener = bindings.lease(leased).unwrap();
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        // Independent ports model an enrolled source rewritten by NAT.
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let physical = mesh.local_addr().unwrap();
+        let peer = bindings.route_peer(logical, physical).unwrap();
+        mesh.send_to(b"move", destination).await.unwrap();
+        let (meta, _) = receive(&bindings).await;
+        assert_eq!(meta.addr, logical);
+        send(&bindings, logical, b"outstanding-input", Some(primary.ip()));
+        let mut bytes = [0; 64];
+        let (n, source) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            mesh.recv_from(&mut bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (&bytes[..n], source),
+            (&b"outstanding-input"[..], destination)
+        );
+        // No acknowledgement came back. Returning replays the exact encrypted
+        // datagram to the old tuple without waiting for the loss timer.
+        enrolled.send_to(b"return", primary).await.unwrap();
+        let (meta, _) = receive(&bindings).await;
+        assert_eq!(meta.addr, logical);
+        let (n, source) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            enrolled.recv_from(&mut bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!((&bytes[..n], source), (&b"outstanding-input"[..], primary));
+        let foreign = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        foreign.send_to(b"wrong-port", destination).await.unwrap();
+        let (meta, _) = receive(&bindings).await;
+        assert_eq!(
+            meta.addr,
+            foreign.local_addr().unwrap(),
+            "the same mesh IP with a foreign port is not an alias"
+        );
+        assert!(
+            bindings.route_peer(logical, physical).is_err(),
+            "conflicting owners cannot replace a live route"
+        );
+        drop(peer);
+        mesh.send_to(b"after-retirement", destination)
+            .await
+            .unwrap();
+        let (meta, _) = receive(&bindings).await;
+        assert_eq!(meta.addr, physical, "retired aliases have no mapping");
+    }
+
+    #[tokio::test]
+    async fn wildcard_reply_uses_the_destination_of_the_latest_peer_packet() {
+        let bindings = Bindings::new(bound("0.0.0.0:0"));
+        let port = bindings.local_addr().unwrap().port();
+        let enrolled_destination = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
+        let mesh_destination = SocketAddr::new("127.0.0.3".parse().unwrap(), port);
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let _peer = bindings
+            .route_peer(logical, mesh.local_addr().unwrap())
+            .unwrap();
+        mesh.send_to(b"move", mesh_destination).await.unwrap();
+        let (meta, _) = receive(&bindings).await;
+        assert_eq!(meta.addr, logical);
+        assert_eq!(meta.dst_ip, Some(mesh_destination.ip()));
+        send(
+            &bindings,
+            logical,
+            b"input",
+            Some(enrolled_destination.ip()),
+        );
+        let mut bytes = [0; 64];
+        let (_, source) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            mesh.recv_from(&mut bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            source, mesh_destination,
+            "a wildcard bind must follow the new local destination, not the connection's immutable source hint"
+        );
+        enrolled
+            .send_to(b"return", enrolled_destination)
+            .await
+            .unwrap();
+        let _ = receive(&bindings).await;
+        let (_, source) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            enrolled.recv_from(&mut bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(source, enrolled_destination);
     }
 
     /// Runs a lease installation between a pending socket poll and receiver
