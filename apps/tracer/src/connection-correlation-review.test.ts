@@ -44,7 +44,7 @@ test("Pongs with a matching nonce and a different timestamp cannot retain readin
     connection.streamAttached(true, 1);
     // Advance a deterministic clock past the unsampled route's grace. This is
     // a correlation oracle, not a wall-clock latency measurement.
-    const until = 1100;
+    const until = 2100;
     for (;;) {
       const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
       if (!next) break;

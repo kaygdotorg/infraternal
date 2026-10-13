@@ -119,7 +119,9 @@ export class MuxConnection {
   private readonly pendingPings = new Map<bigint, number>();
   private livenessTimer = 0;
   private lastPongAt = 0;
-  private livenessRtt = 1000;
+  // Unknown startup RTT uses the same bounded two-second grace as native routes.
+  // Once sampled, only the learned RTT plus scheduling allowance renews readiness.
+  private livenessRtt: number | undefined;
   private lastRttReportAt = -Infinity;
   private readonly subscriptions = new Map<number, Subscription>();
   private readonly welcomeListeners = new Set<() => void>();
@@ -281,7 +283,7 @@ export class MuxConnection {
     const now = performance.now();
     // A renderer can wake with an old reply queued ahead of its timer. Enforce the
     // existing lease first; suspension must not become an hours-long learned RTT.
-    if (now - this.lastPongAt >= this.livenessRtt + 50) {
+    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
       this.retireUnresponsiveSocket();
       return;
     }
@@ -289,7 +291,7 @@ export class MuxConnection {
     for (const key of this.pendingPings.keys()) { if (key <= nonce) this.pendingPings.delete(key); }
     this.lastPongAt = now;
     const ms = Math.max(1, now - startedAt);
-    this.livenessRtt = Math.max(ms, this.livenessRtt === 1000 ? ms : this.livenessRtt * 0.95);
+    this.livenessRtt = Math.max(ms, this.livenessRtt === undefined ? ms : this.livenessRtt * 0.95);
     // Probe frequency must not drive DOM/prediction updates more often than the former sampling cadence.
     if (this.lastPongAt - this.lastRttReportAt >= 2000) {
       this.lastRttReportAt = this.lastPongAt;
@@ -422,7 +424,7 @@ export class MuxConnection {
     this.livenessTimer = 0;
     if (!this.isWelcomed || this.closed) return;
     const now = performance.now();
-    if (now - this.lastPongAt >= this.livenessRtt + 50) {
+    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
       this.retireUnresponsiveSocket();
       return;
     }
@@ -431,7 +433,7 @@ export class MuxConnection {
     // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
     const clock = performance.now();
     const nextProbe = this.lastPingAt + LIVENESS_TICK_MS - clock;
-    const remaining = this.lastPongAt + this.livenessRtt + 50 - clock;
+    const remaining = this.lastPongAt + (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50) - clock;
     this.livenessTimer = window.setTimeout(() => this.checkLiveness(), Math.max(1, Math.min(nextProbe, remaining)));
   }
 
@@ -474,7 +476,7 @@ export class MuxConnection {
         this.welcomedAt = performance.now();
         this.lastPongAt = this.welcomedAt;
         // A network change may have a different RTT; relearn before enforcing its deadline.
-        this.livenessRtt = 1000;
+        this.livenessRtt = undefined;
         this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
