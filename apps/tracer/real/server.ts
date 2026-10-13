@@ -9,6 +9,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpsServer } from "node:https";
 import { request as httpRequest } from "node:http";
@@ -49,6 +50,10 @@ export interface RealServer {
   binary: string;
   dataDir: string;
   pid: number;
+  /** Epoch milliseconds from the monotonic clock, for perf-VM-only recovery measurements. */
+  recoveredAt?: number;
+  /** Restarts only the server PID, retaining its detached session shims. */
+  restart(whileStopped?: () => Promise<void>): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -67,6 +72,8 @@ export async function startRealServer(options: {
   hostname?: string;
   stateRoot?: string;
   remoteListen?: string;
+  /** Uses a private transient service with production's server-only stop behavior. */
+  systemd?: boolean;
   /** Public fixture certificate only; private TLS material remains in memory. */
   certificate?: (pem: string) => Promise<void>;
   /** Seeds controlled public host trust before any bootstrap operation. */
@@ -124,11 +131,29 @@ export async function startRealServer(options: {
   await new Promise<void>((r) => tls.listen(options.port ?? 0, address, r));
   const origin = `https://${hostname}:${(tls.address() as AddressInfo).port}`;
 
-  const child: ChildProcess = spawn(binary, ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])], {
+  let unit: string | undefined;
+  const args = ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])];
+  const launch = (): ChildProcess => {
+    // A stopped transient unit may await garbage collection after its launcher
+    // exits. A fresh name avoids racing that collection while keeping the same data/runtime.
+    unit = options.systemd ? `s199-${randomUUID()}` : undefined;
+    return spawn(unit ? "systemd-run" : binary, unit ? ["--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "-p", "KillMode=process", `--setenv=XDG_RUNTIME_DIR=${runtime}`, `--setenv=ZDOTDIR=${resolve(root, "crates/infraternal/tests/profile")}`, binary, ...args] : args, {
     cwd: root, detached: true,
     env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
-  });
+    });
+  };
+  let child = launch();
+  const stop = async (): Promise<void> => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const stopped = once(child, "exit");
+    if (unit) {
+      const control = spawn("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+      const [code] = await once(control, "exit");
+      if (code !== 0) throw new Error("private fixture service stop failed");
+    } else child.kill("SIGTERM");
+    await stopped;
+  };
   if (process.env.REAL_SERVER_LOG === "1") { child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); child.stdout?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); } else child.stderr?.resume();
 
   const bridges: Bridge[] = [];
@@ -186,18 +211,39 @@ export async function startRealServer(options: {
   setup.stdout.on("data", (b) => { token += b; });
   await once(setup, "exit");
 
-  return {
-    origin, backend, bridges, token: token.trim(), binary, dataDir: state, pid: child.pid!,
+  const fixture: RealServer = {
+    origin, backend, bridges, token: token.trim(), binary, dataDir: state, get pid() { return child.pid!; },
+    async restart(whileStopped) {
+      await stop();
+      await whileStopped?.();
+      child = launch();
+      if (process.env.REAL_SERVER_LOG === "1") {
+        child.stderr?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
+        child.stdout?.on("data", (bytes) => process.stderr.write(`RESTART ${bytes}`));
+      } else child.stderr?.resume();
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        try { if ((await fetch(backend + "/healthz", { headers: { Connection: "close" } })).ok) break; } catch { /* starting */ }
+        if (Date.now() > deadline) throw new Error("server restart failed");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      fixture.recoveredAt = performance.timeOrigin + performance.now();
+    },
     async dispose() {
       front.close();
       tls.close();
-      try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+      if (unit) await stop();
+      else try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
       // Reuse authenticated fixture teardown so detached shims cannot outlive
       // the runtime directory that identifies them. Never scan unrelated PIDs.
-      const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", resolve(runtime, "infraternal")], { cwd: root, stdio: "ignore" });
+      // Root measurements run in a private mount namespace whose /run and passwd
+      // belong to this fixture; ordinary jobs always use their XDG runtime directory.
+      const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
+      const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", shimState], { cwd: root, stdio: "ignore" });
       await once(cleanup, "exit");
       await rm(runtime, { recursive: true, force: true });
       await rm(state, { recursive: true, force: true });
     },
   };
+  return fixture;
 }
