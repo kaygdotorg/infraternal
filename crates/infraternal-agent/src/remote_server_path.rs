@@ -5,11 +5,11 @@
 //! connection in place: the endpoint is rebound to the same socket state so
 //! the connection announces itself at once, and the server's shared endpoint
 //! validates the new source with QUIC path migration. Streams, writer
-//! bindings and terminal offsets never change, so nothing is replayed or
-//! reattached. While on the mesh the host asks for an acknowledgement every
+//! bindings and terminal offsets never change, so no application data is
+//! replayed or reattached. While on the mesh the host asks for an acknowledgement every
 //! probe interval; the first unanswered probe after one RTT plus a margin
-//! returns the connection to the enrolled address, resending its unanswered
-//! mesh datagrams at once.
+//! returns the connection to the enrolled address, resending a bounded recent
+//! history of encrypted mesh datagrams at once.
 //!
 //! A TCP connection (UDP to the enrolled address unavailable) cannot move. It
 //! keeps the earlier behaviour: a separately proven QUIC connection to the mesh
@@ -341,7 +341,7 @@ async fn answered(
     .is_ok()
 }
 
-/// Return in place to the enrolled address, resending unanswered mesh datagrams.
+/// Return in place to the enrolled address, resending bounded recent ciphertext.
 async fn to_enrolled(
     connection: &quinn::Connection,
     endpoint: &quinn::Endpoint,

@@ -12,9 +12,10 @@
 //! (trusted routing), never learned from UDP. A mapped datagram grants no
 //! authority: the connection's packet keys still authenticate every byte.
 //!
-//! While the mesh path is unproven or failing, datagrams sent on it are kept
-//! (bounded) until the mesh answers. Returning to the enrolled path resends
-//! them at once instead of waiting for loss recovery timers; QUIC discards
+//! Datagrams sent on the mesh are retained in a bounded recent history. A
+//! socket cannot identify the packet numbers acknowledged by a reply. Returning
+//! to the enrolled path resends the history instead of waiting for loss
+//! recovery timers; QUIC discards
 //! any duplicate by packet number.
 
 use quinn::{
@@ -128,7 +129,7 @@ impl PathSocket {
         }
     }
 
-    /// Return to the enrolled address and resend the unanswered mesh datagrams there.
+    /// Return to the enrolled address and resend the bounded recent mesh history.
     /// The mesh address stays mapped, so its late replies are still accepted.
     pub fn use_enrolled(&self) {
         let pending = match self.paths.lock() {
@@ -259,13 +260,9 @@ impl AsyncUdpSocket for PathSocket {
         }
         if enrolled {
             paths.enrolled_heard = Some(Instant::now());
-            if !self.on_mesh.load(Ordering::Acquire) {
-                paths.resend.clear();
-            }
         }
         if heard {
             paths.mesh_heard = Some(Instant::now());
-            paths.resend.clear();
             drop(paths);
             self.mesh_datagrams.fetch_add(1, Ordering::AcqRel);
             self.heard.notify_waiters();
@@ -405,6 +402,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unrelated_reply_cannot_discard_ciphertext_needed_after_a_cut() {
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let socket = PathSocket::new(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap(),
+            logical,
+        );
+        socket.use_mesh(mesh.local_addr().unwrap());
+        send(&socket, logical, b"input-needing-replay").await;
+        assert_eq!(arrival(&mesh).await, b"input-needing-replay");
+        // The socket cannot know which packet numbers this reply acknowledges.
+        // A delayed ACK for earlier traffic must not erase the current input.
+        mesh.send_to(b"earlier-ack", socket.local_addr().unwrap())
+            .await
+            .unwrap();
+        receive(&socket, &mut [0; 64]).await;
+        socket.use_enrolled();
+        send(&socket, logical, b"marker").await;
+        assert_eq!(arrival(&enrolled).await, b"input-needing-replay");
+        assert_eq!(arrival(&enrolled).await, b"marker");
+    }
+
+    #[tokio::test]
     async fn mesh_route_maps_only_the_trusted_tuple_and_resends_unanswered_datagrams() {
         let enrolled = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mesh = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
@@ -447,14 +470,12 @@ mod tests {
         assert_eq!(&bytes[..metadata.len], b"mesh-reply");
         assert!(socket.heard_since(switched));
         assert_eq!(socket.mesh_datagrams(), 1);
-        // The reply answered the outstanding datagram: nothing is resent.
+        // The socket cannot interpret ACK ranges. Replaying this encrypted
+        // packet is safe: the QUIC connection owns packet-number deduplication.
         socket.use_enrolled();
         send(&socket, logical, b"marker").await;
-        assert_eq!(
-            arrival(&enrolled).await,
-            b"marker",
-            "answered datagrams are never resent"
-        );
+        assert_eq!(arrival(&enrolled).await, b"answered");
+        assert_eq!(arrival(&enrolled).await, b"marker");
         // A late mesh reply after returning is still the logical peer.
         mesh.send_to(b"late-mesh", local).await.unwrap();
         let metadata = receive(&socket, &mut bytes).await;
