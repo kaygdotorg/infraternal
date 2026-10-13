@@ -1,0 +1,93 @@
+//! Schedules one bounded ciphertext backup through the owning endpoint's receive poll, with no detached worker [215,263], #201.
+use std::{
+    pin::Pin,
+    task::{Context, Poll, Waker},
+    time::Duration,
+};
+
+/// Overlap loss detection and the enrolled-path round trip without waiting for
+/// QUIC's loss timer. This delay is measured as part of path acceptance.
+pub(crate) const COPY_DELAY: Duration = Duration::from_millis(20);
+
+/// One clock per endpoint socket, not one task or clock per leased peer.
+#[derive(Default)]
+pub(crate) struct CopyClock {
+    timer: Option<Pin<Box<tokio::time::Sleep>>>,
+    receiver: Option<Waker>,
+}
+impl CopyClock {
+    pub fn arm(&mut self, deadline: tokio::time::Instant) {
+        if let Some(timer) = &mut self.timer {
+            if deadline >= timer.deadline() {
+                return;
+            }
+            timer.as_mut().reset(deadline);
+        } else {
+            self.timer = Some(Box::pin(tokio::time::sleep_until(deadline)));
+        }
+        // A send can follow the receive poll's Pending result. Wake the same
+        // endpoint driver so the newly armed clock cannot miss registration.
+        if let Some(receiver) = &self.receiver {
+            receiver.wake_by_ref();
+        }
+    }
+    pub fn poll(&mut self, cx: &mut Context<'_>) -> bool {
+        use std::future::Future as _;
+        if !self
+            .receiver
+            .as_ref()
+            .is_some_and(|old| old.will_wake(cx.waker()))
+        {
+            self.receiver = Some(cx.waker().clone());
+        }
+        if self
+            .timer
+            .as_mut()
+            .is_some_and(|timer| matches!(timer.as_mut().poll(cx), Poll::Ready(())))
+        {
+            self.timer = None;
+            return true;
+        }
+        false
+    }
+    #[cfg(test)]
+    pub fn empty(&self) -> bool {
+        self.timer.is_none() && self.receiver.is_none()
+    }
+    pub fn clear(&mut self) {
+        self.timer = None;
+        self.receiver = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A send after a pending receive cannot strand its clock registration.
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct Wake(AtomicBool);
+    impl std::task::Wake for Wake {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    #[tokio::test]
+    async fn arming_after_pending_wakes_the_owned_endpoint_and_clear_drops_it() {
+        let signal = Arc::new(Wake(AtomicBool::new(false)));
+        let waker = std::task::Waker::from(signal.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut clock = CopyClock::default();
+        assert!(!clock.poll(&mut cx));
+        clock.arm(tokio::time::Instant::now() + COPY_DELAY);
+        assert!(signal.0.load(Ordering::Relaxed));
+        assert!(!clock.empty());
+        clock.clear();
+        assert!(clock.empty());
+    }
+}

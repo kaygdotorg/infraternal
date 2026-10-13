@@ -13,7 +13,7 @@
 //! follow a migration; the learned peer route can. Routes are hints, never
 //! authority: the connection's keys authenticate every datagram either way.
 
-use crate::remote_peer_routes::Peers;
+use crate::{remote_path_copies::CopyClock, remote_peer_routes::Peers};
 use quinn::{
     AsyncUdpSocket, UdpPoller,
     udp::{RecvMeta, Transmit},
@@ -57,6 +57,7 @@ pub struct Bindings {
     receiver: Mutex<Option<Waker>>,
     peers: Mutex<Peers>,
     peer_count: AtomicUsize,
+    copies: Mutex<CopyClock>,
 }
 
 impl fmt::Debug for Bindings {
@@ -85,6 +86,25 @@ pub struct PeerBinding {
     logical: SocketAddr,
     id: u64,
 }
+impl PeerBinding {
+    /// Only the already admitted peer's Hello enables encrypted backup copies.
+    pub fn set_backup(&self, enabled: bool) {
+        if let Ok(mut peers) = self.bindings.peers.lock()
+            && let Some(peer) = peers.get_mut(self.logical)
+            && peer.id == self.id
+        {
+            peer.backup = enabled;
+            if !enabled {
+                peer.recent.cancel_copies();
+                if peers.iter_mut().all(|peer| !peer.backup)
+                    && let Ok(mut clock) = self.bindings.copies.lock()
+                {
+                    clock.clear();
+                }
+            }
+        }
+    }
+}
 impl Drop for PeerBinding {
     fn drop(&mut self) {
         self.bindings.remove_peer(self.logical, self.id);
@@ -110,6 +130,7 @@ impl Bindings {
             receiver: Mutex::new(None),
             peers: Mutex::default(),
             peer_count: AtomicUsize::new(0),
+            copies: Mutex::default(),
         })
     }
 
@@ -143,6 +164,11 @@ impl Bindings {
         if let Ok(mut peers) = self.peers.lock() {
             peers.remove(logical, id);
             self.peer_count.store(peers.len(), Ordering::Release);
+            if peers.len() == 0
+                && let Ok(mut clock) = self.copies.lock()
+            {
+                clock.clear();
+            }
         }
     }
 
@@ -376,8 +402,12 @@ impl AsyncUdpSocket for Bindings {
         };
         if result.is_ok()
             && let Some(peer) = peer
+            && let Some(at) = peer
+                .recent
+                .keep_copying(transmit, peer.backup && peer.physical != peer.logical)
+            && let Ok(mut clock) = self.copies.lock()
         {
-            peer.recent.keep(transmit);
+            clock.arm(at);
         }
         result
     }
@@ -388,6 +418,19 @@ impl AsyncUdpSocket for Bindings {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        let due = self.peer_count.load(Ordering::Acquire) != 0
+            && self.copies.lock().is_ok_and(|mut clock| clock.poll(cx));
+        if due && let Ok(mut peers) = self.peers.lock() {
+            for peer in peers.iter_mut() {
+                if let Some(at) =
+                    peer.recent
+                        .copies(self.primary.as_ref(), peer.logical, self.primary_bound)
+                    && let Ok(mut clock) = self.copies.lock()
+                {
+                    clock.arm(at);
+                }
+            }
+        }
         let generation = self.generation.load(Ordering::Acquire);
         let leases = self.snapshot();
         let sources = leases.len() + 1;
@@ -634,6 +677,51 @@ mod tests {
             .unwrap();
         let (meta, _) = receive(&bindings).await;
         assert_eq!(meta.addr, physical, "retired aliases have no mapping");
+    }
+
+    #[tokio::test]
+    async fn a_negotiated_peer_copies_output_without_a_worker_and_off_cancels_it() {
+        let bindings = Bindings::new(bound("127.0.0.1:0"));
+        let primary = bindings.local_addr().unwrap();
+        let leased = bound("127.0.0.3:0");
+        let destination = leased.local_addr().unwrap();
+        let _listener = bindings.lease(leased).unwrap();
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let peer = bindings
+            .route_peer(logical, mesh.local_addr().unwrap())
+            .unwrap();
+        peer.set_backup(true);
+        mesh.send_to(b"move", destination).await.unwrap();
+        receive(&bindings).await;
+        send(&bindings, logical, b"encrypted-output", Some(primary.ip()));
+        let mut mesh_bytes = [0; 64];
+        assert_eq!(
+            mesh.recv_from(&mut mesh_bytes).await.unwrap().0,
+            b"encrypted-output".len()
+        );
+        let mut enrolled_bytes = [0; 64];
+        let received = tokio::select! {
+            copy = enrolled.recv_from(&mut enrolled_bytes) => copy.unwrap(),
+            _ = receive(&bindings) => panic!("no peer sent a reply"),
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("copy did not arrive"),
+        };
+        assert_eq!(
+            (&enrolled_bytes[..received.0], received.1),
+            (&b"encrypted-output"[..], primary)
+        );
+        send(&bindings, logical, b"cancel-this-copy", Some(primary.ip()));
+        assert!(!bindings.copies.lock().unwrap().empty());
+        peer.set_backup(false);
+        assert!(
+            bindings.copies.lock().unwrap().empty(),
+            "off cancels the timer and receiver reference"
+        );
+        assert_eq!(bindings.peers.lock().unwrap().len(), 1);
+        drop(peer);
+        assert_eq!(bindings.peers.lock().unwrap().len(), 0);
+        assert!(bindings.copies.lock().unwrap().empty());
     }
 
     #[tokio::test]

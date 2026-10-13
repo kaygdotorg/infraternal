@@ -35,7 +35,7 @@ use std::{
     time::Instant,
 };
 
-use crate::remote_peer_routes::Recent;
+use crate::{remote_path_copies::CopyClock, remote_peer_routes::Recent};
 
 struct Paths {
     mesh: Option<SocketAddr>,
@@ -55,6 +55,8 @@ pub struct PathSocket {
     mesh_datagrams: AtomicU64,
     heard: tokio::sync::Notify,
     sent: tokio::sync::Notify,
+    backup: AtomicBool,
+    copies: Mutex<CopyClock>,
 }
 
 impl fmt::Debug for PathSocket {
@@ -92,6 +94,8 @@ impl PathSocket {
             mesh_datagrams: AtomicU64::new(0),
             heard: tokio::sync::Notify::new(),
             sent: tokio::sync::Notify::new(),
+            backup: AtomicBool::new(false),
+            copies: Mutex::default(),
         })
     }
 
@@ -134,9 +138,23 @@ impl PathSocket {
         }
     }
 
+    /// Enable overlap only after the authenticated peer advertises support.
+    pub fn set_backup(&self, enabled: bool) {
+        self.backup.store(enabled, Ordering::Release);
+        if !enabled {
+            if let Ok(mut paths) = self.paths.lock() {
+                paths.resend.cancel_copies();
+            }
+            if let Ok(mut clock) = self.copies.lock() {
+                clock.clear();
+            }
+        }
+    }
+
     /// Return to the enrolled address and resend the bounded recent mesh history.
     /// The mesh address stays mapped, so its late replies are still accepted.
     pub fn use_enrolled(&self) {
+        self.set_backup(false);
         let pending = match self.paths.lock() {
             Ok(mut paths) => {
                 self.on_mesh.store(false, Ordering::Release);
@@ -228,7 +246,13 @@ impl PathSocket {
 
     fn keep(&self, transmit: &Transmit<'_>) {
         if let Ok(mut paths) = self.paths.lock() {
-            paths.resend.keep(transmit);
+            if let Some(at) = paths
+                .resend
+                .keep_copying(transmit, self.backup.load(Ordering::Acquire))
+                && let Ok(mut clock) = self.copies.lock()
+            {
+                clock.arm(at);
+            }
             paths.mesh_sent = Some(Instant::now());
         }
     }
@@ -264,6 +288,18 @@ impl AsyncUdpSocket for PathSocket {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        let due = self.on_mesh.load(Ordering::Acquire)
+            && self.backup.load(Ordering::Acquire)
+            && self.copies.lock().is_ok_and(|mut clock| clock.poll(cx));
+        if due
+            && let Ok(mut paths) = self.paths.lock()
+            && let Some(at) = paths
+                .resend
+                .copies(self.socket.as_ref(), self.logical, true)
+            && let Ok(mut clock) = self.copies.lock()
+        {
+            clock.arm(at);
+        }
         let count = match self.socket.poll_recv(cx, bufs, meta) {
             Poll::Ready(Ok(count)) => count,
             other => return other,
@@ -395,6 +431,38 @@ mod tests {
             .unwrap()
             .unwrap();
         bytes[..length].to_vec()
+    }
+
+    #[tokio::test]
+    async fn negotiated_copies_use_the_enrolled_socket_and_retire_on_return() {
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let socket = PathSocket::new(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.2:0").unwrap())
+                .unwrap(),
+            logical,
+        );
+        socket.use_mesh(mesh.local_addr().unwrap());
+        send(&socket, logical, b"legacy").await;
+        assert_eq!(arrival(&mesh).await, b"legacy");
+        assert!(
+            socket.copies.lock().unwrap().empty(),
+            "legacy peers arm no backup clock"
+        );
+        socket.set_backup(true);
+        send(&socket, logical, b"ciphertext-copy").await;
+        assert_eq!(arrival(&mesh).await, b"ciphertext-copy");
+        // The owning endpoint's pending receive drives the clock. There is no
+        // worker that could outlive this socket or the applied mesh path.
+        let mut receive_bytes = [0; 64];
+        tokio::select! {
+            copy = arrival(&enrolled) => assert_eq!(copy, b"ciphertext-copy"),
+            _ = receive(&socket, &mut receive_bytes) => panic!("no peer sent a reply"),
+        }
+        socket.use_enrolled();
+        assert!(socket.copies.lock().unwrap().empty());
     }
 
     #[tokio::test]

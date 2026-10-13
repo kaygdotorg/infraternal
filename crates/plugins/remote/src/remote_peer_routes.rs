@@ -1,5 +1,9 @@
 //! Leases trusted alternative peer tuples and bounded encrypted replay below the existing QUIC endpoint [198,215,263], #201.
-use quinn::udp::{EcnCodepoint, Transmit};
+use crate::remote_path_copies::COPY_DELAY;
+use quinn::{
+    AsyncUdpSocket,
+    udp::{EcnCodepoint, Transmit},
+};
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, SocketAddr},
@@ -13,6 +17,8 @@ pub(super) struct Datagram {
     pub contents: Vec<u8>,
     pub segment_size: Option<usize>,
     pub ecn: Option<EcnCodepoint>,
+    source: Option<IpAddr>,
+    copy_at: Option<tokio::time::Instant>,
 }
 
 #[derive(Default)]
@@ -21,9 +27,17 @@ pub(super) struct Recent {
     bytes: usize,
 }
 impl Recent {
+    #[cfg(test)]
     pub fn keep(&mut self, transmit: &Transmit<'_>) {
+        self.keep_copying(transmit, false);
+    }
+    pub fn keep_copying(
+        &mut self,
+        transmit: &Transmit<'_>,
+        backup: bool,
+    ) -> Option<tokio::time::Instant> {
         if transmit.contents.len() > MAX_BYTES {
-            return;
+            return None;
         }
         while self.datagrams.len() >= MAX_DATAGRAMS
             || self.bytes + transmit.contents.len() > MAX_BYTES
@@ -34,11 +48,50 @@ impl Recent {
             self.bytes -= old.contents.len();
         }
         self.bytes += transmit.contents.len();
+        let copy_at = backup.then(|| tokio::time::Instant::now() + COPY_DELAY);
         self.datagrams.push_back(Datagram {
             contents: transmit.contents.to_vec(),
             segment_size: transmit.segment_size,
             ecn: transmit.ecn,
+            source: transmit.src_ip,
+            copy_at,
         });
+        copy_at
+    }
+    /// At the socket's earliest copy deadline, send the bounded pending batch.
+    /// Include younger entries: sustained output can evict older entries before
+    /// their deadline, and must not starve backup transmission indefinitely.
+    /// A full socket defers a copy; other errors leave recovery to QUIC.
+    pub fn copies(
+        &mut self,
+        socket: &dyn AsyncUdpSocket,
+        destination: SocketAddr,
+        bound: bool,
+    ) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        for sent in &mut self.datagrams {
+            if sent.copy_at.is_some() {
+                let result = socket.try_send(&Transmit {
+                    destination,
+                    contents: &sent.contents,
+                    ecn: sent.ecn,
+                    segment_size: sent.segment_size,
+                    src_ip: if bound { None } else { sent.source },
+                });
+                sent.copy_at = match result {
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        Some(now + COPY_DELAY)
+                    }
+                    _ => None,
+                };
+            }
+        }
+        self.datagrams.iter().filter_map(|sent| sent.copy_at).min()
+    }
+    pub fn cancel_copies(&mut self) {
+        for sent in &mut self.datagrams {
+            sent.copy_at = None;
+        }
     }
     pub fn clear(&mut self) {
         self.bytes = 0;
@@ -97,6 +150,7 @@ pub(super) struct Peer {
     pub local: Option<IpAddr>,
     pub recent: Recent,
     pub seen: Seen,
+    pub backup: bool,
 }
 /// Both trusted tuple keys share one bounded slot. Use the same address/u64
 /// map representation as reply routing rather than monomorphising separate
@@ -112,6 +166,9 @@ pub(super) struct Peers {
 impl Peers {
     pub fn len(&self) -> usize {
         self.count
+    }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Peer> {
+        self.slots.iter_mut().filter_map(Option::as_mut)
     }
     fn index(&self, address: SocketAddr) -> Option<usize> {
         usize::try_from(*self.keys.get(&address)?).ok()
@@ -162,6 +219,7 @@ impl Peers {
             local: None,
             recent: Recent::default(),
             seen: Seen::default(),
+            backup: false,
         });
         if self.free.pop().is_some() {
             self.slots[index] = peer;
@@ -202,6 +260,68 @@ impl Peers {
 mod tests {
     //! GSO batches remain within both replay bounds even when many old packets must retire.
     use super::*;
+    #[tokio::test]
+    async fn output_evicting_the_oldest_copy_still_copies_one_bounded_batch() {
+        use quinn::Runtime as _;
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let destination = receiver.local_addr().unwrap();
+        // Kernel accounting includes skb overhead. Size this fixture socket
+        // for the complete bounded batch instead of relying on host defaults.
+        let state = quinn::udp::UdpSocketState::new((&receiver).into()).unwrap();
+        state
+            .set_recv_buffer_size((&receiver).into(), 256 * 1024)
+            .unwrap();
+        let receiver = quinn::TokioRuntime.wrap_udp_socket(receiver).unwrap();
+        let socket = quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let mut writable = socket.clone().create_io_poller();
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        let mut recent = Recent::default();
+        for index in 0_u32..32 {
+            let mut contents = [7; 4096];
+            contents[..4].copy_from_slice(&index.to_le_bytes());
+            recent.keep_copying(
+                &Transmit {
+                    destination,
+                    contents: &contents,
+                    ecn: None,
+                    segment_size: None,
+                    src_ip: None,
+                },
+                true,
+            );
+        }
+        // The clock's oldest scheduled entry has been evicted. Firing that
+        // clock must flush the retained batch even when its entries are younger.
+        assert!(recent.copies(socket.as_ref(), destination, true).is_none());
+        let mut bytes = vec![0; MAX_BYTES];
+        let mut index = 16_u32;
+        while index < 32 {
+            let mut bufs = [std::io::IoSliceMut::new(&mut bytes)];
+            let mut meta = [quinn::udp::RecvMeta::default()];
+            let count = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                std::future::poll_fn(|cx| receiver.poll_recv(cx, &mut bufs, &mut meta)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(count, 1);
+            for datagram in bytes[..meta[0].len].chunks(meta[0].stride) {
+                assert_eq!(datagram.len(), 4096);
+                assert_eq!(&datagram[..4], &index.to_le_bytes());
+                index += 1;
+            }
+        }
+        assert_eq!(index, 32);
+        assert!(recent.copies(socket.as_ref(), destination, true).is_none());
+        assert!(recent.datagrams.iter().all(|sent| sent.copy_at.is_none()));
+        assert_eq!(recent.bytes, MAX_BYTES);
+    }
+
     #[test]
     fn ciphertext_history_normalizes_gro_batches_and_stays_bounded() {
         let mut seen = Seen::default();
