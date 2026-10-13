@@ -932,7 +932,18 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     let tls = milestone(crate::remote_autoswitch_probe::Kind::TlsHandshake);
     let admitted = milestone(crate::remote_autoswitch_probe::Kind::LedgerAdmission);
     let control = milestone(crate::remote_autoswitch_probe::Kind::ControlReady);
+    timing::validate_lifecycle(
+        enabled_wall,
+        joined,
+        tls.wall,
+        first_byte.wall,
+        first_byte.monotonic.duration_since(moved.into_std()),
+    )
+    .unwrap();
     let phases = serde_json::json!({
+        "terminal_byte_boundary": "authenticated_transport_arrival_before_actor_delivery",
+        "fresh_kernel_peer": true,
+        "lifecycle_and_clock_validated": true,
         "fixture_enable_to_node_wg_handshake_us": joined.duration_since(enabled_wall).unwrap().as_micros(),
         "node_wg_handshake_to_first_mesh_byte_us": first_byte.wall.duration_since(joined).unwrap().as_micros(),
         "fixture_enable_to_first_mesh_byte_us": first_byte.monotonic.duration_since(moved.into_std()).as_micros(),
