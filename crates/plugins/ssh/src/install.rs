@@ -50,6 +50,7 @@ pub struct JoinMaterial {
 
 /// Holds a host-local transaction lock until commit or explicit rollback.
 /// Callers must run rollback on cancellation; Drop cannot perform asynchronous remote I/O.
+#[derive(Clone)]
 pub struct Installation {
     session: Arc<dyn SshSession>,
     host: uuid::Uuid,
@@ -592,13 +593,34 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
         self.commit().await
     }
 
+    /// Retry the same owned installation without ending or replacing its shim.
+    /// Existing fresh-host enrollment state stays with that host's private root.
+    /// # Errors
+    /// Refuses foreign journals and any rollback/staging/setup failure.
+    pub async fn restart_setup(&self, binary: &Path, join: &JoinMaterial) -> Result<bool, Failure> {
+        let retain = r#"
+preserve_session=yes
+stage="$base/.bootstrap-lock"
+if [ -d "$stage" ] && [ ! -L "$stage" ]; then
+    [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+    [ ! -L "$stage/state" ] && [ ! -L "$base/state" ] || exit 71
+    # A join may have completed before activation. Keep that host-local key
+    # outside the disposable transaction, just as the live service does.
+    if [ -d "$stage/state" ] && [ ! -e "$base/state" ]; then mv "$stage/state" "$base/state"; fi
+fi
+"#;
+        self.session.run(&self.script(&format!("{FRESH_CLEANUP}\n{retain}\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}")), Input::Empty).await?;
+        self.stage(binary).await?;
+        self.setup(join).await
+    }
+
     /// Restore the previous installation, or remove only this host-bound fresh installation.
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
     pub async fn rollback(&self) -> Result<(), Failure> {
         self.session
             .run(
-                &self.script(&format!("{FRESH_CLEANUP}\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}")),
+                &self.script(&format!("{FRESH_CLEANUP}\npreserve_session=no\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}")),
                 Input::Empty,
             )
             .await?;
@@ -756,7 +778,9 @@ fi
 if [ -f "$stage/activating" ]; then
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
-    if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
+    if [ "${preserve_session:-no}" != yes ] || [ "$kind" != fresh ]; then
+        if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
+    fi
     # Only a journaled final replacement belongs to this attempt. Temporary
     # files stay in stage; unrelated suffix files are never cleanup targets.
     if [ -f "$stage/replacing-launcher" ] && [ ! -f "$stage/had-launcher" ]; then rm -f "$launcher"; fi
@@ -838,6 +862,7 @@ retire_fresh_acquisition() {
     fi
 }
 finish_fresh() {
+    if [ "${preserve_session:-no}" = yes ]; then validate_receipt; rm -f "$receipt"; return; fi
     validate_receipt
     if [ -e "$base" ] || [ -L "$base" ]; then
         [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] || exit 72
