@@ -5,6 +5,10 @@ use infraternal_plugin_ssh::openssh::OpenSsh;
 use infraternal_plugin_ssh::transport::TransferChoice;
 use std::{io::Read, path::PathBuf, time::Instant};
 
+#[path = "bootstrap_instant_tests.rs"]
+mod instant;
+static FULLY_JOINED: Mutex<Option<Instant>> = Mutex::new(None);
+
 /// The provisioning listener's socket admission is exercised directly below.
 fn enrollment_acceptor(
     config: axum_server::tls_openssl::OpenSSLConfig,
@@ -36,6 +40,12 @@ struct TimedSession {
     inner: Arc<dyn SshSession>,
 }
 impl SshSession for TimedSession {
+    fn session_bridge(&self) -> bool { std::env::var_os("ADDHOST_INSTANT").is_some() && self.inner.session_bridge() }
+    fn stream<'a>(&'a self, script: &'a str) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        if script.contains("setup_step upload") { UPLOAD_STARTED.store(true, Ordering::SeqCst); }
+        self.inner.stream(script)
+    }
+
     fn setup_steps(&self) -> bool { self.inner.setup_steps() }
     fn authentication(&self) -> Option<infraternal_plugin_ssh::auth_order::Authentication> {
         self.inner.authentication()
@@ -213,6 +223,15 @@ pub(super) struct ObservedBackend(
     pub(super) Option<CanaryReturnHook>,
 );
 impl Backend for ObservedBackend {
+    fn early_terminal(&self) -> bool { std::env::var_os("ADDHOST_INSTANT").is_some() && self.0.early_terminal() }
+    fn publish_terminal<'a>(&'a self, a: &'a Authority, h: Uuid, id: Uuid, channel: infraternal_plugin_ssh::duplex::Duplex, session: Arc<dyn SshSession>) -> Operation<'a, ()> {
+        self.0.publish_terminal(a, h, id, channel, session)
+    }
+    fn authority_cancelled<'a>(&'a self, a: &'a Authority) -> Operation<'a, ()> { self.0.authority_cancelled(a) }
+    fn setup_cancelled(&self, h: Uuid) -> Operation<'_, ()> { self.0.setup_cancelled(h) }
+    fn reissue_invitation<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, JoinMaterial> { self.0.reissue_invitation(a,h) }
+    fn stop(&self) -> Operation<'_, ()> { self.0.stop() }
+
     fn record_failure(&self, t: &Target, h: Option<Uuid>, p: Step, f: &Failure) {
         self.0.record_failure(t, h, p, f);
     }
@@ -315,7 +334,11 @@ impl Backend for ObservedBackend {
         Box::pin(measured("authority_retirement", self.0.failed(a, h)))
     }
     fn completed<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
-        Box::pin(measured("authority_commit", self.0.completed(a, h)))
+        Box::pin(async move {
+            measured("authority_commit", self.0.completed(a, h)).await?;
+            *FULLY_JOINED.lock().unwrap() = Some(Instant::now());
+            Ok(())
+        })
     }
 }
 
@@ -481,6 +504,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         issuer: InvitationIssuer::new(auth, f.pool.clone(), store, service),
         hosts,
         attempts: Mutex::default(),
+        sessions_changed: Mutex::default(),
     });
     let retry_private = std::env::var_os("BREAKIT2_RETRY").map(|_| private.clone());
     let transport = Arc::new(FixtureTransport {
@@ -510,6 +534,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let prepared = Instant::now();
     runner.prepare_payloads().await;
     println!("METRIC payload_prepare startup_ms={:.3}", prepared.elapsed().as_secs_f64() * 1000.0);
+    let started = Instant::now();
+    *FULLY_JOINED.lock().unwrap() = None;
     let batch = runner
         .start_authenticated(
             "owner".into(),
@@ -589,6 +615,37 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                         "METRIC breakit2 failed_step={:?} status={:?}",
                         failure.failed_step, failure.exit_status
                     );
+                }
+                if event.step == Step::Done && let (Some(host), Some(session)) = (event.host_id, event.session_id) {
+                    // Persist the native fixture's writer exactly as a browser
+                    // would, so private readiness shares its real allocator.
+                    let connection = Uuid::new_v4();
+                    sqlx::query("INSERT INTO websocket_connections(connection_id,token_hash,user_id,created_at,active) VALUES(?,?,'owner',unixepoch(),1)")
+                        .bind(connection.as_bytes().as_slice()).bind([0_u8;32].as_slice()).execute(&f.pool).await.unwrap();
+                    sqlx::query("INSERT INTO terminal_writers(connection_id,client_stream,session_id) VALUES(?,1,?)")
+                        .bind(connection.as_bytes().as_slice()).bind(session.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+                    let actor = f.backend.hosts.actor(host).await.unwrap();
+                    let terminal = instant::EarlyTerminal::attach(&actor, session, started).await;
+                    // Once the published shim is interactive, closing the wizard
+                    // must leave the same bounded background setup alive.
+                    drop(batch);
+                    let status = runner.setup_status();
+                    let mut setup_changed = status.subscribe("owner", host).unwrap();
+                    loop {
+                        let events = status.events("owner", host, 0).unwrap().1;
+                        if let Some(failure) = events.iter().find(|event| event.state == infraternal_plugin_ssh::setup::State::Failed) {
+                            panic!("published setup failed at {:?}", failure.stage);
+                        }
+                        if events.iter().any(|event| event.stage == infraternal_plugin_ssh::setup::Stage::Ready && event.state == infraternal_plugin_ssh::setup::State::Done) { break; }
+                        setup_changed.changed().await.unwrap();
+                    }
+                    let joined = FULLY_JOINED.lock().unwrap().unwrap();
+                    println!("METRIC addhost_instant fully_joined_ms={:.3}", joined.duration_since(started).as_secs_f64() * 1000.0);
+                    assert!(f.backend.hosts.installed(host).await);
+                    terminal.after_handover().await;
+                    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions WHERE remote_host_id=?")
+                        .bind(host.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+                    assert_eq!(sessions, 1, "handover cannot create another public shell");
                 }
                 return event.step;
             }
