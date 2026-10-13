@@ -74,7 +74,7 @@ class Bridge(Writer):
         self.ping(0, 0)
 
 
-def run(binary):
+def run(binary, installed_binary=None):
     state = fixture_state('ss')
     state.mkdir(mode=0o700)
     bridge = installed = None
@@ -99,7 +99,9 @@ def run(binary):
         bridge.input(pending)
         bridge.kill()
         bridge = None
-        installed = Writer(binary, state)
+        # A feature-reduced starter and the full host build share the same
+        # shim protocol, session identity and per-writer replay cursors.
+        installed = Writer(installed_binary or binary, state)
         installed.id = session
         installed.out, installed.entered, installed.acked = out, entered, acked
         installed.attach()
@@ -125,5 +127,6 @@ def run(binary):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
+    parser.add_argument('--installed-binary', type=Path, help='Full host build adopting the starter shim')
     args = parser.parse_args()
-    run(args.binary.resolve())
+    run(args.binary.resolve(), args.installed_binary.resolve() if args.installed_binary else None)
