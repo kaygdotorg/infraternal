@@ -1,5 +1,0 @@
-Running as unit: run-p378479-i46470550.scope; invocation ID: 724338f3c6ee4d32a62060a148f63d58
-owned_shim_pid=378931 socket_exists=True process_state=S
-exe_exists=False
-exe_stat_errno=13
-exe_lstat_is_symlink=True

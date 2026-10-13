@@ -1,6 +1,10 @@
 <!-- Records production CA bootstrap, admission isolation, lifecycle, scale and atomic-gate evidence for #78. -->
 # Remote infraternal agent bootstrap round
 
+> Historical raw logs and receipts were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/remote-agents-bootstrap/evidence/` and should be attached to #78
+> with the `issue-attach` helper.
+
 This round adds first-use machine certificate setup under fresh administrator passkey verification [151][168], separates authenticated owner admission from anonymous joins, bounds pre-auth sockets, reserves known-source capacity, stabilizes fixture hashing and adds QUIC liveness [198][199][201][205]. No dependency, foundation engine, shipping profile or size budget changed. Nothing was pushed or deployed.
 
 ## First-use contract

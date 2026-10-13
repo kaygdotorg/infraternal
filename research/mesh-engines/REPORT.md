@@ -2,6 +2,10 @@
 
 # WireGuard engine measurements for the mesh
 
+> Historical raw receipts were removed under D262. Fresh output belongs under `$HOME/.cache/codex-
+> scratch/mesh-engines/evidence/`; selected results should be attached to #81 with the `issue-
+> attach` helper.
+
 - **Issue:** #81
 - **Measured:** 2026-10-07 on `infraternal-dev`
 **Decision boundary:** Decisions 163–167 leave the engine choice to the owner. This report measures and recommends candidates; it makes no product choice and changes no product code.

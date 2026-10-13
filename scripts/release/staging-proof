@@ -9,12 +9,15 @@ import shutil
 import re
 import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
 import uuid
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 HOST = "root@10.69.69.208"
+sys.path.insert(0, str(REPOSITORY / "scripts"))
+from evidence_path import evidence_directory
 
 
 def command(arguments, **kwargs):
@@ -53,7 +56,7 @@ def main():
     parser.add_argument("--scratch", type=Path,
                         default=Path.home() / ".cache/codex-scratch/deploy-pipeline")
     parser.add_argument("--evidence", type=Path,
-                        default=REPOSITORY / "evidence/deploy-pipeline/staging-proof.txt")
+                        default=evidence_directory("deploy-pipeline") / "staging-proof.txt")
     options = parser.parse_args()
     scratch = options.scratch.resolve()
     scratch.mkdir(parents=True, exist_ok=True)

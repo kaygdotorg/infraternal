@@ -1,6 +1,10 @@
 <!-- Explains measured static growth and rejected crypto-provider reuse for remote infraternal agents, #78. -->
 # Remote infraternal agent size investigation, run 7
 
+> Historical raw logs and receipts were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/remote-agents-run7-size/evidence/` and should be attached to #78
+> with the `issue-attach` helper.
+
 This is local diagnostic evidence, not pinned performance acceptance or proof
 that phase 1 is complete. The measured feature source is the inherited run 6
 enrollment/operator/runtime prototype. No QUIC engine, TLS primitive, release

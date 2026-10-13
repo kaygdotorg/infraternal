@@ -1,2 +1,0 @@
-25e324578e732b7a8b32ca0c5b838f4a8a834531bab5dfd44e0f2ce18f7a7895  /home/kayg/.cache/codex-scratch/release-prod-3/target/debug/build/openssl-sys-7d62292d94d91236/out/openssl-build/install/lib/libcrypto.a
-91fb74c87600006d34975635257e799aa67f78551b067ac0c3df57ecca790c82  /home/kayg/.cache/codex-scratch/release-prod-3/target/debug/build/openssl-sys-7d62292d94d91236/out/openssl-build/install/lib/libssl.a

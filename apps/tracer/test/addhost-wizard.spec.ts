@@ -4,6 +4,7 @@
  * wizard hands to the canvas. Secrets: the specs also check that a typed password reaches the server in one
  * request body and nowhere else (no URL, no DOM after submit, no storage).
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 
 type Probe = { views(): Array<{ id: string; windows: string[] }> };
@@ -262,7 +263,7 @@ test("an unsupported host cannot be retried; an install failure can", async ({ p
   await expect(page.getByText("Automatic cleanup may still need to finish.", { exact: false })).toHaveCount(0);
   await page.locator(".ah-details summary").click();
   await expect(page.locator(".ah-details pre")).toContainText("Failed step: Start the host service");
-  await page.screenshot({ path: "../../evidence/addhost-169/failure-details.png" });
+  await page.screenshot({ path: tracerEvidencePath("addhost-169", "failure-details.png") });
   await inWizard(page, "Retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
@@ -516,7 +517,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     const details = wizard(page).locator(".ah-details pre");
     await expect(details).toContainText("The SSH connection setup failed.");
     await expect(details).not.toContainText("Connecting to the host failed.");
-    await page.screenshot({ path: `../../evidence/addhost-netbird-connect/connect-failure-${viewport.width}.png` });
+    await page.screenshot({ path: tracerEvidencePath("addhost-netbird-connect", `connect-failure-${viewport.width}.png`) });
   });
 }
 

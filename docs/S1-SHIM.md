@@ -1,6 +1,10 @@
 <!-- Session shim implementation, local measurements and reviewer handoff for #16. -->
 # S1 session shim evidence (#16)
 
+> Historical raw logs were removed under D262. Fresh receipts belong under `$HOME/.cache/codex-
+> scratch/s1-shim/evidence/` and selected files should be attached to #16 with the `issue-
+> attach` helper.
+
 Historical Alacritty implementation and measurements. DECISIONS 94 replaces its
 terminal-state engine; see [the Ghostty migration evidence](S1-VT-GHOSTTY.md)
 for the current serializer, byte budget, build and release comparisons (#22).
@@ -161,7 +165,7 @@ outputs are under `target/history-gates/`. The commit list and final verbatim
 output are recorded on Forgejo #16. No decision or frozen frame changes.
 
 The snapshot regression first fails at visible cell 0:7 (`A` becomes a space),
-as recorded in `target/fix-vt-red.log`. The observer previously interpreted
+as recorded in `$HOME/.cache/codex-scratch/s1-shim/evidence/fix-vt-red.log`. The observer previously interpreted
 47/1047 as alternate-screen transitions although pinned Alacritty/vte ignores
 those modes. It now observes only runtime-supported 1049; ignored modes no
 longer select a stale primary grid for repaint. This preserves runtime behavior,
@@ -173,7 +177,7 @@ again after continuation/return to the primary screen. Existing full-screen,
 charset, margins and unfinished-parser tests remain.
 
 The public detach reproduction initially reports ENOENT for fd0 after closing
-stdin following Rust startup (`target/review-detach-fd0.log`, `target/fix-detach-red.log`). Detach duplicates
+stdin following Rust startup (`$HOME/.cache/codex-scratch/s1-shim/evidence/review-detach-fd0.log`, `$HOME/.cache/codex-scratch/s1-shim/evidence/fix-detach-red.log`). Detach duplicates
 its /dev/null source with F_DUPFD_CLOEXEC to a fresh fd above stderr, transfers
 ownership exactly once to File, then calls safe nix standard-descriptor dup2
 wrappers. Dropping that source cannot close redirected fd0/1/2. The standalone
@@ -201,10 +205,10 @@ must be trusted launcher choices. The prior fuzz campaign is historical evidence
 not a campaign rerun by this repair job; the decoder has not changed.
 
 An initial budget run overlapped compilation and ran benchmark tests in parallel:
-its snapshot p99 was 12.672 ms (`target/fix-budgets.log`). The subsequent serial
+its snapshot p99 was 12.672 ms (`$HOME/.cache/codex-scratch/s1-shim/evidence/fix-budgets.log`). The subsequent serial
 run after those builds passed: input p99 16.002 us, snapshot p99 1.213 ms, parser
-53.41 MB/s, fresh idle RSS 1124 KiB (`target/fix-budgets-serial.log`,
-`target/fix-idle.log`). Keep the loaded-host result visible rather than calling
+53.41 MB/s, fresh idle RSS 1124 KiB (`$HOME/.cache/codex-scratch/s1-shim/evidence/fix-budgets-serial.log`,
+`$HOME/.cache/codex-scratch/s1-shim/evidence/fix-idle.log`). Keep the loaded-host result visible rather than calling
 the local measurements pinned-perf-VM evidence. Final measurements after the
 history rewrite are recorded below and on #16.
 
@@ -220,8 +224,8 @@ ok
 static shim idle RSS: 1136 KiB (1.109 MiB); 80x24; default 8 MiB ring allocated lazily; 10,000-line scrollback limit
 ```
 
-Complete measurement logs: `target/final-budgets.log`, `target/final-idle.log`.
-The rootful canary was rerun successfully in `target/final-security.log`: slave
+Complete measurement logs: `$HOME/.cache/codex-scratch/s1-shim/evidence/final-budgets.log`, `$HOME/.cache/codex-scratch/s1-shim/evidence/final-idle.log`.
+The rootful canary was rerun successfully in `$HOME/.cache/codex-scratch/s1-shim/evidence/final-security.log`: slave
 uid 1001/mode 0600, all UID slots 1001, supplementary groups 27/1001 with no root
 group, uid65534 peer refused without replacing the authenticated peer, and
 Exited(0)/ExitAck removed the socket.

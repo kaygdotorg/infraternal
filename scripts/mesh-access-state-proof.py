@@ -14,6 +14,7 @@ from pathlib import Path
 import socket
 import struct
 import subprocess
+from evidence_path import evidence_directory
 
 spec = importlib.util.spec_from_file_location("packet_proof", Path(__file__).with_name("mesh-policy-proof.py"))
 packet_proof = importlib.util.module_from_spec(spec)
@@ -201,7 +202,7 @@ def main():
     parser.add_argument("--fixture")
     parser.add_argument("--nf-tables", action="store_true")
     parser.add_argument("--outgoing", action="store_true")
-    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--evidence", type=Path, default=evidence_directory("mesh-access-state-proof"))
     parser.add_argument("--dump", action="store_true")
     args = parser.parse_args()
     if args.dump:

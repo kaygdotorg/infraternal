@@ -1,4 +1,0 @@
-Running as unit: run-p1097076-i47188981.scope; invocation ID: a1af59bbc2bc423ba78bb86cf23d7865
-{"machine": "infraternal-dev", "binary": "/home/kayg/.cache/codex-scratch/prod-batch/artifacts/protected-shim", "binary_sha256": "b887c4eace727fb3b98cf9570f528c1d1a4a2f80f2d7915cc7cbe7a0e6e54318", "binary_bytes": 20064880, "dimensions": "80x24", "load": "14.95 20.68 25.35 16/3132 1097129"}
-{"phase": "registry", "recovered": 200, "admitted": 201, "after_reap": 200}
-{"phase": "facts-latency", "sessions": 200, "samples": 101, "p50_ms": 3.407, "maximum_ms": 12.664, "load": "16.80 20.96 25.41 17/3513 1097655"}

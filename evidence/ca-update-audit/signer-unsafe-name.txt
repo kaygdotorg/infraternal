@@ -1,9 +1,0 @@
-TEST signer_unsafe-name status=200 expected=409
-file:///home/kayg/Developer/infraternal/.worktrees/audit-ca-update/docs/verification/ca-update-audit/signer-audit.mjs:47
-  if (response.status !== 409) throw new Error('signer must refuse missing/mismatched VERSION or unsafe checksum names');
-                                     ^
-
-Error: signer must refuse missing/mismatched VERSION or unsafe checksum names
-    at file:///home/kayg/Developer/infraternal/.worktrees/audit-ca-update/docs/verification/ca-update-audit/signer-audit.mjs:47:38
-
-Node.js v22.23.3

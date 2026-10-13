@@ -1,6 +1,0 @@
-crates/plugins/mesh/tests/review_authorized_reenrollment.rs: PASS
-crates/plugins/mesh/tests/review_revoked_host_policy.rs: PASS
-crates/plugins/mesh/tests/review_firewall_marker.rs: PASS
-crates/infraternal-server/tests/review_mesh_host_removal.rs: PASS
-crates/plugins/mesh/tests/review_reverse_recreation.rs: PASS
-crates/plugins/mesh/tests/review_reverse_recreation.py: PASS

@@ -4,6 +4,7 @@
  * scroll bar at rest, gets the scrolling state during a wheel scroll and keeps keyboard scrolling working.
  * Platforms are emulated in the page before it loads (navigator.platform and userAgentData).
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "playwright/test";
 
 // Headless Chromium hides scroll bars unless told otherwise; the bar behaviour is what this file checks.
@@ -139,7 +140,7 @@ test("Mac: the top pill shows the Command and K glyphs", async ({ browser }) => 
 });
 
 test("captures: Windows and Mac, ink, 1440x900: the top pill, the palette and the palette mid-scroll", async ({ browser }) => {
-  const dir = "captures/platform";
+  const dir = tracerEvidencePath("platform");
   for (const [name, env] of [["windows", WINDOWS], ["mac", MAC]] as const) {
     const context = await platformContext(browser, env);
     const page = await openTerminal(context);
@@ -197,7 +198,7 @@ for (const [width, height, theme] of [[393, 852, "paper"], [375, 667, "ink"]] as
     await expect.poll(async () => (await scrollState(page)).scrolling).toBe(true);
     await page.waitForTimeout(150);
     expect(await trackSpread(page)).toBeGreaterThan(20);
-    await page.screenshot({ path: `captures/platform/windows-palette-midscroll-${theme}-${width}x${height}.png` });
+    await page.screenshot({ path: tracerEvidencePath("platform", `windows-palette-midscroll-${theme}-${width}x${height}.png`) });
     await context.close();
   });
 }

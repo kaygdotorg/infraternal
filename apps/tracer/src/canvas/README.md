@@ -82,7 +82,7 @@ never shows mockup UI.
 
 - `bun test src/canvas` (pure parts: geometry, stops, the D180 document) and `bun test chunk-classes.test.ts`.
 - `test/clusters*.spec.ts`, `test/canvas.spec.ts`: the mockup on the test double.
-- `test/mesh.spec.ts`: the Mesh view on the real adapter against the fake server: scale and level of detail, frame times at 1,000 nodes, live updates, edits that reach the server and the ones it refuses, access, pins, states (`MESH_CAPTURES=1` writes `captures/canvas-mesh/`). `real/mesh.spec.ts`: the same view on the real binary.
+- `test/mesh.spec.ts`: the Mesh view on the real adapter against the test server: scale and level of detail, frame times at 1,000 nodes, live updates, edits that reach the server and the ones it refuses, access, pins, states (`MESH_CAPTURES=1` writes to `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/canvas-mesh/`; `INFRATERNAL_EVIDENCE_DIR` may override the external root). `real/mesh.spec.ts`: the same view on the real binary.
 - `real/canvas.spec.ts` (`playwright.real.config.ts`, `scripts/verify integration`): the product on the real server
   binary and real PTYs: open, close (session stays alive), split, re-tile, reload, connection rotation at the
   server's 32-writer cap, frame times, memory at 393x852 DPR 3.

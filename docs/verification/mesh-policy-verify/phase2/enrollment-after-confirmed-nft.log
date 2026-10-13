@@ -1,7 +1,0 @@
-Running as unit: run-p4171056-i4171356.scope; invocation ID: 889767ae081048eb9e54588a6d663b03
-{"test": "unbound_identity_refused", "expected": true, "actual": true, "result": "PASS"}
-{"test": "unbound_identity_not_permitted_ipv4", "expected": false, "actual": false, "result": "PASS"}
-{"test": "unbound_identity_not_permitted_ipv6", "expected": false, "actual": false, "result": "PASS"}
-{"test": "explicit_grant_permitted_ipv4", "expected": true, "actual": true, "result": "PASS"}
-{"test": "explicit_grant_permitted_ipv6", "expected": true, "actual": true, "result": "PASS"}
-{"backend": "nft", "checks": 5, "failures": 0, "machine": "infraternal-dev", "load": "59.83 63.07 52.85 72/1687 4171919"}

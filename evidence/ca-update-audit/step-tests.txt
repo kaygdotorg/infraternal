@@ -1,6 +1,0 @@
-Completed separate test steps:
-92c65f03 test: reproduce audit results and signer release identity gaps (#154)
-3f14b5f4 test: preserve failing replacement verification and custody expectations (#154)
-ef315d53 test: verify unlocked CA custody and authority boundaries (#154)
-2a4d07cc docs: record pinned CA custody and release verification findings (#154)
-Custody ordinary4PASS; authority24PASS with explicit unresolved ignores; handoff7PASS. Five unresolved production regressions and missing-event regression all FAIL as expected via fresh compiled runner. Baseline100 real unlocks/1000 memberships: finish wall p50=3556903ns,p99=8204650ns,processCPU p50=3805686ns,p99=6921201ns;0 audit events. infraternal-dev/8CPUs/CPUWeight10000, load6.90/14.64/20.30 ->8.20/14.31/20.04; no own build/browser overlap, GNUdebug formatting diagnostic, journal I/O excluded. Initial full fast Rust rows PASS except known static-size ceiling; fresh workspace no-run and Clippy PASS. No production fixes in these commits.

@@ -1,9 +1,0 @@
-
-running 1 test
-test auth::tests::socket_tests::scale::review_mesh_headroom_snapshot_does_not_close_shared_socket ... nodes=10000 grants=30000 snapshot_event_bytes=64595 frame_limit=4194304 load=24.69 18.09 16.30 20/3226 1576919
-liveness_resyncs=1 expiry_frame_bytes=64602
-assembled_nodes=10000 assembled_grants=30000 pages=88 max_frame_bytes=64612 total_frame_bytes=5631252 shared_socket_pong=true
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 77.75s
-

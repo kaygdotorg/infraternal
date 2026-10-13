@@ -1,1 +1,0 @@
-Start #195: branch addhost-netbird-connect, base/head 5bf3f42ede08c47c5fb7ad33d977c831fe6e5cc8 (release-prod-5). Read issue body and all comments (0); no parent referenced. Reproduce isolated connect/check; retain strict host-key verification; no deployment or host writes.

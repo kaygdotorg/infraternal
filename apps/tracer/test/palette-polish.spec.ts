@@ -6,12 +6,13 @@
  * 2. The footer of key hints is for a keyboard: gone on touch and on narrow screens, and the list takes its room.
  * 3. Text behind the open palette is not legible through it, at the default card level, over real terminal text.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { devices, expect, test, type Page } from "playwright/test";
 import { denseText, ghost } from "./ghost-metric";
 
-const CAPTURES = resolve(import.meta.dirname, "..", "captures", "palette-polish");
+const CAPTURES = tracerEvidencePath("palette-polish");
 mkdirSync(CAPTURES, { recursive: true });
 const URL = (theme: string): string => `/?mock=1&proto=clusters&scene=3&theme=${theme}`;
 const PALETTE_KEY = "Control+Shift+K";

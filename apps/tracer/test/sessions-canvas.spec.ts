@@ -4,6 +4,7 @@
  * splits through the droplet, the "Sized for" badge, ⌘K, the empty, loading and error states, and what TASTE asks
  * to be measured (motion durations, no rings from the mouse, 44 px on touch, desktop actions in one pill and touch Close).
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "playwright/test";
 
 type Viewport = { width: number; height: number; touch?: boolean };
@@ -158,7 +159,7 @@ test("closing a window never ends its session: a gentle toast, and Reopen brings
     await expect(toast.locator(".ui-toast-message")).toHaveText("Session keeps running");
     await expect(toast.locator(".ui-toast-action")).toHaveText("Reopen");
     expect(await stateOf(page, "build-01", "deploy")).toBe("detached");
-    await page.screenshot({ path: process.env.TOAST_SHOT ?? "/tmp/close-toast.png" });
+    await page.screenshot({ path: process.env.TOAST_SHOT ?? tracerEvidencePath("close-toast.png") });
     await toast.locator(".ui-toast-action").click();
     await expect(consoleWindows(page)).toHaveCount(4);
     expect(await stateOf(page, "build-01", "deploy")).toBe("open");
@@ -463,7 +464,7 @@ test("on a phone the canvas row has a Sessions action that opens the manager of 
     await item.tap();
     await expect(page.locator(".cl-sx-pop")).toBeVisible({ timeout: 8000 });
     await expect(page.locator(".cl-sx-title")).toHaveText("build-01");
-    const capture = "../../evidence/release-prod-3/mobile-manager.png";
+    const capture = tracerEvidencePath("release-prod-3", "mobile-manager.png");
     await page.screenshot({ path: capture });
     await testInfo.attach("mobile session manager", { path: capture, contentType: "image/png" });
   } finally { await context.close(); }

@@ -1,9 +1,0 @@
-Running as unit: run-p109945-i110245.scope; invocation ID: b99f56522b2f43c8951ea82046430e26
-METRIC name=keystroke_echo_confirmed_baseline source=real-agent-pty n=100 p50_ms=0.16 p99_ms=0.33 budget_ms=34.00 result=PASS
-METRIC name=keystroke_pty_echo_baseline source=real-agent-pty n=100 p50_ms=0.20 p99_ms=0.49 budget_ms=34.00 result=PASS
-METRIC name=keystroke_echo_confirmed_flood_other_session source=real-agent-pty n=100 p50_ms=0.16 p99_ms=0.39 budget_ms=34.00 result=PASS
-METRIC name=keystroke_pty_echo_flood_other_session source=real-agent-pty n=100 p50_ms=0.19 p99_ms=0.41 budget_ms=34.00 result=PASS
-METRIC name=flood_isolation_other_session source=real-agent-pty n=100 baseline_p99_ms=0.49 flood_p99_ms=0.41 growth_ms=-0.07 budget_ms=16.67 result=PASS
-METRIC name=keystroke_echo_confirmed_flood_same_session source=real-agent-pty n=100 p50_ms=1.12 p99_ms=1.90 budget_ms=34.00 result=PASS
-METRIC name=keystroke_pty_echo_flood_same_session source=real-agent-pty n=100 p50_ms=3.66 p99_ms=5.83 budget_ms=34.00 result=PASS
-METRIC name=flood_isolation_same_session source=real-agent-pty n=100 baseline_p99_ms=0.49 flood_p99_ms=5.83 growth_ms=5.34 budget_ms=16.67 result=PASS

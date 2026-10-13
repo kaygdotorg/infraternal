@@ -3,13 +3,15 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+from evidence_path import evidence_directory
 
-target_root = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+scratch_root = evidence_directory("verify-vt-native").parent
+target_root = Path(os.environ.get("CARGO_TARGET_DIR", scratch_root / "target"))
 parser = argparse.ArgumentParser()
 parser.add_argument("probe", choices=["mouse", "allocation"])
 parser.add_argument("--library", type=Path)
-parser.add_argument("--evidence", type=Path, default=target_root / "review-vt3-fixes")
-parser.add_argument("--build-dir", type=Path, default=target_root / "vt-probes")
+parser.add_argument("--evidence", type=Path, default=evidence_directory("verify-vt-native"))
+parser.add_argument("--build-dir", type=Path, default=scratch_root / "target" / "vt-probes")
 args = parser.parse_args()
 args.evidence.mkdir(parents=True, exist_ok=True)
 # Select the most recent completed adapter build, never an in-progress archive.

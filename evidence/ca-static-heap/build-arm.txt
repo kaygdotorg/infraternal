@@ -1,3 +1,0 @@
-    Blocking waiting for file lock on build directory
-   Compiling libc v0.2.190
-   Compiling openssl-sys v0.9.117

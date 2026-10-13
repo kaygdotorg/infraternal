@@ -1,9 +1,0 @@
-kernel-library 0
-kernel-integration 0
-production-agent-scale 0
-production-1000-peer-namespace 0
-mesh-ingress-proof-nft 0
-mesh-transit-proof-nft 0
-mesh-ingress-proof-nf-tables 0
-mesh-transit-proof-nf-tables 0
-namespace-nf-tables 0

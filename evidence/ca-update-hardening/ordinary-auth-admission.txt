@@ -1,7 +1,0 @@
-
-running 1 test
-REVIEW production source admission: 30 browser / 10 device, five recovery actions covered, untrusted XFF cannot reset budget, logout exempt
-test runtime::reviewer_admission::reviewer_recovery_source_limit_covers_all_routes_without_forwarding_bypass ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 337 filtered out; finished in 0.35s
-

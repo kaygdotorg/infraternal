@@ -1,6 +1,10 @@
 <!-- Records tested remote identity/transport boundaries and incomplete phase-1 acceptance for #78. -->
 # Remote infraternal agents: phase 1 checkpoint
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 Phase 1 is incomplete. Issue #78 is the state of record for all steps and
 verbatim gates. This checkpoint resumes from `c77e7a3`; source head is
 `417e1972a4f31a8cb92beee713c1c5e4af8e667e`. No push, deployment or o1/o2
@@ -80,11 +84,11 @@ Each linked log preserves tool output below its descriptive header.
 
 | Measurement | p50 / p99 | Scale and cost | Proof |
 | --- | --- | --- | --- |
-| QUIC admission, RTT300ms, 25 samples | 460,080 / 464,893 us | 1,000 retained client/server pairs: 67,348 KiB RSS delta, 67.348 KiB/pair; 588 CPU ticks; load3.49/11.22/13.19 | [QUIC](remote-agents/run5-quic-diagnostic.log) |
-| TCP/TLS admission, RTT300ms, 25 samples | 758,889 / 763,350 us | 1,000 pairs: 69,400 KiB, 69.4 KiB/pair; 266 ticks; load7.32/8.21/11.56 | [TCP](remote-agents/run5-tcp-diagnostic.log) |
-| Signer, 1,000 public identities | 347 / 654 us | 39 ticks; 398,000 DER bytes; 3,184 KiB RSS delta, 3.184 KiB/identity | [Signer](remote-agents/run5-signing-diagnostic.log) |
-| Added populated control lane, 1,000 queues | — | 2,892 KiB added RSS, 2,961 B/lane; 6,778 us creation/first enqueue; Message72 B | [Queues](remote-agents/run5-reply-lane-diagnostic.log) |
-| Real local PTY, 25 reconnects, RTT0 | 9,379 / 14,503 us | 569 exact bytes; 26 markers once; uid1001; load8.01/8.34/11.58 | [PTY](remote-agents/run5-native-pty-repeat.log) |
+| QUIC admission, RTT300ms, 25 samples | 460,080 / 464,893 us | 1,000 retained client/server pairs: 67,348 KiB RSS delta, 67.348 KiB/pair; 588 CPU ticks; load3.49/11.22/13.19 | QUIC |
+| TCP/TLS admission, RTT300ms, 25 samples | 758,889 / 763,350 us | 1,000 pairs: 69,400 KiB, 69.4 KiB/pair; 266 ticks; load7.32/8.21/11.56 | TCP |
+| Signer, 1,000 public identities | 347 / 654 us | 39 ticks; 398,000 DER bytes; 3,184 KiB RSS delta, 3.184 KiB/identity | Signer |
+| Added populated control lane, 1,000 queues | — | 2,892 KiB added RSS, 2,961 B/lane; 6,778 us creation/first enqueue; Message72 B | Queues |
+| Real local PTY, 25 reconnects, RTT0 | 9,379 / 14,503 us | 569 exact bytes; 26 markers once; uid1001; load8.01/8.34/11.58 | PTY |
 
 Pair RSS includes both transport endpoints. Queue RSS excludes the daemon,
 transport and shim. Signer cost excludes network and publication. None proves
@@ -98,8 +102,7 @@ returning sign-in/terminal latency and first-paint budgets. Load reached
 scope and port fail on archived dev `ac03b19` (three failed, one passed,4.1m)
 and this branch (three failed, one passed,3.4m). Branch frontend/proxy files
 match merged dev `19fe05a`. No threshold was changed; the browser gate is red.
-Raw browser logs remain job artifacts referenced on #78. Production screenshots
-are in tracer `test-results/`; this lane makes no visual-quality claim.
+Historical raw browser logs were removed under D262. New browser output belongs in job scratch and should be attached to #78 with `issue-attach`. Production screenshots use `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/`; this lane makes no visual-quality claim.
 
 ## Remaining acceptance
 

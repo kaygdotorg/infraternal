@@ -1,3 +1,0 @@
-Running as unit: run-p2845442-i7039341.scope; invocation ID: 59e18278a12f45a59e4d27985910e374
-    Checking infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fixes2/crates/plugins/ssh)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.36s

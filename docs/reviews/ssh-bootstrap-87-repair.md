@@ -1,6 +1,10 @@
 <!-- Records the independent SSH provisioning repair regressions, measured limits and review evidence for #87. -->
 # SSH host provisioning repair round (#87)
 
+> Historical raw receipts were removed under D262. The recorded measurements remain; new run
+> output belongs under `$HOME/.cache/codex-scratch/ssh-bootstrap-87/evidence/` and selected
+> files should be attached to #87 with the `issue-attach` helper.
+
 Base `d0290f6e`; merged `dev` at `7d6df447` in `5c428697`.
 The final head and exact gate output are recorded on issue #87.
 The eight review regressions are repaired in separate gated commits. Every
@@ -52,9 +56,9 @@ The dev merge exceeded the deferred tracer transfer budget: gzip 51871/51200,
 Brotli 45276/45056 bytes. Deferring the existing details reader and formatter at
 its popover boundary restores gzip 51023/51200 and Brotli 44612/45056.
 The existing live subscription remains eager. Existing details browser tests
-pass 4/4. Real production-build screenshots with public mock data:
-`evidence/ssh-bootstrap/repair-round/screenshots/details-desktop.png` (1440x900),
-`details-phone.png` (393x852). Visual quality requires independent review.
+pass 4/4. Historical production-build screenshots with public mock data were
+removed under D262. Visual quality still requires independent review of fresh
+screenshots attached to #87.
 
 ## Scope and remaining acceptance
 
@@ -131,7 +135,7 @@ The measured additional held memory is 184–256KiB per 1,000 targets
 time increased in this pilot; the accounting buys explicit refusal and
 acknowledged retirement without an idle worker or timer. These controlled
 unavailable-backend numbers exclude full-server and live-installation budgets.
-Raw logs: `evidence/ssh-bootstrap/repair-round/plugin-lifecycle-paired-scale.log`.
+The raw scale log was removed under D262; the recorded measurements remain above.
 
 ## Commit and gate record
 
@@ -153,16 +157,16 @@ Raw logs: `evidence/ssh-bootstrap/repair-round/plugin-lifecycle-paired-scale.log
 | Server adapter |1c84f91a |plugin-adapter-fast.log |
 | Funded restart oracle |487ef1ef |restart-credit-fast.log |
 
-Every listed completed gate exits 0. Logs are under
-`evidence/ssh-bootstrap/repair-round/`; issue #87 retains each head and its
-verbatim gate summary. No load-sensitive exception has been used.
+Every listed completed gate exits 0. Historical raw gate receipts were removed
+under D262; issue #87 retains each head and its verbatim gate summary. No
+load-sensitive exception has been used.
 
 
 The final source build is stripped and static on both targets (`PT_INTERP`
 absent): x86_64 **16,577,392 / 16,783,792 bytes**; aarch64
 **13,942,912 / 14,143,720 bytes** (actual / maximum).
 
-Final documentation gate: `evidence/ssh-bootstrap/repair-round/final-fast.log`.
+The raw final documentation gate receipt was removed under D262.
 
 ## Verification-oracle repair
 
@@ -180,5 +184,5 @@ admission queue. The repair consumes the funded window without refunds only
 for that restart drain. Exact payload/fence, complete input acknowledgments,
 errors, deadlines and the separate saturation oracle remain unchanged.
 Production code is unchanged. Targeted restart and saturation cases pass in
-40.41 s and 35.95 s. Their failing and passing logs remain in the evidence
-folder; the separately gated harness commit is `487ef1ef`.
+40.41 s and 35.95 s. Their failing and passing logs were removed under D262;
+the separately gated harness commit is `487ef1ef`.

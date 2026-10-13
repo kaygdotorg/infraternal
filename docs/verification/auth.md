@@ -1,10 +1,14 @@
 <!-- Auth review rework evidence and reproducible gates for decisions 5,7,20,23–29,40,53; #17. -->
 # Auth verification after independent review
 
+> Historical raw logs and receipts were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/auth/evidence/`; selected files should be attached to #17 with the
+> `issue-attach` helper.
+
 The old head remains reachable as `lane-auth-v1` (`a06368f538aa99e4e78caf4634e9f93e8db9b9eb`).
 The lane was reconstructed locally on `s1-base` (`386acfd3dc6255c7f58f98b4f114d5d7326292ad`).
 Nothing was pushed or deployed. Every new commit passes `scripts/verify fast`;
-individual unedited logs are `target/auth-rework/commit-NN-fast.log`. The finish
+individual unedited logs are `$HOME/.cache/codex-scratch/auth/evidence/auth-rework/commit-NN-fast.log`. The finish
 comment on Forgejo #17 records the final head and unedited final gate output.
 
 ## Review dispositions
@@ -15,8 +19,8 @@ comment on Forgejo #17 records the final head and unedited final gate output.
   and commits a complete passkey replacement before resuming the old request.
   It proves denial, no recovery row, old-session revocation and new-word acceptance.
   The original review reproducer failed first: 0 passed, 1 failed in 2.02 s
-  (`target/recovery-before.log`); the first fix passed in 1.96 s
-  (`target/recovery-after.log`). The retained regression has no timing sleeps.
+  (`$HOME/.cache/codex-scratch/auth/evidence/recovery-before.log`); the first fix passed in 1.96 s
+  (`$HOME/.cache/codex-scratch/auth/evidence/recovery-after.log`). The retained regression has no timing sleeps.
 - B2: both musl gate rows now build a CLI that constructs `Auth` and the router.
   SQLite and the real verifier/crypto are linked, and initialization failure fails
   the executable check. Both binaries have no `PT_INTERP`.
@@ -89,20 +93,21 @@ separate AGPL-3.0-only test package and locked with `bun.lock`.
 
 Both final binaries are stripped, statically linked and have no `PT_INTERP`.
 The old binaries did not link auth; these deltas must not be described as isolated
-library overhead. Evidence: `target/auth-rework/commit-10-fast.log` through
-`commit-12-fast.log`; the final complete gate is `target/auth-rework/final-fast.log`.
+library overhead. Evidence: `$HOME/.cache/codex-scratch/auth/evidence/auth-rework/commit-10-fast.log` through
+`commit-12-fast.log`; the final complete gate is `$HOME/.cache/codex-scratch/auth/evidence/auth-rework/final-fast.log`.
 
 Optimized SQLite-memory session lookup/slide, n=200: p50 **56 us**, p99 **137 us**.
 Argon2id verification: **24 ms**, m=19456 KiB, t=2, p=1.
-Evidence: `target/auth-rework/latency.log`, the release test named in reproduction.
+Evidence: `$HOME/.cache/codex-scratch/auth/evidence/auth-rework/latency.log`, the release test named in reproduction.
 These numbers exclude disk, network, browser, authenticator and phone latency.
 
 The recovery-start transaction was measured against `lane-auth-v1` with matching
 optimized standalone probe manifests on this host: three alternating runs,
 50 recoveries/run, no other build active. Each iteration includes Argon2 and
 SQLite, advances time by 48 hours to expire the previous request, and logs no
-capability or recovery words. Probe source/manifests and unedited outputs remain
-under `target/auth-rework/bench-{old,new}/` and `bench-{old,new}-{1,2,3}.log`.
+capability or recovery words. Historical outputs were removed under D262; fresh
+logs belong under `$HOME/.cache/codex-scratch/auth/evidence/auth-rework/`. Probe
+manifests remain build inputs under `target/auth-rework/bench-{old,new}/`.
 Reproduce each run with:
 
 ```sh
@@ -127,7 +132,7 @@ security fix does not hold the database writer across expensive verification.
 
 The following code/test slices each passed all five fast rows before committing.
 The evidence-docs slice also runs the same gate. Full output is recorded in #17;
-local logs are `target/auth-rework/commit-NN-fast.log` and `final-fast.log`.
+local logs are `$HOME/.cache/codex-scratch/auth/evidence/auth-rework/commit-NN-fast.log` and `final-fast.log`.
 
 | Slice | Commit | Auth tests in fast |
 | --- | --- | ---: |

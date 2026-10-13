@@ -1,5 +1,0 @@
-source=dd867a58151a5bbcd8ce224c34c8596a9ecfcfb6
-recipe=locked default release x86_64-unknown-linux-musl
-bytes=20142672
-/home/kayg/.cache/codex-scratch/ended-sessions-round3/baseline-static: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped
-PT_INTERP=absent

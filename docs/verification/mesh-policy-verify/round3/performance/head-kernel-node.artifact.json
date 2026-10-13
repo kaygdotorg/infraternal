@@ -1,7 +1,0 @@
-{
-  "source": "/home/kayg/.cache/codex-scratch/mpv3-173/target/debug/examples/kernel_node",
-  "executable_segments_sha256": "1c45f432c0dc5265815f6f71ccc925b0be6728d2ef61b0be0c2d141cfcdde9ae",
-  "source_sha256": "f7498f8fae35ec9ac8747dd93b6b818f370e1bc624c5a9ca8650bb5f6275328b",
-  "adapted_sha256": "e21c5116345e6838c108a11f73667ddb429da67ad8ae61ac3d64ff9c331a5632",
-  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
-}

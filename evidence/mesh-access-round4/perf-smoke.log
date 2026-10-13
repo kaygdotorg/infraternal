@@ -1,7 +1,0 @@
-Running as unit: run-p234641-i234941.scope; invocation ID: 0df543c115c14a02a25598ed7c3988ee
-Traceback (most recent call last):
-  File "/root/infraternal-bench/mesh-policy/round4-173/mesh-revocation-proof.py", line 9, in <module>
-    from agent_fixture import rss
-  File "/root/infraternal-bench/mesh-policy/round4-173/agent_fixture.py", line 16, in <module>
-    from latency_proxy import LatencyConfig, LatencyDuplex
-ModuleNotFoundError: No module named 'latency_proxy'

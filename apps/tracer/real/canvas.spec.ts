@@ -3,6 +3,7 @@
  * the tracer, real PTYs. Opening, closing, splitting and re-tiling windows, the one WebSocket, persistence, and
  * the memory budget on a phone. No test double anywhere.
  */
+import { tracerEvidencePath } from "../test/evidence-path";
 import { devices, expect, test, type Browser, type CDPSession, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -14,7 +15,7 @@ test.describe.configure({ mode: "serial" });
 
 let server: RealServer;
 let page: Page;
-const captures = resolve(import.meta.dirname, "../captures/canvas-real");
+const captures = tracerEvidencePath("canvas-real");
 
 test.beforeAll(async ({ browser }) => {
   server = await startRealServer();

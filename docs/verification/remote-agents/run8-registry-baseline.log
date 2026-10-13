@@ -1,9 +1,0 @@
-Running as unit: run-p4016895-i12404640.scope; invocation ID: c396dbc0946b4cce97caac649149d529
-
-running 1 test
-test remote_runtime::tests::revocation::retirement::registry_retention_at_1000_actual_tls_hosts ... registry_diagnostic actual_hosts=1000 transport=tcp_mtls credentials_preallocated=true baseline_rss_kib=37116 retained_rss_kib=165424 delta_at1000_kib=128308 handshake_and_hello_p50_us=2665 p99_us=4233 load=4.23 3.77 2.99 2/976 4016960 machine=infraternal-dev
-registry_retirement remaining_hosts=1000 all_revocations_and_cleanup_us=5180744 cleanup_completed=false retained_client_peers=1000
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 151 filtered out; finished in 9.42s
-

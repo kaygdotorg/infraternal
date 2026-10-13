@@ -1,7 +1,0 @@
-{
-  "source": "/home/kayg/.cache/codex-scratch/mesh-policy-verify/baseline-target/release/infraternal",
-  "executable_segments_sha256": "78cbc177d4e4d87ab968b9abbc144db2a5fd41bc140f17a4c68b3ac097722f1a",
-  "source_sha256": "3893ce6fead5ee338e8ebe6843ae1fedfdbd96681027ec11a2976995c276ab4b",
-  "adapted_sha256": "b2e7377bc89269736734ac596e6063218758608552207ac5740d9ea6dc485b63",
-  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
-}

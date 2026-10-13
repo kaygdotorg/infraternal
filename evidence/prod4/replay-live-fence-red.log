@@ -1,4 +1,0 @@
-Running as unit: run-p4182912-i8376808.scope; invocation ID: da6e606875814eeba6a8ed9540dc89a1
-$ bun x tsc --project tsconfig.json
-test/terminal-query-replay.spec.ts(161,30): error TS2352: Conversion of type 'Window & typeof globalThis' to type 'Window & { releaseQueryPaint(): void; }' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
-  Property 'releaseQueryPaint' is missing in type 'Window & typeof globalThis' but required in type '{ releaseQueryPaint(): void; }'.

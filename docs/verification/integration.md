@@ -53,9 +53,11 @@ Browser checks use Playwright 1.61.1 / Chromium 149.0.7827.55. Keep the tracer
 assets stable during real-browser verification; run its build/test suite first.
 The fixture copies the production assets into its private run directory so
 a concurrent rebuild cannot replace modules during a native ceremony.
-Safe production mobile setup/login and terminal/probe screenshots are preserved
-in `target/integration-evidence/screenshots/`; supplied for review, without a
-visual-quality approval by this job. No arbitrary failure screenshots or traces
+Safe production mobile setup/login and terminal/probe screenshots from the
+historical run were removed under D262. Fresh screenshots belong under
+`$HOME/.cache/codex-scratch/integration/evidence/screenshots/` and should be
+attached for review, without visual-quality approval by the job. No arbitrary
+failure screenshots or traces
 capture auth/recovery ceremonies. The inherited onboarding screenshot helper
 captured browser-generated recovery words even against the test double; its
 recovery grid and setup-token input are now masked, and this job's earlier
@@ -65,7 +67,7 @@ recovery screenshots were removed.
 
 Local x86_64 Linux host, eight virtual cores on Intel i9-9900K @ 3.60 GHz
 (KVM); this is not the pinned perf VM [42].
-Individual load and full output are retained under `target/integration-evidence/`.
+Historical load and full-output receipts were removed under D262; fresh runs should retain them under `$HOME/.cache/codex-scratch/integration/evidence/`.
 Do not extrapolate one-session numbers to all users or global live streams.
 
 | Probe | Result |

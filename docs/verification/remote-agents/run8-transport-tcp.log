@@ -1,8 +1,0 @@
-Running as unit: run-p3465018-i11852765.scope; invocation ID: d0b84e7c2e9644539f13cac39450af19
-
-running 1 test
-test transport_diagnostics::tcp_300ms_and_1000_connection_pairs ... transport_diagnostic kind=tcp_tls simulated_rtt_ms=300 handshake_n=25 admitted_p50_us=758030 admitted_p99_us=760230 connection_pairs=1000 baseline_rss_kib=9924 retained_rss_kib=79888 combined_client_server_delta_kib_per_pair=69.964 combined_delta_kib_at1000=69964 connect_cpu_ticks=278 machine=infraternal-dev load=2.66 5.57 12.87 4/1054 3465522
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 21.90s
-

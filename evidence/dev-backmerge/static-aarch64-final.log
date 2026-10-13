@@ -1,9 +1,0 @@
-Running as unit: run-p555639-i50839252.scope; invocation ID: 42241e9c167e434bbdca1cb1c27e4652
-   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/plugins/remote)
-   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-agent)
-   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal-server)
-   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-backmerge/crates/infraternal)
-    Finished `release` profile [optimized] target(s) in 8m 48s
-/home/kayg/.cache/codex-scratch/dev-backmerge/target/aarch64-unknown-linux-musl/release/infraternal: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
-PT_INTERP: absent; size: 18062680 bytes (baseline 13555672 + allowance 262144 = max 13817816)
-binary exceeds the 13817816-byte size budget: 18062680 bytes

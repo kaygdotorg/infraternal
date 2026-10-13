@@ -1,8 +1,0 @@
-load=26.93 15.52 7.14 17/1568 98650
-Running as unit: run-p98651-i98951.scope; invocation ID: beb23bcf14cf4822b610b1b213ca65af
-
-running 1 test
-test refused_endpoint_persistence_preserves_kernel_endpoint ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
-

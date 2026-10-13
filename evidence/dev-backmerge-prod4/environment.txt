@@ -1,7 +1,0 @@
-machine=infraternal-dev
-architecture=x86_64
-logical_cpus=12
-load_average=(23.58251953125, 42.4375, 49.28173828125)
-rustc 1.99.0 (b940084d7 2026-09-28)
-1.4.2
-Functional gates only on build host; no performance claims from build-host timing output.

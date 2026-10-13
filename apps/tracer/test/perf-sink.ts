@@ -2,8 +2,8 @@
  * TEST DOUBLE: receives the frame meter's incident batches (`POST /__perf`, issue #116) and appends them to a file
  * the orchestrator can read, so a stutter on a real device reaches the person fixing it without being described.
  *
- * The file is `$XDG_STATE_HOME/infraternal-preview/perf/<port>.jsonl` (default `~/.local/state/...`;
- * `INFRATERNAL_PERF_DIR` replaces the directory, for tests). One JSON line per incident:
+ * The file is under the external job evidence directory by default; `INFRATERNAL_PERF_DIR` replaces that directory.
+ * One JSON line per incident:
  *
  *   {"t":"incident","recv":"<ISO time the server received it>","recvMs":<epoch ms>,"sid":"<tab session id>",
  *    "page":"/?mock=1&proto=clusters...","kind":"drop|freeze","at":<epoch ms of the late frame>,"worstMs":..,
@@ -19,16 +19,16 @@
  * becomes `<port>.jsonl.1`). Nothing in a record is a secret: counts, timings, names of animations and scripts.
  */
 import { appendFile, mkdir, rename, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { tracerEvidencePath } from "./evidence-path";
 
 const MAX_BODY = 64 * 1024;
 const MAX_LINE = 16 * 1024;
 const ROTATE_AT = 20 * 1024 * 1024;
 
 export function perfDir(): string {
-  return process.env.INFRATERNAL_PERF_DIR ?? join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "infraternal-preview", "perf");
+  return process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf");
 }
 
 export function createPerfSink(port: number): (request: IncomingMessage, response: ServerResponse) => Promise<void> {

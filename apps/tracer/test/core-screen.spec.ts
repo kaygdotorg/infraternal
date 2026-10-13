@@ -1,4 +1,5 @@
 /** Exercises the authenticated core screen and saves the requested production-build views. */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdir, readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
@@ -13,7 +14,7 @@ async function waitForAttached(page: Page): Promise<void> {
 }
 
 async function saveScreenshot(page: Page, testInfo: TestInfo, name: string): Promise<string> {
-  const path = resolve(process.cwd(), "test-results", "core-screen", `${name}.png`);
+  const path = tracerEvidencePath("playwright", "core-screen", `${name}.png`);
   await mkdir(resolve(path, ".."), { recursive: true });
   await page.screenshot({ path, animations: "disabled" });
   await testInfo.attach(name, { path, contentType: "image/png" });
@@ -43,7 +44,7 @@ async function saveFontComparison(
     <figure><figcaption>Maple Mono NF · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${mono.toString("base64")}"></figure>
   </main></body></html>`);
   await page.locator("img").evaluateAll((images) => Promise.all(images.map((image) => (image as HTMLImageElement).decode())));
-  const path = resolve(process.cwd(), "test-results", "core-screen", `${name}-comparison.png`);
+  const path = tracerEvidencePath("playwright", "core-screen", `${name}-comparison.png`);
   await page.screenshot({ path, animations: "disabled", fullPage: true });
   await testInfo.attach(`${name}-comparison`, { path, contentType: "image/png" });
   return path;

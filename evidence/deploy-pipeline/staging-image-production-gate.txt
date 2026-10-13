@@ -1,1 +1,0 @@
-production trust: FAIL (missing image or staging authority)

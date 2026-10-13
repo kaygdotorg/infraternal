@@ -1,6 +1,0 @@
-Scope command line contains environment variable, which is not expanded by default for now, but will be expanded by default in the future. Use --expand-environment=yes/no to explicitly control it as needed.
-Running as unit: run-p296187-i8683789.scope; invocation ID: 040227b1ed584b81be562aa6522c7907
-Reaped shim final output and ordered exit survive delayed credit: PASS
-Reaped shim final output and ordered exit survive delayed credit: PASS
-Bounded owned exit, unfunded notification, restarted reconnect status, retirement handshake race, unknown session: PASS
-Local memory refusal, invalid dimensions, detach/reattach counts, exit delivery and registry retirement: PASS; detached=305.2 ms attached=456.4 ms; load=39.83 44.22 52.03 29/2174 298141

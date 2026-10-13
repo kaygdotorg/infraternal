@@ -1,1 +1,0 @@
-{"apply_us_including_fsync": 570988, "chunks": 32, "down_us": 45639107, "idle_ticks_10s_off": 0, "idle_ticks_10s_on": 0, "load": "36.20 27.67 26.54 32/1642 2089868", "one_endpoint_us_including_fsync": 31182, "peer_count": 1000, "public_cli": "pass", "rss_bytes_at_1000_nodes": 11399168000, "rss_bytes_off": 10928128, "rss_bytes_on": 11399168}

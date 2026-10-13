@@ -1,1 +1,0 @@
-Correction to the preceding finding: reviewer_tests.rs:67 is the unwrap after recovery_start_clock (lines57-67), not AuthService::open_disk. The actual error remains SQLite code5/database is locked. Current/dev reviewer_tests.rs SHA256 matches:74a67478789a3246194e9a70baa00a3a077b2adc1e429b9c136130c3a12a9d92. Isolated comparison is running; no source/timeouts/assertions changed.

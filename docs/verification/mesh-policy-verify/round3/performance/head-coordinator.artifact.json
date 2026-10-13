@@ -1,7 +1,0 @@
-{
-  "source": "/home/kayg/.cache/codex-scratch/mpv3-173/target/debug/examples/mesh_revocation_fixture",
-  "executable_segments_sha256": "e5e4ec47992b32461786f92e03d556a6c724d9473b91cf9a80279d51ae9c6c1e",
-  "source_sha256": "64878953072b81f78cdb02fad6ea1b74e16f1ed8b2d2643f0fc684110cc32f36",
-  "adapted_sha256": "98c8c3b4efa62bc514ada59deddebeb02552c810dbbf5de5895e040168ae2afb",
-  "adaptation": "private PT_INTERP/RUNPATH plus debug-section stripping; code/profile unchanged"
-}

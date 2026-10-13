@@ -1,6 +1,10 @@
 <!-- Defensive packet-policy, control identity, regression and performance evidence for #173, D164/D166/D197/D216/D227/D228/D235. -->
 # Mesh policy verification
 
+> Historical logs and receipts were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/mesh-policy-verify/evidence/` and should be attached to #173 with
+> the `issue-attach` helper.
+
 The continuation and current measurements are recorded in [round 3](round3/README.md). The earlier measurements below describe the pre-review source.
 
 Base: `378b97da41584876c5aed8ba9828700c8511cd7d` (`dev` at job launch).

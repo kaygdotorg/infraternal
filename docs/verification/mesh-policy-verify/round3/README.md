@@ -1,6 +1,10 @@
 <!-- Reproduction, measurements and retained gate evidence for mesh policy round 3, issue #173. -->
 # Mesh policy round 3
 
+> Historical raw logs and receipts were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/mesh-policy-verify/evidence/` and should be attached to #173 with
+> the `issue-attach` helper.
+
 The three retained review findings are repaired: host retirement removes active
 membership and grants transactionally and publishes to live coordinators;
 authenticated re-enrollment is accepted by the real node; cleanup requires the

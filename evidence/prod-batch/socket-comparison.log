@@ -1,7 +1,0 @@
-Running as unit: run-p1572593-i47664056.scope; invocation ID: 7d25063c10fb4128bd1f22fe94b2567f
-{"case": "liveness", "phase": "start", "utc": "2026-10-11T09:16:40.364746+00:00", "load": "21.22 17.12 15.96 23/3173 1572627"}
-{"case": "liveness", "role": "dev", "exit": 0, "elapsed_s": 9.663, "load": "23.62 17.77 16.18 49/3227 1575585"}
-{"case": "liveness", "role": "merged", "exit": 0, "elapsed_s": 9.715, "load": "23.62 17.77 16.18 33/3207 1575609"}
-{"case": "headroom", "phase": "start", "utc": "2026-10-11T09:16:50.086526+00:00", "load": "23.62 17.77 16.18 33/3207 1575609"}
-{"case": "headroom", "role": "dev", "exit": 0, "elapsed_s": 77.872, "load": "24.03 20.18 17.21 7/3023 1582537"}
-{"case": "headroom", "role": "merged", "exit": 0, "elapsed_s": 79.517, "load": "24.03 20.18 17.21 7/3008 1582573"}

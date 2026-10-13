@@ -1,2 +1,0 @@
-Step: warm enrolled fallback + cached greeting/decoder promotion and background mesh re-probe committed/pushed (head below). Legacy peers unchanged; component-off allocates no warming future, cancellation closes only owned channels. Client server-path6 passed/1 ignored0.64s, fmt/all-target touched clippy PASS. Review silent-cut223034us vs300000us. Current optimized terminal and1000 adaptive measurements pending; no claim that warm handshake elimination alone meets RTT+250ms terminal stall.
-8b9223293ca131143e413ed0a2eb0c12f4075217

@@ -4,6 +4,7 @@
  * size are identical to the pixel, no ResizeObserver callback fires and no terminal refits; only the sidebar moves.
  * Production server binary, real sessions, 1440x900.
  */
+import { tracerEvidencePath } from "../test/evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -12,7 +13,7 @@ import { startRealServer, type RealServer } from "./server";
 test.describe.configure({ mode: "serial" });
 let server: RealServer;
 let page: Page;
-const captures = resolve(import.meta.dirname, "../captures/sidebar-overlay");
+const captures = tracerEvidencePath("sidebar-overlay");
 
 test.beforeAll(async ({ browser }) => {
   server = await startRealServer();

@@ -1,1 +1,0 @@
-Committed/pushed 8f5c2203b14c45b20858c11b54de5d9850146e0c: real mTLS QUIC cancellation/rebinding regressions, 30 passed / 0 failed / 3 ignored runtime tests; fmt and strict all-target remote Clippy pass. Source is current-worktree compilation, no cross-checkout reuse. Next slice introduces bounded owned native writes.

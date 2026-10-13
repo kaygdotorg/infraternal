@@ -1,8 +1,0 @@
-Running as unit: run-p1252655-i9640224.scope; invocation ID: aba6a4bef4084d8a9b3f36b9815c851c
-
-running 1 test
-{"apply_us_including_fsync":433384,"chunks":32,"down_us":504090,"idle_ticks_10s_off":0,"idle_ticks_10s_on":0,"load":"48.10 50.26 44.44 44/1841 1256744","one_endpoint_us_including_fsync":29341,"peer_count":1000,"public_cli":"pass","rss_bytes_at_1000_nodes":12607488000,"rss_bytes_off":12673024,"rss_bytes_on":12607488}
-test shipping_mesh_down_1000_peers_finishes_within_one_second ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.35s
-

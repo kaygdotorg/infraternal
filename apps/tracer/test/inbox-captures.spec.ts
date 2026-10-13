@@ -1,12 +1,13 @@
 /**
  * Review captures of the generic inbox card (D234, TASTE "The inbox is one generic card"): one item collapsed and
- * expanded, and three items with one expanded, on a phone and a desktop, in both themes. They land in
- * captures/inbox-generic/ and are read by eye; the assertions only prove the states were reached.
+ * expanded, and three items with one expanded, on a phone and a desktop, in both themes. Screenshots land in the
+ * external job evidence directory; assertions only prove that the states were reached.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { resolve } from "node:path";
 import { expect, test } from "playwright/test";
 
-const OUT = resolve(import.meta.dirname, "..", "captures", "inbox-generic");
+const OUT = tracerEvidencePath("inbox-generic");
 
 for (const [name, viewport, scale] of [["phone", { width: 393, height: 852 }, 3], ["desktop", { width: 1440, height: 900 }, 2]] as const) {
   for (const theme of ["ink", "paper"]) {

@@ -1,1 +1,0 @@
-Committed/pushed 006be612aee7c3874c110f591dce3179fe138620: isolated shadow-flight module, behavior-preserving extraction; fmt/strict server remote Clippy pass,24 embedded tests pass,2 ignored. Admission ownership is the next independent module slice; prime intent remains refused until activation.

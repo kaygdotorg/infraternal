@@ -1,4 +1,5 @@
 /** Exercises the host facts action end to end on the real embedded agent and captures the production popover. */
+import { tracerEvidencePath } from "../test/evidence-path";
 import { execFileSync } from "node:child_process";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -120,7 +121,7 @@ test("low memory explains the refusal and opens the existing host sessions picke
     await expect(toast).toBeVisible();
     await expect(toast.locator(".ui-toast-message")).toHaveText(/.+ is low on memory \(\d+ MiB free, 1 session running\)\. Close sessions you no longer need\./);
     await expect(toast.getByRole("button", { name: "Sessions", exact: true })).toBeVisible();
-    const captures = resolve(import.meta.dirname, "../captures/session-bounds");
+    const captures = tracerEvidencePath("session-bounds");
     await mkdir(captures, { recursive: true });
     const screenshot = resolve(captures, "refusal-desktop.png");
     await page.screenshot({ path: screenshot });

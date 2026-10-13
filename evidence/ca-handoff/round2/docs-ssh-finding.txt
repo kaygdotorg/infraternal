@@ -1,9 +1,0 @@
-Deployment-doc gate first test attempt hit the unchanged real_cli_askpass_refuses_unregistered_parent_and_cleans_helper fixture at crates/infraternal/tests/ssh_askpass.rs:46: exec Text file busy (errno26), before helper code runs. Encrypted synthetic-key helper test passed in the same suite. Exact compiled-fixture rerun: Running as unit: run-p1300676-i43200915.scope; invocation ID: 788737b1aa2345c9a153ae7b01837f8a
-
-running 1 test
-test real_cli_askpass_refuses_unregistered_parent_and_cleans_helper ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
-
-
-No #118 waiver, assertion, permission or production code change. Retain docs-fast-first.log after this gate finishes, then require a fresh full test row PASS. ARM compilation is independently progressing and holds the release build directory lock. No deployment.

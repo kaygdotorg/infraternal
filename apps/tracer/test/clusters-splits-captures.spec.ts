@@ -1,17 +1,18 @@
 /**
  * Screenshots of the window actions on a stacked column (D212), for review against TASTE.md. Run on demand:
  * `D212_CAPTURE=1 bun x playwright test test/clusters-splits-captures.spec.ts`. The PNGs land in
- * captures/splits-d212/ as `<viewport>-<theme>-<step>.png`.
+ * the external job evidence directory as `<viewport>-<theme>-<step>.png`.
  *
  * The steps: a column of three windows (two split downs), then split right on the middle window (refused: it shares
  * its column), split down on it, new window right, new window below. Each step is captured after it has settled.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
 const enabled = process.env.D212_CAPTURE === "1";
-const OUT = resolve(import.meta.dirname, "..", "captures", "splits-d212");
+const OUT = tracerEvidencePath("splits-d212");
 const VIEWPORTS = [{ w: 1440, h: 900 }, { w: 393, h: 852 }] as const;
 const THEMES = ["ink", "paper"] as const;
 

@@ -4,13 +4,14 @@
  * desktop, in the ink and paper themes. A list reads as one: when any row's hint does not fit beside its name, every row of
  * that list puts the hint under the name, left-aligned with it; otherwise every hint is beside its name. Each section's own
  * list must be on screen before anything is measured, so the spec cannot pass on the wrong view.
- * Captures land in captures/settings-rows.
+ * Review screenshots land in the external job evidence directory.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const captures = resolve(import.meta.dirname, "../captures/settings-rows");
+const captures = tracerEvidencePath("settings-rows");
 const SIZES = [{ w: 375, h: 667, touch: true }, { w: 393, h: 852, touch: true }, { w: 1440, h: 900, touch: false }] as const;
 /** Each section, the palette words that open it, and a list that proves the section is the one on screen. */
 const SECTIONS = [

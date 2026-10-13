@@ -1,6 +1,8 @@
 /** Proves production Ghostty rendering over a real enrolled host; fixture authority arrives only on private stdin (#78). */
 import { chromium, devices } from '../apps/tracer/node_modules/playwright/index.mjs';
 import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { evidencePath } from './evidence-path.mjs';
 
 // No traces, storage-state files, or request logging: the cookie stays in memory.
 let input = '';
@@ -46,8 +48,10 @@ try {
       stage = `${name}:glyph`;
       await page.waitForFunction(value => window.__tracerTestDouble?.screenText().includes(value), marker, { timeout: 15000 });
       const roundtrip = performance.now() - started;
-      await mkdir('evidence/remote-agents/screenshots', { recursive: true });
-      await page.screenshot({ path: `evidence/remote-agents/screenshots/${fixture.screenshot_prefix ?? 'run7-real-remote'}-${name}.png` });
+      const screenshotDirectory = evidencePath('remote-browser', 'remote-agents', 'screenshots');
+      await mkdir(screenshotDirectory, { recursive: true });
+      const prefix = String(fixture.screenshot_prefix ?? 'run7-real-remote').replace(/[^A-Za-z0-9_-]/g, '-');
+      await page.screenshot({ path: join(screenshotDirectory, `${prefix}-${name}.png`) });
       console.log(`remote_browser viewport=${name} real_server=true real_host_daemon=true production_renderer=true enter_to_glyph_ms=${roundtrip.toFixed(3)}`);
       stage = `${name}:probe`;
       await page.locator('#probe-run').click();

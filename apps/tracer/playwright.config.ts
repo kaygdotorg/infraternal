@@ -1,6 +1,6 @@
 /** Runs browser checks against the production tracer build through the test latency proxy [#55, D122, D130]. */
-import { resolve } from "node:path";
 import { defineConfig, devices } from "playwright/test";
+import { tracerEvidencePath } from "./test/evidence-path";
 
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -10,8 +10,8 @@ const deviceScaleFactor = Number(process.env.TRACER_TEST_DPR ?? "1");
 if (![1, 2, 3].includes(deviceScaleFactor)) {
   throw new Error("TRACER_TEST_DPR must be 1, 2, or 3");
 }
-// The frame meter's incident file lands here during tests, not in the person's state directory.
-const perfDir = resolve(import.meta.dirname, "test-results", "perf");
+// Browser reports and frame incidents stay outside the checkout.
+const perfDir = process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf");
 const origin = `http://localhost:${port}`;
 
 export default defineConfig({
@@ -23,7 +23,7 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   reporter: "list",
-  outputDir: "./test-results",
+  outputDir: tracerEvidencePath("playwright"),
   use: {
     ...devices["Desktop Chrome"],
     deviceScaleFactor,

@@ -1,9 +1,0 @@
-   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/mesh-policy-verify/crates/infraternal-server)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.85s
-     Running tests/review_mesh_host_removal.rs (/home/kayg/.cache/codex-scratch/mpv3-173/target/debug/deps/review_mesh_host_removal-c8c39843b6a3c7b5)
-
-running 1 test
-test revoked_remote_host_is_withdrawn_from_mesh_peer_policy ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
-

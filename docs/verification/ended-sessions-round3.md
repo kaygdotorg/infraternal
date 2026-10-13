@@ -1,6 +1,10 @@
 <!-- Event-driven live-session census, D81 idle/latency measurements and review evidence for #168. -->
 # Ended sessions: round 3
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 Issue [#168](https://git.kayg.org/kayg/infraternal/issues/168), branch
 `ended-sessions`, baseline `dd867a58151a5bbcd8ce224c34c8596a9ecfcfb6`.
 The orchestrator approved event-driven discovery within D81. No decision,
@@ -31,7 +35,8 @@ census after all eight ordered Pongs without sending another request.
 
 ## Idle and exit detection
 
-Evidence: [`evidence/ended-sessions-round3`](../../evidence/ended-sessions-round3/).
+Raw run receipts were removed under D262; the recorded measurements and results
+remain in this report.
 Every measurement runs locally on infraternal-dev under
 `systemd-run --user --scope -p CPUWeight=10000`; fixture-owned shim scopes carry
 that weight. Machine: Linux x86_64, 12 reported CPUs. No load generator or remote
@@ -129,8 +134,8 @@ ES-02 saved status, account-scoped bounded exits and unavailable inventory.
 Production browser acceptance passes **8/8** (the original seven plus ES-01
 ordering), **2.0 minutes**, default 300 ms RTT, ports **5188/5189**
 (`browser-acceptance.log`). Browser plugin unavailable; the repository Playwright
-harness was used. Captures under `captures/` are evidence for independent review;
-this job does not judge its own visual quality. Strict tracer checking, **159
+harness was used. Review screenshots were removed under D262; this job does not
+judge its own visual quality. Strict tracer checking, **159
 source tests**, the default production build and all unchanged D188 transfer
 budgets pass (`client-acceptance.log`). The separate complete TypeScript fast
 gate also passes: 166 tracer/shared tests and 36 protocol tests with 34,462

@@ -1,1 +1,0 @@
-Completed dependency step: 4ad3562e pins test-only gliderlabs/ssh v0.3.8 and x/crypto v0.55.0 from NetBird v0.79.0. BSD-style licenses compatible with AGPL; no Cargo/production dependency added. go mod verify: all modules verified; cargo fmt --all --check passed. Local functional loopback trace demonstrates none authentication; no local performance claim.

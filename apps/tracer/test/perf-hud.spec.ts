@@ -3,12 +3,13 @@
  * the meter's frame body costs next to nothing, and it causes no layout or style recalculation between repaints.
  * `?fps=bench` mounts the meter with its measuring hooks (`window.__perfHud`).
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
-const file = resolve(import.meta.dirname, "..", "test-results", "perf", `${port}.jsonl`);
+const file = resolve(process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf"), `${port}.jsonl`);
 const URL = "/?mock=1&proto=clusters&scene=7&theme=ink&bg=none";
 
 type Hud = { bench(calls?: number, batch?: number): { meanUs: number; p99Us: number; maxUs: number }; selfTime(): { frames: number; meanMs: number }; pauseRepaint(): void; flush(): void; finish(): void; state(): { sid: string; incidents: number; refresh: number } };

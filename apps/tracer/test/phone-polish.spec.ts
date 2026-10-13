@@ -3,13 +3,14 @@
  * inside its capsule, the canvas-lock glyph, the window pill leads with the machine's system, and the header pills are one
  * size. Runs on the test double's canvas (the product canvas code), touch profiles at 393x852 and 375x667 in the ink and
  * paper themes, with the keyboard up and down (the viewport shrunk by the keyboard's height, as the real specs do).
- * Captures land in captures/phone-polish; every assertion is a measurement, the captures are for looking.
+ * Review screenshots land in the external job evidence directory; every assertion is a measurement.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const captures = resolve(import.meta.dirname, "../captures/phone-polish");
+const captures = tracerEvidencePath("phone-polish");
 const PEEK = 10;
 const SIZES = [{ w: 393, h: 852, kb: 336 }, { w: 375, h: 667, kb: 300 }] as const;
 const THEMES = ["ink", "paper"] as const;

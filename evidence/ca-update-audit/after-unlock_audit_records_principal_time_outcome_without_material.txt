@@ -1,6 +1,0 @@
-
-running 1 test
-test auth::tests::ca_administration_tests::audit_tests::unlock_audit_records_principal_time_outcome_without_material ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 331 filtered out; finished in 1.36s
-

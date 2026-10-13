@@ -7,9 +7,10 @@
  *
  * Run twice for the two profiles: `bun x playwright test -c playwright.real.config.ts real/switch.spec.ts` (no delay)
  * and with `REAL_ONE_WAY_MS=150` (the 300 ms round-trip profile). Each run prints `SWITCH {json}` lines and writes
- * its table to `captures/switch-<profile>.json`. The assertions are the targets: first paint within one frame of
+ * its table to the external job evidence directory. The assertions are the targets: first paint within one frame of
  * the action (every way that has the screen already), live within one round trip of the action.
  */
+import { tracerEvidencePath } from "../test/evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { loadavg } from "node:os";
@@ -33,8 +34,8 @@ test.beforeAll(async ({ browser }) => {
   await enrol(page);
 });
 test.afterAll(async () => {
-  await mkdir(resolve(import.meta.dirname, "../captures"), { recursive: true });
-  await writeFile(resolve(import.meta.dirname, `../captures/switch-${process.env.SWITCH_LABEL ?? "run"}-${profile}.json`), JSON.stringify({ loadavg: loadavg(), results }, null, 1));
+  await mkdir(tracerEvidencePath(), { recursive: true });
+  await writeFile(tracerEvidencePath(`switch-${process.env.SWITCH_LABEL ?? "run"}-${profile}.json`), JSON.stringify({ loadavg: loadavg(), results }, null, 1));
   await page?.context().close();
   await server?.dispose();
 });
@@ -259,7 +260,7 @@ test("a frame-by-frame strip of a switch shows the old screen, then the new one,
   await scratch.close();
   const timeline = frames.map((f, i) => ({ ms: Math.round(f.at - epoch), ink: ink[i]! }));
   console.log("STRIP", JSON.stringify(timeline.filter((f) => f.ms > -80 && f.ms < 700)));
-  const dir = resolve(import.meta.dirname, `../captures/switch-strip-${profile}`);
+  const dir = tracerEvidencePath(`switch-strip-${profile}`);
   await mkdir(dir, { recursive: true });
   for (const [i, f] of frames.entries()) { const ms = Math.round(f.at - epoch); if (ms > -50 && ms < 150) await writeFile(`${dir}/frame-${String(ms + 100).padStart(4, "0")}ms.jpg`, Buffer.from(f.data, "base64")); void i; }
   const after = timeline.filter((f) => f.ms >= 0 && f.ms < 600 + rtt);

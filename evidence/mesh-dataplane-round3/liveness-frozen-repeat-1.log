@@ -1,8 +1,0 @@
-Running as unit: run-p3615708-i49705764.scope; invocation ID: 8f757d50557c4bf8948fffffa8beae8c
-
-running 1 test
-test auth::tests::socket_tests::claude_review_visible_liveness::claude_review_watch_expires_host_made_visible_by_membership_edit ... listed_live=true db_live_now=false expiry_event_received=true
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 181 filtered out; finished in 9.87s
-

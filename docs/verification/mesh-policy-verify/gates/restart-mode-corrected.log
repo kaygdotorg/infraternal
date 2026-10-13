@@ -1,6 +1,0 @@
-
-running 1 test
-test restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 4.09s
-

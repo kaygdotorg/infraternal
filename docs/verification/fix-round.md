@@ -68,9 +68,9 @@ measurements, not physical-phone/network or pinned performance-VM evidence.
   suite passes 4/4: 500-key probe p99 16.40 ms, time-to-resume 77.00 ms.
   No threshold was relaxed. Final gate output is posted verbatim on the issues.
 
-Production screenshots are in the client `apps/tracer/test-results/` Playwright
-attachments (onboarding 390×844 and desktop; returning sign-in light/dark and
-terminal). They are supplied for review; this job does not approve visual quality.
+Historical production screenshots were removed under D262. Fresh screenshots belong in `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/`
+(onboarding 390×844 and desktop; returning sign-in light/dark and terminal) and
+should be attached for review; this job does not approve visual quality.
 
 ```sh
 nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl -c scripts/verify fast

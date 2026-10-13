@@ -1,6 +1,10 @@
 <!-- Records run 7 size investigation, gated remote-runtime slices, real local proof and remaining #78 acceptance. -->
 # Remote infraternal agents, run 7
 
+> Raw screenshots, logs and receipts referenced by this report were removed under D262. The
+> recorded results remain; new outputs belong in job scratch and should be attached to the
+> relevant issue with the `issue-attach` helper.
+
 Phase 1 remains incomplete. This run commits the configured-server local
 remote path and stops before real-host proof because o1 is not trusted in the
 server's known_hosts. No SSH/key scan, host installation, push, deployment or
@@ -107,8 +111,8 @@ iPhone14.40/29.70ms. P99 exceeds17ms. Chromium iPhone viewport emulation is
 not physical iPhone or Safari evidence. Screenshots are attached for human
 review; this report makes no visual-quality approval claim:
 
-- [Desktop](remote-agents/run7-real-remote-desktop.png)
-- [iPhone viewport](remote-agents/run7-real-remote-iphone.png)
+- Desktop
+- iPhone viewport
 
 The full production suite on TRACER_TEST_PORT4701 exits1: **47 passed,
 21 skipped,6 failed (13.9m)**. The six failed cases, rerun against archived dev
@@ -159,9 +163,10 @@ Auth B1/S1/S2/N1 review principles from `docs/verification/auth.md` were applied
 transaction authority rechecks, bounded admission, trusted test-only unlock and
 real TLS/PTY engines, isolated modules. CA envelope/administrator integration,
 remote cancellation/lease edges and full lifecycle need further review.
-Production screenshots are supplied; independent security/visual review and
-physical-device validation remain external. No approval or budget-certification
-claim follows from the green fast gate.
+Historical production screenshots were removed under D262. Fresh screenshots
+belong in job scratch and should be attached for independent review; security
+review and physical-device validation remain external. No approval or budget-
+certification claim follows from the green fast gate.
 
 ## Final fast gate
 

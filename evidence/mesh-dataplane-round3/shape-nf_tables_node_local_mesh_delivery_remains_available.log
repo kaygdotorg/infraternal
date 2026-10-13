@@ -1,8 +1,0 @@
-load=18.99 20.44 21.97 4/3153 936379
-Running as unit: run-p936380-i51219929.scope; invocation ID: 24c9705a26a143438c7b607fc198884f
-
-running 1 test
-test nf_tables_node_local_mesh_delivery_remains_available ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.89s
-

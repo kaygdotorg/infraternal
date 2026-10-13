@@ -1,8 +1,0 @@
-load=27.80 15.50 7.09 37/1526 97266
-Running as unit: run-p97268-i97568.scope; invocation ID: 173b1a1872ac411a907dffaa989d70c4
-
-running 1 test
-test nft_translated_underlay_ingress_is_refused ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.93s
-

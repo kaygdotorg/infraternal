@@ -1,9 +1,0 @@
-LOAD_START 50.91 54.31 49.87 32/1571 2904313
-Running as unit: run-p2904314-i2904614.scope; invocation ID: b511034233654184b42c8cc3a35cdd16
-
-running 1 test
-test node::tests::explicit_up_recovers_disabled_intent_before_reusing_identity ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.60s
-
-LOAD_END 50.91 54.31 49.87 41/1585 2904746

@@ -1,4 +1,0 @@
-Running as unit: run-p4004736-i50094737.scope; invocation ID: 2314773a368b4436b627fa98ec4c58f3
-    Checking infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal-server)
-    Checking infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/audit-ca-update/crates/infraternal)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.86s

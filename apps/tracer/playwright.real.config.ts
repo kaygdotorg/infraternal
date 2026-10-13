@@ -3,6 +3,7 @@
  * Set `INFRATERNAL_BIN` to the server binary and build the tracer first (`bun run build`, optionally with TRACER_DIST).
  */
 import { defineConfig, devices } from "playwright/test";
+import { tracerEvidencePath } from "./test/evidence-path";
 
 export default defineConfig({
   testDir: "./real",
@@ -12,6 +13,6 @@ export default defineConfig({
   retries: 0,
   reporter: "list",
   timeout: 120_000,
-  outputDir: "./test-results-real",
+  outputDir: tracerEvidencePath("playwright-real"),
   use: { ...devices["Desktop Chrome"], ignoreHTTPSErrors: true, trace: "off", screenshot: "off", launchOptions: { args: ["--disable-renderer-backgrounding"] } },
 });

@@ -3,13 +3,14 @@
  *
  * Locked: the palette offers "Unlock host connections" and Settings shows "Locked" with an Unlock button. After the
  * ceremony the row is gone and Settings says "Unlocked". A viewer who is not an administrator sees the state and
- * no button, and the palette offers nothing. Captures land in captures/ca-unlock/ for the visual review.
+ * no button, and the palette offers nothing. Review screenshots land in the external job evidence directory.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
-const CAPTURES = resolve(import.meta.dirname, "..", "captures", "ca-unlock");
+const CAPTURES = tracerEvidencePath("ca-unlock");
 mkdirSync(CAPTURES, { recursive: true });
 const LABEL = "Unlock host connections";
 const SETTINGS_ROW = '.ui-sp [data-kind="host-connections"]';

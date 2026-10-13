@@ -1,8 +1,0 @@
-ENVIRONMENT machine=infraternal-dev arch=x86_64 cores=8 compiler=rustc1.99.0 pinned_zig=0.15.2 production_base=9fba1eb2
-METRIC architecture=x86_64 baseline_bytes=19896992 release_bytes=20028096 growth_bytes=131104 unchanged_gate_max_bytes=16404816 PT_INTERP=absent release_marker=1
-METRIC architecture=aarch64 baseline_bytes=17729832 release_bytes=17848344 growth_bytes=118512 unchanged_gate_max_bytes=13817816 PT_INTERP=absent release_marker=1
-VERSION: OK
-infraternal: OK
-infraternal-aarch64-musl: OK
-infraternal-x86_64-musl: OK
-Rebuild refusal: exit=1, release bundle already exists

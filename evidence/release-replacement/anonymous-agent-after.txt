@@ -1,2 +1,0 @@
-Running as unit: run-p3160807-i7354706.scope; invocation ID: ec5744ddccff41a18a5320679b501551
-ANONYMOUS_IMAGE real_pty=true input_output=true exact_running_image=true control_fd_isolated=true

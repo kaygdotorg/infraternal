@@ -1,6 +1,10 @@
 <!-- SSH engine research for owner choice: measured alternatives, trust semantics and limits; #87, D4/D141/D167/D170. -->
 # SSH client measurement
 
+> Historical raw receipts were removed under D262. The measured results remain; fresh output
+> belongs under `$HOME/.cache/codex-scratch/ssh-client-research/evidence/` and selected files
+> should be attached to #87 with the `issue-attach` helper.
+
 The product adapter remains system OpenSSH. This report measures russh 0.63.1;
 it does not select another foundational engine. The research package is isolated
 from the product workspace, uses AGPL-3.0-only, and pins its separate lockfile.
@@ -11,8 +15,7 @@ infraternal-dev, Linux x86_64, eight logical cores, OpenSSH 10.0p2 Debian,
 Rust 1.99.0, release opt-level3/LTO/one codegen unit/stripped. CPUWeight10000
 user scope. Initial load average 2.01/1.83/1.52. The repository runtime fast gate, including static
 release builds, ran concurrently; these are diagnostics under that recorded load,
-not an unloaded acceptance benchmark. Evidence:
-`evidence/ssh-bootstrap/continuation-research-final-measurements.log`.
+not an unloaded acceptance benchmark. The raw measurement receipt was removed under D262.
 
 A real rootless sshd listens only on loopback. Fixture host/client private keys
 are generated in memory; the host key uses an anonymous memory descriptor, the
@@ -103,7 +106,7 @@ russh is Apache-2.0. The locked graph has 178 packages including this AGPL
 research package; license metadata permits compatible MIT/Apache/BSD/ISC/
 Unicode alternatives. The isolated graph also passes the repository
 `cargo deny` advisory, ban, license and source policies, with no license
-exception (evidence/ssh-bootstrap/continuation-research-deny.log).
+exception; its raw receipt was removed under D262.
 No product dependency was added.
 The chosen research crypto feature is ring: the SSH protocol implementation is
 Rust, but ring includes native crypto/assembly. This is not a claim that the
@@ -113,7 +116,7 @@ Primary references: [russh client handler](https://docs.rs/russh/0.63.1/russh/cl
 [versioned crate sources](https://docs.rs/crate/russh/0.63.1/source/), and
 [upstream project](https://github.com/Eugeny/russh). License/source checks use
 the exact locked registry source and `cargo metadata --offline`, recorded in
-`evidence/ssh-bootstrap/continuation-research-metadata.json`.
+the raw metadata receipt, removed under D262.
 
 ## Reproduce
 

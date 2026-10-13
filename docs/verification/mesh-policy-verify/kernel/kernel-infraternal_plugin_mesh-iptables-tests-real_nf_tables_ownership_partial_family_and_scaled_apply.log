@@ -1,8 +1,0 @@
-Running as unit: run-p4111106-i4111406.scope; invocation ID: 03499d9a28154c7dbd34edef7e96017c
-
-running 1 test
-test iptables::tests::real_nf_tables_ownership_partial_family_and_scaled_apply ... METRIC nf_tables_policy machine=infraternal-dev peers=1000 apply_us=411107 single_peer_us=371608 load=61.44 56.65 46.34 61/1669 4111374
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 2.25s
-

@@ -1,8 +1,0 @@
-PING 10.221.0.3 (10.221.0.3) 56(84) bytes of data.
-64 bytes from 10.221.0.3: icmp_seq=1 ttl=64 time=0.046 ms
-64 bytes from 10.221.0.3: icmp_seq=2 ttl=64 time=0.053 ms
-64 bytes from 10.221.0.3: icmp_seq=3 ttl=64 time=0.058 ms
-
---- 10.221.0.3 ping statistics ---
-3 packets transmitted, 3 received, 0% packet loss, time 410ms
-rtt min/avg/max/mdev = 0.046/0.052/0.058/0.005 ms

@@ -1,5 +1,0 @@
-Running as unit: run-p3558962-i3559262.scope; invocation ID: b450a2c28b954689a0beda4be16a4286
-    Checking infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-agent)
-   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal-server)
-   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/ended-sessions/crates/infraternal)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 42.47s

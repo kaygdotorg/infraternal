@@ -1,9 +1,0 @@
-# Optimized public test transcript, issue #129.
-Running as unit: run-p896691-i896991.scope; invocation ID: 2ad4852e2b8b4529b9dfb869817baed9
-
-running 1 test
-test remote_client::tests::idle_timers::mesh_idle_timer_cost_at_one_thousand_connections ... METRIC mesh_idle connections=1000 live=1000 cpu_ticks=1533 packets=157326 window_us=18542299 result=PASS
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 24.97s
-

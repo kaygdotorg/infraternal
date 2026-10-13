@@ -1,2 +1,0 @@
-Running as unit: run-p2817897-i7011796.scope; invocation ID: 4e7b853d89af4e59b68018d293b8522e
-exec /work/infraternal-test: no such file or directory

@@ -1,6 +1,10 @@
 <!-- Ghostty VT migration, C API gaps, reproducible measurements and review evidence for #22. -->
 # Shim terminal state: libghostty-vt (#22)
 
+> Raw verification logs and captures were removed under D262. Fresh receipts belong under
+> `$HOME/.cache/codex-scratch/vt-ghostty/evidence/`; create output directories before direct
+> shell redirections and point `VT_CAPTURE_DIR` inside that external directory.
+
 Owner DECISIONS 94 replaces the Alacritty terminal-state engine. This checkout's
 `DECISIONS.md` ends at 86; 94 is supplied by the owner's job and recorded on #22.
 This document supplements the historical [S1 shim comparison](S1-SHIM.md).
@@ -37,7 +41,7 @@ commit after the requested `947d68f` base. Baseline copies are
 contain neither `alacritty_terminal` nor `vt100`; the optional `bench-vt`
 feature preserves the comparison example. `bench-ghostty` additionally enables
 the old Rust binding/formatter comparison. Those engines are absent from a
-default build (`target/vt-ghostty/production-dependencies.log`).
+default build (`$HOME/.cache/codex-scratch/vt-ghostty/evidence/production-dependencies.log`).
 
 ## Snapshot state and the upstream API boundary
 
@@ -126,11 +130,9 @@ pruning and resize. The native oracle reads Ghostty cells independently of the
 serializer, including text presence, widths, graphemes, styles, links, row wrap,
 cursor, modes and palette; continuations expose retained hidden-screen state.
 
-Red/green evidence lives in `target/vt-ghostty/`: `native-unicode-red.log` /
-`native-unicode-green.log`, `saved-origin-red.log` /
-`expanded-origin-tests.log`, and `expanded-wrap-red.log` /
-`empty-cells-tests.log`. The final unit result is 20 passed; performance tests
-are explicitly ignored by the ordinary test gate and run separately below.
+The historical red/green logs were removed under D262. The final unit result is
+20 passed; performance tests are explicitly ignored by the ordinary test gate
+and run separately below.
 
 ## Release measurements on this host
 
@@ -205,16 +207,8 @@ python3 scripts/verify-agent.py --binary target/x86_64-unknown-linux-musl/releas
 nix shell nixpkgs#zig_0_15 -c cargo clippy -p infraternal-shim --all-targets --features bench-vt --locked -- -D warnings
 ```
 
-Raw evidence under `target/vt-ghostty/`: `release-budgets.log`,
-`terminal-rss-isolated.log`, `{alacritty,ghostty}-rss-serial.log`,
-`alacritty-flood-serial{,-2,-3}.log`, `ghostty-flood-after-carry.log`,
-`ghostty-flood-serial-{2,3}.log`, `flood-summary.json`, `real-agent-gate.log`,
-`comparison-feature-gate.log`, `alacritty-comparison-current.log`, and
-`history-preview.log`. Per-commit exact fast
-logs are `toolchain-gate.log`, `init-api-gate.log`,
-`native-module-gate-final.log`, `resize-api-gate.log`, `engine-gate.log`,
-`snapshot-regressions-gate.log`, `carry-perf-gate.log`, `measurements-gate.log`,
-and `docs-gate.log`. Forgejo #22 records start/base, findings and final HEAD with
+The raw release measurements and per-commit fast-gate receipts were removed
+under D262. Forgejo #22 records start/base, findings and final HEAD with
 verbatim gate output. No issue is closed and no branch is pushed by this job.
 
 
@@ -315,19 +309,16 @@ improvement or attribute LF's 5.7% difference to code; the input/parser path
 was unchanged. These numbers are development-box evidence, not a guarantee
 under arbitrary host contention.
 
-Evidence lives under `target/snapshot-fidelity/`: `before-flood.log`,
-`before-snapshot.log`, `after-flood.log`, `after-flood-serial.log`,
-`after-snapshot.log`, `after-snapshot-serial-{1,2,3}.log`,
-`variation-module-green.log`, `final-nightly.log`, and `final-docs-fast.log`.
-The first unsupported seeded fixture is also retained there as a named
-`seed-22601006-case-*-api-gap.vt` file. Logs contain fixtures only by path;
-console reads are sanitized and restricted to summaries.
+Historical logs and the seeded diagnostic fixture were removed under D262.
+Fresh logs and any temporary seeded cases belong in
+`$HOME/.cache/codex-scratch/vt-ghostty/evidence/snapshot-fidelity/`; console
+reads remain sanitized and restricted to summaries.
 
 ```sh
-nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > target/snapshot-fidelity/final-docs-fast.log 2>&1
-nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify nightly > target/snapshot-fidelity/final-nightly.log 2>&1
-nix shell nixpkgs#zig_0_15 -c cargo test --release -p infraternal-shim --lib snapshot_200x60 -- --ignored --nocapture --test-threads=1 > target/snapshot-fidelity/after-snapshot-serial-1.log 2>&1
-python3 crates/infraternal-shim/tests/vt_flood.py --binary target/x86_64-unknown-linux-musl/release/infraternal > target/snapshot-fidelity/after-flood-serial.log 2>&1
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > $HOME/.cache/codex-scratch/vt-ghostty/evidence/snapshot-fidelity/final-docs-fast.log 2>&1
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify nightly > $HOME/.cache/codex-scratch/vt-ghostty/evidence/snapshot-fidelity/final-nightly.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release -p infraternal-shim --lib snapshot_200x60 -- --ignored --nocapture --test-threads=1 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/snapshot-fidelity/after-snapshot-serial-1.log 2>&1
+python3 crates/infraternal-shim/tests/vt_flood.py --binary target/x86_64-unknown-linux-musl/release/infraternal > $HOME/.cache/codex-scratch/vt-ghostty/evidence/snapshot-fidelity/after-flood-serial.log 2>&1
 ```
 
 Forgejo #22 contains the final HEAD and verbatim final fast summary table.
@@ -534,8 +525,7 @@ This job does not claim that supplemental budget passed.
 
 ### Evidence, self-review and reproduction
 
-All logs below are in `target/review-vt2-fixes/`. Raw terminal payloads and
-native diagnostics stay in files; console reads select sanitized summaries.
+Historical logs were removed under D262. Fresh output belongs in `$HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/`; raw terminal payloads and native diagnostics stay in files, while console reads select sanitized summaries.
 
 - Ordering and final real reconnect: `run2-reconnect.log`,
   `detached-controls-fast.log`, `run2-bounded-final-reconnect.log`.
@@ -565,16 +555,17 @@ FFI review and pinned perf-VM validation remain separate reviewer work.
 The eight continuation commits each pass exact fast independently. #26 records
 the base/head, findings, each completed step and final verbatim gate summary.
 No push, deployment or issue closure is part of this job. Scratch build caches
-are removed after the gate; evidence logs and final binaries remain in this
-worktree under `target/review-vt2-fixes/`.
+are removed after the gate; fresh evidence logs belong under
+`$HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/`, while build
+binaries remain under the worktree target directory.
 
 ```sh
-nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > target/review-vt2-fixes/reproduce-1.log 2>&1
-nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify nightly > target/review-vt2-fixes/reproduce-2.log 2>&1
-python3 scripts/verify-vt-reconnect.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > target/review-vt2-fixes/reproduce-3.log 2>&1
-python3 crates/infraternal-shim/tests/vt_flood.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > target/review-vt2-fixes/reproduce-4.log 2>&1
-python3 crates/infraternal-shim/tests/vt_memory.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > target/review-vt2-fixes/reproduce-5.log 2>&1
-python3 crates/infraternal-shim/tests/vt_scale.py --binary target/review-vt2-fixes/final-infraternal-x86_64 --sessions 128 > target/review-vt2-fixes/reproduce-6.log 2>&1
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/reproduce-1.log 2>&1
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify nightly > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/reproduce-2.log 2>&1
+python3 scripts/verify-vt-reconnect.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/reproduce-3.log 2>&1
+python3 crates/infraternal-shim/tests/vt_flood.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/reproduce-4.log 2>&1
+python3 crates/infraternal-shim/tests/vt_memory.py --binary target/review-vt2-fixes/final-infraternal-x86_64 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/reproduce-5.log 2>&1
+python3 crates/infraternal-shim/tests/vt_scale.py --binary target/review-vt2-fixes/final-infraternal-x86_64 --sessions 128 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt2-fixes/reproduce-6.log 2>&1
 ```
 
 ## Third-review corrections T1–T3 (#26)
@@ -625,14 +616,14 @@ The upstream C allocation probe still fails at four of twelve refusal points.
 Our production ReleaseFast wrapper passes all twelve retirement probes and
 the real-PTY refusal fixture. ReleaseSafe refusal points 4 and 5 encounter
 native invalid-state checks before resize returns, so the wrapper cannot
-establish its returned-error guarantee there. Native diagnostics stay in
-`target/review-vt3-fixes/t3-upstream-native/` and `t3-boundary-green-*.log`.
+establish its returned-error guarantee there. Native diagnostic logs were removed under D262.
 This is an upstream limitation, not evidence of a transactional native engine.
 
 ### Reproduction and self-review
 
-All evidence below is under `target/review-vt3-fixes/`. Public probe diagnostics
-and terminal bytes stay in files. The default fast gate includes all four
+Historical evidence below was removed under D262. Fresh output belongs under
+`$HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/`. Public probe
+diagnostics and terminal bytes stay in files. The default fast gate includes all four
 faithful/approximate × 1-byte/16-KiB credit probes, the public mouse encoder,
 production allocator retirement, and five isolated real-PTY ordering cases.
 Each fix had a failing regression before its implementation.
@@ -714,21 +705,18 @@ refusal is not included in these ordinary resident-state totals.
 Reproduction from this worktree (all command output must remain in files):
 
 ```sh
-nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > target/review-vt3-fixes/reproduce-fast.log 2>&1
-nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib fidelity_seeded_nightly -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-original.log 2>&1
-nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib fidelity_extended_nightly -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-expanded.log 2>&1
-python3 scripts/verify-vt-reconnect.py --binary target/x86_64-unknown-linux-musl/release/infraternal > target/review-vt3-fixes/reproduce-reconnect.log 2>&1
-python3 crates/infraternal-shim/tests/vt_flood.py --binary target/x86_64-unknown-linux-musl/release/infraternal > target/review-vt3-fixes/reproduce-flood.log 2>&1
-nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib snapshot_200x60 -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-snapshot.log 2>&1
-nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib measured_full_ring_reconstruction -- --ignored --nocapture --test-threads=1 > target/review-vt3-fixes/reproduce-reconstruction.log 2>&1
-python3 crates/infraternal-shim/tests/vt_scale.py --binary target/x86_64-unknown-linux-musl/release/infraternal --sessions 128 > target/review-vt3-fixes/reproduce-scale.log 2>&1
+nix shell nixpkgs#binutils nixpkgs#file nixpkgs#gnumake nixpkgs#perl nixpkgs#zig_0_15 -c scripts/verify fast > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-fast.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib fidelity_seeded_nightly -- --ignored --nocapture --test-threads=1 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-original.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib fidelity_extended_nightly -- --ignored --nocapture --test-threads=1 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-expanded.log 2>&1
+python3 scripts/verify-vt-reconnect.py --binary target/x86_64-unknown-linux-musl/release/infraternal > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-reconnect.log 2>&1
+python3 crates/infraternal-shim/tests/vt_flood.py --binary target/x86_64-unknown-linux-musl/release/infraternal > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-flood.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib snapshot_200x60 -- --ignored --nocapture --test-threads=1 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-snapshot.log 2>&1
+nix shell nixpkgs#zig_0_15 -c cargo test --release --locked -p infraternal-shim --lib measured_full_ring_reconstruction -- --ignored --nocapture --test-threads=1 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-reconstruction.log 2>&1
+python3 crates/infraternal-shim/tests/vt_scale.py --binary target/x86_64-unknown-linux-musl/release/infraternal --sessions 128 > $HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/reproduce-scale.log 2>&1
 ```
 
 Use `VT_SNAPSHOT_INITIAL=fresh-c` to reproduce constructor-context rejection
-counts; both contexts' logs are `final-fidelity*-{RIS,fresh-c}.log`. Fresh capture
-bytes are in `fresh-captures/`; the opt-in `fidelity_fresh_real_program_captures`
-test takes `VT_CAPTURE_DIR` and reports sampled coverage in
-`final-fresh-captures.log`. Final benchmarks are `final-flood-{1,2,3}.log`,
+counts; both contexts' logs are `final-fidelity*-{RIS,fresh-c}.log`. Fresh capture bytes belong under `$HOME/.cache/codex-scratch/vt-ghostty/evidence/review-vt3-fixes/fresh-captures/`; the opt-in `fidelity_fresh_real_program_captures` test takes `VT_CAPTURE_DIR` and writes its summary to external scratch. Final benchmarks are `final-flood-{1,2,3}.log`,
 `final-snapshot.log`, `final-reconstruction.log`, `final-socket-snapshot.log`
 and `final-scale-128.log`; machine and per-trial load are recorded in
 `final-machine.json` and `final-measurement-status.json`. Original reviewer

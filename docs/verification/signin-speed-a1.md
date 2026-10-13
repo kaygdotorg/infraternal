@@ -214,13 +214,13 @@ Run `python3 scripts/browser-auth/verify-waterfall-cleanup.py` after the release
 build to check this independently. This teardown change follows measurements
 and does not change the final waterfall timing tables.
 
-Sanitized evidence lives at `apps/tracer/test-results/signin-speed-a1/`
-(ignored artifacts, retained for this worktree's reviewer): `before-waterfall`
+Historical sanitized receipts and screenshots were removed under D262. Fresh output belongs at `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/signin-speed-a1/`:
+`before-waterfall`
 and `final-waterfall` JSON/log pairs, the intermediate `after-waterfall`
 pair, `final-fast.log`, `final-browser-2.log`, red/green attach and browser
 build findings, and the real-PTY scale/reconnect logs. `attach-scale.py`
 reproduces the 50-session diagnostic against a specified release binary.
 The final waterfall's `final-waterfall-{0,100,200}ms.png` screenshots show the
 real signed-in production terminal. The regular browser screenshot files
-remain in their original `apps/tracer/test-results/` directories. Scratch
+remain in the external Playwright scratch directories. Scratch
 builds and temporary baseline copies are removed after evidence is retained.

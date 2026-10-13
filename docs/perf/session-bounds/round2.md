@@ -162,15 +162,13 @@ was changed to make the production checks pass. The final race-fixed executable
 also passes all five production bootstrap/sign-in/window-routing/close/reload
 flows in 18.1 seconds (`round2-browser-final-functional.log`, unique port 4367).
 
-Production screenshot evidence is preserved in `round2-browser-captures/`
-under the scratch root, including phone keyboard-up/down, host facts, Mesh and
-sidebar states. This backend repair changes no frontend layout; existing
-tracked captures were restored after the harness generated them. Browser plugin
-tools were unavailable, so the existing repository Playwright harness supplied
-the real-server evidence. No screenshot quality judgment is made by this job.
-Raw logs and screenshots reside under
-`$HOME/.cache/codex-scratch/session-bounds/`; no generated capture replaces an
-existing reviewed image in this change.
+Production screenshots are written under
+`$HOME/.cache/codex-scratch/session-bounds/evidence/`, including phone keyboard-up/down,
+host facts, Mesh and sidebar states. Attach requested images to #151 with the
+orchestrator's `issue-attach` helper. This backend repair changes no frontend
+layout. Browser plugin tools were unavailable, so the repository Playwright
+harness supplied the real-server evidence. This job does not judge screenshot
+quality.
 
 ## Author review
 

@@ -1,6 +1,10 @@
 <!-- Discoverable auth, real restart/browser evidence and scale measurements for #19/#21 [5,23,24,26,40,86]. -->
 # Usernameless passkey sign-in and restart setup
 
+> Historical raw logs and screenshots were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/discoverable/evidence/`; selected files should be attached to
+> #19/#21 with the `issue-attach` helper.
+
 Server lane: `t-server`, base `6fa27a3`. Client lane: `t-web`, base `1b4c907`,
 final client `639ac27`. No push, merge or deploy was performed. Each logical
 contract/dependency/schema/module/test/docs step has its own gated commit.
@@ -41,7 +45,7 @@ and physical iPhone review remain external, not self-approved.
 
 ## Tests and red evidence
 
-`target/passkey-job/restart-red.log`: original bootstrap failed `restart must
+`$HOME/.cache/codex-scratch/discoverable/evidence/passkey-job/restart-red.log`: original bootstrap failed `restart must
 issue a fresh setup capability` (0 passed, 1 failed). `prf-red.log`: two distinct
 users received the same global input (0 passed, 1 failed). `discoverable-red.log`
 and `status-red.log`: omitted-ID login and public status returned 400 instead
@@ -83,7 +87,7 @@ or diagnostic logs. Browser capabilities travel through private stdin/IPC.
 Linux 6.12.111 x86_64; 8 vCPUs on Intel i9-9900K at 3.60 GHz. Rust 1.99.0,
 release optimization, one owner with two enrolled ES256 passkeys, SQLite memory.
 Recorded load averages: 6.36 / 8.48 / 6.06; this is a local run after compilation,
-not the pinned perf VM. Evidence: `target/passkey-job/scale-latency.log`.
+not the pinned perf VM. Evidence: `$HOME/.cache/codex-scratch/discoverable/evidence/passkey-job/scale-latency.log`.
 Nearest-rank percentiles, n=200 in each row:
 
 | Server operation | Pending count | p50 | p99 |
@@ -127,6 +131,6 @@ rechecks and latest counters, Origin/cookie/admission boundaries, native browser
 proofs and legacy envelopes, and module invariants. Only the existing approved
 webauthn-rs/OpenSSL engine is used [86]; no new dependency or foundational engine
 was selected. Binary static/no-PT_INTERP and AGPL/advisory gates pass for both
-architectures. Fast logs are `target/passkey-job/*-fast.log`; final full output
+architectures. Fast logs are `$HOME/.cache/codex-scratch/discoverable/evidence/passkey-job/*-fast.log`; final full output
 is posted verbatim on #19 and #21 with lane heads. Physical iPhone/perf-VM and
 independent visual/security review are still external checks.

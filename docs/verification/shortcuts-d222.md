@@ -92,4 +92,4 @@ Keys a browser owns in a normal tab, or that a fullscreen Keyboard Lock hands ov
 
 `apps/tracer/test/shortcuts-d222.spec.ts` (product canvas and single-terminal screen, Mac and Windows platforms emulated): every default window action, palette and alternate, the panel, the move action, lock-only close does nothing unlocked, font size steps and reset (Windows and Mac), Ctrl+K in a focused terminal reaches the shell (`accepted_input_bytes`), AltGr triggers nothing, a German layout's `?` opens the panel, and the two captures. `test/keyboard-lock.test.ts`, `test/shortcuts-keymap.test.ts`, `test/shortcuts.test.ts`, `test/platform-labels.test.ts` are unit tests.
 
-Captures: `apps/tracer/captures/shortcuts-d222/mac-panel-ink-1440x900.png` and `windows-panel-ink-1440x900.png`.
+Screenshots are written under `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/shortcuts-d222/` and attached to #155 with the orchestrator's `issue-attach` helper.

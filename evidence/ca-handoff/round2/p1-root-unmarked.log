@@ -1,6 +1,0 @@
-
-running 1 test
-test restart::tests::replacement_never_exports_to_a_general_purpose_binary ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.02s
-

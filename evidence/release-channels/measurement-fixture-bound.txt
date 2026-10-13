@@ -1,2 +1,0 @@
-Fixture calculation: extra=850 manifest_bytes=67315 limit=65536 fits=False
-Fixture calculation: extra=825 manifest_bytes=65340 limit=65536 fits=True

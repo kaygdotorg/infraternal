@@ -1,6 +1,10 @@
 <!-- Recovery review corrections, reproducible evidence and owner-review handoff for #45. -->
 # Recovery review corrections
 
+> Historical raw logs and screenshots were removed under D262. Fresh output belongs under
+> `$HOME/.cache/codex-scratch/recovery-review-fixes/evidence/`; selected screenshots should be
+> attached to #45.
+
 Issue [#45](https://git.kayg.org/kayg/infraternal/issues/45) records the independent
 review, rejected exception, failing probes and final commit gates. D113 preserves
 the data key during recovery; D151 keeps recovery wrapping material in the browser;
@@ -31,8 +35,9 @@ server deadline and monotonic client countdown are retained.
 
 ## Reproduction and measurements
 
-Use `TRACER_TEST_PORT=4746` for every browser invocation. Logs below are retained
-under `target/`; the issue quotes final gate output verbatim.
+Use `TRACER_TEST_PORT=4746` for every browser invocation. Historical logs were
+removed under D262; fresh receipts belong under the external job evidence directory.
+The issue quotes final gate output verbatim.
 
 The seven original server probes cover cancellation/completion races, restart and
 concurrent resumption, HTTP expiry under writer contention, clock rollback,
@@ -106,7 +111,7 @@ public fixtures; visual quality and physical iPhone testing belong to owner revi
 [phone entry](https://git.kayg.org/attachments/5aa1fbfd-9fe4-4d39-b44e-839911c94fab),
 [desktop entry](https://git.kayg.org/attachments/9642811e-d138-41d3-a8b0-a3beba700d79),
 [phone ready state](https://git.kayg.org/attachments/6bb8b107-47cd-4d74-b7fa-9198acfdf8a2).
-The local originals are in `target/recovery-screenshots/`.
+The local originals are in `$HOME/.cache/codex-scratch/recovery-review-fixes/evidence/recovery-screenshots/`.
 
 An independent AI reviewer reproduced two additional callback/account-binding
 failures, then found no residual actionable issue after their failing tests and

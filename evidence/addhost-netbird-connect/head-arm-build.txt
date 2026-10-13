@@ -1,9 +1,0 @@
-Running as unit: run-p1244958-i18019889.scope; invocation ID: 3c6df8af8c244ab0ac1a7d5804759536
-    Blocking waiting for file lock on package cache
-   Compiling infraternal-shim v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-shim)
-   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-server)
-   Compiling infraternal v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal)
-   Compiling infraternal-plugin-remote v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/remote)
-   Compiling infraternal-plugin-ssh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/plugins/ssh)
-   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-netbird-connect/crates/infraternal-agent)
-    Finished `release` profile [optimized] target(s) in 5m 43s

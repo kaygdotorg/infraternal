@@ -5,6 +5,7 @@
  * strip seemed to run away from the pointer. Here the layout is saved with two windows on sessions the host
  * reports as gone, the page is reloaded, and the strip is driven the way a person does: approach slowly, click.
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "playwright/test";
@@ -45,7 +46,7 @@ test("a restored ended window starts a new shell on click, and its strip stays u
   await expect(strip.locator(".cl-sx-strip-text")).toHaveText("Session ended");
   await page.waitForTimeout(500);
 
-  const dir = resolve(import.meta.dirname, "..", "captures", "ended-strip");
+  const dir = tracerEvidencePath("ended-strip");
   await mkdir(dir, { recursive: true });
   const tag = process.env.ENDED_STRIP_TAG ?? "after";
   await page.screenshot({ path: resolve(dir, `${tag}-restored-1440x900-ink.png`), animations: "disabled" });
@@ -97,7 +98,7 @@ test("a refused new shell says why in the strip, and Try again recovers", async 
   // The reason sits in the strip, not in a toast on the side.
   await expect(page.locator(".ui-toast")).toBeHidden();
   await page.mouse.move(2, 2);
-  const dir = resolve(import.meta.dirname, "..", "captures", "ended-strip");
+  const dir = tracerEvidencePath("ended-strip");
   await mkdir(dir, { recursive: true });
   await page.screenshot({ path: resolve(dir, `${process.env.ENDED_STRIP_TAG ?? "after"}-refused-1440x900-ink.png`), animations: "disabled" });
   await testInfo.attach("refused", { path: resolve(dir, `${process.env.ENDED_STRIP_TAG ?? "after"}-refused-1440x900-ink.png`), contentType: "image/png" });
@@ -133,7 +134,7 @@ test.describe("phone", () => {
     const win = page.locator(".ui-window[data-kind='terminal']").first();
     const strip = win.locator(".cl-sx-strip");
     await expect(strip).toBeVisible();
-    const dir = resolve(import.meta.dirname, "..", "captures", "ended-strip");
+    const dir = tracerEvidencePath("ended-strip");
     await mkdir(dir, { recursive: true });
     await page.screenshot({ path: resolve(dir, `${process.env.ENDED_STRIP_TAG ?? "after"}-restored-393x852-ink.png`), animations: "disabled" });
     const rest = (await strip.boundingBox())!;

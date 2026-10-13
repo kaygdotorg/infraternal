@@ -1,5 +1,0 @@
-Running as unit: run-p271674-i271974.scope; invocation ID: 370764fd5f6046109afe1e62b05ac3a8
-machine=infraternal-dev mode=after samples=30 artifact_bytes=1024 load_before=36.98 38.58 31.39 25/1476 271758
-METRIC signer_artifacts=12 wall_p50_ms=4.327 wall_p99_ms=71.889 published_bytes=3389
-METRIC signer_artifacts=1002 wall_p50_ms=132.072 wall_p99_ms=390.513 published_bytes=201029
-load_after=37.30 38.62 31.44 36/1438 272538

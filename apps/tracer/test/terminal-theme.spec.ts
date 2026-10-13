@@ -1,4 +1,5 @@
 /** Checks every curated terminal palette from painted pixels on the production build. */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
@@ -187,7 +188,7 @@ function expectThemeHistoryColors(history: ThemeHistoryColors, theme: Theme): vo
 
 async function saveThemeScreenshot(page: Page, testInfo: TestInfo, themeId: string, width: number, height: number): Promise<void> {
   const name = `terminal-theme-${themeId}-${width}x${height}`;
-  const path = resolve(process.cwd(), "test-results", "terminal-themes", `${name}.png`);
+  const path = tracerEvidencePath("playwright", "terminal-themes", `${name}.png`);
   await mkdir(resolve(path, ".."), { recursive: true });
   await page.screenshot({ path, animations: "disabled" });
   await testInfo.attach(name, { path, contentType: "image/png" });

@@ -1,7 +1,0 @@
-Running as unit: run-p2940230-i7134129.scope; invocation ID: 124fd7dad19648b5b3291821b4bee2a4
-Traceback (most recent call last):
-  File "/home/kayg/Developer/infraternal/.worktrees/release-pipeline/evidence/release-replacement/anonymous_agent.py", line 12, in <module>
-    state = fixture_state("m")
-  File "/home/kayg/Developer/infraternal/.worktrees/release-pipeline/scripts/agent_fixture.py", line 33, in fixture_state
-    raise ValueError(f'test state path is too long for an AF_UNIX socket: {longest} bytes')
-ValueError: test state path is too long for an AF_UNIX socket: 113 bytes

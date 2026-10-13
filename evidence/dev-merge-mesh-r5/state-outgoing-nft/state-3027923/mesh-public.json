@@ -1,1 +1,0 @@
-{"enabled":true,"config":{"node":1,"version":7,"addresses":{"ipv4":"10.254.0.1","ipv6":"fd01:203:405::1"},"default_policy":"Allow","peers":{}},"backend":"Nft"}

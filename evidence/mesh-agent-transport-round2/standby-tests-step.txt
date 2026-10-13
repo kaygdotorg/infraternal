@@ -1,2 +1,0 @@
-Step: real mTLS standby regressions committed/pushed (head below). All5 pass: QUIC park timeout/activation, revoke, duplicate isolation; TCP same-channel cached-greeting activation;1000-slot admission/release. Original park lifetime regression red before implementation (ConnectionLost0.99s), green5.46s including5200ms deliberate idle. Server remote suite58 passed/12 ignored15.54s, fmt/all-target clippy PASS. No cold-greeting deadline changed.
-3894435faf9858751e451d92dd0b7d0bc3b63b18

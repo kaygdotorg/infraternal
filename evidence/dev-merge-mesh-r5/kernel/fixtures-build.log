@@ -1,3 +1,0 @@
-    Blocking waiting for file lock on build directory
-   Compiling infraternal-plugin-mesh v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/dev-merge-mesh-r5/crates/plugins/mesh)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.67s

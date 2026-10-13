@@ -52,6 +52,10 @@ Definition of Done (it is in every job prompt):
    gate output, verbatim).
 7. The author runs the reviewer checklist for its area before it reports
    done.
+8. Raw screenshots, logs, traces and measurement receipts live outside the
+   checkout under `$HOME/.cache/codex-scratch/<job>/evidence/`. Attach selected
+   files to the issue with the orchestrator-provided `issue-attach <N> <file>...`
+   helper; do not commit generated evidence.
 
 Then an independent reviewer job (with a different model or prompt, and
 given only the diff and the contracts), then a fix round if one is needed.

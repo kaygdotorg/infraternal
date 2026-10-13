@@ -14,10 +14,13 @@ import { cp, mkdir, readFile, rm } from "fs/promises";
 import { createServer } from "net";
 import { createServer as createHttpsServer } from "https";
 import { request as httpRequest } from "http";
-import { resolve } from "path";
+import { join, resolve } from "path";
+import { evidencePath } from "../evidence-path.mjs";
 import { arch, cpus, loadavg } from "os";
 var root = resolve(import.meta.dirname, "../..");
 process.chdir(root);
+const screenshotDirectory = evidencePath("browser-auth");
+await mkdir(screenshotDirectory, { recursive: true });
 var binary = resolve(root, process.env.MERGED_BROWSER_BIN ?? "target/x86_64-unknown-linux-musl/release/infraternal");
 var buildLabel = process.env.MERGED_BROWSER_BIN ? "debug server" : "static server";
 const openIdleSeconds = Number(process.env.MERGED_OPEN_IDLE_SECONDS ?? "10");
@@ -454,7 +457,7 @@ try {
   } });
   await page.goto(origin + "/");
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "apps/tracer/test-results/merged-mobile-setup.png" });
+  await page.screenshot({ path: join(screenshotDirectory, "merged-mobile-setup.png") });
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.locator("#setup-token").fill(token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
@@ -482,7 +485,7 @@ try {
   await page.reload();
   await page.locator("#login-passkey").waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "apps/tracer/test-results/merged-mobile-login.png" });
+  await page.screenshot({ path: join(screenshotDirectory, "merged-mobile-login.png") });
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.getByRole("button", { name: "Continue with passkey" }).click();
   await wait(() => bridges.at(-1)?.acks.length > 0 && !bridges.at(-1)?.closed, "native sign-in failed");
@@ -583,7 +586,7 @@ try {
     "--seconds",
     String(openIdleSeconds)
   ])).trim());
-  await page.screenshot({ path: "apps/tracer/test-results/merged-real-terminal.png" });
+  await page.screenshot({ path: join(screenshotDirectory, "merged-real-terminal.png") });
   const logout = await pageB.evaluate(async () => (await fetch("/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status);
   check(logout === 200, "logout rejected");
   await wait(() => second.closed, "logout retained device B socket");
@@ -609,7 +612,7 @@ try {
 ` + report);
   checkPerformance(Number(/(?:^|\n)p99: ([0-9.]+) ms/.exec(report ?? "")?.[1]) < 20, "real merged-browser latency exceeded existing 20ms paint gate");
   checkPerformance(Number(/Time to resume: ([0-9.]+) ms/.exec(report ?? "")?.[1]) < 300, "real merged-browser resume exceeded 300ms");
-  await page.screenshot({ path: "apps/tracer/test-results/merged-real-probe.png" });
+  await page.screenshot({ path: join(screenshotDirectory, "merged-real-probe.png") });
   // Complete UI/device acceptance first, then isolate server echo overhead
   // from the two browser renderers and the test proxy's frontend event loop.
   for (const ctx of contexts) await ctx.close();
@@ -633,7 +636,7 @@ try {
     check(recovered.events.every((event) => event.type === "terminal.snapshot" || event.type === "terminal.snapshot_unavailable"), "native browser recovery received an unexpected notice");
     check(BigInt(notices[0].seq) === recovered.snapshots[0], "native browser notice/repaint ordering changed");
     await wait(() => gapPage.locator("#connection-status").textContent().then((text) => text?.includes("approximate")), "approximate recovery not labelled in browser");
-    await gapPage.screenshot({ path: "apps/tracer/test-results/merged-approximate-recovery.png" });
+    await gapPage.screenshot({ path: join(screenshotDirectory, "merged-approximate-recovery.png") });
     await gapContext.close();
     contexts.splice(contexts.indexOf(gapContext), 1);
     console.log("Native browser ring-gap recovery: exactly one ordered notice/repaint, visible approximation, live stream PASS");

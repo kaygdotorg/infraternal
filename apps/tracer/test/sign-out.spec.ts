@@ -5,16 +5,17 @@
  * ask once with the compact confirmation (title, tick and cross icon buttons with tooltips), then land on the sign-in
  * screen with no window, sidebar, overlay or live connection left, and a reload stays signed out. Cancel and a failed
  * request leave the person signed in. A phone has 44 px targets. The product path (real cookie, product canvas) is
- * signed out through the palette and stays signed out after a reload. Captures land in captures/signout/.
+ * signed out through the palette and stays signed out after a reload. Review screenshots land in job scratch.
  *
  * The double keeps a preview signed out until the page is opened with `fresh=1` or it is reset, so every test resets it
  * afterwards, and the page URLs here never carry `fresh=1` (a reload must stay signed out).
  */
+import { tracerEvidencePath } from "./evidence-path";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
-const OUT = resolve(import.meta.dirname, "..", "captures", "signout");
+const OUT = tracerEvidencePath("signout");
 mkdirSync(OUT, { recursive: true });
 
 test.afterEach(async ({ page }) => { await page.context().request.post("/__mock/reset"); });

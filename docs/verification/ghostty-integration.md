@@ -17,7 +17,7 @@ Measurements below use this shared x86_64 dev box, eight CPUs, Intel Core
 i9-9900K at 3.60 GHz as exposed by the host, not the pinned performance VM
 (`machine.txt`). Each evidence log records its machine/load where applicable.
 
-| Measurement | Result | Evidence under `target/integrate2-evidence/` |
+| Measurement | Result | Historical receipt name (removed under D262) |
 | --- | --- | --- |
 | Raw full infraternal-agent/shim/PTY LF flood | 14.921 MB/s, 14.230 MiB/s, 50 MiB exact, zero substitutions | `ghostty-raw-flood.log` |
 | Raw CRLF / printable flood | 19.623 / 80.632 MB/s | `ghostty-raw-flood.log` |
@@ -83,5 +83,7 @@ Final checks: the full browser suite on unique port 4441 passes 21/21
 (`playwright-accepted.log`); the exact requested Nix fast command passes all
 six Rust gates and 7 protocol tests, 34390 assertions, 134 streams and 11439
 schedules with zero divergences (`complete-fast.log`). `bun run check` passes
-(`detached-client-check.log`). Production screenshots are retained under
-`target/integrate2-evidence/screenshots/`.
+(`detached-client-check.log`). Historical production screenshots were removed
+under D262; fresh screenshots belong under
+`$HOME/.cache/codex-scratch/ghostty-integration/evidence/screenshots/` and should
+be attached for review.
