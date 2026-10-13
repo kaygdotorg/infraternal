@@ -24,6 +24,10 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
       await new Promise<void>((resolve, reject) => {
         let opened = 0;
         const acked = new Set<number>();
+        // A dropped setup route is a failed measurement, never an indefinite wait.
+        const timeout = setTimeout(() => reject(new Error(`scale attachment stalled: opened=${opened} acknowledged=${acked.size} batch=${batch}`)), 15_000);
+        const complete = () => { clearTimeout(timeout); resolve(); };
+        socket.once("close", (code) => { clearTimeout(timeout); reject(new Error(`scale attachment closed: code=${code} opened=${opened} acknowledged=${acked.size} batch=${batch}`)); });
         const open = () => send(0, { type: "Call", callId: opened + 1, actionId: "ssh.session.open", inputJson: new TextEncoder().encode("{}") });
         socket.on("error", reject);
         socket.on("message", (data) => decoder.feed(new Uint8Array(Buffer.from(data as Buffer)), (stream, frame) => {
@@ -40,10 +44,10 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
               send(stream, { type: "AttachTerm", sessionId: id, lastOutSeq: 0n, lastInSeq: 0n });
               send(stream, { type: "Credit", bytes: 1024 * 1024 });
             }
-            if (++opened === batch) { if (!attached || acked.size === batch) resolve(); }
+            if (++opened === batch) { if (!attached || acked.size === batch) complete(); }
             else open();
           }
-          if (frame.type === "Ack") { acked.add(stream); if (opened === batch && acked.size === batch) resolve(); }
+          if (frame.type === "Ack") { acked.add(stream); if (opened === batch && acked.size === batch) complete(); }
         }));
       });
       remaining -= batch;
