@@ -83,7 +83,17 @@ impl Store {
     /// # Errors
     /// Reports incomplete persistence; no existing temporary file is overwritten.
     pub fn save(&self, state: &State) -> io::Result<()> {
+        #[cfg(feature = "cutoff-measure")]
+        let encode = state.config.as_ref().map(|config| {
+            crate::cutoff_measure::Stage::new(config.node, config.version, "journal_encode")
+        });
         let body = serde_json::to_vec(state).map_err(io::Error::other)?;
+        #[cfg(feature = "cutoff-measure")]
+        drop(encode);
+        #[cfg(feature = "cutoff-measure")]
+        let _write = state.config.as_ref().map(|config| {
+            crate::cutoff_measure::Stage::new(config.node, config.version, "journal_write")
+        });
         write_public(&self.path, &body)
     }
 }
