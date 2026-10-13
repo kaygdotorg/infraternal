@@ -2132,3 +2132,21 @@ async fn live_setup_retry_preserves_the_bridge_and_host_identity_state() {
         drop(channel);
     }
 }
+
+#[tokio::test]
+async fn early_staging_preserves_canonical_foreign_root_refusal() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.base()).unwrap();
+    std::fs::set_permissions(f.base(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let failure = f
+        .transaction()
+        .stage_session(&f.binary)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        failure.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+    ));
+    assert_eq!(failure.exit_status, Some(71));
+}
