@@ -3,6 +3,9 @@ use super::*;
 use crate::remote_tls::tests::{leaf, root};
 use infraternal_protocol::Frame;
 
+#[path = "remote_path_continuity_tests.rs"]
+mod continuity;
+
 struct StateDirectory(PathBuf);
 impl StateDirectory {
     fn new() -> Self {
