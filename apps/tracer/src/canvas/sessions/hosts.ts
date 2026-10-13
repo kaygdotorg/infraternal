@@ -44,7 +44,8 @@ export function syncAdmittedHosts(connection: Transport, sink: { replaceHosts(ho
         const result = page(await connection.call("remote.host.list", after ? { after } : {}));
         if (disposed || started !== version) return;
         if (!result) throw new Error("Invalid host inventory");
-        for (const host of result.hosts) { if (ids.has(host.id) || hosts.length >= 10_000) throw new Error("Invalid host inventory"); ids.add(host.id); hosts.push(host); }
+        // Pages bound each mux reply, not the number of offline admissions in the account ledger (D214).
+        for (const host of result.hosts) { if (ids.has(host.id)) throw new Error("Invalid host inventory"); ids.add(host.id); hosts.push(host); }
         if (result.next && (result.next === after || !ids.has(result.next) || !result.hosts.length)) throw new Error("Invalid host cursor");
         after = result.next;
       } while (after);
