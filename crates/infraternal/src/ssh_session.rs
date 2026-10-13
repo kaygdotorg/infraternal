@@ -3,9 +3,11 @@
 use infraternal_agent::{
     daemon,
     sessions::{self, Manager},
+    transport::Socket,
 };
 use infraternal_plugin_api::channel::Channel;
-use std::{io, path::PathBuf, process::ExitCode};
+use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+use std::{io, os::fd::AsRawFd, path::PathBuf, process::ExitCode};
 
 /// Internal authenticated SSH command; all protocol output goes to its pipe.
 /// No public shell, arbitrary command or login identity is accepted from argv.
@@ -31,12 +33,61 @@ async fn bridge(state: PathBuf, existing: Option<uuid::Uuid>) -> io::Result<()> 
     } else {
         sessions::launch(&exe, &state, Manager::detect().await, uid, 80, 24).await?
     };
-    let channel = infraternal_plugin_ssh::stdio::Stdio::inherited()?;
-    channel
+    let pipes = infraternal_plugin_ssh::stdio::Stdio::inherited()?;
+    pipes
         .write(format!("SESSION {}\n", uuid::Uuid::from_bytes(session.id)).as_bytes())
         .await?;
     // The daemon discovers this exact shim through its ordinary authenticated
     // rendezvous. Neither this bridge nor SSH starts a shell outside the shim.
     drop(session);
-    daemon::run_authenticated(&channel, Some(state), uid).await
+    // The dispatcher runs on the same socket channel type as the embedded
+    // infraternal agent; a private socketpair relays the SSH pipes to it.
+    // One more local copy on a temporary link buys one shared dispatcher
+    // instance instead of a second one specialised for pipes (D243, #189).
+    let (relay, dispatch) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+    )
+    .map_err(io::Error::from)?;
+    let socket = Socket::inherited(dispatch.as_raw_fd())?;
+    let relay = tokio::net::UnixStream::from_std(relay.into())?;
+    tokio::select! {
+        result = daemon::run_authenticated(&socket, Some(state), uid) => result,
+        result = relay_pipes(&pipes, relay) => result,
+    }
+}
+
+/// Copy both directions until either side closes; frames pass through unparsed.
+async fn relay_pipes(
+    pipes: &infraternal_plugin_ssh::stdio::Stdio,
+    socket: tokio::net::UnixStream,
+) -> io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut from, mut to) = socket.into_split();
+    let inbound = async {
+        let mut bytes = vec![0; 16 * 1024];
+        loop {
+            let count = pipes.read(&mut bytes).await?;
+            if count == 0 {
+                return Ok(());
+            }
+            to.write_all(&bytes[..count]).await?;
+        }
+    };
+    let outbound = async {
+        let mut bytes = vec![0; 16 * 1024];
+        loop {
+            let count = from.read(&mut bytes).await?;
+            if count == 0 {
+                return Ok(());
+            }
+            pipes.write(&bytes[..count]).await?;
+        }
+    };
+    tokio::select! {
+        result = inbound => result,
+        result = outbound => result,
+    }
 }
