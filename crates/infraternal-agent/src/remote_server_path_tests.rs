@@ -103,6 +103,37 @@ impl AgentPlugin for Fixture {
     }
 }
 
+/// A functional packet-loss fixture: the endpoint still owns its socket and
+/// connection while selected outgoing datagrams disappear below QUIC.
+#[derive(Debug)]
+struct DroppedReplies {
+    inner: Arc<dyn quinn::AsyncUdpSocket>,
+    dropping: Arc<std::sync::atomic::AtomicBool>,
+}
+impl quinn::AsyncUdpSocket for DroppedReplies {
+    fn create_io_poller(self: Arc<Self>) -> std::pin::Pin<Box<dyn quinn::UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+    fn try_send(&self, transmit: &quinn::udp::Transmit<'_>) -> io::Result<()> {
+        if self.dropping.load(std::sync::atomic::Ordering::Acquire) {
+            Ok(())
+        } else {
+            self.inner.try_send(transmit)
+        }
+    }
+    fn poll_recv(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        bufs: &mut [std::io::IoSliceMut<'_>],
+        meta: &mut [quinn::udp::RecvMeta],
+    ) -> std::task::Poll<io::Result<usize>> {
+        self.inner.poll_recv(cx, bufs, meta)
+    }
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+}
+
 struct Accepted {
     control: std::sync::Arc<NativeChannel>,
     receive: Receive,
@@ -116,6 +147,7 @@ struct Server {
     accepted: tokio::sync::mpsc::Receiver<Accepted>,
     task: tokio::task::JoinHandle<()>,
     connection_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    dropping: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Server {
     // Keep handshake, proof and connection ownership in one fixture boundary.
@@ -126,11 +158,13 @@ impl Server {
         address: SocketAddr,
     ) -> Self {
         use quinn::Runtime as _;
-        let bindings = Bindings::new(
-            quinn::TokioRuntime
+        let dropping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let bindings = Bindings::new(Arc::new(DroppedReplies {
+            inner: quinn::TokioRuntime
                 .wrap_udp_socket(std::net::UdpSocket::bind(address).unwrap())
                 .unwrap(),
-        );
+            dropping: dropping.clone(),
+        }));
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             Some(remote_quic::server_config(identity, roots).unwrap()),
@@ -205,6 +239,7 @@ impl Server {
             accepted,
             task,
             connection_count,
+            dropping,
         }
     }
     /// Answer on `ip` at the primary port too (the server's mesh address).
@@ -351,6 +386,54 @@ async fn proposed_mesh_moves_the_live_connection_and_a_silent_cut_returns_it() {
     assert_eq!(link.endpoint, Some(enrolled));
     assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
     assert_eq!(server.connections(), 1, "the session never reconnected");
+    assert!(server.accepted.try_recv().is_err());
+    supervisor.abort();
+    let _ = supervisor.await;
+}
+
+/// Losing early enrolled replies must not retire the existing writer-bearing
+/// connection before QUIC has had a chance to recover those packets.
+#[tokio::test]
+async fn dropped_return_replies_keep_the_admitted_connection() {
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let registry = registry();
+    let (supervisor, _directory) = supervise(identity(&ca, enrolled), &registry);
+    let mut active = server.admitted_channel().await;
+    preference(&registry, Some(mesh.ip())).await;
+    until(
+        &registry,
+        ServerLinkKind::Mesh,
+        ServerLinkReason::MeshProven,
+    )
+    .await;
+    server
+        .dropping
+        .store(true, std::sync::atomic::Ordering::Release);
+    preference(&registry, None).await;
+    server.cut();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    server
+        .dropping
+        .store(false, std::sync::atomic::Ordering::Release);
+    until(
+        &registry,
+        ServerLinkKind::Fallback,
+        ServerLinkReason::MeshDisabled,
+    )
+    .await;
+    assert_remote_status(&mut active, ServerLinkKind::Fallback).await;
+    assert_eq!(
+        server.connections(),
+        1,
+        "lost return-path replies replaced the admitted connection"
+    );
     assert!(server.accepted.try_recv().is_err());
     supervisor.abort();
     let _ = supervisor.await;

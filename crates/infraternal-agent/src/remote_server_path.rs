@@ -313,6 +313,16 @@ async fn answered(
         .saturating_mul(2)
         .min(Duration::from_secs(3))
         + SWITCH_MARGIN;
+    // Routing and encrypted replay already changed synchronously. A missing
+    // early enrolled ACK must not destroy the writer-bearing connection before
+    // QUIC can recover lost packets. The longer proof guard adds no wait when
+    // the enrolled path answers, while still bounding recovery to TCP if both
+    // UDP paths are unavailable.
+    let deadline = if mesh {
+        deadline
+    } else {
+        deadline.max(Duration::from_secs(1))
+    };
     tokio::time::timeout(deadline, async {
         loop {
             let heard = if mesh {
