@@ -25,6 +25,18 @@ impl SshSession for Compound {
     }
 }
 impl SshSession for Local {
+    fn stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        Box::pin(async move {
+            let script = script.replace("$HOME", self.root.to_str().unwrap());
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &script]);
+            infraternal_plugin_ssh::duplex::Duplex::spawn(&mut command)
+        })
+    }
+
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             // Map the remote user's home to isolated fixture storage without
@@ -2032,5 +2044,42 @@ async fn installed_infraternal_agent_always_restarts_without_start_limit() {
     assert!(unit.lines().any(|line| line == "Restart=always"));
     assert!(unit.lines().any(|line| line == "RestartSec=2"));
     assert!(unit.lines().any(|line| line == "StartLimitIntervalSec=0"));
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn staged_shell_bridge_keeps_protocol_bytes_and_releases_setup_guard() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    // A real shell process stands in for the CLI only at its fixed receipt
+    // boundary. The separate real-binary oracle verifies shim/session ownership.
+    let original = std::fs::read_to_string(&f.binary).unwrap();
+    let payload = format!(
+        "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\n{original}\n#{}\n",
+        "x".repeat(100_000)
+    );
+    executable(&f.binary, &payload);
+    let transaction = f.transaction();
+    let (actual, channel) = transaction.stage_session(&f.binary).await.unwrap();
+    assert_eq!(actual, id);
+    let frame = b"\0\xffterminal\n";
+    channel.write(frame).await.unwrap();
+    let mut output = vec![0; frame.len()];
+    let mut offset = 0;
+    while offset < output.len() {
+        offset += channel.read(&mut output[offset..]).await.unwrap();
+    }
+    assert_eq!(output, frame);
+    let mut lock = Command::new("flock");
+    assert!(
+        lock.args(["-n", f.base().parent().unwrap().to_str().unwrap(), "true"])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    // The exact owned transaction remains usable while the bridge is live.
+    transaction.setup(&f.join).await.unwrap();
+    drop(channel);
     transaction.rollback().await.unwrap();
 }
