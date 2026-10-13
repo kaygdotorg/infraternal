@@ -4,8 +4,8 @@
 use infraternal_plugin_ssh::{
     auth_evidence::MethodReceipt,
     install::{
-        interrupted_setup_step, interrupted_transfer_step, parse_linger, parse_setup,
-        parse_transfer_setup,
+        interrupted_setup_step, interrupted_transfer_step, parse_linger, parse_refusal,
+        parse_setup, parse_transfer_setup,
     },
     model::{Destination, FailureKind, MeshEvidence},
     openssh::{classify, scan_destination},
@@ -18,6 +18,13 @@ fuzz_target!(|bytes: &[u8]| {
     let _ = infraternal_plugin_ssh::transport::TransferChoice::parse(bytes);
     let _ = parse_setup(bytes);
     let _ = parse_transfer_setup(bytes);
+    for step in [
+        infraternal_plugin_ssh::model::InstallStep::Connect,
+        infraternal_plugin_ssh::model::InstallStep::Upload,
+        infraternal_plugin_ssh::model::InstallStep::Start,
+    ] {
+        let _ = parse_refusal(bytes, step);
+    }
     let _ = interrupted_transfer_step(bytes);
     let _ = interrupted_setup_step(bytes);
     let mut whole = MethodReceipt::default();

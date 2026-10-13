@@ -2150,3 +2150,111 @@ async fn early_staging_preserves_canonical_foreign_root_refusal() {
     ));
     assert_eq!(failure.exit_status, Some(71));
 }
+
+struct SingleCheckChannel {
+    local: Local,
+    streams: std::sync::atomic::AtomicUsize,
+}
+impl SshSession for SingleCheckChannel {
+    fn stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        assert_eq!(
+            self.streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a checked upload must not reopen the SSH command channel"
+        );
+        Box::pin(async move {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]).env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.local.root.join("tools").display()),
+            );
+            infraternal_plugin_ssh::duplex::Duplex::spawn(&mut command)
+        })
+    }
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        self.local.run(script, input)
+    }
+}
+
+#[tokio::test]
+async fn one_command_channel_carries_check_verified_upload_and_bridge_bytes() {
+    let f = Fixture::new();
+    // Public command text can now arrive through stdin after the first script.
+    // Map each shell execution into fixture storage without changing HOME.
+    executable(
+        &f.root.join("tools/sh"),
+        &format!(
+            "#!/usr/bin/python3\n\"\"\"Isolate public fixture scripts; preserve their stdin byte stream.\"\"\"\nimport os,sys\nargs=sys.argv[1:]\nif len(args)>1 and args[0]=='-c': args[1]=args[1].replace('$HOME', {root:?})\nos.execv('/bin/sh',['sh',*args])\n",
+            root = f.root.to_str().unwrap()
+        ),
+    );
+    let id = uuid::Uuid::new_v4();
+    executable(
+        &f.binary,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
+            "x".repeat(100_000)
+        ),
+    );
+    let session = Arc::new(SingleCheckChannel {
+        local: Local {
+            root: f.root.clone(),
+        },
+        streams: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let check = "printf 'INFRATERNAL_CHECK_V1\\nLinux\\nx86_64\\nsystemd\\n1002\\nno\\nyes\\nyes\\nno\\nINFRATERNAL_SETUP_CLEAR\\n'";
+    let (output, checked) = Installation::check_channel(session.as_ref(), check)
+        .await
+        .unwrap();
+    assert!(
+        infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout)
+            .unwrap()
+            .1
+            .is_none()
+    );
+    let transaction = Installation::new(session.clone(), &f.target, &f.join).unwrap();
+    let (actual, bridge) = transaction
+        .stage_session_on(&f.binary, Some(checked))
+        .await
+        .unwrap();
+    assert_eq!(actual, id);
+    bridge.write(b"\0\xffsame channel\n").await.unwrap();
+    assert_eq!(bridge.line(64).await.unwrap(), b"\0\xffsame channel\n");
+    assert_eq!(session.streams.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(bridge);
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn duplex_check_refuses_named_failures_and_oversized_records_before_staging() {
+    for status in [71, 73, 75] {
+        let f = Fixture::new();
+        let session = Local {
+            root: f.root.clone(),
+        };
+        let failure = Installation::check_channel(&session, &format!("exit {status}"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(failure.exit_status, Some(status));
+        assert!(matches!(
+            failure.failed_step,
+            Some(infraternal_plugin_ssh::model::InstallStep::Connect)
+        ));
+        assert!(!f.base().exists());
+    }
+    let f = Fixture::new();
+    let session = Local {
+        root: f.root.clone(),
+    };
+    assert!(
+        Installation::check_channel(&session, "printf '%600s\\n' x")
+            .await
+            .is_err()
+    );
+    assert!(!f.base().exists());
+}

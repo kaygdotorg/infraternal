@@ -242,6 +242,42 @@ impl Installation {
         })
     }
 
+    /// Keep the authenticated command channel through read-only admission and staging.
+    /// Only a bounded public script follows these existing canonical check records.
+    /// # Errors
+    /// Preserves named check refusals; rejects missing delimiters and oversized records.
+    pub async fn check_channel(
+        session: &dyn SshSession,
+        check: &str,
+    ) -> Result<(crate::transport::CommandOutput, crate::duplex::Duplex), Failure> {
+        let script = format!(
+            "{SETUP_HEADER}setup_step connect {}\nprintf 'CHECK ready\\n'\nIFS= read -r setup_length\ncase \"$setup_length\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$setup_length\" -le 65536 ] || exit 1\nsetup_body=$(head -c \"$setup_length\")\nexec sh -c \"$setup_body\"\n",
+            shell_quote(check)
+        );
+        let channel = session.stream(&script).await?;
+        if channel.line(32).await? != b"STEP connect\n" {
+            return Err(invalid_setup().at(InstallStep::Connect));
+        }
+        let mut stdout = Vec::new();
+        loop {
+            let receipt = channel
+                .line(512)
+                .await
+                .map_err(|error| error.at(InstallStep::Connect))?;
+            if let Some(failure) = parse_refusal(&receipt, InstallStep::Connect) {
+                return Err(crate::previous_attempt::classify(failure));
+            }
+            if receipt == b"CHECK ready\n" {
+                break;
+            }
+            if stdout.len() + receipt.len() > 512 {
+                return Err(invalid_setup().at(InstallStep::Connect));
+            }
+            stdout.extend_from_slice(&receipt);
+        }
+        Ok((crate::transport::CommandOutput { stdout }, channel))
+    }
+
     /// Stage the verified payload and start a shim-owned shell on this SSH master.
     /// The returned channel retains SSH until the installed transport reattaches.
     /// # Errors
@@ -250,6 +286,17 @@ impl Installation {
         &self,
         binary: &Path,
     ) -> Result<(uuid::Uuid, crate::duplex::Duplex), Failure> {
+        self.stage_session_on(binary, None).await
+    }
+
+    /// Continue staging on the read-only check channel, avoiding another SSH exec.
+    /// # Errors
+    /// Uses the same verified payload/session receipts as `stage_session`.
+    pub async fn stage_session_on(
+        &self,
+        binary: &Path,
+        checked: Option<crate::duplex::Duplex>,
+    ) -> Result<(uuid::Uuid, crate::duplex::Duplex), Failure> {
         let transfer = Self::negotiated_payload(binary).await?;
         let start = "stage=\"$base/.bootstrap-lock\"\n[ \"$(cat \"$stage/transaction\")\" = \"$transaction\" ] || exit 72\nexec 9<&-\nexec \"$stage/payload\" __ssh-session --state \"$base/sessions\"";
         let script = format!(
@@ -257,12 +304,27 @@ impl Installation {
             shell_quote(&self.script(&transfer.body)),
             shell_quote(&self.script(start))
         );
-        let channel = self.session.stream(&script).await?;
+        let channel = if let Some(channel) = checked {
+            if script.len() > 65536 {
+                return Err(invalid_setup().at(InstallStep::Upload));
+            }
+            channel
+                .write(format!("{}\n", script.len()).as_bytes())
+                .await
+                .map_err(|_| invalid_setup().at(InstallStep::Upload))?;
+            channel
+                .write(script.as_bytes())
+                .await
+                .map_err(|_| invalid_setup().at(InstallStep::Upload))?;
+            channel
+        } else {
+            self.session.stream(&script).await?
+        };
         if channel.line(32).await? != b"STEP upload\n" {
             return Err(invalid_setup().at(InstallStep::Upload));
         }
         let receipt = channel.line(64).await?;
-        if let Some(failure) = refusal(&receipt, InstallStep::Upload) {
+        if let Some(failure) = parse_refusal(&receipt, InstallStep::Upload) {
             return Err(failure.in_mode(self.mode));
         }
         let choice = crate::transport::TransferChoice::parse(&receipt)
@@ -274,7 +336,7 @@ impl Installation {
             return Err(invalid_setup().at(InstallStep::Upload));
         }
         let receipt = channel.line(64).await?;
-        if let Some(failure) = refusal(&receipt, InstallStep::Upload) {
+        if let Some(failure) = parse_refusal(&receipt, InstallStep::Upload) {
             return Err(failure.in_mode(self.mode));
         }
         written.map_err(|_| invalid_setup().at(InstallStep::Upload))?;
@@ -282,7 +344,7 @@ impl Installation {
             return Err(invalid_setup().at(InstallStep::Start));
         }
         let receipt = channel.line(64).await?;
-        if let Some(failure) = refusal(&receipt, InstallStep::Start) {
+        if let Some(failure) = parse_refusal(&receipt, InstallStep::Start) {
             return Err(failure.in_mode(self.mode));
         }
         let id = std::str::from_utf8(&receipt)
@@ -688,9 +750,19 @@ async fn send_transfer(
 // canonical receipt. The duplex bridge shares the existing refusal decoder.
 const SETUP_HEADER: &str = "# INFRATERNAL_SETUP_STEPS_V1\nset -u\nsetup_step() {\n    printf 'STEP %s\\n' \"$1\"\n    if sh -c \"$2\"; then :; else status=$?; printf 'FAIL %s %s\\n' \"$1\" \"$status\"; exit 0; fi\n}\n";
 
-fn refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
+/// Decode only canonical named refusals through the existing bounded setup parser.
+/// Context prefixes are local metadata, never completed stages or remote diagnostics.
+#[must_use]
+pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
     // Prefixes supply the frozen decoder's context; they are never published
     // as completed setup stages or copied from remote diagnostics.
+    if matches!(step, InstallStep::Connect) {
+        let status = receipt.strip_prefix(b"FAIL connect ")?;
+        let mut upload = b"FAIL upload ".to_vec();
+        upload.extend_from_slice(status);
+        return parse_refusal(&upload, InstallStep::Upload)
+            .map(|failure| failure.at(InstallStep::Connect));
+    }
     let (prefix, transfer) = match step {
         InstallStep::Upload => (b"STEP upload\n".as_slice(), true),
         InstallStep::Start => (b"STEP join\nSTEP install\nSTEP start\n".as_slice(), false),
