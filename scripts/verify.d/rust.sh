@@ -7,6 +7,7 @@ rust_run_gate() {
     local name="$1"
     shift
     local result
+    local started=$SECONDS
 
     printf '\n==> %s\n' "$name"
     if "$@"; then
@@ -17,6 +18,7 @@ rust_run_gate() {
         RUST_GATE_FAILED=1
     fi
     RUST_GATE_ROWS+=("${name}|${result}")
+    printf '(%s: %ss)\n' "$name" "$((SECONDS - started))"
 }
 
 rust_print_summary() {
@@ -187,7 +189,13 @@ rust_static_build_check() {
     return "$failed"
 }
 
+# Runs the Rust gate. Mode "final" (scripts/verify fast) is the full gate. Mode
+# "iterate" (scripts/verify iterate) runs every check except the static
+# release builds and what only they can check (linkage, D244 key heap, D243
+# size), which dominate the time and are rechecked by the final mode.
 rust_verify_fast() {
+    local mode="${1:-final}"
+
     RUST_GATE_ROWS=()
     RUST_GATE_FAILED=0
 
@@ -197,7 +205,9 @@ rust_verify_fast() {
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "test" cargo test --workspace --locked
     rust_run_gate "cargo-deny" cargo deny check
-    rust_run_gate "static builds" rust_static_build_check
+    if [[ "$mode" == final ]]; then
+        rust_run_gate "static builds" rust_static_build_check
+    fi
     rust_print_summary
 
     return "$RUST_GATE_FAILED"

@@ -85,12 +85,18 @@ verify_integration() {
 }
 
 if [[ $# -ne 1 ]]; then
-    printf 'usage: scripts/verify {fast|nightly|integration|browser|latency|bench}\n' >&2
+    printf 'usage: scripts/verify {fast|iterate|nightly|integration|browser|latency|bench}\n' >&2
     exit 2
 fi
 
 case "$1" in
-    fast)
+    fast|iterate)
+        # "fast" is the full final gate. "iterate" is the cheaper loop for use
+        # between commits: identical checks minus the two static release
+        # builds, linkage, key-heap and size checks (see rust_verify_fast).
+        # Run "fast" before reporting work done.
+        mode=final
+        [[ "$1" == iterate ]] && mode=iterate
         printf '\n==> Repository artifact size gate\n'
         python3 "${script_dir}/verify.d/evidence-size.py"
         printf '\n==> Release deployment functional checks\n'
@@ -98,8 +104,11 @@ case "$1" in
         python3 "${script_dir}/release/staging_artifacts_test.py"
         bun test "${script_dir}/release/deploy-review.test.ts"
         python3 "${script_dir}/latency_proxy.py" self-test --samples 3
-        rust_verify_fast
+        rust_verify_fast "$mode"
         ts_verify_fast
+        if [[ "$mode" == iterate ]]; then
+            printf '\nITERATE gate passed. This is not the final gate: run scripts/verify fast before reporting done.\n'
+        fi
         ;;
     nightly)
         # The ordinary workspace gate already runs the 1k smoke corpus.
@@ -133,7 +142,7 @@ case "$1" in
         ;;
     *)
         printf 'unknown verification mode: %s\n' "$1" >&2
-        printf 'usage: scripts/verify {fast|nightly|integration|browser|latency|bench}\n' >&2
+        printf 'usage: scripts/verify {fast|iterate|nightly|integration|browser|latency|bench}\n' >&2
         exit 2
         ;;
 esac
