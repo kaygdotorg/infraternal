@@ -271,3 +271,36 @@ async fn unavailable_negotiated_codec_never_sends_invitation() {
         .is_err()
     );
 }
+
+// A setup child can refuse enrollment without reading private stdin. The
+// compound command reports that refusal in stdout while exiting successfully.
+#[tokio::test]
+async fn review_compound_refusal_preserves_receipt_when_invitation_pipe_closes() {
+    use infraternal_plugin_ssh::{
+        install::parse_transfer_setup, model::InstallStep, transport::PayloadInput,
+    };
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        "exec 0<&-; printf 'STEP upload\nTRANSFER reuse\nSTEP join\nFAIL join 71\n'",
+    ]);
+    let result = execute(
+        &mut command,
+        Input::Negotiated {
+            raw: PayloadInput::Bytes(b"unused public payload"),
+            gzip: None,
+            zstd: None,
+            invitation: b"synthetic-capability\n",
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "fixed refusal receipt must survive closed invitation input"
+    );
+    let output = result.unwrap();
+    let failure = parse_transfer_setup(&output.stdout).unwrap_err();
+    assert!(matches!(failure.failed_step, Some(InstallStep::Join)));
+    assert_eq!(failure.exit_status, Some(71));
+}

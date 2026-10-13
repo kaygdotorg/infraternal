@@ -140,7 +140,13 @@ async fn execute_inner(
         let status =
             status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
         let (stdout, stderr) = read?;
-        if status.success() {
+        // A negotiated setup may refuse a stage without consuming invitation
+        // stdin. Keep only a complete canonical refusal for the caller's typed
+        // decoder; successful or malformed receipts still require input delivery.
+        let refused = negotiated
+            && crate::install::parse_transfer_setup(&stdout)
+                .is_err_and(|failure| failure.exit_status.is_some());
+        if status.success() && !refused {
             write?;
         }
         Ok(Output {
