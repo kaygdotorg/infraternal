@@ -1,5 +1,5 @@
 /** Dispatches canvas palette actions on first selection; inventory rows stay synchronous and current at sign-in (D188). */
-import type { Ctx } from "../context";
+import type { Ctx, WinRec } from "../context";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
 
@@ -14,10 +14,11 @@ export function openSettings(cx: Ctx, section: string): void {
 
 export interface CanvasAction { action?: string; source?: string }
 
-export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction): void {
-  const { core, state, views } = cx;
+export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: WinRec | undefined): void {
+  const { core, views } = cx;
   const [, kind, value] = (detail?.action ?? "").split(":");
-  const active = state.activeWin;
+  // Focus can change while the chunk loads; a closed selection must never redirect to another window.
+  const active = selected?.owner.wins.get(selected.model.id) === selected ? selected : undefined;
   if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
   else if (kind === "overview") cx.nav.showOverview();
   else if (kind === "settings") openSettings(cx, value ?? "appearance");

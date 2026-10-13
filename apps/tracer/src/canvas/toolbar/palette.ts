@@ -86,9 +86,10 @@ export function installPalette(cx: Ctx): () => void {
   const onAction = (event: Event): void => {
     const detail = (event as CustomEvent<import("./palette-actions.on-demand").CanvasAction>).detail;
     if (!detail?.action?.startsWith("canvas:")) return;
+    const selected = state.activeWin;
     // Loading an action never delays host registration or the initial terminal; disposal fences a late chunk.
     void onDemand(() => import("./palette-actions.on-demand")).then((module) => {
-      if (!signal.aborted) module.dispatchCanvasAction(cx, detail);
+      if (!signal.aborted) module.dispatchCanvasAction(cx, detail, selected);
     }, () => core.toast.show({ message: "The action couldn't load. Check your connection and try again.", tone: "error" }));
   };
   window.addEventListener("tracer:canvas-action", onAction, { signal });
