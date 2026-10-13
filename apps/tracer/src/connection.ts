@@ -375,9 +375,12 @@ export class MuxConnection {
       noteWsMessage(event.data.byteLength);
       try {
         const message = new Uint8Array(event.data);
-        this.decoder?.feed(message, (streamId, frame) => this.dispatch(streamId, frame, message, receivedAt));
+        this.decoder?.feed(message, (streamId, frame) => {
+          // A Close or overdue Pong may retire this route midway through one message.
+          if (this.socket === socket && !this.closed) this.dispatch(streamId, frame, message, receivedAt);
+        });
       } catch {
-        this.fail("server sent an invalid wire frame");
+        if (this.socket === socket && !this.closed) this.fail("server sent an invalid wire frame");
       }
     };
     socket.onerror = () => {
