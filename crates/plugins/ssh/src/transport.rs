@@ -87,6 +87,9 @@ pub enum Input<'a> {
         invitation: &'a [u8],
         /// Wait for verified staging before exposing private stdin to its reader.
         payload_ack: bool,
+        /// An optional check-time encoding hint; private stdin still requires
+        /// verified staging. None retains remote transfer selection.
+        declared: Option<TransferChoice>,
     },
     /// Public payload first, then private invitation; never concatenate/copy secrets.
     PayloadAndInvitation {

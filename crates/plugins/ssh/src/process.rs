@@ -267,6 +267,7 @@ async fn write_input(
             zstd,
             invitation,
             payload_ack,
+            declared: _,
         } => {
             let payload = match selected.await.ok().flatten() {
                 Some(TransferChoice::Raw) => Some(raw),

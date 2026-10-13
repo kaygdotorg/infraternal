@@ -175,6 +175,7 @@ fi"#,
             zstd: self.zstd.as_deref(),
             invitation,
             payload_ack: true,
+            declared: None,
         }
     }
 }

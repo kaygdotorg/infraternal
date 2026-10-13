@@ -235,6 +235,7 @@ async fn negotiated_sources_require_an_exact_receipt_before_private_input() {
                 zstd: None,
                 invitation: b"synthetic-invitation",
                 payload_ack: false,
+                declared: None,
             },
             Duration::from_secs(60),
         )
@@ -266,6 +267,7 @@ async fn unavailable_negotiated_codec_never_sends_invitation() {
                 zstd: None,
                 invitation: b"synthetic-invitation",
                 payload_ack: false,
+                declared: None,
             },
             Duration::from_secs(60)
         )
@@ -294,6 +296,7 @@ async fn review_compound_refusal_preserves_receipt_when_invitation_pipe_closes()
             zstd: None,
             invitation: b"synthetic-capability\n",
             payload_ack: false,
+            declared: None,
         },
         Duration::from_secs(10),
     )
