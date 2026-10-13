@@ -1,0 +1,46 @@
+/** Dispatches canvas palette actions on first selection; inventory rows stay synchronous and current at sign-in (D188). */
+import type { Ctx } from "../context";
+import type { ViewId } from "../model/types";
+import { isTerminal } from "../views/body";
+
+/** Flies to a Settings window (canvas-locked, snapped to its column). */
+export function openSettings(cx: Ctx, section: string): void {
+  const c = cx.views.get("settings");
+  const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0];
+  if (!rec) return;
+  cx.win.setActive(rec);
+  cx.nav.focusWindow(rec);
+}
+
+export interface CanvasAction { action?: string; source?: string }
+
+export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction): void {
+  const { core, state, views } = cx;
+  const [, kind, value] = (detail?.action ?? "").split(":");
+  const active = state.activeWin;
+  if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
+  else if (kind === "overview") cx.nav.showOverview();
+  else if (kind === "settings") openSettings(cx, value ?? "appearance");
+  else if (kind === "share") void cx.sharing?.open();
+  else if (kind === "unlink") cx.sharing?.unlinkCurrent();
+  else if (kind === "split") { if (active && isTerminal(active)) void cx.win.split(active, value === "right" ? "right" : "down"); }
+  else if (kind === "new") { if (active && isTerminal(active)) void cx.win.newWindow(active, value === "right" ? "right" : "below"); }
+  else if (kind === "close") { if (active && active.model.kind !== "node" && active.model.kind !== "settings") cx.win.closeKey(active); }
+  else if (kind === "canvaslock") cx.nav.setCanvasLock(value === "on");
+  else if (kind === "inputlock") cx.inputLock.toggle();
+  else if (kind === "win" && value) {
+    const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === value);
+    if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); }
+  }
+  else if (kind === "removehost" && value) {
+    const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
+    if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, active?.card.pill ?? core.stage);
+  }
+  else if (kind === "open" && value) cx.win.open(value);
+  else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
+  else if (kind === "sessions") {
+    const anchor = active?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
+    if (active) window.setTimeout(() => cx.sessionUi?.toggleManager(active, anchor, "pointer"), 60);
+  }
+  else if (kind === "ctr" && value && cx.adapters.containers) cx.win.open(cx.adapters.containers.host, value);
+}

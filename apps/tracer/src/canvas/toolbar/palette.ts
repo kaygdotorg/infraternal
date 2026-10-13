@@ -11,7 +11,7 @@ import { ICONS, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx, ViewRec, WinRec } from "../context";
-import type { ViewId } from "../model/types";
+import { onDemand } from "../../on-demand";
 import { recentRows } from "../recency";
 import { windowLabel } from "../windows/label";
 import { SETTINGS_SECTIONS } from "../views/settings";
@@ -20,15 +20,6 @@ import { byFrecency } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
 import { viewKeys } from "./viewlist";
 import { bindingText } from "./shortcuts";
-
-/** Flies to a Settings window (canvas-locked, snapped to its column). */
-export function openSettings(cx: Ctx, section: string): void {
-  const c = cx.views.get("settings");
-  const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0];
-  if (!rec) return;
-  cx.win.setActive(rec);
-  cx.nav.focusWindow(rec);
-}
 
 /** The rows of one view's windows, for the palette opened from the view's hover card ("All N windows", #121). */
 export function viewWindowEntries(cx: Ctx, c: ViewRec): PaletteEntry[] {
@@ -93,34 +84,12 @@ export function installPalette(cx: Ctx): () => void {
     return out;
   });
   const onAction = (event: Event): void => {
-    const detail = (event as CustomEvent<{ action?: string; source?: string }>).detail;
-    const [, kind, value] = (detail?.action ?? "").split(":");
-    const active = state.activeWin;
-    if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
-    else if (kind === "overview") cx.nav.showOverview();
-    else if (kind === "settings") openSettings(cx, value ?? "appearance");
-    else if (kind === "share") void cx.sharing?.open();
-    else if (kind === "unlink") cx.sharing?.unlinkCurrent();
-    else if (kind === "split") { if (active && isTerminal(active)) void cx.win.split(active, value === "right" ? "right" : "down"); }
-    else if (kind === "new") { if (active && isTerminal(active)) void cx.win.newWindow(active, value === "right" ? "right" : "below"); }
-    else if (kind === "close") { if (active && active.model.kind !== "node" && active.model.kind !== "settings") cx.win.closeKey(active); }
-    else if (kind === "canvaslock") cx.nav.setCanvasLock(value === "on");
-    else if (kind === "inputlock") cx.inputLock.toggle();
-    else if (kind === "win" && value) {
-      const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === value);
-      if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); }
-    }
-    else if (kind === "removehost" && value) {
-      const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
-      if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, active?.card.pill ?? core.stage);
-    }
-    else if (kind === "open" && value) cx.win.open(value);
-    else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
-    else if (kind === "sessions") {
-      const anchor = active?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
-      if (active) window.setTimeout(() => cx.sessionUi?.toggleManager(active, anchor, "pointer"), 60);
-    }
-    else if (kind === "ctr" && value && cx.adapters.containers) cx.win.open(cx.adapters.containers.host, value);
+    const detail = (event as CustomEvent<import("./palette-actions.on-demand").CanvasAction>).detail;
+    if (!detail?.action?.startsWith("canvas:")) return;
+    // Loading an action never delays host registration or the initial terminal; disposal fences a late chunk.
+    void onDemand(() => import("./palette-actions.on-demand")).then((module) => {
+      if (!signal.aborted) module.dispatchCanvasAction(cx, detail);
+    }, () => core.toast.show({ message: "The action couldn't load. Check your connection and try again.", tone: "error" }));
   };
   window.addEventListener("tracer:canvas-action", onAction, { signal });
   const offHosts = cx.adapters.sessions.onChange(() => core.refreshPalette());
