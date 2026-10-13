@@ -929,6 +929,10 @@ impl Bootstrap {
                 if early {
                     let full = self.binaries.get(check.architecture);
                     let session_binary = self.binaries.session_payload(check.architecture)?;
+                    let encoding = checked
+                        .as_ref()
+                        .and_then(crate::install::Checked::encoding)
+                        .filter(|_| target.mode == crate::model::InstallMode::Rootless);
                     let (session_id, channel) = transaction
                         .stage_session_on(&session_binary, checked)
                         .await?;
@@ -982,7 +986,9 @@ impl Bootstrap {
                                 // The already-proven retry path retires only the upload
                                 // journal, preserving the shim and host identity. It
                                 // never truncates the executable's running inode.
-                                transaction.restart_setup(&payload, &join).await
+                                transaction
+                                    .restart_setup_with(&payload, &join, encoding)
+                                    .await
                             }
                         } => result,
                     }
