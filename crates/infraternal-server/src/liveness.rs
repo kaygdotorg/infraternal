@@ -38,7 +38,7 @@ impl Liveness {
     pub(crate) fn pong(&mut self, nonce: u64, sent_us: u64) {
         // Only a new reply to this route's issued probes renews its lease.
         // Delayed/duplicate replies, ordinary traffic and another stream cannot do so.
-        if nonce != sent_us || nonce <= self.acked || nonce > self.sent {
+        if nonce != sent_us || nonce <= self.acked || nonce > self.sent || self.expired() {
             return;
         }
         let now = Instant::now();
@@ -73,6 +73,11 @@ mod tests {
         route.pong(nonce, stamp);
         route.pong(u64::MAX, u64::MAX);
         tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.expired());
+        // A queued reply may win the select before an overdue timer. It cannot
+        // turn suspension into a longer lease after the old lease has ended.
+        let (nonce, stamp) = route.ping();
+        route.pong(nonce, stamp);
         assert!(route.expired());
     }
 }
