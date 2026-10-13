@@ -98,9 +98,31 @@ impl Transfer {
     /// selection runs under the setup lock; a declared choice comes from the
     /// read-only check and is still verified by digest after staging.
     fn body_with(&self, selection: &str) -> String {
+        // The digest is taken from the same byte stream `tee` writes, on its
+        // own core while the decoder runs, instead of re-reading the file
+        // afterwards. A failed file write leaves the file short (tee drops a
+        // failed output), so the exact size completes the proof. A reused
+        // cache entry is read back and hashed as before.
         format!(
-            "{PAYLOAD_CACHE}\nvalidate_cache\n{selection}\n{STAGE_TRANSACTION}\nprintf 'TRANSFER %s\\n' \"$choice\"\ncase \"$choice\" in\nreuse) ln \"$cache/payload\" \"$stage/payload\";;\nzstd) head -c {zstd_size} | zstd -dc > \"$stage/payload\";;\ngzip) head -c {gzip_size} | gzip -dc > \"$stage/payload\";;\nraw) head -c {raw_size} > \"$stage/payload\";;\n*) exit 1;;\nesac\nprintf '%s  %s\\n' {digest} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\nif [ \"$choice\" != reuse ]; then\n{PUBLISH_PAYLOAD_CACHE}\nfi",
-            digest = shell_quote(&self.digest),
+            r#"{PAYLOAD_CACHE}
+validate_cache
+{selection}
+{STAGE_TRANSACTION}
+printf 'TRANSFER %s\n' "$choice"
+case "$choice" in
+reuse) ln "$cache/payload" "$stage/payload"; streamed=$(sha256sum < "$stage/payload");;
+zstd) streamed=$(head -c {zstd_size} | zstd -dc | tee "$stage/payload" | sha256sum);;
+gzip) streamed=$(head -c {gzip_size} | gzip -dc | tee "$stage/payload" | sha256sum);;
+raw) streamed=$(head -c {raw_size} | tee "$stage/payload" | sha256sum);;
+*) exit 1;;
+esac
+[ "$streamed" = "{digest}  -" ] || exit 1
+[ "$(stat -c '%s' "$stage/payload")" = {raw_size} ] || exit 1
+chmod 700 "$stage/payload"
+if [ "$choice" != reuse ]; then
+{PUBLISH_PAYLOAD_CACHE}
+fi"#,
+            digest = self.digest,
             zstd_size = self.zstd.as_ref().map_or(0, |bytes| bytes.len()),
             gzip_size = self.gzip.as_ref().map_or(0, |bytes| bytes.len()),
             raw_size = self.raw_size,

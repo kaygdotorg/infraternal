@@ -2529,3 +2529,66 @@ async fn checked_staging_survives_a_buffering_payload_reader_and_reuses_the_cach
         assert_eq!(decoded.lines().count(), 1, "attempt {attempt}: {decoded}");
     }
 }
+
+#[tokio::test]
+async fn streamed_digest_refuses_a_short_file_or_a_changed_stream_before_launch() {
+    // `tee` that keeps the stream intact but truncates its file models a
+    // failed file write; a decoder that alters one byte models corruption.
+    for (tool, text) in [
+        (
+            "tee",
+            "#!/usr/bin/python3\nimport os, sys\ndata = sys.stdin.buffer.read()\nopen(sys.argv[1], 'wb').write(data[:-10])\nsys.stdout.buffer.write(data)\n",
+        ),
+        (
+            "decoders",
+            "#!/usr/bin/python3\nimport os, subprocess, sys\ntool = '/usr/bin/' + os.path.basename(sys.argv[0])\ndata = bytearray(subprocess.run([tool, *sys.argv[1:]], stdin=sys.stdin, capture_output=True).stdout)\ndata[100] ^= 1\nsys.stdout.buffer.write(data)\n",
+        ),
+    ] {
+        let f = Fixture::new();
+        executable(
+            &f.root.join("tools/sh"),
+            &format!(
+                "#!/usr/bin/python3\nimport os,sys\nargs=sys.argv[1:]\nif len(args)>1 and args[0]=='-c': args[1]=args[1].replace('$HOME', {root:?})\nos.execv('/bin/sh',['sh',*args])\n",
+                root = f.root.to_str().unwrap()
+            ),
+        );
+        // Whichever codec the check reports, its decoder alters the stream.
+        let names: &[&str] = if tool == "tee" {
+            &["tee"]
+        } else {
+            &["zstd", "gzip"]
+        };
+        for name in names {
+            executable(&f.root.join(format!("tools/{name}")), text);
+        }
+        let id = uuid::Uuid::new_v4();
+        large_fixture_binary(&f, id);
+        // The setup program arrives on stdin; the `tools/sh` mapping keeps
+        // every remote path inside the fixture root.
+        let session = Arc::new(SingleCheckChannel {
+            local: Local {
+                root: f.root.clone(),
+            },
+            streams: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let check = "printf 'INFRATERNAL_CHECK_V1\\nLinux\\nx86_64\\nsystemd\\n1002\\nno\\nyes\\nyes\\nno\\nINFRATERNAL_SETUP_CLEAR\\n'";
+        let (_, checked) = Installation::check_channel(session.as_ref(), check)
+            .await
+            .unwrap();
+        let transaction = Installation::new(session, &f.target, &f.join).unwrap();
+        let failure = transaction
+            .stage_session_on(&f.binary, Some(checked))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{tool}: an unverified payload was launched"));
+        assert!(
+            matches!(
+                failure.failed_step,
+                Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+            ),
+            "{tool}: {failure:?}"
+        );
+        assert_eq!(failure.exit_status, Some(1), "{tool}");
+        transaction.rollback().await.unwrap();
+    }
+}
