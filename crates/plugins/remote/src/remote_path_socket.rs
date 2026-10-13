@@ -19,10 +19,9 @@
 
 use quinn::{
     AsyncUdpSocket, UdpPoller,
-    udp::{EcnCodepoint, RecvMeta, Transmit},
+    udp::{RecvMeta, Transmit},
 };
 use std::{
-    collections::VecDeque,
     fmt,
     io::{self, IoSliceMut},
     net::SocketAddr,
@@ -35,20 +34,11 @@ use std::{
     time::Instant,
 };
 
-/// Unanswered mesh datagrams kept for an immediate resend (bytes, count).
-const RESEND_BYTES: usize = 64 * 1024;
-const RESEND_DATAGRAMS: usize = 64;
-
-struct Sent {
-    contents: Vec<u8>,
-    segment_size: Option<usize>,
-    ecn: Option<EcnCodepoint>,
-}
+use crate::remote_peer_routes::Recent;
 
 struct Paths {
     mesh: Option<SocketAddr>,
-    resend: VecDeque<Sent>,
-    resend_bytes: usize,
+    resend: Recent,
     mesh_heard: Option<Instant>,
     enrolled_heard: Option<Instant>,
 }
@@ -91,8 +81,7 @@ impl PathSocket {
             on_mesh: AtomicBool::new(false),
             paths: Mutex::new(Paths {
                 mesh: None,
-                resend: VecDeque::new(),
-                resend_bytes: 0,
+                resend: Recent::default(),
                 mesh_heard: None,
                 enrolled_heard: None,
             }),
@@ -135,7 +124,6 @@ impl PathSocket {
             }
             paths.mesh = Some(mesh);
             paths.resend.clear();
-            paths.resend_bytes = 0;
             self.on_mesh.store(true, Ordering::Release);
         }
     }
@@ -146,8 +134,7 @@ impl PathSocket {
         let pending = match self.paths.lock() {
             Ok(mut paths) => {
                 self.on_mesh.store(false, Ordering::Release);
-                paths.resend_bytes = 0;
-                std::mem::take(&mut paths.resend)
+                paths.resend.take()
             }
             Err(_) => return,
         };
@@ -217,22 +204,7 @@ impl PathSocket {
 
     fn keep(&self, transmit: &Transmit<'_>) {
         if let Ok(mut paths) = self.paths.lock() {
-            if paths.resend.len() == RESEND_DATAGRAMS
-                || paths.resend_bytes + transmit.contents.len() > RESEND_BYTES
-            {
-                // The oldest datagram is the most likely to have been retransmitted by now.
-                if let Some(old) = paths.resend.pop_front() {
-                    paths.resend_bytes -= old.contents.len();
-                }
-            }
-            if transmit.contents.len() <= RESEND_BYTES {
-                paths.resend_bytes += transmit.contents.len();
-                paths.resend.push_back(Sent {
-                    contents: transmit.contents.to_vec(),
-                    segment_size: transmit.segment_size,
-                    ecn: transmit.ecn,
-                });
-            }
+            paths.resend.keep(transmit);
         }
     }
 }
@@ -289,13 +261,11 @@ impl AsyncUdpSocket for PathSocket {
             paths.enrolled_heard = Some(Instant::now());
             if !self.on_mesh.load(Ordering::Acquire) {
                 paths.resend.clear();
-                paths.resend_bytes = 0;
             }
         }
         if heard {
             paths.mesh_heard = Some(Instant::now());
             paths.resend.clear();
-            paths.resend_bytes = 0;
             drop(paths);
             self.mesh_datagrams.fetch_add(1, Ordering::AcqRel);
             self.heard.notify_waiters();
@@ -403,6 +373,35 @@ mod tests {
             .unwrap()
             .unwrap();
         bytes[..length].to_vec()
+    }
+
+    #[tokio::test]
+    async fn segmented_replay_evicts_enough_old_datagrams_to_keep_the_byte_bound() {
+        let logical = "127.0.0.1:7443".parse().unwrap();
+        let socket = PathSocket::new(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap(),
+            logical,
+        );
+        for length in [1024, 1024, 1024, 63 * 1024] {
+            socket.keep(&Transmit {
+                destination: logical,
+                contents: &vec![7; length],
+                segment_size: Some(1024),
+                ecn: None,
+                src_ip: None,
+            });
+        }
+        let mut paths = socket.paths.lock().unwrap();
+        let pending = paths.resend.take();
+        assert!(
+            pending
+                .iter()
+                .map(|sent| sent.contents.len())
+                .sum::<usize>()
+                <= 64 * 1024
+        );
     }
 
     #[tokio::test]

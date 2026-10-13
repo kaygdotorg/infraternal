@@ -40,6 +40,10 @@ impl Recent {
             ecn: transmit.ecn,
         });
     }
+    pub fn clear(&mut self) {
+        self.bytes = 0;
+        self.datagrams.clear();
+    }
     pub fn take(&mut self) -> VecDeque<Datagram> {
         self.bytes = 0;
         std::mem::take(&mut self.datagrams)
