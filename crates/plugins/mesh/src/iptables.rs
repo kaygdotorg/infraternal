@@ -57,33 +57,30 @@ pub(crate) fn apply_with_aliases(
     } else {
         presence()?
     };
-    // Preflight both families before mutating either. Restore batches are atomic
-    // per table; an interrupted table/family is fenced or rolled back by the caller.
-    for (index, tool) in TOOLS.iter().enumerate() {
-        test(
-            tool,
-            &render_with_aliases(
-                config,
-                index == 1,
-                installed[index],
-                aliases,
-                fence,
-                connections,
-            ),
-        )?;
-    }
-    for (index, tool) in TOOLS.iter().enumerate() {
-        run(
-            tool,
-            &render_with_aliases(
-                config,
-                index == 1,
-                installed[index],
-                aliases,
-                fence,
-                connections,
-            ),
-        )?;
+    let scripts = std::array::from_fn(|index| {
+        render_with_aliases(
+            config,
+            index == 1,
+            installed[index],
+            aliases,
+            fence,
+            connections,
+        )
+    });
+    // Both families must pass preflight before either mutates. Independent
+    // families run together; join both outcomes before callers can roll back.
+    execute_families(&scripts, true)?;
+    execute_families(&scripts, false)?;
+    Ok(())
+}
+fn execute_families(scripts: &[String; 2], preflight: bool) -> io::Result<()> {
+    let outcomes = std::thread::scope(|scope| {
+        let ipv4 = scope.spawn(|| execute(TOOLS[0], &scripts[0], preflight));
+        let ipv6 = scope.spawn(|| execute(TOOLS[1], &scripts[1], preflight));
+        [ipv4.join(), ipv6.join()]
+    });
+    for outcome in outcomes {
+        outcome.map_err(|_| io::Error::other("Mesh filter worker ended."))??;
     }
     Ok(())
 }
@@ -204,9 +201,6 @@ fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
         Some(1) => Ok(false),
         _ => Err(io::ErrorKind::PermissionDenied.into()),
     }
-}
-fn test(tool: &str, script: &str) -> io::Result<()> {
-    execute(tool, script, true)
 }
 fn run(tool: &str, script: &str) -> io::Result<()> {
     execute(tool, script, false)
