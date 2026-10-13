@@ -97,3 +97,13 @@ first-glyph guarantee is independently maintained: inventory code/RPC start only
 after the visible glyph, with 0/42 candidate trials asking earlier across all
 runs. Every candidate finds the final host. All VM fixtures/artifacts are removed
 and the shared lock released. No sample is dropped or budget raised.
+
+The first serial branch-head full gate (`e06f5f50`) also failed the unchanged
+`server_setup_terminal_echo_and_resume_preserve_offsets_once`: unexpected
+WebSocket close (`auth/tests.rs:1731`). Server library: 415 pass, 1 fail, 45
+ignored. The same binary failed once in isolation and passed its next exact run.
+No #118 exemption is used. `serial-head-fast.log`, `echo-isolated.log` and
+`echo-backtrace.log` preserve these outputs. Final TypeScript head validation
+passes 191 tracer and 36 protocol tests; deferred Brotli 44,822 / 45,056 (234
+bytes margin). A complete two-thread head gate is run next, keeping the serial
+failure rather than masking it with the isolated pass.
