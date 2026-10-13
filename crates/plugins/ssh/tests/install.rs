@@ -2083,3 +2083,52 @@ async fn staged_shell_bridge_keeps_protocol_bytes_and_releases_setup_guard() {
     drop(channel);
     transaction.rollback().await.unwrap();
 }
+
+#[tokio::test]
+async fn live_setup_retry_preserves_the_bridge_and_host_identity_state() {
+    for after_activation in [false, true] {
+        let f = Fixture::new();
+        let id = uuid::Uuid::new_v4();
+        let original = std::fs::read_to_string(&f.binary).unwrap();
+        let refuse = f.root.join("refuse-join");
+        let payload = format!(
+            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nif [ -f {} ]; then rm {}; mkdir -p \"$3\"; printf 'public-fixture-state\\n' > \"$3/proof\"; exit 1; fi\n{original}",
+            infraternal_plugin_ssh::transport::shell_quote(refuse.to_str().unwrap()),
+            infraternal_plugin_ssh::transport::shell_quote(refuse.to_str().unwrap())
+        );
+        executable(&f.binary, &payload);
+        if after_activation {
+            std::fs::write(f.root.join("refuse-start"), b"").unwrap();
+        } else {
+            std::fs::write(&refuse, b"").unwrap();
+        }
+        let transaction = f.transaction();
+        let (session, channel) = transaction.stage_session(&f.binary).await.unwrap();
+        assert_eq!(session, id);
+        assert!(transaction.setup(&f.join).await.is_err());
+        if after_activation {
+            std::fs::remove_file(f.root.join("refuse-start")).unwrap();
+        }
+        // A live session's rendezvous and unrelated files cannot be rollback targets.
+        std::fs::create_dir_all(f.base().join("sessions/sessions")).unwrap();
+        let sentinel = f.base().join("sessions/sessions/live-marker");
+        std::fs::write(&sentinel, b"original live session").unwrap();
+        let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&sentinel).unwrap());
+        transaction.restart_setup(&f.binary, &f.join).await.unwrap();
+        assert_eq!(
+            std::fs::read(f.base().join("state/proof")).unwrap(),
+            b"public-fixture-state\n"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"original live session");
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&sentinel).unwrap()),
+            inode
+        );
+        channel.write(b"same session\n").await.unwrap();
+        assert_eq!(channel.line(32).await.unwrap(), b"same session\n");
+        transaction.commit().await.unwrap();
+        channel.write(b"after setup commit\n").await.unwrap();
+        assert_eq!(channel.line(32).await.unwrap(), b"after setup commit\n");
+        drop(channel);
+    }
+}
