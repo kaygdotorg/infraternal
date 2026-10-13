@@ -184,3 +184,43 @@ fn unavailable() -> Failure {
     Failure::unsupported("The host setup status is unavailable.")
 }
 
+#[cfg(test)]
+mod tests {
+    //! Verifies authority, retention, monotonic retry sequences and replay overflow.
+    use super::*;
+    #[test]
+    fn host_status_outlives_its_subscriber_and_keeps_exact_identity() {
+        let status = Status::default();
+        let host = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        status.begin("owner", host, session).unwrap();
+        let subscription = status.subscribe("owner", host).unwrap();
+        drop(subscription);
+        status
+            .emit("owner", host, Stage::Install, State::Done, None)
+            .unwrap();
+        assert!(status.subscribe("foreign", host).is_err());
+        assert!(status.begin("owner", host, Uuid::new_v4()).is_err());
+        assert!(
+            status
+                .emit("foreign", host, Stage::Ready, State::Done, None)
+                .is_err()
+        );
+        let (resync, events) = status.events("owner", host, 0).unwrap();
+        assert!(!resync);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, session);
+        status.begin("owner", host, session).unwrap();
+        for _ in 0..65 {
+            status
+                .emit("owner", host, Stage::Join, State::Running, None)
+                .unwrap();
+        }
+        let (resync, events) = status.events("owner", host, 0).unwrap();
+        assert!(resync);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].attempt, 2);
+        assert_eq!(events[0].sequence, 66);
+        assert!(status.events("foreign", host, 0).is_err());
+    }
+}
