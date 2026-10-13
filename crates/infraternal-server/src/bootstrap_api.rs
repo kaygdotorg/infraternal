@@ -27,11 +27,17 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+#[cfg(feature = "remote")]
+#[path = "bootstrap_setup_api.rs"]
+mod setup_api;
+
 /// The existing authenticator is reused; runtime must provide an authorized #78 backend.
 struct Api {
     auth: Auth,
     runner: Bootstrap,
     sockets: Arc<Semaphore>,
+    #[cfg(feature = "remote")]
+    setup_sockets: Arc<Semaphore>,
     ssh_key: Arc<dyn SshKeySource>,
 }
 
@@ -46,18 +52,22 @@ pub fn router_with_ssh_key(
     runner: Bootstrap,
     ssh_key: Arc<dyn SshKeySource>,
 ) -> Router {
-    Router::new()
-        .route("/v1/bootstrap/ws", get(upgrade))
-        .route(
-            "/v1/bootstrap/ssh-key",
-            get(public_ssh_key).post(public_ssh_key),
-        )
-        .with_state(Arc::new(Api {
-            auth,
-            runner,
-            ssh_key,
-            sockets: Arc::new(Semaphore::new(16)),
-        }))
+    let router = Router::new().route("/v1/bootstrap/ws", get(upgrade)).route(
+        "/v1/bootstrap/ssh-key",
+        get(public_ssh_key).post(public_ssh_key),
+    );
+    #[cfg(feature = "remote")]
+    let router = router.route("/v1/bootstrap/setup/ws", get(setup_api::upgrade));
+    router.with_state(Arc::new(Api {
+        auth,
+        runner,
+        ssh_key,
+        sockets: Arc::new(Semaphore::new(16)),
+        #[cfg(feature = "remote")]
+        setup_sockets: Arc::new(Semaphore::new(
+            infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
+        )),
+    }))
 }
 
 #[derive(Deserialize)]
