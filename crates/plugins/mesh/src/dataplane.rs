@@ -95,7 +95,11 @@ pub struct Chunk {
     pub merged: BTreeMap<NodeId, PeerPolicy>,
     pub removed: Vec<NodeId>,
     /// Negotiated, final access-only delta; snapshots retain ordinary peer chunks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_access_updates"
+    )]
     pub access_updates: Vec<AccessUpdate>,
 }
 
@@ -107,4 +111,33 @@ pub struct AccessUpdate {
     pub last: NodeId,
     pub inbound: TrafficPolicy,
     pub outbound: TrafficPolicy,
+}
+
+// Deriving a struct decoder also accepts positional arrays. Range entries are
+// objects on this boundary; forwarding MapAccess preserves duplicate-field refusal.
+fn deserialize_access_updates<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<AccessUpdate>, D::Error> {
+    struct Object(AccessUpdate);
+    impl<'de> Deserialize<'de> for Object {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Object;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("an access update object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    map: A,
+                ) -> Result<Object, A::Error> {
+                    AccessUpdate::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                        .map(Object)
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+    Vec::<Object>::deserialize(deserializer)
+        .map(|objects| objects.into_iter().map(|object| object.0).collect())
 }
