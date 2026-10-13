@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub(crate) const INSPECT: &str = concat!(
-    include_str!("setup_lock.sh"),
+    include_str!("setup_guard.sh"),
     include_str!("previous_attempt.sh")
 );
 

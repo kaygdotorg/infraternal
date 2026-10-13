@@ -14,6 +14,13 @@ use std::{
 #[path = "setup_scripts.rs"]
 mod setup_scripts;
 
+// Mutating commands need both the parent guard and transaction lease; the
+// read-only ownership check carries only the guard it actually executes.
+pub(crate) const SETUP_LOCK: &str = concat!(
+    include_str!("setup_guard.sh"),
+    include_str!("setup_lock.sh")
+);
+
 /// Paths are trusted server settings; no target may select an executable to upload.
 #[derive(Clone)]
 pub struct BinaryPaths {
@@ -394,10 +401,7 @@ impl Installation {
                 self.mode,
                 self.host,
                 self.transaction,
-                &format!(
-                    "setup_guarded=yes\n{}\n{cleanup}",
-                    include_str!("setup_lock.sh")
-                ),
+                &format!("setup_guarded=yes\n{SETUP_LOCK}\n{cleanup}"),
             );
             writeln!(upload, "sh -c {}", shell_quote(&guarded_cleanup))
                 .map_err(|_| Failure::install("The host setup script could not be prepared."))?;
@@ -703,7 +707,7 @@ impl Installation {
     }
 
     fn script(&self, body: &str) -> String {
-        let guarded = format!("{}\nsetup_guard\n{body}", include_str!("setup_lock.sh"));
+        let guarded = format!("{SETUP_LOCK}\nsetup_guard\n{body}");
         Self::script_for(self.mode, self.host, self.transaction, &guarded)
     }
 
