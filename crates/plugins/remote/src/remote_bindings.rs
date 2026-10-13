@@ -148,23 +148,35 @@ impl Bindings {
 
     /// Normalize only leased tuples and replay encrypted data when the physical
     /// path changes. Packet numbers, not routing hints, own deduplication.
-    fn receive_peer(&self, lease: Option<u64>, meta: &mut [RecvMeta]) {
+    fn receive_peer(&self, lease: Option<u64>, bufs: &[IoSliceMut<'_>], meta: &mut [RecvMeta]) {
         if self.peer_count.load(Ordering::Acquire) == 0 {
+            self.learn(lease, meta);
             return;
         }
         let mut replay = Vec::new();
         if let Ok(mut peers) = self.peers.lock() {
-            for received in meta {
+            for (index, received) in meta.iter_mut().enumerate() {
+                let mut fresh = true;
                 let physical = received.addr;
                 if let Some(peer) = peers.by_physical(physical) {
                     let logical = peer.logical;
-                    if peer.physical != physical || peer.binding != lease {
+                    fresh = bufs
+                        .get(index)
+                        .and_then(|buf| buf.get(..received.len))
+                        .is_some_and(|contents| peer.seen.observe(contents, received.stride));
+                    if fresh && (peer.physical != physical || peer.binding != lease) {
                         peer.physical = physical;
                         peer.binding = lease;
                         replay.push((logical, peer.recent.take()));
                     }
-                    peer.local = received.dst_ip;
+                    if fresh {
+                        peer.local = received.dst_ip;
+                    }
                     received.addr = logical;
+                }
+                // A duplicate must retain both the alias and the socket route.
+                if fresh {
+                    self.learn(lease, std::slice::from_ref(received));
                 }
             }
         }
@@ -391,8 +403,7 @@ impl AsyncUdpSocket for Bindings {
             };
             match socket.poll_recv(cx, bufs, meta) {
                 Poll::Ready(Ok(count)) => {
-                    self.receive_peer(lease, &mut meta[..count]);
-                    self.learn(lease, &meta[..count]);
+                    self.receive_peer(lease, bufs, &mut meta[..count]);
                     return Poll::Ready(Ok(count));
                 }
                 // A failing lease must not stop the agent address; the lease
@@ -623,6 +634,37 @@ mod tests {
             .unwrap();
         let (meta, _) = receive(&bindings).await;
         assert_eq!(meta.addr, physical, "retired aliases have no mapping");
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_duplicate_cannot_move_the_reply_route() {
+        let bindings = Bindings::new(bound("127.0.0.1:0"));
+        let primary = bindings.local_addr().unwrap();
+        let leased = bound("127.0.0.3:0");
+        let destination = leased.local_addr().unwrap();
+        let _listener = bindings.lease(leased).unwrap();
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let _peer = bindings
+            .route_peer(logical, mesh.local_addr().unwrap())
+            .unwrap();
+        let packet = b"identical encrypted datagram";
+        mesh.send_to(packet, destination).await.unwrap();
+        assert_eq!(receive(&bindings).await.0.addr, logical);
+        enrolled.send_to(packet, primary).await.unwrap();
+        assert_eq!(receive(&bindings).await.0.addr, logical);
+        let peer = bindings.peers.lock().unwrap();
+        let peer = peer.get(logical).unwrap();
+        assert_eq!(
+            peer.physical,
+            mesh.local_addr().unwrap(),
+            "a duplicate must not steer replies"
+        );
+        assert!(
+            peer.binding.is_some(),
+            "a duplicate must not retire the reply socket"
+        );
     }
 
     #[tokio::test]

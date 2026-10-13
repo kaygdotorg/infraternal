@@ -50,6 +50,44 @@ impl Recent {
     }
 }
 
+/// Recent ciphertext fingerprints protect routing hints from delayed copies.
+/// They never authenticate or discard a datagram: QUIC still sees every packet.
+/// A fingerprint collision conservatively keeps the current reply route. The
+/// 256-entry ring costs at most 4096 bytes per active peer (4 MiB at 1000 peers).
+/// Fingerprints are the final 16 ciphertext bytes, including the integrity
+/// tag for the established encrypted packets used here. This is only a
+/// conservative hint filter: different packets sharing a suffix retain the
+/// current route, and both still reach QUIC. It neither parses packet numbers
+/// nor reads packet keys or plaintext.
+#[derive(Default)]
+pub(super) struct Seen {
+    fingerprints: Vec<[u8; 16]>,
+    next: usize,
+}
+impl Seen {
+    pub fn observe(&mut self, contents: &[u8], stride: usize) -> bool {
+        let mut fresh = false;
+        // GRO batches must compare individual UDP datagrams, since a backup
+        // can arrive unbatched or in a differently sized batch.
+        for datagram in contents.chunks(stride.max(1)) {
+            let mut fingerprint = [0; 16];
+            let suffix = &datagram[datagram.len().saturating_sub(16)..];
+            fingerprint[..suffix.len()].copy_from_slice(suffix);
+            if self.fingerprints.contains(&fingerprint) {
+                continue;
+            }
+            fresh = true;
+            if self.fingerprints.len() < 256 {
+                self.fingerprints.push(fingerprint);
+            } else {
+                self.fingerprints[self.next] = fingerprint;
+                self.next = (self.next + 1) % 256;
+            }
+        }
+        fresh
+    }
+}
+
 pub(super) struct Peer {
     pub id: u64,
     pub logical: SocketAddr,
@@ -58,6 +96,7 @@ pub(super) struct Peer {
     pub binding: Option<u64>,
     pub local: Option<IpAddr>,
     pub recent: Recent,
+    pub seen: Seen,
 }
 /// Both trusted tuple keys share one bounded slot. Use the same address/u64
 /// map representation as reply routing rather than monomorphising separate
@@ -122,6 +161,7 @@ impl Peers {
             binding: None,
             local: None,
             recent: Recent::default(),
+            seen: Seen::default(),
         });
         if self.free.pop().is_some() {
             self.slots[index] = peer;
@@ -162,6 +202,62 @@ impl Peers {
 mod tests {
     //! GSO batches remain within both replay bounds even when many old packets must retire.
     use super::*;
+    #[test]
+    fn ciphertext_history_normalizes_gro_batches_and_stays_bounded() {
+        let mut seen = Seen::default();
+        assert!(seen.observe(b"aaaabbbb", 4));
+        assert!(!seen.observe(b"aaaa", 4));
+        assert!(!seen.observe(b"bbbb", 4));
+        assert!(!seen.observe(b"bbbbaaaa", 4));
+        assert!(seen.observe(b"ccccaaaa", 4));
+        for value in 0_u32..1000 {
+            assert!(seen.observe(&value.to_le_bytes(), 4));
+            assert!(seen.fingerprints.len() <= 256);
+        }
+        assert!(!seen.observe(&999_u32.to_le_bytes(), 4));
+    }
+
+    #[test]
+    #[ignore = "Measure only on the perf VM: 31 batches of 20000 fresh/duplicate pairs across 1000 peers."]
+    fn ciphertext_history_at_1000_peers() {
+        let mut peers: Vec<Seen> = (0..1000).map(|_| Seen::default()).collect();
+        let mut packet = [0_u8; 1352];
+        for peer in &mut peers {
+            for value in 0_u32..256 {
+                packet[1348..].copy_from_slice(&value.to_le_bytes());
+                assert!(peer.observe(&packet, packet.len()));
+            }
+        }
+        let load = std::fs::read_to_string("/proc/loadavg").unwrap();
+        let mut samples = Vec::new();
+        for batch in 0_u32..31 {
+            let started = std::time::Instant::now();
+            for value in 0_u32..20000 {
+                packet[1348..].copy_from_slice(&(256 + batch * 20000 + value).to_le_bytes());
+                let peer = &mut peers[value as usize % 1000];
+                assert!(peer.observe(std::hint::black_box(&packet), packet.len()));
+                assert!(!peer.observe(std::hint::black_box(&packet), packet.len()));
+            }
+            samples.push(started.elapsed().as_nanos());
+        }
+        samples.sort_unstable();
+        println!(
+            "ciphertext_history peers=1000 batches=31 pairs_per_batch=20000 bytes_per_datagram=1352 batch_p50_ns={} batch_p99_ns={} pair_p50_ns={} pair_p99_ns={} fingerprint_capacity_bytes={} machine={} load={}",
+            samples[15],
+            samples[30],
+            samples[15] / 20000,
+            samples[30] / 20000,
+            peers
+                .iter()
+                .map(|peer| peer.fingerprints.capacity() * 16)
+                .sum::<usize>(),
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .unwrap()
+                .trim(),
+            load.trim()
+        );
+    }
+
     #[test]
     fn retiring_an_old_lease_cannot_remove_a_reused_tuple() {
         let logical = "127.0.0.1:40001".parse().unwrap();
