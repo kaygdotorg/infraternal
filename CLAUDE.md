@@ -72,6 +72,7 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 
 ## Gates
 
-Before you report that work is done, run `scripts/verify fast` and quote its
-output. Each slice adds its own gates (integration, browser, bench). A green
+Iterate with `scripts/verify iterate` (the same checks without the static
+release builds and their linkage, key-heap and size checks). Before you report
+that work is done, run `scripts/verify fast` and quote its output. Each slice adds its own gates (integration, browser, bench). A green
 gate is not proof: include measured numbers and issue-attached screenshots.

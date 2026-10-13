@@ -36,10 +36,15 @@ Definition of Done (it is in every job prompt):
 2. Atomic commits. Each commit builds, is formatted and lint-clean
    (`cargo fmt --check`, `cargo clippy` for the touched crates, `bun run
    check` for touched TypeScript) and passes the tests of the code it
-   touches. The full `scripts/verify fast` (static builds included) runs at
-   milestones and always on the branch head before it is handed to review,
-   pushed for integration or merged; its output is quoted verbatim on the
-   issue. The commit body gives the why, the rejected alternatives, and the
+   touches. Between commits, iterate with `scripts/verify iterate` (#204): the
+   same fmt, VT fmt, clippy, tests, cargo-deny, plugin compile-out,
+   TypeScript and repository artifact checks, without the two static release
+   builds, linkage, D244 key-heap and D243 size checks. The full
+   `scripts/verify fast` (static builds included) is the final gate: it runs
+   at milestones and always on the branch head before you report done, hand
+   off to review, push for integration or merge; its output is quoted
+   verbatim on the issue. A green `iterate` run is never quoted as the final
+   gate. The commit body gives the why, the rejected alternatives, and the
    decision or issue references. (Owner, 2026-10-11: the full gate on every
    commit cost about half of each job's time on the shared build host.)
 3. Tests against real engines (real PTY, real sshd, real Docker or Podman).

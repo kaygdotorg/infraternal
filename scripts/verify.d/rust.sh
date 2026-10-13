@@ -7,6 +7,7 @@ rust_run_gate() {
     local name="$1"
     shift
     local result
+    local started=$SECONDS
 
     printf '\n==> %s\n' "$name"
     if "$@"; then
@@ -17,6 +18,7 @@ rust_run_gate() {
         RUST_GATE_FAILED=1
     fi
     RUST_GATE_ROWS+=("${name}|${result}")
+    printf '(%s: %ss)\n' "$name" "$((SECONDS - started))"
 }
 
 rust_print_summary() {
@@ -40,6 +42,7 @@ rust_check_static_binary() {
     local binary="${target_dir}/${target}/release/infraternal"
     local description
     local size_bytes
+    local delta_bytes
     local max_size_bytes
 
     if [[ ! -x "$binary" ]]; then
@@ -70,8 +73,9 @@ rust_check_static_binary() {
     esac
 
     size_bytes="$(stat -c '%s' "$binary")"
-    printf 'PT_INTERP: absent; size: %s bytes (max %s; allowance 0)\n' \
-        "$size_bytes" "$max_size_bytes"
+    delta_bytes=$((size_bytes - max_size_bytes))
+    printf 'PT_INTERP: absent; size: %s bytes; cap: %s bytes; delta: %+d bytes\n' \
+        "$size_bytes" "$max_size_bytes" "$delta_bytes"
     if ((size_bytes > max_size_bytes)); then
         printf 'binary exceeds the %s-byte size budget: %s bytes\n' \
             "$max_size_bytes" "$size_bytes" >&2
@@ -187,7 +191,13 @@ rust_static_build_check() {
     return "$failed"
 }
 
+# Runs the Rust gate. Mode "final" (scripts/verify fast) is the full gate. Mode
+# "iterate" (scripts/verify iterate) runs every check except the static
+# release builds and what only they can check (linkage, D244 key heap, D243
+# size), which dominate the time and are rechecked by the final mode.
 rust_verify_fast() {
+    local mode="${1:-final}"
+
     RUST_GATE_ROWS=()
     RUST_GATE_FAILED=0
 
@@ -197,7 +207,9 @@ rust_verify_fast() {
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "test" cargo test --workspace --locked
     rust_run_gate "cargo-deny" cargo deny check
-    rust_run_gate "static builds" rust_static_build_check
+    if [[ "$mode" == final ]]; then
+        rust_run_gate "static builds" rust_static_build_check
+    fi
     rust_print_summary
 
     return "$RUST_GATE_FAILED"
