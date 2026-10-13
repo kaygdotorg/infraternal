@@ -140,3 +140,22 @@ The public digest index has four entries (two architectures times two builds),
 and the encoding index has eight (two codecs per build). Each encoded entry
 retains the existing 64 MiB ceiling. These caches belong to the server; no cache
 or compressor is added to a host daemon or a session shim.
+
+## Deferred transfer on the checked connection
+
+Immediate full-payload restaging reuses the bounded compound transfer command.
+Its first upload child holds the ordinary directory guard while a separate
+fresh errexit child retires only that installation's journal and lease. The
+cleanup child inherits the parent's guard; it cannot release the parent's
+copy. The next upload recreates the journal through the existing acquisition
+path. Session rendezvous and the running executable inode remain untouched.
+
+The same read-only check may supply public rootless encoding support for that
+immediate restage. In this case the setup script declares raw, gzip or zstd
+and public bytes follow without waiting for a selection round trip. The reader
+requires the exact matching `TRANSFER` receipt and `PAYLOAD ready` before
+private enrollment input can flow, even when an older caller omitted its
+optional acknowledgment flag. Reuse still requires ordinary digest selection;
+unknown capabilities, root setup and later retries retain negotiation. No
+check-time hint authorizes installation or bypasses ownership, digest, terminal
+proof or commit checks.
