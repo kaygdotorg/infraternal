@@ -1299,7 +1299,8 @@ export class TerminalClient {
       this.replayResponseFence = undefined;
       if (this.attached && !this.attachmentConfirmed) {
         this.attachmentConfirmed = true;
-        this.setStatus("");
+        // Completing replay clears its wait, not an approximation or input-pressure warning.
+        if (this.config.status.textContent === "Catching up…") this.setStatus("");
         this.conn.streamAttached(true, this.streamId);
         this.startPings();
         this.config.hooks?.onAttached?.(this.connectionIsResume, this);
