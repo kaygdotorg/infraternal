@@ -58,6 +58,28 @@ The machine pill consumes these events; no ready toast is required. Mapping:
 connect/upload/install failures affect install, join affects join, start
 affects start, readiness affects ready.
 
+## Host status adapter
+
+The SSH server component exposes `/v1/bootstrap/setup/ws` with the same exact
+Origin and current unlocked-owner cookie admission as the wizard. First send
+`{"action":"subscribe","host_id":"<uuid>","window_id":"<canvas id>","after":0}`.
+It replays retained events before live delivery. `{"action":"replay","after":N}`
+requests replay; overflow sends a host/window-bound `resync:true` followed by
+authoritative current stage states. `{"action":"retry","host_id":"<uuid>"}`
+retries only that subscription's host with the requesting live capability.
+The declared actions are `ssh.setup-watch` and `ssh.setup-retry` (D16).
+
+Subscriptions are bounded by the shared terminal-stream count. Window ids are
+bounded presentation coordinates supplied by the canvas; host and session ids
+remain authority coordinates. Host ownership and revocation are checked before
+each event and retry; component-off ends subscriptions and provisional bridges.
+A socket's closure never cancels a published session's background setup.
+Retries are serialized per host and share the global eight-worker admission.
+
+The wizard's additive `done.session_id`, when present alongside `host_id`, names
+the published shim to attach. It must not open another shell. Older `done`
+events without this field keep the original installed-terminal behavior.
+
 ## Real-login compatibility (D240, D247)
 
 The early session must use the same host-login launcher and person/account
