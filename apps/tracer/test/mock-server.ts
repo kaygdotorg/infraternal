@@ -9,6 +9,7 @@ import { CLOSE_SESSION_GONE, encodeMuxedFrame, WebSocketFrameDecoder, type WireF
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { terminalFixtures } from "./terminal-fixtures";
 import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
+import { serveSetup } from "./setup-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { createPerfSink } from "./perf-sink";
@@ -112,6 +113,7 @@ let closeAfterAttachMs: number | undefined;
 let selectedFixture: Uint8Array | undefined;
 const liveSessionIds = new Set<string>();
 let sessionInventoryAvailable = true;
+const earlySessions = new Map<string, MockSession>();
 let session = createSession();
 /** The reset seed is inventory-visible only if a client actually attaches to it. */
 let unclaimedSessionId: string | undefined = session.sessionIdText;
@@ -137,7 +139,7 @@ let socketCloseCount = 0;
 
 server.on("upgrade", (request, socket, head) => {
   const path = new URL(request.url ?? "/", `http://${request.headers.host ?? `${HOST}:${PORT}`}`).pathname;
-  if (path === "/v1/bootstrap/ws") {
+  if (path === "/v1/bootstrap/ws" || path === "/v1/bootstrap/setup/ws") {
     // Same admission as the real route: exact Origin (403), then the unlocked owner session (401).
     const status = !sameOrigin(request) ? "403 Forbidden" : !isAuthenticated(request) ? "401 Unauthorized" : undefined;
     if (status) {
@@ -145,7 +147,13 @@ server.on("upgrade", (request, socket, head) => {
       socket.destroy();
       return;
     }
-    webSockets.handleUpgrade(request, socket, head, (webSocket) => serveProvisioning(webSocket, request));
+    webSockets.handleUpgrade(request, socket, head, (webSocket) => {
+      if (path === "/v1/bootstrap/setup/ws") serveSetup(webSocket);
+      else serveProvisioning(webSocket, request, () => {
+        session = createSession(); earlySessions.set(session.sessionIdText, session);
+        return session.sessionIdText;
+      });
+    });
     return;
   }
   if (path !== "/v1/ws") {
@@ -871,6 +879,7 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
 function handleTerminalFrame(connection: Connection, streamId: number, frame: WireFrame): void {
   switch (frame.type) {
     case "AttachTerm":
+      if (!connection.attached && earlySessions.has(uuidText(frame.sessionId))) connection.session = earlySessions.get(uuidText(frame.sessionId))!;
       attachCount += 1;
       if (attachHistory.length < MAX_ATTACH_HISTORY) {
         attachHistory.push({ last_out_seq: frame.lastOutSeq.toString(), output_sequence: String(connection.session.outputLength) });

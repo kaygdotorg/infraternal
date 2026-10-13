@@ -29,10 +29,11 @@
  * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
  * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { WebSocket } from "ws";
 import type { AddHostFixture } from "../src/add-host-contract";
+import { publishSetup, runSetup } from "./setup-double";
 import { addHostFixtures } from "./prototype-fixtures";
 
 const MAX_COMMAND_BYTES = 32 * 1024;
@@ -59,6 +60,8 @@ interface BootstrapEvent {
   message: string;
   elapsed_ms: number;
   log_tail: string[];
+  host_id?: string;
+  session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
   failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
@@ -66,6 +69,7 @@ interface BootstrapEvent {
 
 interface Target {
   id: string;
+  publication?: { host_id: string; session_id: string };
   /** The host name the scripted patterns match: the fixture id or the typed host. */
   name: string;
   /** Kind of the one-connection credential this target was started with. */
@@ -169,7 +173,7 @@ function authOf(target: Target): NonNullable<BootstrapEvent["authentication"]> {
   return network ? { method: "network", network } : { method: "server-key" };
 }
 
-export function serveProvisioning(socket: WebSocket, _request: IncomingMessage): void {
+export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, publishTerminal?: (hostId: string) => string): void {
   const targets = new Map<string, Target>();
   const events: BootstrapEvent[] = [];
   let sequence = 0;
@@ -185,6 +189,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       sequence: ++sequence, target: target.id, attempt: target.attempt, step, message,
       elapsed_ms: Date.now() - target.enteredAt, log_tail: [...target.breadcrumbs],
     };
+    if (step === "done" && target.publication) Object.assign(event, target.publication);
     if (failure) event.failure = failure;
     if (authentication) event.authentication = authentication;
     if (leftovers) event.leftovers = leftovers;
@@ -226,6 +231,16 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage):
       release();
     };
     const walk = (phase: number): void => {
+      if (phase === 1 && /^instant/.test(target.name) && publishTerminal) {
+        const host = randomUUID();
+        const session = publishTerminal(host);
+        target.publication = { host_id: host, session_id: session };
+        publishSetup(host, session);
+        emit(target, "done", "The terminal is ready; setup steps continue.");
+        target.state = "done";
+        runSetup(host, target.name.includes("fail") ? "join" : undefined, release);
+        return;
+      }
       if (phase >= PHASES.length) {
         emit(target, "done", target.mode === "root" ? "Ready · root" : "Ready");
         target.state = "done";
