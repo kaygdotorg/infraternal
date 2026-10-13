@@ -798,268 +798,290 @@ impl Bootstrap {
         clippy::too_many_lines,
         reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
     )]
-    async fn run(
-        &self,
-        batch: &BatchInner,
-        target: &Target,
+    fn run<'a>(
+        &'a self,
+        batch: &'a BatchInner,
+        target: &'a Target,
         attempt: u32,
         started: Instant,
-        resources: &mut AttemptResources,
+        resources: &'a mut AttemptResources,
         auth_once: Option<OneUseAuth>,
-    ) -> Result<(), Failure> {
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Check,
-            "Checking the SSH host.",
-            started,
-            None,
-        );
-        let resolved = self.resolve_attempt(batch, target, auth_once).await?;
-        let session = self
-            .transport
-            .open(resolved.destination, resolved.credentials, resolved.mesh)
-            .await
-            .map_err(|error| error.at(InstallStep::Connect))?;
-        let owns_cleanup = lock(&batch.states)
-            .get(&target.id)
-            .is_some_and(|state| state.cleanup.is_some());
-        // Stored coordinates already authorize this attempt's rollback. Restore
-        // it before inspecting earlier attempts; its own lease is not foreign.
-        let script = if owns_cleanup {
-            format!(
-                "{}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'",
-                crate::probe::CHECK_SCRIPT
-            )
-        } else {
-            previous_attempt::check_script(target.mode)
-        };
-        let output = session
-            .run(&script, Input::Empty)
-            .await
-            .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
-        // Preserve method evidence even if the authenticated host is unsupported.
-        // Public metadata only; no provider or private material enters replay state.
-        if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
-            metadata.authentication = session.authentication();
-        }
-        let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
-        check.authorize_mode(target.mode)?;
-        restore_previous(batch, target, attempt, started, session.clone()).await?;
-        if let Some(previous) = previous {
-            self.await_start_fresh(batch, target, attempt, started, session.as_ref(), &previous)
-                .await?;
-        }
-        // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
-        // Durable publication can outlive a cancelled acknowledgement. Bind
-        // cleanup ownership before the backend can enqueue its commit.
-        let mut register = |host| {
-            resources.host = Some(host);
-            Ok(())
-        };
-        let join = self
-            .backend
-            .invitation_registered(
-                &batch.authority,
+    ) -> Operation<'a, ()> {
+        // Bound one setup allocation to each admitted worker. Sharing the poll
+        // boundary keeps the large state machine out of its cancellation wrapper.
+        Box::pin(async move {
+            emit(
+                batch,
                 target,
-                &check,
-                session.trust_lookup(),
-                &mut register,
-            )
-            .await?;
-        resources.host = Some(join.host);
-        if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
-            metadata.host_id = Some(join.host);
-        }
-        let early = self.backend.early_terminal() && session.session_bridge();
-        // Resolve through the trusted payload source before either early shell or setup.
-        let payload = self
-            .payload(batch, target, attempt, started, check.architecture)
-            .await?;
-        resources.installation = Some(Installation::new(session.clone(), target, &join)?);
-        let transaction = resources
-            .installation
-            .as_ref()
-            .ok_or_else(|| Failure::install("The installation transaction is unavailable."))?;
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Install,
-            "Installing the infraternal agent.",
-            started,
-            None,
-        );
-        let setup = async {
-            if early {
-                let (session_id, channel) = transaction.stage_session(&payload).await?;
-                // Once a real shim exists, rollback must never remove its rendezvous
-                // or stop its shell while publication's durable write is in flight.
-                resources.published = true;
-                if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
-                    metadata.session_id = Some(session_id);
-                }
-                self.setup
-                    .begin(&batch.authority.owner, join.host, session_id)?;
-                lock(&self.pending_setup).insert(
-                    join.host,
-                    SetupAttempt {
-                        owner: batch.authority.owner.clone(),
-                        batch: batch.authority.batch,
-                        target: target.clone(),
-                        session_id,
-                        installation: transaction.clone(),
-                        binary: payload.clone(),
-                        running: true,
-                    },
-                );
-                self.setup.emit(
-                    &batch.authority.owner,
-                    join.host,
-                    crate::setup::Stage::Install,
-                    crate::setup::State::Running,
-                    None,
-                )?;
-                self.backend
-                    .publish_terminal(&batch.authority, join.host, session_id, channel, session)
-                    .await?;
-                emit(
+                attempt,
+                Step::Check,
+                "Checking the SSH host.",
+                started,
+                None,
+            );
+            let resolved = self.resolve_attempt(batch, target, auth_once).await?;
+            let session = self
+                .transport
+                .open(resolved.destination, resolved.credentials, resolved.mesh)
+                .await
+                .map_err(|error| error.at(InstallStep::Connect))?;
+            let owns_cleanup = lock(&batch.states)
+                .get(&target.id)
+                .is_some_and(|state| state.cleanup.is_some());
+            // Stored coordinates already authorize this attempt's rollback. Restore
+            // it before inspecting earlier attempts; its own lease is not foreign.
+            let script = if owns_cleanup {
+                format!(
+                    "{}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'",
+                    crate::probe::CHECK_SCRIPT
+                )
+            } else {
+                previous_attempt::check_script(target.mode)
+            };
+            let early = self.backend.early_terminal() && session.session_bridge();
+            let (output, checked) = if early {
+                let (output, channel) =
+                    Installation::check_channel(session.as_ref(), &script).await?;
+                (output, Some(channel))
+            } else {
+                let output = session
+                    .run(&script, Input::Empty)
+                    .await
+                    .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
+                (output, None)
+            };
+            // Preserve method evidence even if the authenticated host is unsupported.
+            // Public metadata only; no provider or private material enters replay state.
+            if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+                metadata.authentication = session.authentication();
+            }
+            let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
+            check.authorize_mode(target.mode)?;
+            restore_previous(batch, target, attempt, started, session.clone()).await?;
+            if let Some(previous) = previous {
+                self.await_start_fresh(
                     batch,
                     target,
                     attempt,
-                    Step::Done,
-                    "The terminal is ready; setup steps continue.",
                     started,
-                    None,
-                );
-                tokio::select! {
-                    biased;
-                    _ = self.backend.setup_cancelled(join.host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
-                    result = transaction.setup(&join) => result,
-                }
-            } else {
-                transaction.stage_and_setup(&payload, &join).await
+                    session.as_ref(),
+                    &previous,
+                )
+                .await?;
             }
-        };
-        let linger = setup.await.map_err(|mut error| {
-            if error.message == "The matching static infraternal binary is unavailable." {
-                error.missing_binary = Some(Box::new(crate::model::MissingBinary {
-                    architecture: match check.architecture {
-                        crate::probe::Architecture::X86_64 => "x86_64",
-                        crate::probe::Architecture::Aarch64 => "aarch64",
-                    },
-                    path: payload.display().to_string(),
-                }));
+            // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
+            // Durable publication can outlive a cancelled acknowledgement. Bind
+            // cleanup ownership before the backend can enqueue its commit.
+            let mut register = |host| {
+                resources.host = Some(host);
+                Ok(())
+            };
+            let join = self
+                .backend
+                .invitation_registered(
+                    &batch.authority,
+                    target,
+                    &check,
+                    session.trust_lookup(),
+                    &mut register,
+                )
+                .await?;
+            resources.host = Some(join.host);
+            if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+                metadata.host_id = Some(join.host);
             }
-            error
-        })?;
-        if early {
-            for stage in [
-                crate::setup::Stage::Install,
-                crate::setup::Stage::Join,
-                crate::setup::Stage::Start,
-            ] {
-                self.setup.emit(
-                    &batch.authority.owner,
-                    join.host,
-                    stage,
-                    crate::setup::State::Done,
-                    None,
-                )?;
-            }
-            self.setup.emit(
-                &batch.authority.owner,
-                join.host,
-                crate::setup::Stage::Ready,
-                crate::setup::State::Running,
-                None,
-            )?;
-        }
-        drop(join); // Capability plaintext is erased immediately after its stdin handoff.
-        if !linger && !early {
+            // Resolve through the trusted payload source before either early shell or setup.
+            let payload = self
+                .payload(batch, target, attempt, started, check.architecture)
+                .await?;
+            resources.installation = Some(Installation::new(session.clone(), target, &join)?);
+            let transaction = resources
+                .installation
+                .as_ref()
+                .ok_or_else(|| Failure::install("The installation transaction is unavailable."))?;
             emit(
                 batch,
                 target,
                 attempt,
                 Step::Install,
-                "Host policy did not enable user linger; the service may stop after logout.",
+                "Installing the infraternal agent.",
                 started,
                 None,
             );
-        }
-        let host = resources
-            .host
-            .ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
-        if !early {
-            emit(
-                batch,
-                target,
-                attempt,
-                Step::Facts,
-                "Waiting for authenticated host facts.",
-                started,
-                None,
-            );
-        }
-        if !early {
-            emit(
-                batch,
-                target,
-                attempt,
-                Step::Connect,
-                "Checking a terminal through the infraternal agent.",
-                started,
-                None,
-            );
-        }
-        self.complete_setup(&batch.authority, host, transaction, early)
-            .await?;
-        if early {
-            self.setup.emit(
-                &batch.authority.owner,
-                host,
-                crate::setup::Stage::Ready,
-                crate::setup::State::Done,
-                None,
-            )?;
-        }
-        Ok(())
+            let setup = async {
+                if early {
+                    let (session_id, channel) =
+                        transaction.stage_session_on(&payload, checked).await?;
+                    // Once a real shim exists, rollback must never remove its rendezvous
+                    // or stop its shell while publication's durable write is in flight.
+                    resources.published = true;
+                    if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+                        metadata.session_id = Some(session_id);
+                    }
+                    self.setup
+                        .begin(&batch.authority.owner, join.host, session_id)?;
+                    lock(&self.pending_setup).insert(
+                        join.host,
+                        SetupAttempt {
+                            owner: batch.authority.owner.clone(),
+                            batch: batch.authority.batch,
+                            target: target.clone(),
+                            session_id,
+                            installation: transaction.clone(),
+                            binary: payload.clone(),
+                            running: true,
+                        },
+                    );
+                    self.setup.emit(
+                        &batch.authority.owner,
+                        join.host,
+                        crate::setup::Stage::Install,
+                        crate::setup::State::Running,
+                        None,
+                    )?;
+                    self.backend
+                        .publish_terminal(&batch.authority, join.host, session_id, channel, session)
+                        .await?;
+                    emit(
+                        batch,
+                        target,
+                        attempt,
+                        Step::Done,
+                        "The terminal is ready; setup steps continue.",
+                        started,
+                        None,
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = self.backend.setup_cancelled(join.host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
+                        result = transaction.setup(&join) => result,
+                    }
+                } else {
+                    transaction.stage_and_setup(&payload, &join).await
+                }
+            };
+            let linger = setup.await.map_err(|mut error| {
+                if error.message == "The matching static infraternal binary is unavailable." {
+                    error.missing_binary = Some(Box::new(crate::model::MissingBinary {
+                        architecture: match check.architecture {
+                            crate::probe::Architecture::X86_64 => "x86_64",
+                            crate::probe::Architecture::Aarch64 => "aarch64",
+                        },
+                        path: payload.display().to_string(),
+                    }));
+                }
+                error
+            })?;
+            if early {
+                for stage in [
+                    crate::setup::Stage::Install,
+                    crate::setup::Stage::Join,
+                    crate::setup::Stage::Start,
+                ] {
+                    self.setup.emit(
+                        &batch.authority.owner,
+                        join.host,
+                        stage,
+                        crate::setup::State::Done,
+                        None,
+                    )?;
+                }
+                self.setup.emit(
+                    &batch.authority.owner,
+                    join.host,
+                    crate::setup::Stage::Ready,
+                    crate::setup::State::Running,
+                    None,
+                )?;
+            }
+            drop(join); // Capability plaintext is erased immediately after its stdin handoff.
+            if !linger && !early {
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Install,
+                    "Host policy did not enable user linger; the service may stop after logout.",
+                    started,
+                    None,
+                );
+            }
+            let host = resources
+                .host
+                .ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
+            if !early {
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Facts,
+                    "Waiting for authenticated host facts.",
+                    started,
+                    None,
+                );
+            }
+            if !early {
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Connect,
+                    "Checking a terminal through the infraternal agent.",
+                    started,
+                    None,
+                );
+            }
+            self.complete_setup(&batch.authority, host, transaction, early)
+                .await?;
+            if early {
+                self.setup.emit(
+                    &batch.authority.owner,
+                    host,
+                    crate::setup::Stage::Ready,
+                    crate::setup::State::Done,
+                    None,
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Initial setup and retry share the same admitted proof/commit path.
     /// Retiring host authority cancels both proof and remote commit together.
-    async fn complete_setup(
-        &self,
-        authority: &Authority,
+    fn complete_setup<'a>(
+        &'a self,
+        authority: &'a Authority,
         host: uuid::Uuid,
-        installation: &Installation,
+        installation: &'a Installation,
         published: bool,
-    ) -> Result<(), Failure> {
-        let proof = async {
-            let (release, approved) = tokio::sync::oneshot::channel();
-            tokio::try_join!(
-                async {
-                    self.backend.connected_facts(authority, host).await?;
-                    self.backend.terminal_canary(authority, host).await?;
-                    release.send(()).map_err(|()| {
-                        Failure::install("The host commit command ended before terminal proof.")
-                    })
-                },
-                installation.commit_after(approved),
-            )?;
-            // Completion discharges durable retirement only after proof and commit.
-            self.backend.completed(authority, host).await
-        };
-        if published {
-            tokio::select! {
-                biased;
-                _ = self.backend.setup_cancelled(host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
-                result = proof => result,
+    ) -> Operation<'a, ()> {
+        // Fresh setup and retry share this bounded proof/commit poll function.
+        Box::pin(async move {
+            let proof = async {
+                let (release, approved) = tokio::sync::oneshot::channel();
+                tokio::try_join!(
+                    async {
+                        self.backend.connected_facts(authority, host).await?;
+                        self.backend.terminal_canary(authority, host).await?;
+                        release.send(()).map_err(|()| {
+                            Failure::install("The host commit command ended before terminal proof.")
+                        })
+                    },
+                    installation.commit_after(approved),
+                )?;
+                // Completion discharges durable retirement only after proof and commit.
+                self.backend.completed(authority, host).await
+            };
+            if published {
+                tokio::select! {
+                    biased;
+                    _ = self.backend.setup_cancelled(host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
+                    result = proof => result,
+                }
+            } else {
+                proof.await
             }
-        } else {
-            proof.await
-        }
+        })
     }
 
     /// Confirm only this failed attempt's public observation; the caller supplies
