@@ -12,10 +12,16 @@ use std::{
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use zeroize::Zeroize as _;
 
+#[path = "remote_mesh_timing.rs"]
+mod timing;
+
 const PROOF_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2";
 // The longer evidence directory would make a session socket 108 bytes. This
 // owned sibling keeps kernel sun_path below 107 bytes without changing sessions.
 const STATE_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mat-r2-ns";
+// The shim's audited exec isolation closes fd 3. Reuse this wrapper for both
+// inherited channels so neither can remain open in the surviving shim.
+const INHERITED_SOCKET_EXEC: &str = "leg_b_fd=$1; if [ \"$leg_b_fd\" != 3 ]; then exec 3<&\"$leg_b_fd\"; exec {leg_b_fd}<&-; fi; shift; exec \"$@\"";
 
 /// All public reports share the caller-selected benchmark artifact directory.
 fn proof_scratch() -> PathBuf {
@@ -32,6 +38,7 @@ struct ClientBundle {
     state: PathBuf,
     binary: PathBuf,
     session: Option<Uuid>,
+    server_key: infraternal_plugin_mesh::policy::model::PublicKey,
 }
 impl Drop for ClientBundle {
     fn drop(&mut self) {
@@ -88,10 +95,27 @@ async fn mesh_namespace_client() {
         Uuid::from_bytes(session.id),
         session.pid
     );
+    let shim_pid = session.pid;
     drop(session);
-    infraternal_agent::remote_client::run(&identity, Some(state))
-        .await
+    let fd = std::env::var("INFRATERNAL_MESH_TIMING_FD")
+        .unwrap()
+        .parse::<i32>()
         .unwrap();
+    let timing_socket = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+    assert_ne!(
+        std::fs::read_link(format!("/proc/{shim_pid}/fd/{fd}")).ok(),
+        Some(timing_socket),
+        "timing socket leaked into the surviving shim"
+    );
+    let running = infraternal_agent::remote_client::run(&identity, Some(state));
+    tokio::pin!(running);
+    tokio::select! {
+        result = &mut running => result.unwrap(),
+        result = timing::serve(fd, bundle.server_key) => {
+            result.unwrap();
+            running.await.unwrap();
+        }
+    }
 }
 
 fn command(program: &str, args: &[&str]) {
@@ -143,9 +167,18 @@ impl Drop for Processes {
 async fn node_process(
     namespace_pid: u32,
     bundle: &ClientBundle,
-) -> (tokio::process::Child, Uuid, u32) {
+) -> (tokio::process::Child, Uuid, u32, tokio::net::UnixStream) {
+    let (timestamps, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
+    nix::fcntl::fcntl(
+        &inherited,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .unwrap();
     let mut child = tokio::process::Command::new("nsenter")
-        .args(["-t", &namespace_pid.to_string(), "-n"])
+        .args(["-t", &namespace_pid.to_string(), "-n", "bash", "-c"])
+        .arg(INHERITED_SOCKET_EXEC)
+        .arg("mesh-proof")
+        .arg(inherited.as_raw_fd().to_string())
         .arg(std::env::current_exe().unwrap())
         .args([
             "mesh_namespace_client",
@@ -154,12 +187,16 @@ async fn node_process(
             "--test-threads=1",
         ])
         .env("INFRATERNAL_MESH_CHILD", "1")
+        .env("INFRATERNAL_MESH_TIMING_FD", "3")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
+    drop(inherited);
+    timestamps.set_nonblocking(true).unwrap();
+    let timestamps = tokio::net::UnixStream::from_std(timestamps).unwrap();
     let mut input = child.stdin.take().unwrap();
     let encoded = zeroize::Zeroizing::new(serde_json::to_vec(bundle).unwrap());
     input.write_all(&encoded).await.unwrap();
@@ -192,7 +229,7 @@ async fn node_process(
             discard.clear();
         }
     });
-    (child, id, pid)
+    (child, id, pid, timestamps)
 }
 
 fn wire(frame: &Frame<'_>) -> Bytes {
@@ -422,9 +459,21 @@ fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
         nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
     )
     .unwrap();
-    let child = Command::new("bash").args(["-c", "leg_b_fd=$1; if [ \"$leg_b_fd\" != 3 ]; then exec 3<&\"$leg_b_fd\"; exec {leg_b_fd}<&-; fi; shift; exec \"$@\"", "mesh-proof", &inherited.as_raw_fd().to_string()])
-        .arg(binary).args(["agent", "--fd", "3", "--state"]).arg(state)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let child = Command::new("bash")
+        .args([
+            "-c",
+            INHERITED_SOCKET_EXEC,
+            "mesh-proof",
+            &inherited.as_raw_fd().to_string(),
+        ])
+        .arg(binary)
+        .args(["agent", "--fd", "3", "--state"])
+        .arg(state)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     drop(inherited);
     socket.set_nonblocking(true).unwrap();
     (
@@ -764,8 +813,9 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         state: node_state.clone(),
         binary,
         session: None,
+        server_key: server_mesh.public_key,
     };
-    let (mut client, session, shim) = node_process(namespace_pid, &bundle).await;
+    let (mut client, session, shim, mut timestamps) = node_process(namespace_pid, &bundle).await;
     processes.shim = Some(shim);
     let remote = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -836,6 +886,11 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
+    let capture = crate::remote_autoswitch_probe::Capture::start(|peer| match peer.ip() {
+        std::net::IpAddr::V4(ip) => ip.octets()[..2] == [10, 254] || ip.octets() == [10, 220, 0, 2],
+        std::net::IpAddr::V6(_) => false,
+    });
+    let enabled_wall = std::time::SystemTime::now();
     let moved = tokio::time::Instant::now();
     runtime.set_enabled("mesh", true).await.unwrap();
     let mesh_link = wait_link(&remote, ServerLinkKind::Mesh).await;
@@ -854,6 +909,40 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     echo.sequence += moving.len() as u64;
     expected.extend_from_slice(&moving);
     echo.wait(&expected).await;
+    let joined = tokio::time::timeout(Duration::from_secs(5), timing::handshake(&mut timestamps))
+        .await
+        .unwrap()
+        .unwrap();
+    let events = capture.events();
+    let first_byte = events
+        .iter()
+        .filter(|event| {
+            event.kind == crate::remote_autoswitch_probe::Kind::TerminalByte
+                && event.peer.ip() != "10.220.0.2".parse::<std::net::IpAddr>().unwrap()
+        })
+        .min_by_key(|event| event.monotonic)
+        .unwrap();
+    assert_ne!(first_byte.stream, 0);
+    let milestone = |kind| {
+        events
+            .iter()
+            .find(|event| event.kind == kind && event.peer == first_byte.peer)
+            .unwrap()
+    };
+    let tls = milestone(crate::remote_autoswitch_probe::Kind::TlsHandshake);
+    let admitted = milestone(crate::remote_autoswitch_probe::Kind::LedgerAdmission);
+    let control = milestone(crate::remote_autoswitch_probe::Kind::ControlReady);
+    let phases = serde_json::json!({
+        "fixture_enable_to_node_wg_handshake_us": joined.duration_since(enabled_wall).unwrap().as_micros(),
+        "node_wg_handshake_to_first_mesh_byte_us": first_byte.wall.duration_since(joined).unwrap().as_micros(),
+        "fixture_enable_to_first_mesh_byte_us": first_byte.monotonic.duration_since(moved.into_std()).as_micros(),
+        "server_mtls_to_ledger_admission_us": admitted.monotonic.duration_since(tls.monotonic).as_micros(),
+        "ledger_admission_to_control_ready_us": control.monotonic.duration_since(admitted.monotonic).as_micros(),
+        "control_ready_to_first_mesh_byte_us": first_byte.monotonic.duration_since(control.monotonic).as_micros(),
+        "server_mtls_to_first_mesh_byte_us": first_byte.monotonic.duration_since(tls.monotonic).as_micros(),
+        "first_mesh_byte_stream": first_byte.stream,
+        "add_host_completion_measured": false,
+    });
     assert_ne!(
         mesh_link.endpoint.unwrap().ip(),
         listeners.local_addr().unwrap().ip()
@@ -921,6 +1010,8 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         "load": std::fs::read_to_string("/proc/loadavg").unwrap().trim(),
         "lifecycle_complete": false
     });
+    let mut partial = partial;
+    partial["phases"] = phases.clone();
     std::fs::write(
         scratch.join(format!("namespace-transport-{rtt_ms}.json")),
         serde_json::to_vec_pretty(&partial).unwrap(),
@@ -982,7 +1073,8 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     client.wait().await.unwrap();
     bundle.session = Some(session);
     let restarted = tokio::time::Instant::now();
-    let (next, same_session, same_shim) = node_process(namespace_pid, &bundle).await;
+    let (next, same_session, same_shim, next_timestamps) =
+        node_process(namespace_pid, &bundle).await;
     assert_eq!((same_session, same_shim), (session, shim));
     wait_link(&remote, ServerLinkKind::Mesh).await;
     echo.send(b"restart-survives|").await;
@@ -1004,6 +1096,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     report["load_start"] = load_start.trim().into();
     report["head_profile"] = "primed-writer".into();
     report["lifecycle_complete"] = true.into();
+    report["phases"] = phases;
     std::fs::write(
         scratch.join(format!("namespace-transport-{rtt_ms}.json")),
         serde_json::to_vec_pretty(&report).unwrap(),
@@ -1028,6 +1121,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         "local mesh echo p99 exceeded direct by 2ms"
     );
     drop(next);
+    drop(next_timestamps);
     drop(echo);
     drop(runtime);
     drop(listeners);
