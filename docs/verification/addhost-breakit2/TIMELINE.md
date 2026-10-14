@@ -24,7 +24,7 @@ The driver uses these additional environment variables:
 | `ADDHOST_BROWSER_DIST` | Production assets plus the bundled diagnostic entry and `timeline.html`. |
 | `ADDHOST_BROWSER_SCRIPT` | `addhost-timeline.mjs`, with the existing Playwright dependency available. |
 | `ADDHOST_BROWSER_RUNTIME` | Bun executable on the measurement machine. |
-| `ADDHOST_BROWSER_PREPARE=1` | Start resource preparation with sign-in for the paired comparison. |
+| `ADDHOST_BROWSER_PREPARE=1` | Prepare resources and a disposable renderer with sign-in for the paired comparison. |
 | `ADDHOST_TIMELINE_EVIDENCE` | Owned directory receiving public clock/packet receipts. |
 | `ADDHOST_TIMELINE_TARGET` | Same unique Docker target name passed to `--container-name`. |
 | `ADDHOST_FAST_STEP_PROFILE=1` | Enable target shell boundaries. |
@@ -49,3 +49,11 @@ retained setup stream reports ready, another 29 bytes are sent. Success requires
 both outputs and acknowledgment of all 59 bytes on the original session. The
 driver's budget check runs only after those proofs complete. Raw receipts belong
 in the job cache and must be attached to #189, rather than committed here.
+
+Two functional browser oracles run on the build host without measuring latency:
+`TRACER_TEST_PORT=<unique> bun docs/verification/addhost-breakit2/renderer-disposal.mjs`
+checks document handlers after disposal and a partial opening failure;
+`renderer-prepare.mjs` checks single-flight preparation, resource-failure retry,
+focus preservation and absence of new sockets or retained DOM/listeners.
+`RENDERER_DISPOSAL_ARTIFACT` may select an earlier public renderer artifact for
+the disposal oracle's negative control. Keep their output outside the checkout.
