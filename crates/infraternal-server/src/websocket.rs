@@ -59,7 +59,7 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
 // Reject further AttachTerm requests on a socket at this bound.
-const MAX_ATTACHMENTS: usize = 32;
+pub(super) const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
 const MAX_ENDED_SESSION_STATUSES: i64 = 128;
 // Bound unfinished host-facts and terminal-open calls on each socket.
@@ -67,7 +67,7 @@ const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
 // Cap a fragmented input frame before the decoder retains more bytes.
-const MAX_SOCKET_BUFFER: usize = MAX_FRAME_LEN + 10;
+pub(super) const MAX_SOCKET_BUFFER: usize = MAX_FRAME_LEN + 10;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
 
 type PendingPluginCall = (u32, Result<Vec<u8>, AgentError>);
@@ -433,10 +433,16 @@ async fn run_socket(
     let mut pending_plugin_calls = tokio::task::JoinSet::<PendingPluginCall>::new();
     let mut plugins = state.plugin_socket(&user_id, &session_token);
     let mut output_open = true;
-    let mut receive_deadline = None;
+    let (mut sink, mut transport) = crate::websocket_transport::Transport::start(
+        sink,
+        source,
+        receive,
+        state.clone(),
+        user_id.clone(),
+        session_token.clone(),
+    );
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
-    let mut liveness = Liveness::new();
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut loop_result = Ok(());
@@ -444,12 +450,9 @@ async fn run_socket(
         .await
         .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
-        if attachments.is_empty() {
-            liveness = Liveness::new();
-        }
+        transport.active(!attachments.is_empty());
         tokio::select! {
             _ = ticks.tick(), if !attachments.is_empty() => {
-                if liveness.expired() { break; }
                 // Rebind stalled session routes on the server; the healthy browser socket,
                 // sibling streams and durable input writer remain usable.
                 let expired_streams: Vec<u32> = attachments.iter()
@@ -469,17 +472,19 @@ async fn run_socket(
                         }
                 }
                 if loop_result.is_err() { break; }
-                if while_authorized(&state, &user_id, &session_token, true, async {
-                    let (nonce, sent_us) = liveness.ping();
-                    send_frame(&mut sink, 0, &Frame::Ping { nonce, sent_us }, &mut encode).await?;
+                // Internal proofs carry no input or browser data, just as their
+                // Pong fast path below carries no authority. Browser probes and
+                // all reconnect/data operations retain the authority watchdog.
+                let probes = async {
                     for (&stream_id, attachment) in &mut attachments {
                         if attachment.awaiting_ack { continue; }
                         let (nonce, sent_us) = attachment.liveness.ping();
                         encode_muxed_frame_into(stream_id, &Frame::Ping { nonce, sent_us }, &mut encode).map_err(|_| ())?;
                         attachment.handle.send_frame(Bytes::copy_from_slice(&encode)).await.map_err(|_| ())?;
                     }
-                    Ok(())
-                }).await.is_err() { break; }
+                    Ok::<(), ()>(())
+                };
+                if probes.await.is_err() { break; }
             }
             Some(reply) = plugins.recv() => {
                 let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
@@ -509,7 +514,7 @@ async fn run_socket(
                 let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
                 expiry = deadline;
             }
-            input = receive_wire(&mut source, &mut receive, &mut receive_deadline) => {
+            input = transport.recv() => {
                 let input = match input {
                     Ok(Some(input)) => input,
                     Ok(None) => break,
@@ -523,12 +528,6 @@ async fn run_socket(
                         if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
                     Inbound::Frame(wire) => {
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Pong { nonce, sent_us } = decoded.frame {
-                        liveness.pong(nonce, sent_us);
-                        continue;
-                    }
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
                         && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
@@ -652,7 +651,7 @@ async fn run_socket(
         tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None))).await;
     // Drop transport before metadata cleanup so a busy SQLite writer cannot retain a revoked socket.
     drop(sink);
-    drop(source);
+    drop(transport);
     let now = unix_seconds().unwrap_or_default();
     let _ = sqlx::query("UPDATE websocket_connections SET active=0, expires_at=? WHERE connection_id=? AND user_id=? AND active=1")
         .bind(now.saturating_add(i64::from(RESUME_WINDOW_SECONDS)))
@@ -664,7 +663,7 @@ async fn run_socket(
 
 /// Interrupt pending work on authority loss. Subscribing before the read closes the missed-wakeup window.
 /// Checks on the ready branch prevent a late backend reply winning against committed revocation.
-async fn while_authorized<T: Send>(
+pub(super) async fn while_authorized<T: Send>(
     state: &WebSocketState,
     user: &str,
     token: &str,
@@ -1932,7 +1931,7 @@ fn encode_session_id(session_id: &[u8; 16]) -> String {
     output
 }
 
-enum Inbound {
+pub(super) enum Inbound {
     Frame(Bytes),
     TransportPing(Bytes),
 }
@@ -1958,7 +1957,7 @@ where
     }
 }
 
-async fn receive_wire<S>(
+pub(super) async fn receive_wire<S>(
     source: &mut S,
     receive: &mut BytesMut,
     deadline: &mut Option<tokio::time::Instant>,
@@ -2015,7 +2014,7 @@ where
     }
 }
 
-async fn send_frame<K>(
+pub(super) async fn send_frame<K>(
     sink: &mut K,
     stream_id: u32,
     frame: &Frame<'_>,
@@ -2029,7 +2028,7 @@ where
 }
 
 /// Bound each writer independently; a stalled browser cannot retain its permits forever.
-async fn send_message<K>(sink: &mut K, message: Message) -> Result<(), ()>
+pub(super) async fn send_message<K>(sink: &mut K, message: Message) -> Result<(), ()>
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
