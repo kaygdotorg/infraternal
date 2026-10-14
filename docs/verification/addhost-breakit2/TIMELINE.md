@@ -58,3 +58,20 @@ checks document handlers after disposal and a partial opening failure;
 focus preservation and absence of new sockets or retained DOM/listeners.
 `RENDERER_DISPOSAL_ARTIFACT` may select an earlier public renderer artifact for
 the disposal oracle's negative control. Keep their output outside the checkout.
+
+The final native gate can use `native-timing-runner.py` as Cargo's GNU test
+runner (`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="python3 <absolute-script>"`).
+It moves only the healthy mesh freshness and warm fallback temporal cases to
+the designated VM; their assertions and deadlines are unchanged. It verifies
+the copied executable's SHA-256, executes each exact case under the shared
+lock, requires one executed passing test and a successful child-exit sentinel,
+then executes every remaining case locally. Failure on either machine fails
+the aggregate; a filtered invocation is refused.
+
+Set `ADDHOST_NATIVE_VM_ROOT` and `ADDHOST_NATIVE_VM_STATE_ROOT` to owned paths
+under `/root/infraternal-bench/`. `ADDHOST_NATIVE_VM_LOADER` and
+`ADDHOST_NATIVE_VM_LIB` select the already-staged compatible GNU loader and
+public runtime libraries. `INFRATERNAL_TEST_STATE_ROOT` keeps local test state
+under the job's scratch directory. Other test executables pass through without
+changes. This is an explicit execution-platform choice for physical timing
+checks, not a skip or a different test expectation.
