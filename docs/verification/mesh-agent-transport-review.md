@@ -29,6 +29,21 @@
   detached worker survives component down. Each recent queue is bounded to
   64 KiB and 64 datagrams. Two ends at 1000 transports allow 128 MiB of recent
   payload, plus routing metadata and the existing engine state.
+- Ordinary mesh-to-enrolled copies retain individual 20 ms deadlines; an older
+  entry's clock cannot send younger entries early. The shared endpoint budget
+  is 32 send calls per receive poll, including segmented calls. Due entries
+  remain pending across budget exhaustion and socket backpressure. Completed
+  enrolled returns consume their originals once; capability withdrawal cancels
+  negotiated copies without cancelling pending legacy enrolled recovery.
+- The proposed additive bit 6 dual reply on #201 keeps enrolled primary replies
+  immediate and permits the same ciphertext on the admitted mesh alternative,
+  eligible immediately. It shares the existing history, clock and send budget;
+  alternative admission cannot displace pending enrolled returns. Duplicate
+  hints never promote the primary route. Unknown coordinates stay dormant,
+  capability withdrawal cancels alternatives, and component removal or lease
+  retirement prevents pending work from selecting a replacement socket. Alternative replies add no
+  connection, writer, stream or admission authority. Implementation and
+  acceptance of this clarification remain pending.
 - A candidate owns fresh acknowledgement probes until its bounded proof ends.
   Idle mesh detection requires both a physical mesh reply and fresh authenticated
   counters. Enrolled copies alone cannot prove a live mesh. Simultaneous
@@ -39,11 +54,21 @@
   storage defect. The cancellation-safe immediate transaction remains covered.
 - Real SSH acceptance records natural bootstrap Done and exact kernel handshake
   order without a pre-canary mesh wait. Unrestricted route hints are diagnostics,
-  never packet provenance. A separate fenced-canary profile blocks enrolled
-  ingress before creating its readiness PTY, giving the first authenticated
-  Output causal mesh provenance and including the firewall overhead. A fresh
-  post-fence marker verifies mesh delivery on the continuing session. Silent-cut
-  status and byte delivery must be reported separately.
+  never packet provenance. The unheld natural-join profile timestamps the first
+  authenticated post-success fenced Output and the complete fresh marker on
+  the same terminal attachment. Start, bootstrap success and kernel handshake
+  to each witness are upper bounds including readiness, terminal setup, the
+  initial echo, counter queries, firewall work and marker input/echo. They do
+  not identify the earliest mesh byte of natural joining or the original SSH
+  shell's handoff.
+- The controlled standing profile intentionally holds the initial mesh join
+  until an enrolled terminal exists, then measures its surviving attachment
+  after release. It is separate from natural unheld acceptance. The separate
+  fenced-canary profile blocks enrolled ingress before creating its readiness
+  PTY; its first authenticated Output has causal mesh provenance and includes
+  firewall overhead. A failed readiness operation remains a failed sample and
+  cannot acquire a post-success witness. These profiles are reported separately,
+  as are silent-cut status and byte delivery.
 - The 1000-transport cost fixture proves paths before starting their watchdogs;
   startup, ramp, warmup and steady failures remain separate receipts. It measures
   physical adapter sends, including ciphertext copies. It does not claim 1000
@@ -51,3 +76,6 @@
   counter overhead; failed watchdog cohorts are not accepted cost evidence.
 - Release acceptance, both static size ceilings and the complete fast gate are
   recorded on #201. This checklist does not assert outstanding measurements pass.
+  The proposed dual reply has no accepted healthy-1000-transport or 31-sample
+  per-venue release result claimed here; those measurements, its regressions
+  and the final gates remain required.

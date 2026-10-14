@@ -378,16 +378,50 @@ unchanged, and no capability replaces mTLS, ledger admission or writer binding.
 
 The transport reuses its existing recent history, bounded to 64 datagrams and
 64 KiB of ciphertext per peer. One clock belongs to each endpoint socket,
-never a detached task. Its earliest 20 ms deadline sends the retained pending
-batch once, including younger retained entries so continuous eviction cannot
-starve copies. Successful copies are not scheduled again; a full socket can
-retry only within the same bounded history. Returning or disabling the path
-cancels copies; retiring the last peer lease releases the clock and cache.
+never a detached task. Ordinary mesh-to-enrolled copies each become eligible
+20 ms after their original transmission; another entry's earlier deadline
+must not copy younger entries early. Each endpoint receive poll permits at
+most 32 copy send calls, shared across peers. A segmented send call can carry
+multiple UDP datagrams. Due work beyond this budget remains pending for the
+next poll. Successful copies are not scheduled again; socket backpressure
+retains pending work within the same bounded history.
+
+Returning to enrolled makes retained mesh originals eligible for bounded
+recovery. A completed return consumes its original once, including when the
+send budget is exhausted; a later route change must not re-arm completed
+returns. Pending returns retain their backpressure deadlines. Withdrawing
+bit 6 cancels negotiated copies while preserving pending legacy enrolled
+recovery. Retiring a peer lease cancels its remaining work; retiring the last
+lease releases the clock and cache.
+
+#### Proposed bounded dual reply (#201)
+
+The following additive clarification is proposed on #201; implementation and
+acceptance remain pending. It changes no frame layout, version, capability bit
+or authority.
+
+For negotiated bit 6 peers, an enrolled primary reply remains immediate.
+The same encrypted datagram may additionally be sent to the admitted mesh
+alternative without changing that primary route. This alternative is eligible
+immediately, rather than adding a second 20 ms delay; ordinary mesh-to-enrolled
+copies retain their individual 20 ms deadlines. Both kinds of copy share the
+existing bounded history, endpoint clock and 32-send budget, within the same
+64-datagram / 64-KiB limits. Redundant alternative admission must not evict or
+displace pending enrolled-return work; backpressure must not discard that
+recovery work.
+
+Unknown mesh coordinates remain dormant. A withdrawn capability cancels
+negotiated alternatives while preserving pending legacy enrolled returns.
+Component removal or lease retirement cancels its alternative work, and a
+retired lease must never select a replacement socket. Alternative replies
+create no new connection, stream, writer or admission authority.
 
 Receivers deliver every datagram to QUIC for authentication and packet-number
 deduplication. A bounded ciphertext-suffix cache filters recent duplicate
 routing hints, including differently batched GRO input. A suffix collision
-keeps a route hint rather than admitting or dropping data. The mesh liveness
+keeps a route hint rather than admitting or dropping data. A duplicate mesh
+original received after its enrolled copy must not promote the primary route;
+the proposed alternative reply does not change this rule. The mesh liveness
 probe requires physical mesh arrival plus newly authenticated traffic:
 authenticated enrolled copies alone must not keep a dead mesh path selected.
 
