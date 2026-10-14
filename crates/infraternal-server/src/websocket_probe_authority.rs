@@ -18,6 +18,11 @@ impl Lease {
         Ok(Self { revoked, expiry })
     }
 
+    /// Share the completed handshake's absolute expiry without renewing it.
+    pub(crate) fn deadline(&self) -> Instant {
+        self.expiry
+    }
+
     async fn refresh(&mut self, state: &WebSocketState, user: &str, token: &str) -> Result<(), ()> {
         self.revoked.borrow_and_update();
         self.expiry = probe_deadline(state, user, token).await?;

@@ -131,6 +131,7 @@ impl Transport {
         state: Arc<WebSocketState>,
         user: String,
         token: String,
+        authority: super::websocket::probe_authority::Lease,
     ) -> (impl Sink<Message, Error = axum::Error> + Unpin, Self) {
         let writer = Arc::new(Mutex::new(writer));
         let context = Arc::new(Context {
@@ -147,7 +148,7 @@ impl Transport {
         let (active, activity) = watch::channel(false);
         let mut tasks = tokio::task::JoinSet::new();
         tasks.spawn(read(context.clone(), reader, receive, send, reply));
-        tasks.spawn(proofs(context.clone(), activity, replies));
+        tasks.spawn(proofs(context.clone(), activity, replies, authority));
         // Keep one serialized WebSocket writer. The existing send timeout still
         // covers lock acquisition and flushing; no extra payload copy or queued
         // output is introduced by this adapter.
@@ -378,17 +379,8 @@ async fn proofs(
     context: Arc<Context>,
     mut activity: watch::Receiver<bool>,
     mut replies: mpsc::Receiver<Reply>,
+    mut authority: super::websocket::probe_authority::Lease,
 ) {
-    let Ok(mut authority) = super::websocket::probe_authority::Lease::new(
-        &context.state,
-        &context.user,
-        &context.token,
-    )
-    .await
-    else {
-        context.retire(false);
-        return;
-    };
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut active = false;

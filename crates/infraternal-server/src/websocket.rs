@@ -414,7 +414,7 @@ async fn run_socket(
         ),
     )
     .await;
-    let Ok(Ok(connection_id)) = handshake else {
+    let Ok(Ok((connection_id, proof_authority))) = handshake else {
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None)))
             .await;
         drop(sink);
@@ -437,6 +437,9 @@ async fn run_socket(
     let mut pending_plugin_calls = tokio::task::JoinSet::<PendingPluginCall>::new();
     let mut plugins = state.plugin_socket(&user_id, &session_token);
     let mut output_open = true;
+    // Welcome certifies that the non-renewing proof lease and initial expiry
+    // are ready. No initial authority query may race the peer's first idle period.
+    let mut expiry = proof_authority.deadline();
     let (mut sink, mut transport) = crate::websocket_transport::Transport::start(
         sink,
         source,
@@ -444,13 +447,11 @@ async fn run_socket(
         state.clone(),
         user_id.clone(),
         session_token.clone(),
+        proof_authority,
     );
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
     let mut loop_result = Ok(());
-    let mut expiry = socket_deadline(&state, &user_id, &session_token)
-        .await
-        .unwrap_or_else(|()| tokio::time::Instant::now());
     loop {
         transport.active(!attachments.is_empty());
         tokio::select! {
@@ -1003,7 +1004,7 @@ async fn handshake<S, K>(
     user_id: &str,
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
-) -> Result<[u8; 16], ()>
+) -> Result<([u8; 16], probe_authority::Lease), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
@@ -1059,7 +1060,9 @@ where
     // Retain rollback metadata outside the cancelled future, including the previous Resume token.
     *pending_welcome = Some(welcome);
     let welcome = pending_welcome.as_ref().ok_or(())?;
-    socket_deadline(state, user_id, session_token).await?;
+    // Subscribe and finish the initial authority read before sending Welcome.
+    // The shared loop reuses this exact absolute expiry without another SQL read.
+    let proof_authority = probe_authority::Lease::new(state, user_id, session_token).await?;
     if send_frame(
         sink,
         CONTROL_STREAM,
@@ -1075,7 +1078,7 @@ where
     {
         return Err(());
     }
-    Ok(welcome.connection_id)
+    Ok((welcome.connection_id, proof_authority))
 }
 
 #[derive(Clone)]
