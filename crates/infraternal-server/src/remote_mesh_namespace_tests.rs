@@ -15,7 +15,7 @@ use zeroize::Zeroize as _;
 #[path = "remote_mesh_timing.rs"]
 mod timing;
 
-const PROOF_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2";
+const PROOF_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mesh-autoswitch/evidence";
 // The longer evidence directory would make a session socket 108 bytes. This
 // owned sibling keeps kernel sun_path below 107 bytes without changing sessions.
 const STATE_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mat-r2-ns";
@@ -484,8 +484,85 @@ fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
     )
 }
 
+// Match production's durable SQLite storage. Cancelling pool checkout can
+// discard its connection before ownership reaches the caller; the last
+// in-memory connection would then erase the schema, unrelated to transaction
+// cancellation. Each namespace lifecycle owns a fresh file outside the repo.
+async fn namespace_pool(options: sqlx::sqlite::SqlitePoolOptions) -> sqlx::SqlitePool {
+    let scratch = proof_scratch();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let database = scratch.join(format!("namespace-{}.sqlite", Uuid::new_v4()));
+    options
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(database)
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn namespace_store_survives_cancelled_pool_checkout() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let armed = Arc::new(AtomicBool::new(false));
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let options = sqlx::sqlite::SqlitePoolOptions::new().before_acquire({
+        let armed = armed.clone();
+        let reached = reached.clone();
+        move |_, _| {
+            let armed = armed.clone();
+            let reached = reached.clone();
+            Box::pin(async move {
+                if armed.swap(false, Ordering::AcqRel) {
+                    reached.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(true)
+            })
+        }
+    });
+    let pool = namespace_pool(options).await;
+    let (_, pool, _) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
+    let runtime = crate::plugins::compiled(&pool).await.unwrap();
+    armed.store(true, Ordering::Release);
+    let checkout = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.acquire().await }
+    });
+    reached.notified().await;
+    checkout.abort();
+    assert!(checkout.await.unwrap_err().is_cancelled());
+    // Disable must still persist after an aborted coordinator checkout; this
+    // is a connection replacement, independent of BEGIN/COMMIT cancellation.
+    runtime.set_enabled("mesh", false).await.unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT enabled FROM plugin_settings WHERE role='server' AND plugin='mesh'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+    let database = pool.connect_options().get_filename().to_owned();
+    pool.close().await;
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", database.display()));
+    }
+}
+
 async fn root_store(host: &Identity, root: &X509) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
-    let (store, pool, id) = crate::enrollment::authority::tests::enrolled().await;
+    let pool = namespace_pool(sqlx::sqlite::SqlitePoolOptions::new()).await;
+    let (store, pool, id) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
     // The generic fixture has a synthetic rootless enrollment. Start a fresh
     // rootful fixture row rather than changing an enrolled execution mode.
     for table in ["remote_join_tokens", "remote_certificates", "remote_hosts"] {
