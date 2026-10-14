@@ -420,8 +420,11 @@ impl Plugin for DesktopServer {
                         result = calls.join_next(), if !calls.is_empty() => {
                             if !matches!(result, Some(Ok(Ok(())))) { break; }
                         }
-                        ended = workers.join_next(), if !workers.is_empty() => {
-                            if let Some(Ok(stream)) = ended { viewers.remove(&stream); }
+                        ended = workers.join_next_with_id(), if !workers.is_empty() => {
+                            // A stream ID can be reused before its prior task finishes.
+                            // Only the task that owns the current handle may remove it.
+                            if let Some(Ok((task, stream))) = ended
+                                && viewers.get(&stream).is_some_and(|viewer| viewer.task == task) { viewers.remove(&stream); }
                         }
                         request = requests.recv() => {
                             let Some(wire) = request else { break; };
@@ -434,14 +437,17 @@ impl Plugin for DesktopServer {
                                         Ok(viewer) => {
                                             let (tx, rx) = mpsc::channel(8);
                                             let (stop, stopped) = watch::channel(false);
-                                            viewers.insert(stream, ViewerHandle { requests: tx, stop });
                                             let replies = replies.clone();
-                                            workers.spawn(async move {
+                                            let task = workers.spawn(async move {
+                                                // A late Close belongs to this attachment, just as its video does.
+                                                // Keep the reply guarded through the actual socket write.
+                                                let completed = replies.with_authority(Arc::new(ViewerCompletion(stopped.clone())));
                                                 let _ = viewer_loop(viewer, stream, rx, replies.clone(), stopped).await;
                                                 let mut closed = Vec::new();
-                                                if encode_muxed_frame_into(stream, &Frame::Close { code: 4404, reason: "viewer ended" }, &mut closed).is_ok() { let _ = replies.send(Bytes::from(closed)).await; }
+                                                if encode_muxed_frame_into(stream, &Frame::Close { code: 4404, reason: "viewer ended" }, &mut closed).is_ok() { let _ = tokio::time::timeout(Duration::from_secs(1), completed.send_and_wait(Bytes::from(closed))).await; }
                                                 stream
                                             });
+                                            viewers.insert(stream, ViewerHandle { task: task.id(), requests: tx, stop });
                                         }
                                         Err(_) => { send_viewer_close(&replies, stream).await; }
                                     }
@@ -691,12 +697,28 @@ struct ViewerInput {
 // A control task may retain a sender after Close. Its sender cannot retain
 // the viewer lease: every map removal publishes retirement independently.
 struct ViewerHandle {
+    task: tokio::task::Id,
     requests: mpsc::Sender<ViewerCommand>,
     stop: watch::Sender<bool>,
 }
 impl Drop for ViewerHandle {
     fn drop(&mut self) {
         self.stop.send_replace(true);
+    }
+}
+// Final Close packets retain attachment retirement independently of the stream ID.
+struct ViewerCompletion(watch::Receiver<bool>);
+impl infraternal_plugin_api::streams::Authority for ViewerCompletion {
+    fn permits(&self) -> bool {
+        !*self.0.borrow()
+    }
+    fn cancelled(&self) -> Operation<'_, ()> {
+        let mut stopped = self.0.clone();
+        Box::pin(async move {
+            if !*stopped.borrow_and_update() {
+                let _ = stopped.changed().await;
+            }
+        })
     }
 }
 enum ViewerCommand {
@@ -1031,6 +1053,147 @@ mod slow_action_tests {
         )
         .await;
     }
+    /// Retiring an attachment must not consume the replacement stream identity.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn retiring_viewer_does_not_remove_replacement_on_same_stream() {
+        let server = DesktopServer::new(1);
+        server.configure(true);
+        let (session, mut host_commands) =
+            Session::new([146; 16], "node".into(), "owner".into(), Arc::new(Owner));
+        server.registry.insert(session).unwrap();
+        let node = Arc::new(SlowNode {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let (requests, rx) = mpsc::channel(8);
+        let (tx, mut replies) = mpsc::channel(16);
+        let reply_sender = ReplySender::new(tx, "desktop", 1);
+        let worker = tokio::spawn(server.run(
+            Arc::new(Host(node)),
+            rx,
+            reply_sender.clone(),
+            Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU64::new(0)
+            })),
+        ));
+        send(
+            &requests,
+            1,
+            &Frame::Desktop(Message::Attach {
+                session_id: &[146; 16],
+                delivery: Delivery::Reliable,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            host_commands.recv().await,
+            Some(crate::session::HostCommand::Keyframe)
+        ));
+        // Hold the old task's final reply until a new attachment has control.
+        // This forces task completion after replacement without scheduler sleeps.
+        for _ in 0..16 {
+            reply_sender
+                .send(Bytes::from_static(b"held"))
+                .await
+                .unwrap();
+        }
+        send(
+            &requests,
+            1,
+            &Frame::Close {
+                code: 1000,
+                reason: "viewer closed",
+            },
+        )
+        .await;
+        send(
+            &requests,
+            1,
+            &Frame::Desktop(Message::Attach {
+                session_id: &[146; 16],
+                delivery: Delivery::Reliable,
+            }),
+        )
+        .await;
+        send(
+            &requests,
+            0,
+            &Frame::Call {
+                call_id: 1,
+                action_id: "desktop.session.control",
+                input_json: br#"{"stream_id":1}"#,
+            },
+        )
+        .await;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(3), host_commands.recv())
+                .await
+                .unwrap(),
+            Some(crate::session::HostCommand::Control { .. })
+        ));
+        for _ in 0..16 {
+            assert_eq!(replies.recv().await.unwrap().wire.as_ref(), b"held");
+        }
+        let mut first_control = false;
+        let mut old_close = false;
+        let mut old_close_allowed = true;
+        while !first_control || !old_close {
+            let reply = tokio::time::timeout(Duration::from_secs(3), replies.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match decode_muxed_frame(&reply.wire).unwrap().frame {
+                Frame::Result { call_id: 1, ok, .. } => {
+                    assert!(ok);
+                    first_control = true;
+                }
+                Frame::Close { .. } => {
+                    old_close_allowed = reply
+                        .authority
+                        .as_ref()
+                        .is_none_or(|authority| authority.permits());
+                    old_close = true;
+                }
+                _ => panic!("unexpected reply"),
+            }
+        }
+        // The replacement must remain addressable after the prior task exits.
+        send(
+            &requests,
+            0,
+            &Frame::Call {
+                call_id: 2,
+                action_id: "desktop.session.control",
+                input_json: br#"{"stream_id":1}"#,
+            },
+        )
+        .await;
+        let permitted = loop {
+            let reply = tokio::time::timeout(Duration::from_secs(3), replies.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let Frame::Result { call_id: 2, ok, .. } =
+                decode_muxed_frame(&reply.wire).unwrap().frame
+            {
+                break ok;
+            }
+        };
+        drop(requests);
+        worker.await.unwrap();
+        server.configure(false);
+        server.stopped().await;
+        assert!(
+            permitted,
+            "prior viewer completion removed the replacement attachment"
+        );
+        assert!(
+            !old_close_allowed,
+            "prior Close retained authority over the reused stream"
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn parameter_choice_is_socket_local_and_waits_for_repairing_keyframe() {
