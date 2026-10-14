@@ -168,15 +168,25 @@ def snapshot(pid):
 def shim_pids(runtime):
     """Identify only the fixture's private Unix peers; shims can own separate scopes."""
     pids = []
-    for path in (runtime / 'infraternal/sessions').glob('*.sock'):
-        with socket.socket(socket.AF_UNIX) as peer:
-            try:
-                peer.connect(str(path))
-            except (FileNotFoundError, ConnectionRefusedError):
-                continue
-            pid, uid, _ = struct.unpack('3i', peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-            assert uid == os.getuid() and pid > 0, 'fixture peer ownership'
-            pids.append(pid)
+    sessions = runtime / 'infraternal/sessions'
+    try:
+        directory = os.open(sessions, os.O_RDONLY | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return pids
+    try:
+        for path in sessions.glob('*.sock'):
+            with socket.socket(socket.AF_UNIX) as peer:
+                try:
+                    # Keep the address below sun_path's limit without changing
+                    # process cwd or following a fixture-wide runtime alias.
+                    peer.connect(f'/proc/self/fd/{directory}/{path.name}')
+                except (FileNotFoundError, ConnectionRefusedError):
+                    continue
+                pid, uid, _ = struct.unpack('3i', peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                assert uid == os.getuid() and pid > 0, 'fixture peer ownership'
+                pids.append(pid)
+    finally:
+        os.close(directory)
     return sorted(pids)
 
 
