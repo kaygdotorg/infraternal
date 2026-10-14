@@ -1,9 +1,10 @@
 <!-- Design and reproducible experiments for a non-default per-person session host [D268, #205]. -->
 # One process per person login: research prototype
 
-Status: opt-in research, not adoption. D13's default process per terminal remains
-unchanged. D268 Q20 authorizes measurement; only the owner decides adoption or
-changes D7/D13/D128/D240/D247. No new terminal engine or dependency was selected.
+Status: D270 selects this design for hardening. The prototype remains opt-in;
+D13's default process per terminal is unchanged. D268 Q20 and D270 authorize
+measurement and hardening, without changing D7/D13/D128/D240/D247. No new
+terminal engine or foundational dependency was selected.
 
 ## Boundary and identity
 
@@ -68,12 +69,11 @@ The prototype divides **64 MiB of output-ring retention** and **64 MiB of VT
 scrollback retention** over the initial batch. Each session gets the smaller
 of its requested ring capacity and the host share; VT history is capped at
 17 MiB per session. Screen pages, parser carry, writer queues, peers, snapshots,
-allocator overhead and shell/kernel memory are additional. These limits bound
-steady detached history, not total host RSS or repeated native allocation
-failures. At 1,000 sessions each history share is 67,108 bytes. This is a
+allocator overhead and shell/kernel memory are additional. These history
+shares are retention limits, not a total host RSS budget. At 1,000 sessions each history share is 67,108 bytes. This is a
 retention trade-off, not a free process-sharing win; a smaller ring triggers
-more snapshots and provides less replay history. A production adoption needs
-a dynamic byte pool and admission limits for aggregate peers/input too.
+more snapshots and provides less replay history. A production adoption still needs a dynamic whole-host byte pool and admission
+limits against the machine budget, including shell and kernel PTY memory.
 
 ## Crash containment and revocation
 
@@ -84,14 +84,32 @@ continue under ordinary child retirement. The prototype synchronously reaps
 its own killed shell; an uninterruptible child exit can stall that reactor.
 Adoption needs a nonblocking child reaper. A panic hook must never include PTY output or input in diagnostics.
 
-One existing failure invariant becomes more expensive in a shared PID:
-`terminal_native.rs` intentionally tombstones a native handle after any resize
-error because native ownership may be partially mutated. Its abandoned native
-allocations remain until process exit. Removing a Rust session from the pool
-does not reclaim those abandoned allocations while sibling sessions keep the
-host alive. Repeated native resize failures therefore invalidate a strict
-whole-host memory bound. Adoption needs transactional native resize/ownership
-or an isolated fallback/guardian design; the history caps alone do not fix it.
+Shared terminals own every native allocation through a stable boxed allocator.
+The hard per-terminal reservation ceiling is **8 MiB**, including transient
+allocations, intrusive ownership headers and mapping prefixes. Ordinary native
+payload/metadata allocations share a **256 KiB** ceiling; explicitly tagged
+page-pool allocations use the remaining reservation. Size/alignment alone
+cannot identify a page request. Native page backing is zero-filled anonymous
+memory, and its complete mapping is charged before allocation.
+
+OSC, DCS, APC, PM and SOS strings forward at most **4 KiB** to the native
+parser. Excess payload is discarded until the true terminator. The limiter
+retains syntax across fragmentation, UTF-8/C1 controls and an ST split between
+ESC and backslash; early cancellation would render the discarded suffix as
+text when a viewer continued a snapshot. Allocation refusal makes snapshots
+explicitly approximate. A native resize error releases the terminal's owned
+allocation list without traversing a potentially damaged native graph. The
+default per-session implementation keeps its existing native behavior.
+
+Shared-session pending input remains capped at **1 MiB**, with at most
+**1,024 ownership segments**; a refused new segment cannot advance an input
+cursor. Aggregate decoder, trailing and queued-transmit buffers across one
+session's peers are capped at **4 MiB**. Completed oversized transmit buffers
+release their capacity. The reactor accounts native ownership, lazy prefix,
+parser carry, ring capacity, input capacity/cursors/segments and peers against
+**16 MiB plus the configured retention shares** per session. This accounting
+bounds in-process ownership; it does not include the person's shell processes,
+kernel PTYs or allocator-wide resident fragmentation.
 
 This does not isolate the native VT engine: a segmentation fault, abort,
 allocator OOM or shared-process bug affects every session in that person's
