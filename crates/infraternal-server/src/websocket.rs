@@ -413,7 +413,7 @@ async fn run_socket(
     let mut pending_welcome = None;
     let handshake = tokio::time::timeout_at(
         handshake_deadline,
-        while_authorized(
+        while_authorized_value(
             &state,
             &user_id,
             &session_token,
@@ -648,26 +648,45 @@ async fn run_socket(
 
 /// Interrupt pending work on authority loss. Subscribing before the read closes the missed-wakeup window.
 /// Checks on the ready branch prevent a late backend reply winning against committed revocation.
-pub(super) async fn while_authorized<T: Send>(
+pub(super) async fn while_authorized(
     state: &WebSocketState,
     user: &str,
     token: &str,
     renew: bool,
-    operation: impl std::future::Future<Output = Result<T, ()>> + Send,
-) -> Result<T, ()> {
+    operation: impl std::future::Future<Output = Result<(), ()>> + Send,
+) -> Result<(), ()> {
     // Sharing the watchdog across operation future types bounds transport code
     // size as compiled plugins grow. One short-lived allocation replaces each
     // separate watchdog state machine; operation cancellation stays unchanged.
     while_authorized_operation(state, user, token, renew, operation.boxed()).await
 }
 
-async fn while_authorized_operation<T: Send>(
+/// Keep owned results behind the shared guard until its final authority check.
+/// Only value-returning operations need this slot; ordinary frames retain the
+/// existing boxed operation's allocation payload and common unit watchdog.
+async fn while_authorized_value<T: Send>(
     state: &WebSocketState,
     user: &str,
     token: &str,
     renew: bool,
-    operation: infraternal_plugin_api::Operation<'_, Result<T, ()>>,
+    operation: impl std::future::Future<Output = Result<T, ()>> + Send,
 ) -> Result<T, ()> {
+    let mut value = None;
+    while_authorized(state, user, token, renew, async {
+        value = Some(operation.await?);
+        Ok(())
+    })
+    .await?;
+    value.ok_or(())
+}
+
+async fn while_authorized_operation(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+    renew: bool,
+    operation: infraternal_plugin_api::Operation<'_, Result<(), ()>>,
+) -> Result<(), ()> {
     let mut revocations = state.auth.revocation_events();
     let mut expiry = authority_deadline(state, user, token, renew).await?;
     let mut check = tokio::time::interval_at(
@@ -1356,7 +1375,7 @@ where
                 // proofs, input and revocation; never suspend the multiplexed receive loop.
                 // The existing bounded call queue owns cancellation on socket teardown.
                 pending_plugin_calls.spawn(async move {
-                    let result = while_authorized(&state, &user, &token, false, async {
+                    let result = while_authorized_value(&state, &user, &token, false, async {
                         Ok(open_terminal(&state, &user, &token, size, host).await)
                     })
                     .await

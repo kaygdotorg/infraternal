@@ -111,7 +111,7 @@ async fn held_authority_operation(completion: Completion) -> Result<(), ()> {
         }
         Ok(value)
     };
-    let guarded = while_authorized(&state, &user, token, false, operation);
+    let guarded = while_authorized_value(&state, &user, token, false, operation);
     tokio::pin!(guarded);
     tokio::select! {
         result = &mut acquired => result.unwrap(),
