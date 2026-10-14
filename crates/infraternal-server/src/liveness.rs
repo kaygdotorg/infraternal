@@ -29,6 +29,12 @@ impl Liveness {
     }
 
     pub(crate) fn ping(&mut self) -> (u64, u64) {
+        // Begin a response deadline only when the peer has something to answer.
+        // SQL/writer scheduling before this probe is not evidence of peer loss.
+        // Never move an outstanding deadline: pipelining cannot mask silence.
+        if self.sent == self.acked {
+            self.answered = Instant::now();
+        }
         self.sent = u64::try_from(self.origin.elapsed().as_micros())
             .unwrap_or(u64::MAX)
             .max(self.sent.saturating_add(1));
@@ -51,13 +57,30 @@ impl Liveness {
     }
 
     pub(crate) fn expired(&self) -> bool {
-        self.answered.elapsed() > self.budget
+        self.sent > self.acked && self.answered.elapsed() > self.budget
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_server_probe_does_not_expire_an_answered_route() {
+        let mut route = Liveness::new();
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        route.pong(nonce, stamp);
+        // Server-side authorization or writer work can postpone the next probe.
+        // The peer cannot answer a probe that has not been issued yet.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert!(!route.expired(), "all issued probes were answered");
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        route.pong(nonce, stamp);
+        assert_eq!(route.acked, nonce, "the timely answer must renew the route");
+        assert!(!route.expired());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn missing_replies_expire_even_with_probes_in_flight() {
@@ -67,6 +90,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(150)).await;
         route.pong(nonce, stamp);
         assert!(!route.expired());
+        route.ping();
         tokio::time::advance(Duration::from_millis(175)).await;
         route.ping();
         // A stale or unsolicited Pong cannot hide a one-direction failure.
