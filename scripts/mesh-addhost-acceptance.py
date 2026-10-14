@@ -127,6 +127,25 @@ def lifecycle(args, venue, index):
                 docker("exec", target, "tc", "qdisc", "add", "dev", device, "root", "netem", "delay", "75ms")
         environment = dict(os.environ, ACCEPTANCE_COUNTER_ADDR=node_ip + ":4931")
         if args.packet_diagnostics:
+            # Bracket only fixed public fixture barriers; retain no rule body.
+            nft_observer = scratch / "nft"
+            nft_observer.write_text(
+                "#!/usr/bin/python3\n"
+                '"""Record public fixture barrier clocks without recording rules."""\n'
+                "import json, subprocess, sys, time\nfrom pathlib import Path\n"
+                "body = sys.stdin.buffer.read() if sys.argv[1:] == ['-f', '-'] else None\n"
+                "start = time.time_ns() // 1000\n"
+                f"result = subprocess.run([{str(frontend)!r}, *sys.argv[1:]], input=body)\n"
+                "finish = time.time_ns() // 1000\n"
+                "if body is not None:\n"
+                " for tag in ['acceptance_standing_fence', 'acceptance_cut']:\n"
+                "  if ('table inet ' + tag).encode() in body:\n"
+                f"   with Path({str(evidence / 'fixture-barriers.jsonl')!r}).open('a') as output:\n"
+                "    output.write(json.dumps(dict(barrier=tag, removed=body.startswith(b'delete'), before_us=start, completed_us=finish, exit=result.returncode)) + '\\n')\n"
+                "sys.exit(result.returncode)\n"
+            )
+            nft_observer.chmod(0o700)
+            environment["PATH"] = str(scratch) + os.pathsep + environment["PATH"]
             # Header summaries only: never capture payloads, netlink messages
             # or identity material. Both processes belong to this lifecycle.
             for name, pid in (("node", node_pid), ("server", server_pid)):
@@ -155,6 +174,14 @@ def lifecycle(args, venue, index):
             capture.flush()
             assert Path(capture.name).stat().st_size, "owned packet observer recorded no UDP headers"
         (evidence / "exit").write_text(str(result.returncode))
+        if args.packet_diagnostics:
+            # Only this disposable node's daemon unit, never host journals.
+            with (evidence / "node-daemon.log").open("w") as output:
+                subprocess.run([
+                    "docker", "exec", target, "journalctl", "--no-pager", "-o", "short-precise",
+                    "_SYSTEMD_UNIT=infraternal-agent.service", "+",
+                    "_SYSTEMD_USER_UNIT=infraternal-agent.service",
+                ], stdout=output, stderr=subprocess.DEVNULL, check=False)
         metadata_source = "import json; from pathlib import Path; paths=['/var/lib/infraternal/state','/var/lib/infraternal/sessions']; print(json.dumps({p:dict(uid=Path(p).stat().st_uid,mode=oct(Path(p).stat().st_mode & 0o777)) for p in paths if Path(p).exists()}))"
         metadata = subprocess.check_output(["docker", "exec", target, "python3", "-c", metadata_source])
         (evidence / "node-state-metadata.json").write_bytes(metadata)
