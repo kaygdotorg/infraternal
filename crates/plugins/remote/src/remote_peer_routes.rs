@@ -29,6 +29,20 @@ pub(super) struct Recent {
     bytes: usize,
 }
 impl Recent {
+    /// Read existing bounds and scheduling state without hot-path counters.
+    #[cfg(feature = "test-support")]
+    pub fn history(&self) -> [usize; 4] {
+        [
+            self.datagrams.len(),
+            self.bytes,
+            self.datagrams
+                .iter()
+                .filter(|sent| sent.copy_at.is_some())
+                .count(),
+            self.datagrams.iter().filter(|sent| sent.returning).count(),
+        ]
+    }
+
     #[cfg(test)]
     pub fn keep(&mut self, transmit: &Transmit<'_>) {
         self.keep_copying(transmit, false);

@@ -307,8 +307,20 @@ async fn physical_counters_include_both_source_paths() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Optimized transport-only measurement on the perf VM under its shared benchmark lock."]
-#[allow(clippy::too_many_lines)]
 async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
+    measure_mesh_probe_and_copy_cost(&[false, true], false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "Separate fresh-copy cohort on the perf VM under its shared benchmark lock."]
+async fn fresh_copy_from_admission_at_one_thousand_transports() {
+    measure_mesh_probe_and_copy_cost(&[true], true).await;
+}
+
+/// Retain the original same-cohort diagnostic and measure a separately labelled
+/// fresh cohort without changing its connections, windows, or health criteria.
+#[allow(clippy::too_many_lines)]
+async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
     let ca = root();
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
@@ -388,14 +400,16 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
         .unwrap();
         client.set_default_client_config(config.clone());
         let pending = client.connect(enrolled, "localhost").unwrap();
-        peers.push(
-            bindings
-                .route_peer(
-                    SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), port),
-                    SocketAddr::new(Ipv4Addr::new(127, 0, 0, 4).into(), port),
-                )
-                .unwrap(),
-        );
+        if !fresh_copy {
+            peers.push(
+                bindings
+                    .route_peer(
+                        SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), port),
+                        SocketAddr::new(Ipv4Addr::new(127, 0, 0, 4).into(), port),
+                    )
+                    .unwrap(),
+            );
+        }
         clients.push(client);
         paths.push(path);
         drivers.push(driver);
@@ -416,17 +430,40 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
         .map(|(_, connection)| connection)
         .collect();
     assert_eq!(accepted.len(), CONNECTIONS);
+    if fresh_copy {
+        // All mutual TLS handshakes have completed. Create each fresh alias and
+        // enable its existing negotiated-copy flag synchronously before any
+        // mesh selection or probe can populate its retained history.
+        for path in &paths {
+            let port = path.local_addr().unwrap().port();
+            let peer = bindings
+                .route_peer(
+                    SocketAddr::new(Ipv4Addr::new(127, 0, 0, 3).into(), port),
+                    SocketAddr::new(Ipv4Addr::new(127, 0, 0, 4).into(), port),
+                )
+                .unwrap();
+            peer.set_backup(true);
+            peers.push(peer);
+        }
+    }
     let mut reports = Vec::new();
     let mut healthy = true;
     let client_addresses: Vec<_> = paths
         .iter()
         .map(|path| path.local_addr().unwrap())
         .collect();
-    for backup in [false, true] {
+    for &backup in profiles {
         // Observe the physical ramp separately: failed guards stop generating
         // probes before steady windows, hiding a startup transmission burst.
         let traffic_before = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_before = owned_udp_drops(&[enrolled, mesh], &client_addresses);
+        let history_before = bindings.retained_history().unwrap();
+        if fresh_copy {
+            assert_eq!(
+                history_before, [0; 4],
+                "fresh peers must have no prior mesh history"
+            );
+        }
         for peer in &peers {
             peer.set_backup(backup);
         }
@@ -482,10 +519,12 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
         let ramp_interruptions = finished_watchers(&mut watchers);
         let traffic_after_ramp = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_after_ramp = owned_udp_drops(&[enrolled, mesh], &client_addresses);
+        let history_after_ramp = bindings.retained_history().unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
         let warmup_interruptions = finished_watchers(&mut watchers);
         let traffic_after_warmup = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_after_warmup = owned_udp_drops(&[enrolled, mesh], &client_addresses);
+        let history_after_warmup = bindings.retained_history().unwrap();
         let steady_cohort_valid = proof_failures == 0
             && ramp_interruptions.is_empty()
             && warmup_interruptions.is_empty()
@@ -516,7 +555,7 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
             .filter(|connection| connection.close_reason().is_none())
             .count();
         healthy &= steady_cohort_valid && false_interruptions == 0 && live == CONNECTIONS;
-        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 20 } else { 0 },"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"owned_udp_drops":{"before":udp_drops_before,"after_ramp":udp_drops_after_ramp,"after_warmup":udp_drops_after_warmup,"after_windows":owned_udp_drops(&[enrolled,mesh],&client_addresses),"observation":"four_per_profile_outside_timed_windows"},"startup":{"physical_traffic_before":traffic_before,"physical_traffic_after_ramp":traffic_after_ramp,"physical_traffic_after_warmup":traffic_after_warmup,"physical_traffic_units":"cumulative_payload_bytes_and_successful_udp_datagrams_including_GSO_segments","proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
+        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 20 } else { 0 },"retained_server_history":{"units":["entries","payload_bytes","armed_entries","returning_entries"],"before":history_before,"after_ramp":history_after_ramp,"after_warmup":history_after_warmup,"after_windows":bindings.retained_history().unwrap(),"observation":"aggregate_existing_fields_outside_timed_windows"},"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"owned_udp_drops":{"before":udp_drops_before,"after_ramp":udp_drops_after_ramp,"after_warmup":udp_drops_after_warmup,"after_windows":owned_udp_drops(&[enrolled,mesh],&client_addresses),"observation":"four_per_profile_outside_timed_windows"},"startup":{"physical_traffic_before":traffic_before,"physical_traffic_after_ramp":traffic_after_ramp,"physical_traffic_after_warmup":traffic_after_warmup,"physical_traffic_units":"cumulative_payload_bytes_and_successful_udp_datagrams_including_GSO_segments","proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
         watchers.abort_all();
         while watchers.join_next().await.is_some() {}
         for path in &paths {
@@ -526,20 +565,28 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
             peer.set_backup(false);
         }
     }
-    let report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":"no_copy_then_copy_same_retained_cohort","limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh","correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations","CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
+    let report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":if fresh_copy { "fresh_copy_only_new_cohort" } else { "no_copy_then_copy_same_retained_cohort" },"fresh_copy_cohort":fresh_copy,"peer_binding_birth":if fresh_copy { "after_all_mutual_TLS_before_any_mesh_selection_backup_enabled_immediately" } else { "before_TLS_with_profile_flags_later" },"limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh",if fresh_copy { "correlated_windows_of_one_fresh_cohort_no_previous_profile" } else { "correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations" },"CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
     let scratch = PathBuf::from(
         std::env::var_os("INFRATERNAL_MESH_PROOF_SCRATCH")
             .expect("set external proof evidence directory"),
     );
     std::fs::create_dir_all(&scratch).unwrap();
     std::fs::write(
-        scratch.join("mesh-probe-copy-cost-1000.json"),
+        scratch.join(if fresh_copy {
+            "mesh-fresh-copy-cost-1000.json"
+        } else {
+            "mesh-probe-copy-cost-1000.json"
+        }),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
     let startup: Vec<_> = report["profiles"].as_array().unwrap().iter().map(|profile| serde_json::json!({"profile":profile["profile"],"startup":profile["startup"],"steady_cohort_valid_at_start":profile["steady_cohort_valid_at_start"]})).collect();
     std::fs::write(
-        scratch.join("mesh-probe-copy-startup-1000.json"),
+        scratch.join(if fresh_copy {
+            "mesh-fresh-copy-startup-1000.json"
+        } else {
+            "mesh-probe-copy-startup-1000.json"
+        }),
         serde_json::to_vec_pretty(&startup).unwrap(),
     )
     .unwrap();
@@ -554,6 +601,6 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
     drop((connections, accepted, drivers, peers, lease));
     assert!(
         healthy,
-        "healthy authenticated path watchers must remain live throughout both profiles"
+        "healthy authenticated path watchers must remain live throughout every requested profile"
     );
 }

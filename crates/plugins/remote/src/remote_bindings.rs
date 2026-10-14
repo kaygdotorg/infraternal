@@ -230,6 +230,23 @@ impl Bindings {
             .unwrap_or(logical)
     }
 
+    /// Aggregate retained entries, payload bytes, armed entries and return
+    /// entries from existing state for opt-in snapshots outside measured windows.
+    ///
+    /// # Errors
+    /// Returns an error if the routing state lock is poisoned.
+    #[cfg(feature = "test-support")]
+    pub fn retained_history(&self) -> io::Result<[usize; 4]> {
+        let mut peers = self.peers.lock().map_err(|_| io::ErrorKind::Other)?;
+        let mut total = [0; 4];
+        for peer in peers.iter_mut() {
+            for (sum, value) in total.iter_mut().zip(peer.recent.history()) {
+                *sum += value;
+            }
+        }
+        Ok(total)
+    }
+
     /// Add one bound destination socket; the endpoint driver is woken to poll it.
     ///
     /// # Errors
