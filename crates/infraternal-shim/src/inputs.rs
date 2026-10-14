@@ -14,6 +14,8 @@ pub(super) struct Inputs {
     pub(super) active_writer: Option<u32>,
     cursors: HashMap<u32, InputCursors>,
     segments: VecDeque<(u32, usize)>,
+    #[cfg(feature = "process-per-user")]
+    segment_limit: usize,
 }
 impl Default for Inputs {
     fn default() -> Self {
@@ -33,7 +35,28 @@ impl Inputs {
                 },
             )]),
             segments: VecDeque::new(),
+            #[cfg(feature = "process-per-user")]
+            segment_limit: MAX_FRAME,
         }
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn for_host(size: (u16, u16, u16, u16)) -> Self {
+        Self {
+            segment_limit: 1024,
+            ..Self::with_geometry(size)
+        }
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn available(&self, writer: u32, queued: usize) -> usize {
+        if self.segments.len() >= self.segment_limit
+            && self
+                .segments
+                .back()
+                .is_some_and(|(last, _)| *last != writer)
+        {
+            return 0;
+        }
+        MAX_FRAME - queued
     }
     pub(super) fn select(&mut self, writer: u32, size: (u16, u16, u16, u16)) -> io::Result<()> {
         if self.cursors.contains_key(&writer) {
@@ -95,6 +118,16 @@ impl Inputs {
             .cursors
             .get_mut(&writer)
             .ok_or_else(super::invalid_input)?;
+        #[cfg(feature = "process-per-user")]
+        if seq.saturating_add(bytes.len() as u64) > state.accepted
+            && self.segments.len() >= self.segment_limit
+            && self
+                .segments
+                .back()
+                .is_some_and(|(last, _)| *last != writer)
+        {
+            return Err(super::invalid_input());
+        }
         let before = queue.len();
         state.accept(seq, bytes, queue)?;
         let added = queue.len() - before;
@@ -172,5 +205,35 @@ mod tests {
         inputs.select(512, (80, 24, 0, 0)).unwrap();
         assert!(inputs.get(Some(513)).is_err());
         assert_eq!(inputs.get(Some(512)).unwrap().written, 0);
+    }
+}
+
+#[cfg(all(test, feature = "process-per-user"))]
+mod host_budget_tests {
+    //! Segment refusal preserves accepted offsets and resumes when a slot drains.
+    use super::*;
+    #[test]
+    fn alternating_writers_cannot_expand_shared_host_bookkeeping_without_bound() {
+        let mut inputs = Inputs::for_host((80, 24, 0, 0));
+        inputs.select(7, (80, 24, 0, 0)).unwrap();
+        inputs.select(9, (80, 24, 0, 0)).unwrap();
+        let mut queue = VecDeque::new();
+        for index in 0..1024 {
+            let writer = if index % 2 == 0 { 7 } else { 9 };
+            let accepted = inputs.get(Some(writer)).unwrap().accepted;
+            inputs.accept(writer, accepted, b"x", &mut queue).unwrap();
+        }
+        assert_eq!(inputs.available(7, queue.len()), 0);
+        let accepted = inputs.get(Some(7)).unwrap().accepted;
+        assert!(inputs.accept(7, accepted, b"x", &mut queue).is_err());
+        assert_eq!(inputs.get(Some(7)).unwrap().accepted, accepted);
+        assert_eq!(queue.len(), 1024);
+        assert!(inputs.segments.capacity() <= 1024);
+        // A duplicate remains idempotent even at the cap.
+        inputs.accept(7, accepted - 1, b"x", &mut queue).unwrap();
+        inputs.advance(1).unwrap();
+        queue.pop_front();
+        inputs.accept(7, accepted, b"x", &mut queue).unwrap();
+        assert_eq!(inputs.get(Some(7)).unwrap().accepted, accepted + 1);
     }
 }

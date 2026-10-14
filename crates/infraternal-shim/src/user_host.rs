@@ -178,7 +178,7 @@ impl Session {
         Ok(Self {
             terminal: LazyTerminal::new(config.cols, config.rows, history),
             ring: Ring::new(config.ring_capacity),
-            cursors: Inputs::with_geometry((config.cols, config.rows, 0, 0)),
+            cursors: Inputs::for_host((config.cols, config.rows, 0, 0)),
             config,
             listener,
             path,

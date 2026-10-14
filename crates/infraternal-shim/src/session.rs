@@ -867,11 +867,15 @@ fn handle<'a>(
         }
         let writer = p.writer.ok_or_else(invalid)?;
         let accepted = cursors.get(p.writer)?.accepted;
+        #[cfg(not(feature = "process-per-user"))]
+        let available = MAX_FRAME - input.len();
+        #[cfg(feature = "process-per-user")]
+        let available = cursors.available(writer, input.len());
         if p.input_waits(
             offset.unwrap_or(accepted),
             bytes.len(),
             accepted,
-            MAX_FRAME - input.len(),
+            available,
             reserved,
         )? {
             return Err(io::ErrorKind::WouldBlock.into());
