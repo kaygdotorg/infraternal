@@ -144,7 +144,7 @@ Reviews and fixes run at the same time as the next lane's build.
   | Target | Measured ceiling |
   | --- | ---: |
   | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,570,688 bytes |
+  | `aarch64-unknown-linux-musl` | 19,569,568 bytes |
 
   These ceilings retain the lower recorded per-target measurements from #198
   and #201 while combined-source release artifacts are checked on #201. The
