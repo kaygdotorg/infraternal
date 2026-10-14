@@ -85,6 +85,23 @@ class SampleAccounting(unittest.IsolatedAsyncioTestCase):
             await browser.sample_probe()
         self.assertEqual(browser.last_pong, 1.999)
 
+    async def test_late_local_callback_preserves_only_the_unissued_reply_allowance(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.last_ping = 10
+        browser.last_pong = 10.001
+        browser.rtt = .001
+        browser.adaptive = True
+        browser.fast_until = 0
+        browser.next_nonce = 1 << 63
+        browser.pending = {}
+        browser.send = AsyncMock()
+        with patch.object(fixture.time, 'monotonic', side_effect=[10.036, 10.045]):
+            await browser.sample_probe()
+            self.assertAlmostEqual(browser.last_pong, 10.012)
+            await browser.sample_probe()
+            self.assertAlmostEqual(browser.last_pong, 10.012, msg='outstanding deadline cannot move')
+        self.assertEqual(browser.send.await_count, 1)
+
     async def test_exited_thread_invalidates_sample(self):
         # Dropping a worker must not turn its accumulated CPU into apparent idle.
         with patch.object(fixture, 'snapshot', side_effect=[{1: (100, 0, 2), 2: (500, 0, 7)}, {1: (110, 0, 3)}]), patch.object(fixture.asyncio, 'sleep', new=AsyncMock()), patch.object(Path, 'read_text', return_value='worker'):

@@ -74,11 +74,13 @@ class Browser:
     async def sample_probe(self):
         """Share one cadence between timer callbacks and incoming server probes."""
         now = time.monotonic()
-        if now + 1e-12 < self.next_probe_at(now):
+        due = self.next_probe_at(now)
+        if now + 1e-12 < due:
             return
-        grace = 2 if self.rtt is None else self.rtt + .05
-        if getattr(self, 'adaptive', False) and not self.pending and (self.rtt is None or now - self.last_pong >= grace):
-            self.last_pong = now
+        if getattr(self, 'adaptive', False) and not self.pending:
+            # Match local callback-delay accounting only before a new request.
+            # Once a proof is pending, neither timers nor sends move its deadline.
+            self.last_pong = now if self.rtt is None else self.last_pong + max(0, now - max(due, self.last_pong))
         # Publish the sample before yielding: receive and timer must not double-send.
         self.last_ping = now
         nonce = self.next_nonce
