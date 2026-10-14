@@ -3,10 +3,16 @@ import { ProvisioningRun } from "../src/provisioning-client";
 import { TerminalClient } from "../src/terminal";
 import { MuxConnection } from "../src/connection";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
+import { Terminal as RendererTerminal } from "../vendor/ghostty-web";
 
 const epoch = (): number => performance.timeOrigin + performance.now();
 const records: Array<{ step: string; epoch_ms: number; bytes?: number }> = [];
 const mark = (step: string, bytes?: number): void => { records.push({ step, epoch_ms: epoch(), ...(bytes === undefined ? {} : { bytes }) }); };
+const rendererOpen = RendererTerminal.prototype.open;
+RendererTerminal.prototype.open = function (parent: HTMLElement): void {
+  mark("renderer_dom_open_started");
+  try { rendererOpen.call(this, parent); } finally { mark("renderer_dom_open_done"); }
+};
 const OriginalSocket = WebSocket;
 /** Observe only public protocol boundaries; capabilities and terminal contents stay in memory. */
 class TimingSocket extends OriginalSocket {
@@ -17,13 +23,13 @@ class TimingSocket extends OriginalSocket {
     this.addEventListener("close", (event) => mark(`socket_closed_${event.code}`));
     this.addEventListener("message", (event: MessageEvent<unknown>) => {
       if (!(event.data instanceof ArrayBuffer)) return;
-      try { decoder.feed(new Uint8Array(event.data), (stream, frame) => { if (frame.type === "Close") mark(`wire_close_${frame.code}_stream_${stream}`); }); } catch { mark("wire_decode_failed"); }
+      try { decoder.feed(new Uint8Array(event.data), (stream, frame) => { if (frame.type === "Close") mark(`wire_close_${frame.code}_stream_${stream}`); if (stream === 0 && frame.type === "Pong") mark("wire_received_Pong"); }); } catch { mark("wire_decode_failed"); }
     });
   }
   override send(data: Parameters<WebSocket["send"]>[0]): void {
     const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : undefined;
     if (bytes) {
-      try { this.sent.feed(bytes, (_stream, frame) => { if (frame.type === "Hello" || frame.type === "AttachTerm" || frame.type === "Credit") mark(`wire_sent_${frame.type}`); }); } catch { mark("wire_encode_failed"); }
+      try { this.sent.feed(bytes, (stream, frame) => { if (frame.type === "Hello" || frame.type === "AttachTerm" || frame.type === "Credit" || (stream === 0 && frame.type === "Ping")) mark(`wire_sent_${frame.type}`); }); } catch { mark("wire_encode_failed"); }
     }
     super.send(data);
   }

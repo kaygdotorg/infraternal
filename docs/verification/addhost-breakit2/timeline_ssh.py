@@ -9,6 +9,9 @@ import sys
 import time
 
 arguments = sys.argv[1:]
+if "-M" in arguments and os.environ.get("ADDHOST_SSH_COMPRESSION") == "1":
+    # Public fixture-only candidate; the shipping transport is unchanged.
+    arguments = ["-C", *arguments]
 if "-M" not in arguments:
     # A trusted experiment changes only the retained prompt command's shared
     # pipe, before exec; it neither reads input nor changes full-install pipes.

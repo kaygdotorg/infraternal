@@ -4,6 +4,18 @@ use crate::embedded::{
     AgentError, AttachmentHandle, EmbeddedAgent, SessionInventoryState, TerminalOutput,
     TerminalSize,
 };
+/// Public fixture clocks distinguish browser stalls from serialized backend work.
+#[cfg(test)]
+fn addhost_timeline(step: &'static str) {
+    if std::env::var_os("ADDHOST_BROWSER_TIMELINE").is_some()
+        && let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+    {
+        eprintln!(
+            "{{\"source\":\"socket\",\"step\":\"{step}\",\"epoch_ms\":{}}}",
+            now.as_secs_f64() * 1000.0
+        );
+    }
+}
 use crate::{
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
@@ -1271,6 +1283,8 @@ where
     // The surrounding watchdog authenticates every frame, including attach, input and credit.
     match decoded.frame {
         Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
+            #[cfg(test)]
+            addhost_timeline("control_ping");
             send_frame(
                 sink,
                 CONTROL_STREAM,
@@ -1414,6 +1428,8 @@ where
             last_out_seq,
             last_in_seq,
         } if stream_id != 0 && stream_id % 2 == 1 => {
+            #[cfg(test)]
+            addhost_timeline("attach_received");
             if attachments.contains_key(&stream_id) || attachments.len() >= MAX_ATTACHMENTS {
                 return Err(());
             }
@@ -1468,6 +1484,8 @@ where
                     .map_err(|_| ())?,
             )
             .await?;
+            #[cfg(test)]
+            addhost_timeline("attach_agent_resolved");
             let attachment = tokio::time::timeout(
                 BACKEND_TIMEOUT,
                 agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
@@ -1475,6 +1493,8 @@ where
             .await
             .map_err(|_| ())?
             .map_err(|_| ())?;
+            #[cfg(test)]
+            addhost_timeline("attach_sent");
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
             }

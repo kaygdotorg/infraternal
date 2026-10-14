@@ -29,6 +29,7 @@ The driver uses these additional environment variables:
 | `ADDHOST_TIMELINE_TARGET` | Same unique Docker target name passed to `--container-name`. |
 | `ADDHOST_FAST_STEP_PROFILE=1` | Enable target shell boundaries. |
 | `ADDHOST_PROMPT_BUDGET_MS=1500` | Fail after byte-integrity and installation proof when paint exceeds this post-authentication budget. |
+| `ADDHOST_SSH_COMPRESSION=1` | Fixture-only compressed SSH master for a paired experiment; shipping configuration is unchanged. |
 
 Browser records use `performance.timeOrigin + performance.now()`. Server and
 SSH records use epoch milliseconds; target shell records use epoch nanoseconds.
