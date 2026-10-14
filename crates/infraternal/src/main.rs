@@ -10,6 +10,8 @@ mod embedded_cli;
 mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
+#[cfg(feature = "process-per-user")]
+mod user_host_cli;
 
 #[cfg(any(feature = "remote", all(feature = "plugin-agent", target_os = "linux")))]
 mod output;
@@ -1035,6 +1037,10 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     };
     let state = matches.get_one::<String>("state").map(PathBuf::from);
     let detach = matches.get_flag("detach");
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<i64>("host_sessions").is_some() {
+        return user_host_cli::run(matches);
+    }
     match run_shim(
         session,
         uid,

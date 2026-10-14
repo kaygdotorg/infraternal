@@ -261,6 +261,8 @@ fn session_shim_action() -> ActionDefinition {
         ],
         JsonSchema::object(
             [
+                #[cfg(feature = "process-per-user")]
+                ("host_sessions".to_owned(), JsonSchema::integer("Research-only count of sessions in one existing person login; 1–1000.")),
                 (
                     "session".to_owned(),
                     JsonSchema::string("Validated session identifier."),

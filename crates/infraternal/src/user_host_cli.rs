@@ -1,0 +1,47 @@
+//! Explicit research-only batch launch through the existing hidden shim action [D7/D268].
+use crate::{ArgMatches, ExitCode, PathBuf, shim_integer};
+use infraternal_shim::{Config, run_host};
+
+pub(super) fn run(matches: &ArgMatches) -> ExitCode {
+    match start(matches) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("session host startup failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+fn start(matches: &ArgMatches) -> std::io::Result<()> {
+    let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    let count: usize = shim_integer(matches, "host_sessions", None).map_err(|_| invalid())?;
+    let session = matches.get_one::<String>("session").ok_or_else(invalid)?;
+    if count == 0
+        || count > 1000
+        || session.len() != 32
+        || !session.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(invalid());
+    }
+    let origin = u128::from_str_radix(session, 16).map_err(|_| invalid())?;
+    let mut config = Config::new(
+        origin.to_be_bytes(),
+        shim_integer(matches, "uid", None).map_err(|_| invalid())?,
+    );
+    config.cols = shim_integer(matches, "cols", Some(80)).map_err(|_| invalid())?;
+    config.rows = shim_integer(matches, "rows", Some(24)).map_err(|_| invalid())?;
+    config.ring_capacity =
+        shim_integer(matches, "ring_capacity", Some(8 * 1024 * 1024)).map_err(|_| invalid())?;
+    config.state = matches.get_one::<String>("state").map(PathBuf::from);
+    // This mode measures real account shells, never the fixed readiness canary.
+    if matches.get_flag("readiness") || matches.get_flag("detach") {
+        return Err(invalid());
+    }
+    let configs = (0..count)
+        .map(|i| {
+            let mut config = config.clone();
+            config.session = origin.wrapping_add(i as u128).to_be_bytes();
+            config
+        })
+        .collect();
+    run_host(configs)
+}
