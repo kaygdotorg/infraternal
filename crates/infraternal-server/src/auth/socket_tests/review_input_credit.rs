@@ -3,12 +3,12 @@ use super::*;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn review_full_input_writer_preserves_browser_control_progress() {
     browser_credit_case(false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn browser_input_overload_retires_only_the_terminal_stream() {
     browser_credit_case(true).await;
 }
@@ -16,6 +16,11 @@ async fn browser_input_overload_retires_only_the_terminal_stream() {
 /// Share the actual full-window setup between progress and stream-overload checks.
 async fn browser_credit_case(overload: bool) {
     let _guard = SERIAL.lock().await;
+    // These assert frame ordering under backpressure, not the host's ability
+    // to schedule SQLite and multi-megabyte writes inside a learned lease.
+    // Keep production deadlines stationary across the real I/O, as in the
+    // other socket ordering fixtures; unexpected reconnects still fail.
+    let _clock = FrozenSocketTime::new().await;
     let f = fixture().await;
     let session = [71_u8; 16];
     sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,unixepoch(),unixepoch())")
