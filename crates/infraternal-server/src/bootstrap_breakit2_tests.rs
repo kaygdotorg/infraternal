@@ -76,8 +76,8 @@ impl SshSession for TimedSession {
         })
     }
 }
-struct TimedTransport {
-    adapter: OpenSsh,
+pub(super) struct TimedTransport {
+    pub(super) adapter: OpenSsh,
 }
 impl SshTransport for TimedTransport {
     fn open(
@@ -129,9 +129,9 @@ impl AuthProvider for FixtureProvider {
         Box::pin(async { Ok(None) })
     }
 }
-struct FixtureTransport {
-    transport: Arc<dyn SshTransport>,
-    private: Mutex<Option<Secret>>,
+pub(super) struct FixtureTransport {
+    pub(super) transport: Arc<dyn SshTransport>,
+    pub(super) private: Mutex<Option<Secret>>,
 }
 impl SshTransport for FixtureTransport {
     fn open(
@@ -158,7 +158,17 @@ impl SshTransport for FixtureTransport {
 
 // Keep diagnosis in a test adapter: the production backend/functions remain
 // unchanged, and this prints only fixed boundaries and typed local errors.
-struct ObservedBackend(Arc<RemoteBackend>);
+pub(super) type CanaryHook = Arc<dyn Fn() -> Result<(), Failure> + Send + Sync>;
+pub(super) type CanaryReturnHook = Arc<
+    dyn Fn(Uuid, Option<Failure>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+pub(super) struct ObservedBackend(
+    pub(super) Arc<RemoteBackend>,
+    pub(super) Option<CanaryHook>,
+    pub(super) Option<CanaryReturnHook>,
+);
 impl Backend for ObservedBackend {
     fn record_failure(&self, t: &Target, h: Option<Uuid>, p: Step, f: &Failure) {
         self.0.record_failure(t, h, p, f);
@@ -206,8 +216,17 @@ impl Backend for ObservedBackend {
     }
     fn terminal_canary<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
         Box::pin(async move {
-            if std::env::var_os("BREAKIT2_DIAG").is_none() {
-                return measured("readiness", self.0.terminal_canary(a, h)).await;
+            if let Some(before_canary) = &self.1 {
+                before_canary()?;
+            }
+            if self.1.is_some() || self.2.is_some() || std::env::var_os("BREAKIT2_DIAG").is_none() {
+                // Optional observations run only after the unmodified production
+                // canary returns, before Bootstrap can roll back its authority.
+                let result = measured("readiness", self.0.terminal_canary(a, h)).await;
+                if let Some(after_canary) = &self.2 {
+                    after_canary(h, result.as_ref().err().cloned()).await;
+                }
+                return result;
             }
             let actor = self.0.actor(a, h).await?;
             let result = actor
@@ -437,7 +456,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     });
     let runner = Bootstrap::new(
         transport.clone(),
-        Arc::new(ObservedBackend(f.backend.clone())),
+        Arc::new(ObservedBackend(f.backend.clone(), None, None)),
         BinaryPaths {
             x86_64: binary.clone(),
             aarch64: binary,
