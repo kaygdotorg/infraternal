@@ -3,8 +3,10 @@
 
 The private fixture persists only a hash of its in-memory browser capability.
 Scheduler activations are schedule-ins (schedstat field three), not hardware interrupts.
-The default profile sends the browser’s 25 ms probes in both directions;
-responses-only remains available to identify the earlier incomplete fixture.
+The default profile preserves the original 25ms browser workload;
+--adaptive-browser mirrors the healthy 40ms cadence. Responses-only identifies
+the earlier incomplete fixture. Client timer counts describe this equivalent
+wire driver, not a browser process CPU measurement.
 """
 import argparse
 import asyncio
@@ -50,17 +52,30 @@ class Browser:
         self.rtt = None
         self.last_ping = float('-inf')
         self.next_nonce = 1 << 63
+        self.adaptive = False
+        self.fast_until = 0
+        self.proof_changed = asyncio.Event()
+        self.timer_wakeups = 0
+        self.probes_sent = 0
 
     def start_probes(self):
         """Match the shared browser connection cadence and correlated proof deadline."""
         self.last_pong = time.monotonic()
+        self.fast_until = self.last_pong + .250
         self.probe_task = asyncio.create_task(self.probe())
+
+    def probe_interval(self, now):
+        """Mirror the production browser's healthy idle and recent-doubt cadence."""
+        return .04 if getattr(self, 'adaptive', False) and self.rtt is not None and now >= self.fast_until else .025
 
     async def sample_probe(self):
         """Share one cadence between timer callbacks and incoming server probes."""
         now = time.monotonic()
-        if now - self.last_ping < .025:
+        if now - self.last_ping + 1e-12 < self.probe_interval(now):
             return
+        grace = 2 if self.rtt is None else self.rtt + .05
+        if getattr(self, 'adaptive', False) and not self.pending and now - self.last_pong >= grace:
+            self.last_pong = now
         # Publish the sample before yielding: receive and timer must not double-send.
         self.last_ping = now
         nonce = self.next_nonce
@@ -69,6 +84,7 @@ class Browser:
             del self.pending[next(iter(self.pending))]
         sent = round(now * 1_000_000)
         self.pending[nonce] = (sent, now)
+        self.probes_sent = getattr(self, 'probes_sent', 0) + 1
         await self.send(0, 8, struct.pack('<QQ', nonce, sent))
 
     async def probe(self):
@@ -77,13 +93,19 @@ class Browser:
         while True:
             now = time.monotonic()
             grace = 2 if self.rtt is None else self.rtt + .05
-            assert now - self.last_pong < grace, 'fixture client proof expired'
+            assert (self.adaptive and not self.pending) or now - self.last_pong < grace, 'fixture client proof expired'
             await self.sample_probe()
             clock = time.monotonic()
             grace = 2 if self.rtt is None else self.rtt + .05
-            next_probe = self.last_ping + .025 - clock
-            remaining = self.last_pong + grace - clock
-            await asyncio.sleep(max(.001, min(next_probe, remaining)))
+            next_probe = self.last_ping + self.probe_interval(clock) - clock
+            remaining = self.last_pong + grace - clock if self.pending or not self.adaptive else float('inf')
+            # A correlated reply cancels the obsolete response timer, as in the
+            # production browser. Count actual timer expirations separately.
+            self.proof_changed.clear()
+            try:
+                await asyncio.wait_for(self.proof_changed.wait(), max(.001, min(next_probe, remaining)))
+            except asyncio.TimeoutError:
+                self.timer_wakeups += 1
 
     async def send(self, stream, kind, body=b''):
         wire = bytes(varint(stream) + varint(len(body) + 1)) + bytes([kind]) + body
@@ -134,10 +156,14 @@ class Browser:
                                 now = time.monotonic()
                                 grace = 2 if self.rtt is None else self.rtt + .05
                                 assert now - self.last_pong < grace, 'fixture late client proof'
-                                self.rtt = max(.001, now - pending[1], (self.rtt or 0) * .95)
+                                sample = now - pending[1]
+                                if self.adaptive and self.rtt is not None and sample > self.rtt + .005:
+                                    self.fast_until = now + max(.250, sample * 2)
+                                self.rtt = max(.001, sample, (self.rtt or 0) * .95)
                                 self.last_pong = now
                                 self.probe_pongs += 1
                                 self.pending = {key: value for key, value in self.pending.items() if key > nonce}
+                                self.proof_changed.set()
                         else:
                             self.queue.put_nowait((stream, kind, body))
                 elif opcode == 8:
@@ -288,6 +314,7 @@ async def run(args):
             browser = await Browser.connect(port, token)
             browsers.append(browser)
             if not args.responses_only:
+                browser.adaptive = getattr(args, 'adaptive_browser', False)
                 browser.start_probes()
             # Match the staging helper's 25-terminal chunks. Both specified
             # revisions admit at most 32 streams per browser socket.
@@ -303,7 +330,11 @@ async def run(args):
                               attached_sessions=min(len(sessions), args.clients * 25),
                               server_pid=server_pid, seconds=args.settle)), flush=True)
         await asyncio.sleep(args.settle)
+        client_before = [(b.probes_sent, b.timer_wakeups) for b in browsers]
         result = await measure(server_pid, args.seconds)
+        client_activity = [dict(probes_per_second=(b.probes_sent - before[0]) / result['seconds'],
+                                timer_wakeups_per_second=(b.timer_wakeups - before[1]) / result['seconds'])
+                           for b, before in zip(browsers, client_before)]
         assert all(not browser.task.done() and (browser.probe_task is None or not browser.probe_task.done()) for browser in browsers), 'idle browser retired'
         assert shim_pids(runtime) == pids, 'real shim identities changed'
         # Fresh correlated control replies establish that retained sockets survived the window.
@@ -316,7 +347,8 @@ async def run(args):
                     break
         print(json.dumps(dict(revision=args.revision, sessions=len(sessions), clients=len(browsers),
                               attached_sessions=min(len(sessions), args.clients * 25),
-                              profile='responses-only' if args.responses_only else 'full-duplex',
+                              profile='responses-only' if args.responses_only else ('adaptive-browser' if getattr(args, 'adaptive_browser', False) else 'full-duplex'),
+                              client_activity=client_activity,
                               client_probe_pongs=[browser.probe_pongs for browser in browsers], **result)), flush=True)
         if args.perf is not None:
             # Profile separately so sampling overhead cannot contaminate the table.
@@ -364,6 +396,7 @@ if __name__ == '__main__':
     parser.add_argument('--settle', type=float, default=60)
     parser.add_argument('--seconds', type=float, default=60)
     parser.add_argument('--responses-only', action='store_true')
+    parser.add_argument('--adaptive-browser', action='store_true')
     parser.add_argument('--perf', type=Path)
     parser.add_argument('--profile', type=Path)
     options = parser.parse_args()

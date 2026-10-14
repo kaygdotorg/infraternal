@@ -38,6 +38,8 @@ class SampleAccounting(unittest.IsolatedAsyncioTestCase):
         browser.last_ping = float('-inf')
         browser.next_nonce = 1 << 63
         browser.pending = {}
+        browser.rtt = None
+        browser.adaptive = False
         browser.send = AsyncMock()
         with patch.object(fixture.time, 'monotonic', side_effect=[10, 10.001, 10.026]):
             await browser.sample_probe()
@@ -45,6 +47,26 @@ class SampleAccounting(unittest.IsolatedAsyncioTestCase):
             await browser.sample_probe()
         self.assertEqual(browser.send.await_count, 2)
         self.assertEqual(len(browser.pending), 2)
+
+    async def test_adaptive_idle_cadence_matches_browser_and_resets_only_stale_answered_lease(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.last_ping = 10
+        browser.last_pong = 10.001
+        browser.rtt = .001
+        browser.adaptive = True
+        browser.fast_until = 9
+        browser.next_nonce = 1 << 63
+        browser.pending = {}
+        browser.send = AsyncMock()
+        with patch.object(fixture.time, 'monotonic', side_effect=[10.026, 10.04, 10.05]):
+            await browser.sample_probe()
+            self.assertEqual(browser.send.await_count, 0)
+            await browser.sample_probe()
+            self.assertEqual(browser.send.await_count, 1)
+            # Ordinary cadence cannot postpone the fresh liveness deadline.
+            self.assertEqual(browser.last_pong, 10.001)
+            await browser.sample_probe()
+            self.assertEqual(browser.send.await_count, 1)
 
     async def test_exited_thread_invalidates_sample(self):
         # Dropping a worker must not turn its accumulated CPU into apparent idle.
