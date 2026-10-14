@@ -423,6 +423,9 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
         .map(|path| path.local_addr().unwrap())
         .collect();
     for backup in [false, true] {
+        // Observe the physical ramp separately: failed guards stop generating
+        // probes before steady windows, hiding a startup transmission burst.
+        let traffic_before = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_before = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         for peer in &peers {
             peer.set_backup(backup);
@@ -477,9 +480,11 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
         }
         let admission_elapsed = admission_started.elapsed();
         let ramp_interruptions = finished_watchers(&mut watchers);
+        let traffic_after_ramp = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_after_ramp = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         tokio::time::sleep(Duration::from_secs(1)).await;
         let warmup_interruptions = finished_watchers(&mut watchers);
+        let traffic_after_warmup = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_after_warmup = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         let steady_cohort_valid = proof_failures == 0
             && ramp_interruptions.is_empty()
@@ -511,7 +516,7 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
             .filter(|connection| connection.close_reason().is_none())
             .count();
         healthy &= steady_cohort_valid && false_interruptions == 0 && live == CONNECTIONS;
-        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 20 } else { 0 },"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"owned_udp_drops":{"before":udp_drops_before,"after_ramp":udp_drops_after_ramp,"after_warmup":udp_drops_after_warmup,"after_windows":owned_udp_drops(&[enrolled,mesh],&client_addresses),"observation":"four_per_profile_outside_timed_windows"},"startup":{"proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
+        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 20 } else { 0 },"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"owned_udp_drops":{"before":udp_drops_before,"after_ramp":udp_drops_after_ramp,"after_warmup":udp_drops_after_warmup,"after_windows":owned_udp_drops(&[enrolled,mesh],&client_addresses),"observation":"four_per_profile_outside_timed_windows"},"startup":{"physical_traffic_before":traffic_before,"physical_traffic_after_ramp":traffic_after_ramp,"physical_traffic_after_warmup":traffic_after_warmup,"physical_traffic_units":"cumulative_payload_bytes_and_successful_udp_datagrams_including_GSO_segments","proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
         watchers.abort_all();
         while watchers.join_next().await.is_some() {}
         for path in &paths {
