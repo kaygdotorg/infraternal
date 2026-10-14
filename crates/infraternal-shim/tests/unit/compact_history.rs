@@ -89,12 +89,23 @@ fn all_numbered_lines_survive_compression_and_full_replay() {
 #[test]
 #[ignore = "perf VM only: paired resident increment for exact 10,000 x 72 history"]
 fn numbered_history_resident_increment() {
+    measured_history_increment(&"x".repeat(65), "repeated-x");
+}
+
+#[test]
+#[ignore = "perf VM only: decimal-body 10,000 x 72 history for workload comparison"]
+fn decimal_history_resident_increment() {
+    measured_history_increment(&("0123456789".repeat(6) + "01234"), "decimal");
+}
+
+fn measured_history_increment(body: &str, label: &str) {
     assert_eq!(
         std::fs::read_to_string("/proc/sys/kernel/hostname")
             .unwrap()
             .trim(),
         "infraternal-perf-test"
     );
+    assert_eq!(body.len(), 65);
     // Use the same terminal instance and geometry for both measurements.
     let mut terminal = Terminal::with_history_budget(80, 24, 17 * 1024 * 1024).unwrap();
     terminal.process(b"\x1bcseed\r\n");
@@ -104,7 +115,7 @@ fn numbered_history_resident_increment() {
     let empty_encoded = terminal.engine.encoded_bytes();
     let empty_mappings = terminal.engine.mapped_blocks();
     for number in 1..=10_000 {
-        terminal.process(format!("{number:06} {}\r\n", "x".repeat(65)).as_bytes());
+        terminal.process(format!("{number:06} {body}\r\n").as_bytes());
     }
     terminal.engine.compact(true);
     let full = pss();
@@ -113,7 +124,7 @@ fn numbered_history_resident_increment() {
     let encoded = terminal.engine.encoded_bytes();
     let mappings = terminal.engine.mapped_blocks();
     println!(
-        "COMPACT_HISTORY lines=10000 columns=72 empty_pss_kib={empty} filled_pss_kib={full} increment_pss_kib={} empty_mapped_resident_bytes={empty_pages} mapped_resident_bytes={resident} empty_encoded_bytes={empty_encoded} encoded_bytes={encoded} empty_mappings={empty_mappings} mappings={mappings} ordinary_bytes={ordinary} reserved_bytes={reserved} blocks={blocks} reference_kib=407 ratio={:.6}",
+        "COMPACT_HISTORY body={label} lines=10000 columns=72 empty_pss_kib={empty} filled_pss_kib={full} increment_pss_kib={} empty_mapped_resident_bytes={empty_pages} mapped_resident_bytes={resident} empty_encoded_bytes={empty_encoded} encoded_bytes={encoded} empty_mappings={empty_mappings} mappings={mappings} ordinary_bytes={ordinary} reserved_bytes={reserved} blocks={blocks} reference_kib=407 ratio={:.6}",
         full.saturating_sub(empty),
         f64::from(u32::try_from(full.saturating_sub(empty)).unwrap()) / 407.0
     );
@@ -166,6 +177,7 @@ fn pss() -> usize {
         .parse()
         .unwrap()
 }
+
 #[test]
 fn retained_row_receipt_neither_restores_pages_nor_changes_encoding() {
     let terminal = filled();
@@ -173,4 +185,3 @@ fn retained_row_receipt_neither_restores_pages_nor_changes_encoding() {
     assert_eq!(terminal.retained_history_rows(), 9977);
     assert_eq!(terminal.ownership().unwrap(), before);
 }
-
