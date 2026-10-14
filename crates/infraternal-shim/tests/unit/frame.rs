@@ -4,6 +4,30 @@ use super::*;
 mod tests {
     //! Exercises frame invariants against real data and frozen expectations.
     use super::*;
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn batch_append_preserves_prefix_and_refuses_invalid_frames() {
+        let state = Frame::InputState(17, 19);
+        let output = Frame::Output(42, b"reply".to_vec());
+        let mut wire = state.encode().unwrap();
+        output.append_into(&mut wire).unwrap();
+        let mut expected = state.encode().unwrap();
+        expected.extend(output.encode().unwrap());
+        assert_eq!(wire, expected);
+        let before = wire.clone();
+        assert!(
+            Frame::Input(vec![0; MAX_FRAME])
+                .append_into(&mut wire)
+                .is_err()
+        );
+        assert_eq!(wire, before);
+        assert!(
+            Frame::SnapshotWithFlags(0, 2, vec![])
+                .append_into(&mut wire)
+                .is_err()
+        );
+        assert_eq!(wire, before);
+    }
     #[test]
     fn golden_and_fragmented() {
         let fixtures = [

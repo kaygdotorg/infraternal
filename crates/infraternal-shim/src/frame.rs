@@ -157,8 +157,18 @@ impl Frame {
     /// Encode into reusable storage, rejecting oversized payloads before growth.
     /// # Errors
     /// Rejects frames beyond the frozen limit without changing the buffer.
-    #[allow(clippy::too_many_lines)]
     pub fn encode_into(&self, wire: &mut Vec<u8>) -> io::Result<()> {
+        self.encode_mode::<false>(wire)
+    }
+    /// Append one complete frame to an unsent shared-host batch.
+    /// # Errors
+    /// Rejects oversized payloads without changing the preceding frames.
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn append_into(&self, wire: &mut Vec<u8>) -> io::Result<()> {
+        self.encode_mode::<true>(wire)
+    }
+    #[allow(clippy::too_many_lines)]
+    fn encode_mode<const APPEND: bool>(&self, wire: &mut Vec<u8>) -> io::Result<()> {
         let size = match self {
             Self::Input(bytes) => 1 + bytes.len(),
             Self::Output(_, bytes) | Self::Snapshot(_, bytes) | Self::SequencedInput(_, bytes) => {
@@ -176,8 +186,11 @@ impl Frame {
         if size > MAX_FRAME {
             return Err(invalid());
         }
-        wire.clear();
-        wire.resize(4, 0);
+        if !APPEND {
+            wire.clear();
+        }
+        let start = wire.len();
+        wire.resize(start + 4, 0);
         let body = wire;
         macro_rules! put {
             ($value:expr) => {
@@ -286,8 +299,8 @@ impl Frame {
                 body.extend_from_slice(message.as_bytes());
             }
         }
-        let size = u32::try_from(body.len() - 4).map_err(|_| invalid())?;
-        body[..4].copy_from_slice(&size.to_le_bytes());
+        let size = u32::try_from(body.len() - start - 4).map_err(|_| invalid())?;
+        body[start..start + 4].copy_from_slice(&size.to_le_bytes());
         Ok(())
     }
     /// Decode a complete type plus payload (without the length prefix).

@@ -346,6 +346,7 @@ impl Session {
             let current = p.buffer_bytes();
             wire_bytes = wire_bytes - before + current;
             before = current;
+            let mut queued_reply = false;
             if p.pending.is_empty()
                 && let Some(reply) = p.input_reply.take()
             {
@@ -355,22 +356,15 @@ impl Session {
                     InputReply::State => Frame::InputState(state.written, state.accepted),
                     InputReply::Ack => Frame::InputAck(state.written),
                 })?;
-                if p.flush_bounded(&mut write_bytes, &mut write_attempts)
-                    .is_err()
-                {
-                    // Retirement happens after this scan. Keep any newly
-                    // allocated frame/decoder storage charged until then.
-                    wire_bytes = wire_bytes - before + p.buffer_bytes();
-                    retired.push(i);
-                    continue;
-                }
+                queued_reply = true;
             }
             // Include all current buffers before reserving a repaint, even
             // when a preceding state frame completed without a new event.
             let current = p.buffer_bytes();
             wire_bytes = wire_bytes - before + current;
             before = current;
-            if p.pending.is_empty()
+            if (p.pending.is_empty()
+                || (queued_reply && matches!(p.request, Some(Request::Read(_)))))
                 && let Some(request) = p.request.take()
             {
                 match request {
@@ -385,11 +379,17 @@ impl Session {
                     }
                 }
             }
-            if p.pending.is_empty()
+            // Only append output to this visit's wholly unsent state/ack.
+            // Never overwrite a partial frame or append a costly repaint.
+            if (p.pending.is_empty() || queued_reply)
+                && !matches!(p.request, Some(Request::Snapshot))
                 && let Some(seq) = p.cursor
             {
                 if seq < self.ring.start() {
-                    if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
+                    if queued_reply {
+                        // Logical writable readiness resumes the repaint after
+                        // the preceding control frame has completed.
+                    } else if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
                         p.snapshot(&self.terminal, self.ring.head())?;
                     } else {
                         p.queue(&Frame::Error(1, "session memory budget exhausted".into()))?;
@@ -401,8 +401,14 @@ impl Session {
                         .read(seq, CHUNK)
                         .ok_or_else(|| io::Error::other("delivery cursor invariant"))?;
                     p.cursor = Some(seq + bytes.len() as u64);
-                    p.queue(&Frame::Output(seq, bytes))?;
-                } else if self.drained
+                    let frame = Frame::Output(seq, bytes);
+                    if queued_reply {
+                        frame.append_into(&mut p.pending)?;
+                    } else {
+                        p.queue(&frame)?;
+                    }
+                } else if !queued_reply
+                    && self.drained
                     && !p.exited_sent
                     && let Some(status) = self.exit
                 {
@@ -716,6 +722,47 @@ mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
 
+    #[test]
+    fn blocked_state_and_output_share_one_ordered_write_batch() {
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/w{}",
+            std::process::id()
+        ));
+        let mut config = Config::new([15; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        client.read_exact(&mut [0; 63]).unwrap();
+        let peer = &mut session.peers[0];
+        peer.attached = true;
+        peer.caps = SEQUENCED_INPUT;
+        peer.input_reply = Some(InputReply::State);
+        peer.request = Some(Request::Read(0));
+        loop {
+            match peer.stream.write(&[b'x'; 4096]) {
+                Ok(n) => assert!(n > 0),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("backpressure fixture failed: {e}"),
+            }
+        }
+        session.ring.append(b"reply").unwrap();
+        session.housekeeping().unwrap();
+        let queued = session.peers[0].pending.clone();
+        drop(client);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+        let mut expected = Frame::InputState(0, 0).encode().unwrap();
+        expected.extend(Frame::Output(0, b"reply".to_vec()).encode().unwrap());
+        assert_eq!(
+            queued, expected,
+            "state/output need a single bounded write batch"
+        );
+    }
     #[test]
     fn session_constructor_retains_only_the_bound_socket_path() {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
