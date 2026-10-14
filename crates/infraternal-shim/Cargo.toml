@@ -27,7 +27,7 @@ vt100 = { workspace = true, optional = true }
 # Comparison engines are never in the default production dependency graph.
 [features]
 # Research-only shared-process reactor; never selected by production defaults.
-process-per-user = ["nix/uio"]
+process-per-user = ["nix/uio", "nix/event"]
 # Audited transient process-transfer buffers are removed with the remote plugin.
 ca-handoff = ["dep:openssl"]
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
