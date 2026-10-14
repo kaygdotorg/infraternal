@@ -62,6 +62,15 @@ impl BinaryPaths {
 /// Existing path-based adapters remain available; the server supplies its verified release resolver [225].
 pub trait PayloadSource: Send + Sync {
     fn get(&self, architecture: Architecture) -> crate::transport::Operation<'_, PathBuf>;
+
+    /// An authenticated optional session image; absence selects the full payload.
+    /// Existing sources retain their full-payload behavior without local guessing.
+    fn session(
+        &self,
+        _architecture: Architecture,
+    ) -> crate::transport::Operation<'_, Option<PathBuf>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 impl PayloadSource for BinaryPaths {
     fn get(&self, architecture: Architecture) -> crate::transport::Operation<'_, PathBuf> {

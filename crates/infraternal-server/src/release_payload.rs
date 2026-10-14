@@ -1,4 +1,4 @@
-//! Resolves lockstep cross-architecture SSH payloads from signed releases, with a state-directory cache [220,224,225].
+//! Resolves lockstep SSH and optional session payloads from signed releases, with a state-directory cache [220,224,225,255].
 use crate::release_verify::verify_release_file;
 use infraternal_plugin_ssh::{
     install::PayloadSource, model::Failure, probe::Architecture, transport::Operation,
@@ -8,6 +8,23 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
+
+#[derive(Clone, Copy)]
+enum Artifact {
+    Full,
+    Session,
+}
+impl Artifact {
+    fn optional(self) -> bool {
+        matches!(self, Self::Session)
+    }
+    fn name(self, label: &str) -> String {
+        match self {
+            Self::Full => format!("infraternal-{label}-musl"),
+            Self::Session => format!("infraternal-{label}-session-musl"),
+        }
+    }
+}
 
 /// One resolver belongs to one server version; no polling or network work runs while SSH is off.
 pub(crate) struct ReleasePayload {
@@ -31,7 +48,12 @@ impl ReleasePayload {
         // Restart cleanup precedes the first request. An unsafe/unavailable cache
         // remains a plain acquisition failure when resolution is attempted.
         if private_directory(&cache).is_ok() {
-            let _ = cleanup_downloads(&cache.join(infraternal_plugin_api::VERSION));
+            let version = cache.join(infraternal_plugin_api::VERSION);
+            let _ = cleanup_downloads(&version);
+            let sessions = version.join("session");
+            if std::fs::symlink_metadata(&sessions).is_ok() {
+                let _ = cleanup_downloads(&sessions);
+            }
         }
         Arc::new(Self {
             executable,
@@ -46,18 +68,32 @@ impl ReleasePayload {
         })
     }
     async fn resolve(&self, arch: Architecture) -> Result<PathBuf, Failure> {
+        self.resolve_artifact(arch, Artifact::Full)
+            .await?
+            .ok_or_else(|| Failure::install("the verified binary is unavailable."))
+    }
+    async fn resolve_session(&self, arch: Architecture) -> Result<Option<PathBuf>, Failure> {
+        self.resolve_artifact(arch, Artifact::Session).await
+    }
+    #[allow(clippy::too_many_lines)] // Keep authenticated absence, bounded download and atomic publication ordered.
+    async fn resolve_artifact(
+        &self,
+        arch: Architecture,
+        artifact: Artifact,
+    ) -> Result<Option<PathBuf>, Failure> {
         let same = matches!(
             (std::env::consts::ARCH, arch),
             ("x86_64", Architecture::X86_64) | ("aarch64", Architecture::Aarch64)
         );
-        if same {
-            return Ok(self.executable.clone());
+        // A separate session image must be authenticated even on this server's architecture.
+        if same && !artifact.optional() {
+            return Ok(Some(self.executable.clone()));
         }
         let label = match arch {
             Architecture::X86_64 => "x86_64",
             Architecture::Aarch64 => "aarch64",
         };
-        let name = format!("infraternal-{label}-musl");
+        let name = artifact.name(label);
         let fail = |reason: &'static str| {
             let step = match arch {
                 Architecture::Aarch64 => infraternal_plugin_ssh::model::InstallStep::GetArm64Binary,
@@ -68,18 +104,31 @@ impl ReleasePayload {
         private_directory(&self.cache).map_err(|_| fail("the release cache is unavailable."))?;
         let version_dir = self.cache.join(&self.version);
         private_directory(&version_dir).map_err(|_| fail("the release cache is unavailable."))?;
+        let version_dir = if artifact.optional() {
+            let sessions = version_dir.join("session");
+            private_directory(&sessions).map_err(|_| fail("the release cache is unavailable."))?;
+            sessions
+        } else {
+            version_dir
+        };
         let ready = version_dir.join(label);
-        if ready.exists() {
-            self.verify_cached(&ready, &name).await.map_err(fail)?;
-            return Ok(ready.join(name));
+        if std::fs::symlink_metadata(&ready).is_ok() {
+            let present = self
+                .verify_cached(&ready, &name, artifact, false)
+                .await
+                .map_err(fail)?;
+            return Ok(present.then(|| ready.join(name)));
         }
         let guard = self.lock.lock().await;
         // Cache hits hash independently; only publication is serialized. A waiter
         // checks again because the first downloader may have populated its cache.
-        if ready.exists() {
+        if std::fs::symlink_metadata(&ready).is_ok() {
             drop(guard);
-            self.verify_cached(&ready, &name).await.map_err(fail)?;
-            return Ok(ready.join(name));
+            let present = self
+                .verify_cached(&ready, &name, artifact, false)
+                .await
+                .map_err(fail)?;
+            return Ok(present.then(|| ready.join(name)));
         }
         let staging =
             Staging::new(&version_dir).map_err(|_| fail("the release cache is unavailable."))?;
@@ -91,14 +140,14 @@ impl ReleasePayload {
         )
         .await;
         if matches!(result, Err(crate::release_http::DownloadError::Missing)) && self.development {
-            return Ok(self.local.get(arch).to_owned());
+            if artifact.optional() {
+                let local = self.local.session_payload(arch)?;
+                return Ok((local.as_path() != self.local.get(arch)).then_some(local));
+            }
+            return Ok(Some(self.local.get(arch).to_owned()));
         }
         result.map_err(|error| fail(error.reason()))?;
-        for (file, limit) in [
-            ("SHA256SUMS.sig", 1024),
-            ("VERSION", 128),
-            (name.as_str(), 128 * 1024 * 1024),
-        ] {
+        for (file, limit) in [("SHA256SUMS.sig", 1024), ("VERSION", 128)] {
             crate::release_http::download(
                 &format!("{base}/{file}"),
                 &staging.path.join(file),
@@ -107,9 +156,27 @@ impl ReleasePayload {
             .await
             .map_err(|error| fail(error.reason()))?;
         }
-        self.verify_cached(&staging.path, &name)
+        // VERSION verification validates every signed manifest line. Only an
+        // authenticated omission permits the optional full-payload fallback.
+        let present = if artifact.optional() {
+            self.verify_cached(&staging.path, &name, artifact, true)
+                .await
+                .map_err(fail)?
+        } else {
+            true
+        };
+        if present {
+            crate::release_http::download(
+                &format!("{base}/{name}"),
+                &staging.path.join(&name),
+                128 * 1024 * 1024,
+            )
             .await
-            .map_err(fail)?;
+            .map_err(|error| fail(error.reason()))?;
+            self.verify_cached(&staging.path, &name, artifact, false)
+                .await
+                .map_err(fail)?;
+        }
         // Also collect abandoned work when a resolver is reused after another
         // process stops. Our staging lock keeps this verified candidate alive.
         cleanup_downloads(&version_dir)
@@ -124,12 +191,15 @@ impl ReleasePayload {
         std::fs::File::open(&version_dir)
             .and_then(|file| file.sync_all())
             .map_err(|_| fail("the release cache could not be saved."))?;
-        Ok(ready.join(name))
+        Ok(present.then(|| ready.join(name)))
     }
 }
 impl PayloadSource for ReleasePayload {
     fn get(&self, arch: Architecture) -> Operation<'_, PathBuf> {
         Box::pin(self.resolve(arch))
+    }
+    fn session(&self, arch: Architecture) -> Operation<'_, Option<PathBuf>> {
+        Box::pin(self.resolve_session(arch))
     }
 }
 struct Staging {
@@ -201,6 +271,8 @@ fn cleanup_downloads(version: &Path) -> std::io::Result<()> {
                         | "VERSION"
                         | "infraternal-x86_64-musl"
                         | "infraternal-aarch64-musl"
+                        | "infraternal-x86_64-session-musl"
+                        | "infraternal-aarch64-session-musl"
                 )
             ) && std::fs::symlink_metadata(file.path()).is_ok_and(|m| {
                 m.is_file()
@@ -242,8 +314,14 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
 }
 impl ReleasePayload {
     // Conventional octal group/other permission masks make this audit explicit.
-    #[allow(clippy::verbose_bit_mask)]
-    async fn verify_cached(&self, directory: &Path, name: &str) -> Result<(), &'static str> {
+    #[allow(clippy::verbose_bit_mask, clippy::too_many_lines)]
+    async fn verify_cached(
+        &self,
+        directory: &Path,
+        name: &str,
+        artifact: Artifact,
+        metadata_only: bool,
+    ) -> Result<bool, &'static str> {
         #[cfg(test)]
         let trust = self.trust.clone();
         let directory = directory.to_owned();
@@ -280,16 +358,6 @@ impl ReleasePayload {
             };
             let sums = read("SHA256SUMS", 65_536)?;
             let sig = read("SHA256SUMS.sig", 1024)?;
-            let file = open(&name).map_err(|_| "the cached binary could not be read.")?;
-            if !file.metadata().is_ok_and(|m| {
-                m.is_file()
-                    && m.len() <= 128 * 1024 * 1024
-                    && m.uid() == nix::unistd::geteuid().as_raw()
-                    && m.mode() & 0o077 == 0
-                    && m.nlink() == 1
-            }) {
-                return Err("the cached binary is unsafe.");
-            }
             let verify = |file: &std::fs::File, filename: &str| {
                 #[cfg(test)]
                 if let Some(trust) = &trust {
@@ -322,8 +390,32 @@ impl ReleasePayload {
             if declared_version != expected_version.as_bytes() {
                 return Err("the signed release belongs to another server version.");
             }
+            if artifact.optional() {
+                // VERSION's strict checksum parse authenticated the complete
+                // manifest above; presence uses its exact validated filename.
+                let advertised = std::str::from_utf8(&sums)
+                    .map_err(|_| "the signed checksums are malformed.")?
+                    .lines()
+                    .any(|line| line.get(66..) == Some(name.as_str()));
+                if !advertised {
+                    return Ok(false);
+                }
+                if metadata_only {
+                    return Ok(true);
+                }
+            }
+            let file = open(&name).map_err(|_| "the cached binary could not be read.")?;
+            if !file.metadata().is_ok_and(|m| {
+                m.is_file()
+                    && m.len() <= 128 * 1024 * 1024
+                    && m.uid() == nix::unistd::geteuid().as_raw()
+                    && m.mode() & 0o077 == 0
+                    && m.nlink() == 1
+            }) {
+                return Err("the cached binary is unsafe.");
+            }
             let result = verify(&file, &name);
-            result.map_err(|error| match error {
+            result.map(|()| true).map_err(|error| match error {
                 crate::release_verify::ReleaseError::Signature => {
                     "the release signature is malformed."
                 }

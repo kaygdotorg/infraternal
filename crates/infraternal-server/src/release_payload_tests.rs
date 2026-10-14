@@ -22,6 +22,9 @@ pub(crate) struct Bucket {
 }
 impl Bucket {
     pub(crate) fn new(files: HashMap<String, Vec<u8>>) -> Self {
+        Self::with_response(files, false)
+    }
+    fn with_response(files: HashMap<String, Vec<u8>>, refused: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -42,8 +45,10 @@ impl Bucket {
                         let path = request.split_whitespace().nth(1).unwrap();
                         count.fetch_add(1, Ordering::Relaxed);
                         let files = data.lock().unwrap();
-                        let body = files.get(path);
-                        let status = if body.is_some() {
+                        let body = if refused { None } else { files.get(path) };
+                        let status = if refused {
+                            "403 Forbidden"
+                        } else if body.is_some() {
                             "200 OK"
                         } else {
                             "404 Not Found"
@@ -93,6 +98,13 @@ impl Release {
         Self::with_manifest_entries(size, version, 0)
     }
     pub(crate) fn with_manifest_entries(size: usize, version: &str, extra: usize) -> Self {
+        Self::with_artifacts(size, version, extra, false)
+    }
+    fn with_sessions(version: &str) -> Self {
+        Self::with_artifacts(1024, version, 0, true)
+    }
+    #[allow(clippy::too_many_lines)] // Keep generated key, manifest, signature and bucket contents in one fixture.
+    fn with_artifacts(size: usize, version: &str, extra: usize, sessions: bool) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;
         let root =
@@ -125,6 +137,17 @@ impl Release {
             Sha256::digest(&version)
         )
         .into_bytes();
+        let session_files = if sessions {
+            vec![
+                ("infraternal-x86_64-session-musl", b"x86 session".to_vec()),
+                ("infraternal-aarch64-session-musl", b"arm session".to_vec()),
+            ]
+        } else {
+            Vec::new()
+        };
+        for (name, bytes) in &session_files {
+            sums.extend_from_slice(format!("{:x}  {name}\n", Sha256::digest(bytes)).as_bytes());
+        }
         for index in 0..extra {
             sums.extend_from_slice(
                 format!("{:x}  fixture-{index:04}\n", Sha256::digest([])).as_bytes(),
@@ -152,6 +175,7 @@ impl Release {
             ("SHA256SUMS.sig", signature),
         ]
         .into_iter()
+        .chain(session_files)
         .map(|(name, bytes)| (format!("/releases/{version_name}/{name}"), bytes))
         .collect();
         Self { root, files, trust }
@@ -549,4 +573,290 @@ async fn edge_add_host_keeps_exact_server_version_and_verified_cache() {
         payload
     );
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
+}
+
+/// Optional session artifacts still require this server's signed release on both architectures.
+#[tokio::test]
+async fn session_payloads_are_signed_on_both_architectures_and_reused_offline() {
+    let release = Release::with_sessions("0.1.0");
+    let bucket = Bucket::new(release.files.clone());
+    let resolver = release.resolver(bucket.origin.clone(), "sessions", false);
+    for (arch, label, expected) in [
+        (Architecture::X86_64, "x86_64", b"x86 session".as_slice()),
+        (Architecture::Aarch64, "aarch64", b"arm session".as_slice()),
+    ] {
+        let path = resolver
+            .session(arch)
+            .await
+            .unwrap()
+            .expect("signed session");
+        assert_eq!(
+            path,
+            resolver.cache.join(format!(
+                "0.1.0/session/{label}/infraternal-{label}-session-musl"
+            ))
+        );
+        assert_ne!(path, resolver.executable);
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+    }
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 8);
+    drop(bucket);
+    for arch in [Architecture::X86_64, Architecture::Aarch64] {
+        assert!(resolver.session(arch).await.unwrap().is_some());
+    }
+}
+
+#[tokio::test]
+async fn concurrent_session_requests_publish_one_verified_artifact() {
+    let release = Release::with_sessions("0.1.0");
+    let bucket = Bucket::new(release.files.clone());
+    let resolver = Arc::new(release.resolver(bucket.origin.clone(), "session-concurrent", false));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let resolver = resolver.clone();
+        tasks.push(tokio::spawn(async move {
+            resolver
+                .session(Architecture::X86_64)
+                .await
+                .unwrap()
+                .unwrap()
+        }));
+    }
+    let expected = resolver
+        .cache
+        .join("0.1.0/session/x86_64/infraternal-x86_64-session-musl");
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), expected);
+    }
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
+}
+
+#[tokio::test]
+async fn signed_session_absence_is_cached_and_reauthenticated_offline() {
+    let release = Release::new(1024);
+    let bucket = Bucket::new(release.files.clone());
+    let resolver = release.resolver(bucket.origin.clone(), "session-absent", false);
+    for arch in [Architecture::X86_64, Architecture::Aarch64] {
+        assert!(resolver.session(arch).await.unwrap().is_none());
+    }
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 6);
+    drop(bucket);
+    assert!(
+        resolver
+            .session(Architecture::X86_64)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let cached = resolver.cache.join("0.1.0/session/x86_64");
+    assert!(cached.join("SHA256SUMS.sig").is_file());
+    std::fs::write(cached.join("VERSION"), b"another-version\n").unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+}
+
+#[tokio::test]
+async fn advertised_session_missing_digest_or_signature_never_falls_back() {
+    let release = Release::with_sessions("0.1.0");
+    for (case, file, replacement) in [
+        ("missing", "infraternal-x86_64-session-musl", None),
+        (
+            "digest",
+            "infraternal-x86_64-session-musl",
+            Some(b"tampered".as_slice()),
+        ),
+        ("signature", "SHA256SUMS.sig", Some(b"invalid".as_slice())),
+        ("version-digest", "VERSION", Some(b"other\n".as_slice())),
+        ("manifest", "SHA256SUMS", Some(b"invalid\n".as_slice())),
+    ] {
+        let mut files = release.files.clone();
+        let key = format!("/releases/0.1.0/{file}");
+        if let Some(bytes) = replacement {
+            files.insert(key, bytes.to_vec());
+        } else {
+            files.remove(&key);
+        }
+        let bucket = Bucket::new(files);
+        let resolver = release.resolver(bucket.origin.clone(), case, true);
+        // Even an existing trusted local artifact cannot hide a signed-release failure.
+        std::fs::write(
+            resolver
+                .local
+                .x86_64
+                .with_file_name("infraternal-x86_64-session-musl"),
+            b"local",
+        )
+        .unwrap();
+        assert!(
+            resolver.session(Architecture::X86_64).await.is_err(),
+            "{case}"
+        );
+        assert!(
+            !resolver.cache.join("0.1.0/session/x86_64").exists(),
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn signed_session_version_replay_and_untrusted_key_are_refused() {
+    let release = Release::with_sessions("0.1.0");
+    let replay = release
+        .files
+        .iter()
+        .map(|(path, bytes)| (path.replace("/0.1.0/", "/0.1.1/"), bytes.clone()))
+        .collect();
+    let bucket = Bucket::new(replay);
+    let mut resolver = release.resolver(bucket.origin.clone(), "session-replay", true);
+    resolver.version = "0.1.1".into();
+    let error = resolver.session(Architecture::X86_64).await.unwrap_err();
+    assert_eq!(
+        error.message,
+        "the signed release belongs to another server version."
+    );
+    let other = Release::with_sessions("0.1.0");
+    let bucket = Bucket::new(release.files.clone());
+    let mut resolver = release.resolver(bucket.origin.clone(), "session-untrusted", true);
+    resolver.trust = Some(other.trust.clone());
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+}
+
+#[tokio::test]
+async fn session_cache_refuses_shared_payloads_symlinks_and_unsafe_absence() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let release = Release::with_sessions("0.1.0");
+    let bucket = Bucket::new(release.files.clone());
+    let resolver = release.resolver(bucket.origin.clone(), "session-unsafe", false);
+    let path = resolver
+        .session(Architecture::X86_64)
+        .await
+        .unwrap()
+        .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let retained = path.with_extension("retained");
+    std::fs::hard_link(&path, &retained).unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+    std::fs::remove_file(&retained).unwrap();
+    std::fs::rename(&path, &retained).unwrap();
+    symlink(&retained, &path).unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 4);
+    let absent = Release::new(1024);
+    let bucket = Bucket::new(absent.files.clone());
+    let resolver = absent.resolver(bucket.origin.clone(), "unsafe-absence", false);
+    assert!(
+        resolver
+            .session(Architecture::X86_64)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let parent = resolver.cache.join("0.1.0/session");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+}
+
+#[tokio::test]
+async fn development_session_fallback_only_uses_trusted_local_artifacts_for_missing_release() {
+    use std::os::unix::fs::symlink;
+    let release = Release::new(1024);
+    let bucket = Bucket::new(HashMap::new());
+    let resolver = release.resolver(bucket.origin.clone(), "session-development", true);
+    assert!(
+        resolver
+            .session(Architecture::X86_64)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let session = resolver
+        .local
+        .x86_64
+        .with_file_name("infraternal-x86_64-session-musl");
+    std::fs::write(&session, b"trusted local").unwrap();
+    assert_eq!(
+        resolver.session(Architecture::X86_64).await.unwrap(),
+        Some(session.clone())
+    );
+    std::fs::remove_file(&session).unwrap();
+    symlink(&resolver.local.x86_64, &session).unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+    drop(bucket);
+    assert!(
+        resolver.session(Architecture::X86_64).await.is_err(),
+        "offline is not a missing public release"
+    );
+}
+
+#[test]
+fn session_staging_cleanup_preserves_active_and_unknown_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let release = Release::new(1024);
+    let version = release.root.join("session-cleanup");
+    private_directory(&version).unwrap();
+    let path = version.join(format!("download-{}", uuid::Uuid::new_v4()));
+    private_directory(&path).unwrap();
+    let active = lock_directory(&path, nix::fcntl::FlockArg::LockExclusiveNonblock).unwrap();
+    for name in [
+        "infraternal-x86_64-session-musl",
+        "infraternal-aarch64-session-musl",
+    ] {
+        let file = path.join(name);
+        std::fs::write(&file, b"partial").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    cleanup_downloads(&version).unwrap();
+    assert!(
+        path.exists(),
+        "active lifetime lock protects the staging directory"
+    );
+    // Release ownership without executing Staging::drop, as on process termination.
+    drop(active);
+    cleanup_downloads(&version).unwrap();
+    assert!(!path.exists());
+    let path = version.join(format!("download-{}", uuid::Uuid::new_v4()));
+    private_directory(&path).unwrap();
+    std::fs::write(path.join("unrelated"), b"preserve").unwrap();
+    cleanup_downloads(&version).unwrap();
+    assert!(path.exists());
+}
+
+#[tokio::test]
+async fn refused_session_release_never_uses_development_fallback() {
+    let release = Release::with_sessions("0.1.0");
+    let bucket = Bucket::with_response(release.files.clone(), true);
+    let resolver = release.resolver(bucket.origin.clone(), "session-refused", true);
+    std::fs::write(
+        resolver
+            .local
+            .x86_64
+            .with_file_name("infraternal-x86_64-session-musl"),
+        b"trusted local",
+    )
+    .unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn dangling_session_cache_symlink_is_refused_without_publication() {
+    use std::os::unix::fs::symlink;
+    let release = Release::with_sessions("0.1.0");
+    let bucket = Bucket::new(release.files.clone());
+    let resolver = release.resolver(bucket.origin.clone(), "session-dangling", false);
+    private_directory(&resolver.cache).unwrap();
+    private_directory(&resolver.cache.join("0.1.0")).unwrap();
+    let session = resolver.cache.join("0.1.0/session");
+    private_directory(&session).unwrap();
+    let ready = session.join("x86_64");
+    symlink(release.root.join("missing-cache"), &ready).unwrap();
+    assert!(resolver.session(Architecture::X86_64).await.is_err());
+    assert!(
+        std::fs::symlink_metadata(&ready)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 0);
 }
