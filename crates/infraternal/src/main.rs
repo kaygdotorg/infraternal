@@ -23,12 +23,12 @@ mod remote;
 mod remote_server;
 #[cfg(feature = "remote")]
 mod remote_service;
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart;
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_binary;
 mod shim_cli;
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_image;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
@@ -1383,7 +1383,7 @@ mod startup_tests;
 /// First userspace entry protection applies equally to server and child modes.
 fn harden_startup() -> Result<(), nix::errno::Errno> {
     nix::sys::prctl::set_dumpable(false)?;
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", feature = "plugin-server"))]
     if std::env::args_os()
         .skip(1)
         .find(|argument| argument != "--json")
@@ -1543,6 +1543,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             };
             return run_remote_agent(mode, fd, state, data, json);
         }
+        #[cfg(feature = "plugin-server")]
         if action.cli_handler == CliHandler::ServerRestart {
             let data = matches
                 .get_one::<String>("data")

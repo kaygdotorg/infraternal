@@ -41,8 +41,9 @@ infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optiona
 # Per-run test authority is compiled only into explicit staging images (#188 D1).
 staging-trust = ["plugin-server", "infraternal-server/staging-trust"]
 release = ["plugin-server", "infraternal-server/release", "dep:infraternal-plugin-release", "dep:sqlx"]
-remote = ["plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:base64", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:tokio-openssl", "dep:url"]
-ssh = ["plugin-ssh", "infraternal-server?/ssh"]
+remote = ["infraternal-shim/ca-handoff", "plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:base64", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:tokio-openssl", "dep:url"]
+# Private SSH session routes need the host runtime even when its operator role is absent.
+ssh = ["plugin-ssh", "dep:infraternal-agent", "dep:tokio", "infraternal-server?/ssh"]
 # Private release profile for the early shim/SSH startup image.
 session-payload = ["ssh"]
 default = ["release", "remote", "ssh", "plugin-host-facts", "plugin-agent", "plugin-backup", "plugin-mesh", "plugin-relay", "plugin-server", "plugin-ssh"]

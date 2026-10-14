@@ -396,6 +396,67 @@ mod tests {
         );
     }
 
+    /// Resolve the actual packaging recipe independently of this test binary's
+    /// features: an accidental role dependency must not silently disable its test.
+    #[test]
+    fn packaged_node_dependency_closure_omits_server_storage_and_release() {
+        let output = std::process::Command::new("cargo")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args([
+                "tree",
+                "--offline",
+                "--locked",
+                "--color",
+                "never",
+                "-p",
+                "infraternal",
+                "--no-default-features",
+                "--features",
+                "plugin-host-facts,remote,ssh",
+                "--edges",
+                "normal",
+                "--prefix",
+                "none",
+                "--format",
+                "{p}",
+            ])
+            .output()
+            .expect("resolve the packaged node dependency closure without building");
+        assert!(
+            output.status.success(),
+            "node dependency resolution failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let dependencies = String::from_utf8(output.stdout).expect("UTF-8 dependency names");
+        for forbidden in [
+            "infraternal-server",
+            "sqlx",
+            "libsqlite3-sys",
+            "infraternal-plugin-release",
+        ] {
+            let prefix = format!("{forbidden} ");
+            assert!(
+                !dependencies.lines().any(|line| line.starts_with(&prefix)),
+                "packaged node retains forbidden dependency {forbidden}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "plugin-server"))]
+    #[test]
+    fn node_build_omits_and_refuses_server_commands() {
+        let registry = registry().expect("node action registry");
+        assert!(build(&registry).find_subcommand("server").is_none());
+        for command in [&["server"][..], &["server", "init"], &["server", "restart"]] {
+            assert!(registry.find(command).is_none());
+            let arguments = std::iter::once("infraternal").chain(command.iter().copied());
+            let error = build(&registry)
+                .try_get_matches_from(arguments)
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        }
+    }
+
     #[cfg(not(feature = "plugin-mesh"))]
     #[test]
     fn compiled_out_plugin_has_no_help_or_parse_path() {
@@ -418,6 +479,7 @@ mod backmerge_tests {
     use crate::cli::actions::registry;
     use infraternal_plugin_api::CliHandler;
 
+    #[cfg(feature = "plugin-server")]
     #[test]
     fn restart_inherits_private_state_before_or_after_the_command() {
         let registry = registry().unwrap();
