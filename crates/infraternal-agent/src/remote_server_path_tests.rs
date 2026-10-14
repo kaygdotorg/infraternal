@@ -696,8 +696,7 @@ async fn retry_during_enrolled_proof(late_hint: bool, backup: bool) {
     let path = link.path.as_ref().expect("fixture requires native QUIC");
     // The authenticated session normally publishes this negotiated flag.
     if backup {
-        link.standby
-            .send_replace(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+        link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
     }
     let mesh_socket = server.reserved.as_ref().unwrap().try_clone().unwrap();
     mesh_socket.set_nonblocking(true).unwrap();
@@ -875,10 +874,9 @@ async fn backup_published_during_candidate_proof_keeps_enrolled_control_live() {
         active.as_mut(),
     ));
     start_mesh_candidate(steering.as_mut(), path).await;
-    link.standby
-        .send_replace(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
-    // Poll publication before sending the marker: only subsequent datagrams
-    // need backup, so this does not depend on replaying older queued packets.
+    link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+    // Publication synchronously applies backup through the production method.
+    // Only subsequent datagrams need copies; no older queued packet is replayed.
     std::future::poll_fn(|cx| {
         assert!(steering.as_mut().poll(cx).is_pending());
         std::task::Poll::Ready(())

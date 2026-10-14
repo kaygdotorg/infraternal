@@ -63,6 +63,14 @@ impl Drop for Link {
     }
 }
 impl Link {
+    /// Apply authenticated Hello capabilities before publishing their status.
+    /// Selecting enrolled keeps the copy clock idle until mesh traffic resumes.
+    fn negotiated(&self, caps: u64) {
+        if let Some(path) = &self.path {
+            path.set_backup(caps & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0);
+        }
+        self.standby.send_replace(caps);
+    }
     /// The path actually carrying traffic now, which a QUIC link can change.
     fn current(&self) -> (ServerLinkKind, SocketAddr) {
         match self.path.as_ref().map(|path| (path.path(), path.logical())) {
@@ -223,7 +231,7 @@ async fn session(
                 renewal,
                 registry,
                 proof,
-                &link.standby,
+                |caps| link.negotiated(caps),
             )
             .await
         }
@@ -377,26 +385,9 @@ async fn steer(
                         != 0,
                 );
                 remote_quic::probe_liveness(connection);
-                let proof = answered(connection, path, since, true);
-                tokio::pin!(proof);
-                let moved = loop {
-                    tokio::select! {
-                        _ = &mut active => return Steered::Ended,
-                        moved = &mut proof => break moved,
-                        changed = capabilities.changed() => {
-                            if changed.is_err() {
-                                return Steered::Ended;
-                            }
-                            // Hello can negotiate backup while this first
-                            // candidate is pending. Apply it to subsequent
-                            // ciphertext without restarting its proof deadline.
-                            path.set_backup(
-                                *capabilities.borrow_and_update()
-                                    & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
-                                    != 0,
-                            );
-                        }
-                    }
+                let moved = tokio::select! {
+                    _ = &mut active => return Steered::Ended,
+                    moved = answered(connection, path, since, true) => moved,
                 };
                 if moved {
                     retry = Duration::from_secs(1);

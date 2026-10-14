@@ -262,7 +262,7 @@ async fn quic_session_on(
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     plugins: crate::plugin_control::Registry,
     proof: Option<ProvedControl>,
-    standby: &tokio::sync::watch::Sender<u64>,
+    publish: impl FnOnce(u64),
 ) -> io::Result<()> {
     let result = async {
         let ProvedControl {
@@ -294,7 +294,7 @@ async fn quic_session_on(
         let infraternal_protocol::Frame::Hello { caps, .. } = hello.frame else {
             return Err(io::ErrorKind::InvalidData.into());
         };
-        standby.send_replace(caps);
+        publish(caps);
         let control = PrefixedControl {
             channel: control,
             prefix: Mutex::new(prefix),
