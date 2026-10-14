@@ -2683,3 +2683,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      mesh; no system tunnel, no root, no setting changed on the Mac. The
      first underlay may be the existing NetBird addresses. App-window
      end-to-end measurements and mesh throughput measurements run over it.
+270. **One process per user becomes the target design (owner, 2026-10-14;
+     extends D268 Q20):** "would love if we could make the one process per
+     user design reaaaaly optimised and stable." Work on it is no longer only
+     a prototype to measure: it is the design we harden, with optimisation
+     and stability as the goals (idle, average and worst-case memory and
+     CPU; crash containment; restart and upgrade survival per D128;
+     per-person logins per D240). Switching the default still waits for
+     measured gates — soak, fault injection and the head-to-head numbers on
+     #205 — and the owner's go.
