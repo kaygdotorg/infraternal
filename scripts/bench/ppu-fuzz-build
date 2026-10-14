@@ -28,6 +28,7 @@ cargo-fuzz = true
 [features]
 default = ["process-per-user"]
 process-per-user = []
+compact-history = ["process-per-user", "infraternal-shim/compact-history"]
 [dependencies]
 infraternal-shim = {{ path = {json.dumps(str(repo / 'crates/infraternal-shim'))}, features = ["process-per-user"] }}
 vte = "=0.15.0"
