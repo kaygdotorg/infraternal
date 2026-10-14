@@ -17,3 +17,22 @@ pub mod protocol;
 mod protocol_tests;
 #[cfg(feature = "desktop")]
 pub mod socket;
+
+#[cfg(feature = "source")]
+pub mod datagram;
+#[cfg(feature = "source")]
+pub mod media;
+#[cfg(feature = "source")]
+pub mod source;
+#[cfg(feature = "source")]
+mod source_inventory;
+#[cfg(feature = "source")]
+mod source_ipc;
+#[cfg(feature = "source")]
+pub mod source_manifest;
+#[cfg(feature = "source")]
+pub mod source_request;
+#[cfg(feature = "source")]
+mod source_worker;
+#[cfg(feature = "source")]
+pub mod wire;
