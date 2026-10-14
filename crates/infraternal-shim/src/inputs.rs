@@ -8,11 +8,72 @@ use std::{
 
 const MAX_WRITERS: usize = 512;
 
+#[cfg(not(feature = "process-per-user"))]
+type Cursors = HashMap<u32, InputCursors>;
+
+/// Most shared sessions have only writer zero. Its inline state avoids one
+/// allocation per idle session; selecting another writer promotes it exactly
+/// once without resetting accepted/written offsets or staged geometry.
+#[cfg(feature = "process-per-user")]
+enum Cursors {
+    Legacy(InputCursors),
+    Multiple(HashMap<u32, InputCursors>),
+}
+#[cfg(feature = "process-per-user")]
+impl From<[(u32, InputCursors); 1]> for Cursors {
+    fn from([(writer, cursor)]: [(u32, InputCursors); 1]) -> Self {
+        debug_assert_eq!(writer, 0);
+        Self::Legacy(cursor)
+    }
+}
+#[cfg(feature = "process-per-user")]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "retain HashMap's borrowed-key API so production callers stay identical"
+)]
+impl Cursors {
+    fn get(&self, writer: &u32) -> Option<&InputCursors> {
+        match self {
+            Self::Legacy(cursor) => (*writer == 0).then_some(cursor),
+            Self::Multiple(cursors) => cursors.get(writer),
+        }
+    }
+    fn get_mut(&mut self, writer: &u32) -> Option<&mut InputCursors> {
+        match self {
+            Self::Legacy(cursor) => (*writer == 0).then_some(cursor),
+            Self::Multiple(cursors) => cursors.get_mut(writer),
+        }
+    }
+    fn contains_key(&self, writer: &u32) -> bool {
+        self.get(writer).is_some()
+    }
+    fn len(&self) -> usize {
+        match self {
+            Self::Legacy(_) => 1,
+            Self::Multiple(cursors) => cursors.len(),
+        }
+    }
+    fn capacity(&self) -> usize {
+        match self {
+            Self::Legacy(_) => 0,
+            Self::Multiple(cursors) => cursors.capacity(),
+        }
+    }
+    fn insert(&mut self, writer: u32, cursor: InputCursors) {
+        if let Self::Legacy(legacy) = self {
+            *self = Self::Multiple(HashMap::from([(0, std::mem::take(legacy))]));
+        }
+        if let Self::Multiple(cursors) = self {
+            cursors.insert(writer, cursor);
+        }
+    }
+}
+
 /// Queue ownership follows byte segments so a partial PTY write credits only
 /// the writers whose bytes were actually written. Identity zero preserves v1.
 pub(super) struct Inputs {
     pub(super) active_writer: Option<u32>,
-    cursors: HashMap<u32, InputCursors>,
+    cursors: Cursors,
     segments: VecDeque<(u32, usize)>,
     #[cfg(feature = "process-per-user")]
     segment_limit: usize,
@@ -26,7 +87,7 @@ impl Inputs {
     pub(super) fn with_geometry(size: (u16, u16, u16, u16)) -> Self {
         Self {
             active_writer: None,
-            cursors: HashMap::from([(
+            cursors: Cursors::from([(
                 0,
                 InputCursors {
                     requested_size: size,
@@ -182,6 +243,23 @@ impl Inputs {
 mod tests {
     //! Verify writer ownership at actual partial-write boundaries and retained identity limits.
     use super::*;
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn host_legacy_writer_needs_no_heap_table() {
+        let (mut inputs, allocation) =
+            crate::heap_accounting::measure(|| Inputs::for_host((81, 25, 0, 0)));
+        assert_eq!(allocation.bytes, 0, "idle legacy cursor allocated a table");
+        assert_eq!(inputs.get(Some(0)).unwrap().requested_size, (81, 25, 0, 0));
+        let mut queue = VecDeque::new();
+        inputs.accept(0, 0, b"ab", &mut queue).unwrap();
+        inputs.advance(1).unwrap();
+        inputs.select(7, (80, 24, 0, 0)).unwrap();
+        assert_eq!(inputs.get(Some(0)).unwrap().written, 1);
+        assert_eq!(inputs.get(Some(0)).unwrap().accepted, 2);
+        assert_eq!(inputs.get(Some(7)).unwrap().accepted, 0);
+        inputs.advance(1).unwrap();
+        assert_eq!(inputs.get(Some(0)).unwrap().written, 2);
+    }
     #[test]
     fn partial_writes_credit_only_the_owner_and_replay_trims_per_writer() {
         let mut inputs = Inputs::default();
