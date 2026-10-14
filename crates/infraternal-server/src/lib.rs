@@ -35,6 +35,8 @@ mod release_latest;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
 mod liveness;
+#[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+mod node_host;
 pub mod release_manifest;
 pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
@@ -77,11 +79,15 @@ pub mod remote_standby_request;
 mod remote_startup;
 mod runtime;
 mod server_tls;
+#[cfg(any(test, feature = "native-streams"))]
+mod socket_authority;
 mod terminal_exit;
 mod web_assets;
 mod websocket;
 mod websocket_input;
 mod websocket_transport;
+#[cfg(any(test, feature = "native-streams"))]
+mod wire_identity;
 
 #[cfg(feature = "remote")]
 pub use remote_runtime::RemoteService;
@@ -107,6 +113,8 @@ pub fn compiled_plugins() -> &'static [&'static infraternal_plugin_api::PluginDe
     COMPILED_PLUGINS
 }
 static COMPILED_PLUGINS: &[&infraternal_plugin_api::PluginDescriptor] = &[
+    #[cfg(feature = "desktop")]
+    &infraternal_plugin_desktop::server_manifest::DESCRIPTOR,
     #[cfg(feature = "ssh")]
     &infraternal_plugin_ssh::manifest::DESCRIPTOR,
     #[cfg(feature = "remote")]

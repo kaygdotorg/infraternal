@@ -117,7 +117,7 @@ async fn primed_pair() -> PrimedPair {
         crate::remote_link::RemoteLink::quic_admitted(admitted, Some(&mut admission))
     );
     let link = Arc::new(link.unwrap());
-    link.hello(&hello).await.unwrap();
+    link.hello(&hello).unwrap();
     let mut greeting = BytesMut::new();
     link.read(&mut greeting, &mut [0; 4096]).await.unwrap();
     let (activation, activated) = oneshot::channel();

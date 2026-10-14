@@ -457,6 +457,7 @@ mod tests {
         let (socket, _unread) = tokio::net::UnixStream::pair().unwrap();
         let (reader, writer) = socket.into_split();
         let mut connection = AgentConnection {
+            wire_jobs: tokio::task::JoinSet::new(),
             peer: Peer::Local { reader, writer },
             execution_uid: 0,
             pid: None,
@@ -550,6 +551,7 @@ mod tests {
         let (link, _control, _listener, _endpoint, _peer) =
             crate::remote_runtime::tests::native_link_pair().await;
         let mut connection = AgentConnection {
+            wire_jobs: tokio::task::JoinSet::new(),
             peer: Peer::Remote(link),
             execution_uid: 0,
             pid: None,

@@ -896,6 +896,9 @@ mod terminal_exit;
 #[path = "socket_tests/session_gone.rs"]
 mod session_gone;
 
+#[cfg(feature = "desktop")]
+#[path = "socket_tests/native_plugin.rs"]
+mod native_plugin;
 #[path = "socket_tests/restart_open_liveness_review.rs"]
 mod restart_open_liveness_review;
 #[path = "socket_tests/review_input_credit.rs"]

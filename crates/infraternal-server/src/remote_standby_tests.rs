@@ -345,6 +345,11 @@ async fn primed_fixture(
         Frame::Hello { .. }
     ));
     let live_binding = remote_quic::negotiate_binding(&live_connection, &hello()).unwrap();
+    let (prior_authority, retained_admission) = {
+        let admitted = hosts.0.lock().await;
+        let host = &admitted[&host_id];
+        (host.authority.clone(), host.admission.clone())
+    };
     let generation = hosts.0.lock().await[&host_id].generation;
     let (warm_endpoint, connection, warm) = connect_control(address, &node, &root).await;
     let mut receive = Receive::default();
@@ -732,6 +737,14 @@ async fn primed_fixture(
         "promotion must not send a second greeting"
     );
     assert!(connection.close_reason().is_none());
+    // Existing NodeHost handles share this admission slot. Expiring the old
+    // certificate must not revoke operations on the newly promoted transport.
+    prior_authority.expire_for_test();
+    assert!(hosts.0.lock().await[&host_id].authority.permits());
+    assert!(
+        retained_admission.read().unwrap().permits(),
+        "promotion left retained NodeHost handles on the prior certificate"
+    );
 }
 
 #[path = "remote_control_queue_tests.rs"]

@@ -167,6 +167,12 @@ impl AuthorityGuard {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self) {
+        self.certificate
+            .send_modify(|admission| admission.expires = Instant::now());
+    }
+
     pub(crate) fn permits(&self) -> bool {
         !*self.signal.changed.borrow() && Instant::now() < self.certificate.borrow().expires
     }

@@ -1584,6 +1584,7 @@ dependencies = [
  "hyper-util",
  "infraternal-agent",
  "infraternal-plugin-api",
+ "infraternal-plugin-desktop",
  "infraternal-plugin-mesh",
  "infraternal-plugin-release",
  "infraternal-plugin-remote",

@@ -185,6 +185,16 @@ impl WebSocketState {
 
     /// Bind this socket to the generic host authority bridge without starting features.
     pub(crate) fn plugin_socket(self: &Arc<Self>, user: &str, token: &str) -> SocketPlugins {
+        #[cfg(any(test, feature = "native-streams"))]
+        let host: Arc<dyn SocketHost> =
+            Arc::new_cyclic(|weak: &std::sync::Weak<PluginHost>| PluginHost {
+                authority: crate::socket_authority::SocketAuthority::admitted(weak.clone()),
+                state: Arc::clone(self),
+                user: user.to_owned(),
+                hash: crate::auth::hash(token),
+                token: token.to_owned(),
+            });
+        #[cfg(not(any(test, feature = "native-streams")))]
         let host: Arc<dyn SocketHost> = Arc::new(PluginHost {
             state: Arc::clone(self),
             user: user.to_owned(),
@@ -380,7 +390,7 @@ async fn run_socket(
                     CONTROL_STREAM,
                     &Frame::Hello {
                         version: 1,
-                        caps: 0,
+                        caps: state.plugins.wire_capabilities(),
                         client_info: "infraternal-server/0.1",
                     },
                     &mut encode,
@@ -414,7 +424,7 @@ async fn run_socket(
         ),
     )
     .await;
-    let Ok(Ok((connection_id, proof_authority))) = handshake else {
+    let Ok(Ok((connection_id, proof_authority, peer_capabilities))) = handshake else {
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None)))
             .await;
         drop(sink);
@@ -436,6 +446,7 @@ async fn run_socket(
     // Shutdown below aborts and joins every call before releasing socket state.
     let mut pending_plugin_calls = tokio::task::JoinSet::<PendingPluginCall>::new();
     let mut plugins = state.plugin_socket(&user_id, &session_token);
+    plugins.set_peer_capabilities(peer_capabilities);
     let mut output_open = true;
     // Welcome certifies that the non-renewing proof lease and initial expiry
     // are ready. No initial authority query may race the peer's first idle period.
@@ -457,9 +468,18 @@ async fn run_socket(
         tokio::select! {
             Some(reply) = plugins.recv() => {
                 let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
-                if while_authorized(&state, &user_id, &session_token, true,
-                    send_message(&mut sink, Message::Binary(wire))
-                ).await.is_err() {break;}
+                #[cfg(any(test, feature = "native-streams"))]
+                {
+                let authority = plugins.take_delivery_authority();
+                let sending = async {
+                    let write = send_message(&mut sink, Message::Binary(wire));
+                    let send = while_authorized(&state, &user_id, &session_token, true, write);
+                    match authority { Some(authority) => authority.authorized(Box::pin(send)).await, None => send.await }
+                };
+                if sending.await.is_err() { break; }
+                }
+                #[cfg(not(any(test, feature = "native-streams")))]
+                if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Binary(wire))).await.is_err() { break; }
             }
             changed = recovery_events.changed(), if recovery_subscribed => {
                 if changed.is_err() { break; }
@@ -486,8 +506,14 @@ async fn run_socket(
             input = transport.recv() => {
                 let input = match input {
                     Ok(Some(input)) => input,
-                    Ok(None) => break,
+                    Ok(None) => {
+                        #[cfg(all(test, feature = "desktop"))]
+                        eprintln!("desktop_diagnostic stage=browser_receive result=eof");
+                        break;
+                    }
                     Err(()) => {
+                        #[cfg(all(test, feature = "desktop"))]
+                        eprintln!("desktop_diagnostic stage=browser_receive result=invalid");
                         loop_result = Err(());
                         break;
                     }
@@ -532,6 +558,20 @@ async fn run_socket(
                             send_message(&mut sink, Message::Close(None)).await
                         }).await;
                         break;
+                    }
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && attachments.contains_key(&decoded.stream_id)
+                        && !matches!(decoded.frame, Frame::Input { .. } | Frame::Resize { .. } | Frame::Credit { .. } | Frame::Close { .. }) {
+                        loop_result = Err(());
+                        break;
+                    }
+                    if let Ok(decoded) = decode_muxed_frame(&wire)
+                        && !attachments.contains_key(&decoded.stream_id)
+                        && !plugins.owns_stream(decoded.stream_id)
+                        && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
+                        && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
+                        if while_authorized(&state, &user_id, &session_token, true, send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)).await.is_err() { break; }
+                        continue;
                     }
                     match plugins.dispatch(&wire, &mut encode) {
                         Dispatch::Queued => continue,
@@ -1004,7 +1044,7 @@ async fn handshake<S, K>(
     user_id: &str,
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
-) -> Result<([u8; 16], probe_authority::Lease), ()>
+) -> Result<([u8; 16], probe_authority::Lease, u64), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
@@ -1012,6 +1052,11 @@ where
     let hello = next_wire(source, sink, receive).await?.ok_or(())?;
     socket_deadline(state, user_id, session_token).await?;
     let decoded = decode_muxed_frame(&hello).map_err(|_| ())?;
+    let capabilities = if let Frame::Hello { caps, .. } = &decoded.frame {
+        *caps
+    } else {
+        return Err(());
+    };
     let resume = match (decoded.stream_id, decoded.frame) {
         (
             CONTROL_STREAM,
@@ -1078,7 +1123,7 @@ where
     {
         return Err(());
     }
-    Ok((welcome.connection_id, proof_authority))
+    Ok((welcome.connection_id, proof_authority, capabilities))
 }
 
 #[derive(Clone)]
@@ -1887,9 +1932,16 @@ async fn owned_writer(
     if !existing && count >= i64::try_from(MAX_ATTACHMENTS).map_err(|_| ())? {
         return Err(());
     }
-    sqlx::query("INSERT INTO terminal_writers(connection_id,client_stream,session_id) SELECT ?,?,t.id FROM terminal_sessions t JOIN websocket_connections c ON c.connection_id=? AND c.user_id=t.user_id AND c.active=1 WHERE t.id=? AND t.user_id=? AND t.closed_at IS NULL ON CONFLICT(connection_id,client_stream) DO NOTHING")
-        .bind(connection.as_slice()).bind(stream).bind(connection.as_slice()).bind(session.as_slice()).bind(user)
-        .execute(&mut *tx).await.map_err(|_| ())?;
+    if !existing {
+        // SQLite serializes this transaction. AUTOINCREMENT retains deleted
+        // terminal identities; the plugin clock covers reservations with no
+        // terminal row. Advancing either high-water mark is sufficient because
+        // native reservation also reads sqlite_sequence. Exhaustion inserts no
+        // row, so the ownership lookup below refuses before publishing an ID.
+        sqlx::query("INSERT INTO terminal_writers(writer_id,connection_id,client_stream,session_id) SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='terminal_writers'),0),w.value)+1,?,?,t.id FROM terminal_sessions t JOIN websocket_connections c ON c.connection_id=? AND c.user_id=t.user_id AND c.active=1 JOIN wire_writer_clock w ON w.singleton=1 WHERE t.id=? AND t.user_id=? AND t.closed_at IS NULL AND MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='terminal_writers'),0),w.value)<2147483647")
+            .bind(connection.as_slice()).bind(stream).bind(connection.as_slice()).bind(session.as_slice()).bind(user)
+            .execute(&mut *tx).await.map_err(|_| ())?;
+    }
     let row = sqlx::query("SELECT w.writer_id,w.input_acked FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id JOIN websocket_connections c ON c.connection_id=w.connection_id WHERE w.connection_id=? AND w.client_stream=? AND w.session_id=? AND t.user_id=? AND c.user_id=? AND c.active=1 AND t.closed_at IS NULL")
         .bind(connection.as_slice()).bind(stream).bind(session.as_slice()).bind(user).bind(user)
         .fetch_optional(&mut *tx).await.map_err(|_| ())?.ok_or(())?;
@@ -2109,6 +2161,8 @@ mod recovery_notification_bench;
 
 /// The host retains session secrets and authority interruption independently of feature work.
 struct PluginHost {
+    #[cfg(any(test, feature = "native-streams"))]
+    authority: Arc<crate::socket_authority::SocketAuthority>,
     state: Arc<WebSocketState>,
     user: String,
     token: String,
@@ -2117,6 +2171,38 @@ struct PluginHost {
 impl SocketHost for PluginHost {
     fn node_action_declared(&self, id: &str) -> bool {
         self.state.action(id).is_some()
+    }
+    #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+    fn node<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> Operation<'a, Option<Arc<dyn infraternal_plugin_api::streams::NodeHost>>> {
+        Box::pin(async move {
+            use infraternal_plugin_api::streams::Authority;
+            let id = uuid::Uuid::parse_str(id).ok()?;
+            if !self.authority.permits() {
+                return None;
+            }
+            // Resolve both the current login and host owner at selection. The
+            // returned host lease deliberately contains no browser credential.
+            let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts h JOIN sessions s ON s.user_id=h.owner_id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND s.token_hash=? AND s.unlocked=1 AND s.expires>unixepoch())")
+                .bind(id.as_bytes().as_slice()).bind(&self.user).bind(&self.hash).fetch_one(&self.state.pool).await.ok()?;
+            if !allowed || !self.authority.permits() {
+                return None;
+            }
+            self.state
+                .remote_hosts
+                .node(id, self.user.clone(), self.state.pool.clone())
+                .await
+        })
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn authority(&self) -> Arc<dyn infraternal_plugin_api::streams::Authority> {
+        self.authority.clone()
+    }
+    #[cfg(any(test, feature = "native-streams"))]
+    fn retire(&self) {
+        self.authority.withdraw();
     }
     fn user_id(&self) -> &str {
         &self.user
@@ -2128,13 +2214,29 @@ impl SocketHost for PluginHost {
         &'a self,
         operation: Operation<'a, Result<(), ()>>,
     ) -> Operation<'a, Result<(), ()>> {
-        Box::pin(while_authorized_operation(
-            &self.state,
-            &self.user,
-            &self.token,
-            true,
-            operation,
-        ))
+        #[cfg(any(test, feature = "native-streams"))]
+        {
+            Box::pin(async move {
+                use infraternal_plugin_api::streams::Authority;
+                if !self.authority.permits() {
+                    return Err(());
+                }
+                tokio::select! { biased;
+                    () = self.authority.cancelled() => Err(()),
+                    result = while_authorized_operation(&self.state, &self.user, &self.token, true, operation) => result,
+                }
+            })
+        }
+        #[cfg(not(any(test, feature = "native-streams")))]
+        {
+            Box::pin(while_authorized_operation(
+                &self.state,
+                &self.user,
+                &self.token,
+                true,
+                operation,
+            ))
+        }
     }
     fn fresh(&self, now: i64) -> Operation<'_, bool> {
         Box::pin(async move {
