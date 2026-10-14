@@ -61,7 +61,9 @@ impl Ring {
             // producers must not fault in more ring pages for hours. Large
             // single-session rings still grow lazily, bounded by their share.
             let precommit = needed > 4096 && self.capacity <= 128 * 1024;
-            let reserve = if precommit {
+            let reserve = if needed == 0 {
+                0
+            } else if precommit {
                 self.capacity
             } else {
                 needed.next_power_of_two().min(self.capacity)

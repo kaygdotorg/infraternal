@@ -29,4 +29,13 @@ mod tests {
         assert_eq!(ring.head() - ring.start(), 67_108);
         assert_eq!(ring.read(ring.start(), 4), Some(b"xxxx".to_vec()));
     }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn empty_append_keeps_lazy_storage_unallocated() {
+        let mut ring = Ring::new(65536);
+        ring.append(&[]).unwrap();
+        assert_eq!(ring.allocated_bytes(), 0);
+        assert_eq!((ring.start(), ring.head()), (0, 0));
+    }
 }
