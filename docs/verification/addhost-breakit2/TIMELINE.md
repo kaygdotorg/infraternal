@@ -1,0 +1,51 @@
+<!-- Describes the owned D255 timing fixture, clock boundaries and acceptance evidence (#189). -->
+
+# Add-host prompt timeline
+
+`timeline.py` wraps the existing disposable-target measurement. The Rust
+controller serves the real bootstrap API, session WebSocket and production
+web assets. The diagnostic browser entry uses the shipping provisioning
+client, multiplexed connection and terminal renderer. It calls the sign-in
+operation directly; wizard and camera animations are outside this measurement.
+The existing multiplexed socket is established before that operation starts.
+
+Build artifacts on the build host. Run measurements only on the perf VM under
+`flock -w 3600 /var/lock/perf-bench.lock`, releasing the lock between fresh
+targets. Keep the fixture's short state directory and unique container name
+exclusive to this lane. Use a unique `TRACER_TEST_PORT` for each browser run.
+`measure.py` takes explicit full and session images and verifies the installed
+full-image digest after handover; omitting the session image is refused.
+
+The driver uses these additional environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `ADDHOST_BROWSER_TIMELINE=1` | Enable the ignored controller's real browser path. |
+| `ADDHOST_BROWSER_DIST` | Production assets plus the bundled diagnostic entry and `timeline.html`. |
+| `ADDHOST_BROWSER_SCRIPT` | `addhost-timeline.mjs`, with the existing Playwright dependency available. |
+| `ADDHOST_BROWSER_RUNTIME` | Bun executable on the measurement machine. |
+| `ADDHOST_BROWSER_PREPARE=1` | Start resource preparation with sign-in for the paired comparison. |
+| `ADDHOST_TIMELINE_EVIDENCE` | Owned directory receiving public clock/packet receipts. |
+| `ADDHOST_TIMELINE_TARGET` | Same unique Docker target name passed to `--container-name`. |
+| `ADDHOST_FAST_STEP_PROFILE=1` | Enable target shell boundaries. |
+| `ADDHOST_PROMPT_BUDGET_MS=1500` | Fail after byte-integrity and installation proof when paint exceeds this post-authentication budget. |
+
+Browser records use `performance.timeOrigin + performance.now()`. Server and
+SSH records use epoch milliseconds; target shell records use epoch nanoseconds.
+All three processes run on the same VM clock. Header-only TCP captures record
+both directions, without payloads. Target/client SSH diagnostics retain only
+fixed protocol message types, not arbitrary debug text. The target wrapper also
+records public shell-program byte counts. Diagnostic subprocesses add small
+local overhead, so compare matched fixtures rather than treating an instrumented
+trace as the uninstrumented acceptance result.
+
+The owner cookie and generated SSH identity travel only through child stdin.
+No request headers, WebSocket bodies, terminal contents, private key or cookie
+are stored. The fixture's generated public host key remains strictly pinned;
+ignoring the disposable browser TLS certificate does not bypass SSH trust.
+
+The first painted prompt triggers 30 bytes of input before handover. After the
+retained setup stream reports ready, another 29 bytes are sent. Success requires
+both outputs and acknowledgment of all 59 bytes on the original session. The
+driver's budget check runs only after those proofs complete. Raw receipts belong
+in the job cache and must be attached to #189, rather than committed here.
