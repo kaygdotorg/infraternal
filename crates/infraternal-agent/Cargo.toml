@@ -37,6 +37,8 @@ infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optiona
 workspace = true
 
 [dev-dependencies]
+# Safe monotonic timestamps align opt-in test diagnostics with external profiles.
+nix = { workspace = true, features = ["time"] }
 # Paused test time controls frame-expiry ordering without changing runtime timers.
 tokio = { workspace = true, features = ["test-util"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }
