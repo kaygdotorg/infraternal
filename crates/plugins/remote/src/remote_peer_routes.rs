@@ -18,6 +18,9 @@ pub(super) struct Datagram {
     pub ecn: Option<EcnCodepoint>,
     source: Option<IpAddr>,
     copy_at: Option<tokio::time::Instant>,
+    /// Return replay consumes an original; an ordinary backup retains it.
+    /// Keep this identity across another route change while draining.
+    returning: bool,
 }
 
 #[derive(Default)]
@@ -54,8 +57,27 @@ impl Recent {
             ecn: transmit.ecn,
             source: transmit.src_ip,
             copy_at,
+            returning: false,
         });
         copy_at
+    }
+    /// Select enrolled recovery without moving ciphertext into another queue.
+    /// Existing return entries retain their backpressure deadline; only new
+    /// mesh originals become immediately eligible. Their source follows the
+    /// enrolled packet's local destination, including wildcard-bound endpoints.
+    pub fn replay(&mut self, source: Option<IpAddr>) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        for sent in &mut self.datagrams {
+            if !sent.returning {
+                sent.returning = true;
+                sent.copy_at = Some(now);
+            }
+            sent.source = source;
+        }
+        self.deadline()
+    }
+    pub fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.datagrams.iter().filter_map(|sent| sent.copy_at).min()
     }
     /// At the socket's earliest copy deadline, send up to the shared poll budget.
     /// Each retained entry owns its deadline: another peer's clock or an evicted
@@ -73,7 +95,7 @@ impl Recent {
         for sent in &mut self.datagrams {
             if sent.copy_at.is_some_and(|deadline| deadline <= now) {
                 if *remaining == 0 {
-                    return Some(now);
+                    break;
                 }
                 *remaining -= 1;
                 let result = socket.try_send(&Transmit {
@@ -91,11 +113,25 @@ impl Recent {
                 };
             }
         }
-        self.datagrams.iter().filter_map(|sent| sent.copy_at).min()
+        // Remove completed returns even when this poll exhausts its budget.
+        // Leaving them until a later poll would let a route change re-arm old
+        // ciphertext. New mesh sends share the same existing storage bounds.
+        let bytes = &mut self.bytes;
+        self.datagrams.retain(|sent| {
+            let keep = !sent.returning || sent.copy_at.is_some();
+            if !keep {
+                *bytes -= sent.contents.len();
+            }
+            keep
+        });
+        self.deadline()
     }
     pub fn cancel_copies(&mut self) {
         for sent in &mut self.datagrams {
-            sent.copy_at = None;
+            // Legacy enrolled recovery is independent of negotiated backups.
+            if !sent.returning {
+                sent.copy_at = None;
+            }
         }
     }
     pub fn clear(&mut self) {
@@ -298,6 +334,61 @@ impl Peers {
 mod tests {
     //! GSO batches remain within both replay bounds even when many old packets must retire.
     use super::*;
+    #[tokio::test]
+    async fn completed_return_entries_stay_consumed_when_new_mesh_history_arrives() {
+        use quinn::Runtime as _;
+        fn transmit(destination: SocketAddr, contents: &[u8]) -> Transmit<'_> {
+            Transmit {
+                destination,
+                contents,
+                ecn: None,
+                segment_size: None,
+                src_ip: None,
+            }
+        }
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let socket = quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let mut writable = socket.clone().create_io_poller();
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        let mut recent = Recent::default();
+        recent.keep(&transmit(destination, b"old-one"));
+        recent.keep(&transmit(destination, b"old-two"));
+        assert!(recent.replay(None).is_some());
+        let mut budget = 1;
+        assert!(
+            recent
+                .copies(socket.as_ref(), destination, true, &mut budget)
+                .is_some()
+        );
+        assert_eq!(budget, 0);
+        assert_eq!(recent.datagrams.len(), 1);
+        assert_eq!(recent.datagrams[0].contents, b"old-two");
+        recent.keep(&transmit(destination, b"new-mesh"));
+        let mut budget = 1;
+        assert!(
+            recent
+                .copies(socket.as_ref(), destination, true, &mut budget)
+                .is_none()
+        );
+        assert_eq!(budget, 0);
+        assert_eq!(recent.datagrams.len(), 1);
+        assert_eq!(recent.datagrams[0].contents, b"new-mesh");
+        assert_eq!(recent.bytes, b"new-mesh".len());
+        assert!(recent.replay(None).is_some());
+        let mut budget = 1;
+        assert!(
+            recent
+                .copies(socket.as_ref(), destination, true, &mut budget)
+                .is_none()
+        );
+        assert_eq!(recent.bytes, 0);
+        assert!(recent.datagrams.is_empty());
+    }
     #[tokio::test]
     async fn shared_copy_clock_preserves_each_datagrams_deadline() {
         use quinn::Runtime as _;

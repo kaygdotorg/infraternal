@@ -96,7 +96,9 @@ impl PeerBinding {
             peer.backup = enabled;
             if !enabled {
                 peer.recent.cancel_copies();
-                if peers.iter_mut().all(|peer| !peer.backup)
+                if peers
+                    .iter_mut()
+                    .all(|peer| !peer.backup && peer.recent.deadline().is_none())
                     && let Ok(mut clock) = self.bindings.copies.lock()
                 {
                     clock.clear();
@@ -179,7 +181,6 @@ impl Bindings {
             self.learn(lease, meta);
             return;
         }
-        let mut replay = Vec::new();
         if let Ok(mut peers) = self.peers.lock() {
             for (index, received) in meta.iter_mut().enumerate() {
                 let mut fresh = true;
@@ -194,11 +195,15 @@ impl Bindings {
                         peer.physical = physical;
                         peer.binding = lease;
                         if physical == logical {
-                            // Only mesh sends need fast enrolled recovery.
-                            // Consume that history once: replies sent while
-                            // enrolled are already on the retained live path,
-                            // and QUIC owns their ordinary stream recovery.
-                            replay.push((logical, peer.recent.take()));
+                            // Enrolled selection is immediate; redundant mesh
+                            // history drains through the endpoint's existing
+                            // fair send budget after QUIC receives this batch.
+                            // Each completed return consumes its original.
+                            if let Some(at) = peer.recent.replay(received.dst_ip)
+                                && let Ok(mut clock) = self.copies.lock()
+                            {
+                                clock.arm(at);
+                            }
                         }
                     }
                     if fresh {
@@ -210,26 +215,6 @@ impl Bindings {
                 if fresh {
                     self.learn(lease, std::slice::from_ref(received));
                 }
-            }
-        }
-        for (logical, pending) in replay {
-            self.learn(
-                lease,
-                &[RecvMeta {
-                    addr: logical,
-                    ..RecvMeta::default()
-                }],
-            );
-            for sent in pending {
-                // A full socket buffer leaves recovery to QUIC; no detached
-                // worker or unbounded retransmission queue outlives the lease.
-                let _ = self.try_send(&Transmit {
-                    destination: logical,
-                    contents: &sent.contents,
-                    segment_size: sent.segment_size,
-                    ecn: sent.ecn,
-                    src_ip: None,
-                });
             }
         }
     }
@@ -655,13 +640,10 @@ mod tests {
         enrolled.send_to(b"return", primary).await.unwrap();
         let (meta, _) = receive(&bindings).await;
         assert_eq!(meta.addr, logical);
-        let (n, source) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            enrolled.recv_from(&mut bytes),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (n, source) = tokio::select! {
+            received = enrolled.recv_from(&mut bytes) => received.unwrap(),
+            _ = receive(&bindings) => panic!("no peer sent another datagram"),
+        };
         assert_eq!((&bytes[..n], source), (&b"outstanding-input"[..], primary));
         let foreign = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
         foreign.send_to(b"wrong-port", destination).await.unwrap();
@@ -798,13 +780,10 @@ mod tests {
             .await
             .unwrap();
         let _ = receive(&bindings).await;
-        let (_, source) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            enrolled.recv_from(&mut bytes),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (_, source) = tokio::select! {
+            received = enrolled.recv_from(&mut bytes) => received.unwrap(),
+            _ = receive(&bindings) => panic!("no peer sent another datagram"),
+        };
         assert_eq!(source, enrolled_destination);
     }
 
@@ -1043,9 +1022,9 @@ mod tests {
                 ciphertext[24..].copy_from_slice(&index.to_le_bytes());
                 send(&bindings, logical, &ciphertext, None);
             }
-            // Inject distinct public hints at the adapter boundary. Both real UDP
-            // sockets count successful physical writes; no receive timer is polled,
-            // so backup clocks cannot contaminate this functional replay bound.
+            // Inject distinct public hints at the adapter boundary. Both real
+            // UDP sockets count successful physical writes; return drains share
+            // the owned clock and complete before the next route transition.
             for index in 0_u64..6 {
                 if index == 4 {
                     assert_eq!(
@@ -1073,6 +1052,7 @@ mod tests {
                     ..RecvMeta::default()
                 }];
                 bindings.receive_peer(on_mesh.then_some(lease.id), &buffers, &mut metadata);
+                poll_return_replay(&bindings, &sends, if index < 4 { 17 } else { 19 }).await;
             }
             assert_eq!(
                 sends.load(Ordering::Relaxed),
@@ -1081,9 +1061,29 @@ mod tests {
             );
         }
     }
-    #[tokio::test]
-    async fn an_enrolled_copy_first_replays_history_and_leaves_its_mesh_duplicate_non_authoritative()
-     {
+    /// Drive a fixed number of owned receive polls. Timer publication is allowed
+    /// between polls, but no elapsed-time threshold determines correctness.
+    async fn poll_return_replay(bindings: &Bindings, sends: &AtomicU64, expected: u64) {
+        for _ in 0..8 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let before = sends.load(Ordering::Relaxed);
+            let mut bytes = [0; 64];
+            let mut buffers = [IoSliceMut::new(&mut bytes)];
+            let mut metadata = [RecvMeta::default()];
+            std::future::poll_fn(|cx| {
+                let _ = bindings.poll_recv(cx, &mut buffers, &mut metadata);
+                Poll::Ready(())
+            })
+            .await;
+            assert!(
+                sends.load(Ordering::Relaxed) - before <= 32,
+                "return replay exceeded the shared send budget before receiving"
+            );
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), expected);
+    }
+
+    async fn enrolled_return_replay_is_bounded_and_consumed(backup: bool) {
         let sends = Arc::new(AtomicU64::new(0));
         let primary = Arc::new(InstallWhilePending {
             inner: bound("127.0.0.1:0"),
@@ -1102,13 +1102,13 @@ mod tests {
         let logical = enrolled.local_addr().unwrap();
         let alternative = alternate.local_addr().unwrap();
         let peer = bindings.route_peer(logical, alternative).unwrap();
-        peer.set_backup(true);
+        peer.set_backup(backup);
         let mut writable = bindings.clone().create_io_poller();
         std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
             .await
             .unwrap();
-        // Inject the physical receive ordering directly. Neither the copy clock
-        // nor elapsed time decides this fixture, and raw hints prove no identity.
+        // Inject the physical receive ordering directly. Raw hints prove no
+        // identity; the owned clock below only schedules redundant ciphertext.
         let hint = |value: u64, on_mesh: bool| {
             let mut ciphertext = [0_u8; 32];
             ciphertext[24..].copy_from_slice(&value.to_le_bytes());
@@ -1137,27 +1137,59 @@ mod tests {
         hint(1001, false);
         assert_eq!(
             sends.load(Ordering::Relaxed),
-            128,
-            "one fresh enrolled hint synchronously replays all 64 retained mesh sends"
+            64,
+            "a return must hand its receive batch to QUIC before replaying retained history"
         );
         hint(1001, true);
-        assert_eq!(sends.load(Ordering::Relaxed), 128);
+        assert_eq!(sends.load(Ordering::Relaxed), 64);
         {
             let peers = bindings.peers.lock().unwrap();
             let routed = peers.get(logical).unwrap();
             assert_eq!(routed.physical, logical);
             assert_eq!(routed.binding, None);
         }
+        // Turning negotiated backups off cannot cancel already requested
+        // enrolled recovery, including a return to a legacy-only path.
+        peer.set_backup(false);
+        poll_return_replay(&bindings, &sends, 128).await;
         // The delayed original cannot safely become a fresh hint: that would
         // also let an arbitrary delayed duplicate move a proven return route.
         // A new mesh transmission can supply a routing hint; authenticated path
         // proof remains the caller's responsibility above this adapter.
         hint(1002, true);
         assert_eq!(sends.load(Ordering::Relaxed), 128);
-        let peers = bindings.peers.lock().unwrap();
-        let routed = peers.get(logical).unwrap();
-        assert_eq!(routed.physical, alternative);
-        assert_eq!(routed.binding, Some(lease.id));
+        {
+            let peers = bindings.peers.lock().unwrap();
+            let routed = peers.get(logical).unwrap();
+            assert_eq!(routed.physical, alternative);
+            assert_eq!(routed.binding, Some(lease.id));
+        }
+        hint(1003, false);
+        poll_return_replay(&bindings, &sends, 128).await;
+        // Consuming the old return must not make newly sent mesh ciphertext
+        // ineligible for its own subsequent enrolled recovery.
+        hint(1004, true);
+        send(&bindings, logical, b"new mesh ciphertext", None);
+        assert_eq!(sends.load(Ordering::Relaxed), 129);
+        hint(1005, false);
+        assert_eq!(sends.load(Ordering::Relaxed), 129);
+        poll_return_replay(&bindings, &sends, 130).await;
+        hint(1006, true);
+        send(&bindings, logical, b"retired mesh ciphertext", None);
+        hint(1007, false);
+        drop(peer);
+        assert!(bindings.copies.lock().unwrap().empty());
+        poll_return_replay(&bindings, &sends, 131).await;
+    }
+
+    #[tokio::test]
+    async fn negotiated_enrolled_return_replay_is_bounded_and_consumed_once() {
+        enrolled_return_replay_is_bounded_and_consumed(true).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_enrolled_return_replay_is_bounded_and_consumed_once() {
+        enrolled_return_replay_is_bounded_and_consumed(false).await;
     }
 
     #[tokio::test]
