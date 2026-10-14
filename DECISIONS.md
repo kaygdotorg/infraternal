@@ -2705,3 +2705,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        by a small amber **key** on the glyph — the owner asked for the
        thing itself instead of an amber dot — and are sent when the link
        is back. One status dot per pill, never two.
+272. **Adopt the assembler-capability override (owner, 2026-10-14; settles
+     D264 and D268 Q21, #175):** "approved!" The pinned compiler wrapper
+     makes OpenSSL's assembler probe report no AVX-512/VAES support, so
+     OpenSSL emits its own fallback stubs for the AVX-512 AES-GCM path.
+     Measured: x86_64 −784,736 B (−3.5%); AES-GCM known-answer tests and
+     the D244 key-memory gate pass; AES-GCM, TLS and QUIC speed unchanged
+     within noise on hardware without AVX-512. A gate check fails the build
+     if a future OpenSSL brings the AVX-512 AES-GCM code back. It merges
+     after the switch-over, once its review's P2 fixes pass.
