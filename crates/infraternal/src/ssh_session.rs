@@ -15,7 +15,9 @@ pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> ExitCode {
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .and_then(|runtime| runtime.block_on(bridge(state, session)));
+        .and_then(|runtime| {
+            infraternal_agent::block_on_io(&runtime, Box::pin(bridge(state, session)))
+        });
     if result.is_ok() {
         ExitCode::SUCCESS
     } else {
