@@ -62,9 +62,9 @@ export function reconnectDelay(attempt: number): number {
   return step + Math.random() * (step / 2);
 }
 const LIVENESS_TICK_MS = 25;
-// Healthy idle links need fewer samples, still inside the RTT + 50ms silence
-// deadline. Leave 10ms for low-RTT reply scheduling; input/doubt keeps 25ms.
-const IDLE_PROBE_MS = 40;
+// Idle waits for its correlated answer before sampling again. Ten milliseconds
+// after that answer leaves forty of the RTT + 50ms budget for scheduling jitter.
+const IDLE_PROBE_PAUSE_MS = 10;
 const MAX_SOCKETS = 12;
 const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
@@ -283,7 +283,7 @@ export class MuxConnection {
       this.fastProbeUntil = startedAt + 250;
       this.scheduleLiveness();
     }
-    if (startedAt - this.lastPingAt < this.probeInterval()) return;
+    if (startedAt < this.nextProbeAt()) return;
     this.lastPingAt = startedAt;
     this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
     const nonce = this.nextPingNonce;
@@ -456,8 +456,12 @@ export class MuxConnection {
     this.scheduleLiveness();
   }
 
-  private probeInterval(): number {
-    return this.livenessRtt === undefined || performance.now() < this.fastProbeUntil || this.unacknowledgedInput.size > 0 ? LIVENESS_TICK_MS : IDLE_PROBE_MS;
+  private nextProbeAt(): number {
+    const first = this.lastPingAt + LIVENESS_TICK_MS;
+    if (this.livenessRtt === undefined || performance.now() < this.fastProbeUntil || this.unacknowledgedInput.size > 0) return first;
+    // The response deadline stays armed while idle waits. Another request cannot
+    // redeem silence; typing or link doubt immediately restores pipelining.
+    return this.pendingPings.size > 0 ? Infinity : Math.max(first, this.lastPongAt + IDLE_PROBE_PAUSE_MS);
   }
 
   private scheduleLiveness(): void {
@@ -466,7 +470,7 @@ export class MuxConnection {
     // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
     // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
     const clock = performance.now();
-    const nextProbe = this.lastPingAt + this.probeInterval() - clock;
+    const nextProbe = this.nextProbeAt() - clock;
     const remaining = this.pendingPings.size > 0 ? this.lastPongAt + (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50) - clock : Infinity;
     this.livenessTimer = window.setTimeout(() => this.checkLiveness(), Math.max(1, Math.min(nextProbe, remaining)));
   }

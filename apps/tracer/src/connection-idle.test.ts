@@ -45,6 +45,7 @@ function fixture(rtt: number, streams: number) {
     get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
     stopForwarding() { forwarding = false; },
+    setRoundTrip(ms: number) { rtt = ms; },
     suspend(ms: number) { now += ms; },
     advance(ms: number) {
       const until = now + ms;
@@ -69,8 +70,9 @@ for (const rtt of [1, 150]) for (const streams of [1, 28]) test(`healthy idle pr
     const probes = f.probes, wakeups = f.wakeups;
     f.advance(1000);
     expect(f.disconnects).toBe(0);
-    expect(f.probes - probes).toBeLessThanOrEqual(25);
-    expect(f.wakeups - wakeups).toBeLessThanOrEqual(26);
+    const maximum = Math.ceil(1000 / Math.max(25, rtt + 10));
+    expect(f.probes - probes).toBeLessThanOrEqual(maximum);
+    expect(f.wakeups - wakeups).toBeLessThanOrEqual(maximum + 1);
     // Missing both directions must still retire the socket within RTT + 50ms.
     f.stopForwarding();
     // Drain replies already in flight before starting the silence oracle.
@@ -81,7 +83,7 @@ for (const rtt of [1, 150]) for (const streams of [1, 28]) test(`healthy idle pr
 });
 
 test("unacknowledged input keeps probes fast until the matching stream acknowledges it", () => {
-  const f = fixture(1, 2);
+  const f = fixture(30, 2);
   try {
     f.advance(1000);
     f.connection.send(1, { type: "Input", inSeq: 0n, bytes: new Uint8Array([1]) });
@@ -114,7 +116,7 @@ for (const rtt of [1, 30, 150]) for (const phase of [0, 7, 20, 39]) test(`idle s
 });
 
 test("retransmitting an earlier input range cannot forget a later unacknowledged byte", () => {
-  const f = fixture(1, 1);
+  const f = fixture(30, 1);
   try {
     f.advance(1000);
     const bytes = new Uint8Array([1]);
@@ -134,6 +136,17 @@ test("a delayed first timer starts unknown-RTT grace when its first probe is iss
   try {
     f.suspend(1999);
     f.advance(1600);
+    expect(f.disconnects).toBe(0);
+    expect(f.connection.isWelcomed).toBe(true);
+  } finally { f.dispose(); }
+});
+
+for (const streams of [1, 28]) test(`a healthy idle route tolerates a 20ms RTT step at ${streams} streams without consuming its scheduling allowance before probing`, () => {
+  const f = fixture(1, streams);
+  try {
+    f.advance(1000);
+    f.setRoundTrip(20);
+    f.advance(120);
     expect(f.disconnects).toBe(0);
     expect(f.connection.isWelcomed).toBe(true);
   } finally { f.dispose(); }
