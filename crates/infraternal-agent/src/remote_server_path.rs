@@ -301,7 +301,7 @@ pub(super) async fn answered(
             }
             tokio::select! {
                 _ = probes.tick() => remote_quic::probe_liveness(connection),
-                () = path.mesh_heard(), if mesh && !heard => {},
+                () = path.mesh_heard(since.into_std()), if mesh && !heard => {},
                 () = tokio::time::sleep(Duration::from_millis(if heard || !mesh { 1 } else { 5 })) => {},
             }
         }
@@ -335,6 +335,15 @@ enum Steered {
     Replaced(Box<Link>, ServerLinkReason),
 }
 
+/// A late mesh reply wakes a fresh authenticated proof rather than waiting for
+/// retry backoff. This routing hint neither changes the path nor admits a peer.
+async fn retry_path(path: &PathSocket, deadline: tokio::time::Instant, since: std::time::Instant) {
+    tokio::select! {
+        () = tokio::time::sleep_until(deadline) => {},
+        () = path.mesh_heard(since) => {},
+    }
+}
+
 /// Drive one QUIC link: move it between paths in place until its session ends.
 #[allow(clippy::too_many_lines)]
 async fn steer(
@@ -352,6 +361,7 @@ async fn steer(
     let mut capabilities = link.standby.subscribe();
     let mut retry = Duration::from_secs(1);
     let mut not_before = tokio::time::Instant::now() + if cooling { retry } else { Duration::ZERO };
+    let mut retry_since = std::time::Instant::now();
     loop {
         let proposed = (*proposals.borrow_and_update())
             .map(|ip| SocketAddr::new(ip, identity.endpoint.port()));
@@ -370,7 +380,7 @@ async fn steer(
                         if changed.is_err() { return Steered::Ended }
                         continue;
                     }
-                    () = tokio::time::sleep_until(not_before) => {}
+                    () = retry_path(path, not_before, retry_since) => {}
                 }
                 let since = tokio::time::Instant::now();
                 path.use_mesh(mesh);
@@ -391,6 +401,7 @@ async fn steer(
                     // An unanswered switch keeps the session: its datagrams are
                     // resent on the enrolled path and the move retries later.
                     *reason = ServerLinkReason::MeshRefused;
+                    retry_since = std::time::Instant::now();
                     let _ = to_enrolled(link, registry, *reason).await;
                     not_before = tokio::time::Instant::now() + retry;
                     retry = (retry * 2).min(Duration::from_secs(30));
@@ -444,6 +455,7 @@ async fn steer(
                 } else {
                     not_before = tokio::time::Instant::now();
                 }
+                retry_since = std::time::Instant::now();
                 let returned = tokio::select! {
                     _ = &mut active => return Steered::Ended,
                     returned = to_enrolled(link, registry, *reason) => returned,

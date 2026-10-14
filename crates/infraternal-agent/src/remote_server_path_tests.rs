@@ -566,6 +566,61 @@ async fn dropped_return_replies_keep_the_admitted_connection() {
     let _ = supervisor.await;
 }
 
+/// A late physical reply schedules proof without selecting a new path itself.
+#[tokio::test]
+async fn a_latched_mesh_reply_wakes_retry_without_selecting_the_path() {
+    use quinn::{AsyncUdpSocket as _, Runtime as _};
+    let mesh = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let local = socket.local_addr().unwrap();
+    let path = PathSocket::new(
+        quinn::TokioRuntime.wrap_udp_socket(socket).unwrap(),
+        "127.0.0.1:1".parse().unwrap(),
+    );
+    path.use_mesh(mesh.local_addr().unwrap());
+    path.use_enrolled();
+    let since = std::time::Instant::now();
+    mesh.send_to(b"route hint", local).await.unwrap();
+    let mut bytes = [0; 64];
+    let mut buffers = [std::io::IoSliceMut::new(&mut bytes)];
+    let mut metadata = [quinn::udp::RecvMeta::default()];
+    std::future::poll_fn(|cx| path.poll_recv(cx, &mut buffers, &mut metadata))
+        .await
+        .unwrap();
+    assert!(path.heard_since(since));
+    let mut retry = std::pin::pin!(retry_path(
+        &path,
+        tokio::time::Instant::now() + Duration::from_secs(3600),
+        since,
+    ));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(
+        std::future::Future::poll(retry.as_mut(), &mut context).is_ready(),
+        "a latched mesh reply remained hidden behind the retry timer"
+    );
+    assert_eq!(
+        path.path(),
+        Path::Enrolled,
+        "a route hint is not path proof"
+    );
+    // The prior healthy reply must not defeat a subsequent interruption's
+    // backoff. Register first, then deliver a new hint, covering both ordering
+    // directions without relying on an elapsed-time assertion.
+    let fresh_since = std::time::Instant::now();
+    let mut waiting = std::pin::pin!(retry_path(
+        &path,
+        tokio::time::Instant::now() + Duration::from_secs(3600),
+        fresh_since,
+    ));
+    assert!(std::future::Future::poll(waiting.as_mut(), &mut context).is_pending());
+    mesh.send_to(b"new route hint", local).await.unwrap();
+    std::future::poll_fn(|cx| path.poll_recv(cx, &mut buffers, &mut metadata))
+        .await
+        .unwrap();
+    assert!(std::future::Future::poll(waiting.as_mut(), &mut context).is_ready());
+    assert_eq!(path.path(), Path::Enrolled);
+}
+
 /// A recovered mesh is retried on the same connection after the cool-down.
 #[tokio::test]
 async fn interrupted_mesh_is_retried_on_the_same_connection() {

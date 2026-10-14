@@ -312,9 +312,19 @@ impl PathSocket {
         self.mesh_datagrams.load(Ordering::Acquire)
     }
 
-    /// Wait for the next datagram from the mesh address.
-    pub async fn mesh_heard(&self) {
-        self.heard.notified().await;
+    /// Wait for a mesh datagram at or after `since`, including one that arrived
+    /// before this future was polled. Registration precedes the clock check so
+    /// a concurrent receive cannot disappear between observation and waiting.
+    pub async fn mesh_heard(&self, since: Instant) {
+        loop {
+            let notified = self.heard.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.heard_since(since) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Arm before queueing a probe, then await its first physical transmission.
