@@ -42,7 +42,8 @@ prevent further setup actions. The event envelope is additive:
     "attempt": 1,
     "sequence": 1,
     "stage": "install",
-    "state": "running"
+    "state": "running",
+    "retry_available": false
   }
 }
 ```
@@ -50,7 +51,12 @@ prevent further setup actions. The event envelope is additive:
 `stage` is `install`, `join`, `start` or `ready`; `state` is `running`,
 `done` or `failed`. A failed event may add a classified `failed_step`
 (`connect`, `upload`, `install`, `join`, `start`, `readiness`) and a safe
-human `message`. No remote output, command input or credential enters it.
+human `message`. Every event includes boolean `retry_available`: true only
+for a failed attempt with another attempt remaining (at most eight attempts),
+false for running, done or an exhausted failure. This describes attempt
+eligibility; a retry still requires current authority and available worker
+capacity. Failure is published after the saved attempt becomes retryable.
+No remote output, command input or credential enters it.
 A stage may emit running then done, or done alone. `ready:done` means the
 installed transport has reattached the existing session. A retry starts a
 new attempt and keeps the existing session. Sequences increase per host;
