@@ -35,7 +35,8 @@ use std::{
 
 const PREFIX_LIMIT: usize = 4096;
 // A global output quantum keeps one thousand ready PTYs from postponing input.
-const OUTPUTS_PER_ROUND: usize = 16;
+const OUTPUTS_PER_ROUND: usize = 1;
+const OUTPUT_BYTES_PER_READ: usize = 4096;
 // Aggregate history is bounded at scale rather than multiplying defaults by 1000.
 const HOST_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 const PEER_BYTES: usize = 4 * 1024 * 1024;
@@ -434,11 +435,11 @@ impl Session {
             && self.can_read()
             && (master.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) || self.exit.is_some())
         {
-            let mut bytes = [0; CHUNK];
+            let mut bytes = [0; OUTPUT_BYTES_PER_READ];
             match self
                 .pty
                 .master
-                .read(&mut bytes[..CHUNK.min(self.config.ring_capacity)])
+                .read(&mut bytes[..OUTPUT_BYTES_PER_READ.min(self.config.ring_capacity)])
             {
                 Ok(0) => self.drained = true,
                 Ok(n) => {
