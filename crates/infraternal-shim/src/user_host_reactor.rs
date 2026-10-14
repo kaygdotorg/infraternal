@@ -28,9 +28,8 @@ struct Registration {
 pub(super) struct Registry {
     epoll: Epoll,
     by_fd: HashMap<RawFd, Registration>,
-    by_key: HashMap<u64, Registration>,
     owned: Vec<Vec<RawFd>>,
-    next_key: u64,
+    next_key: u32,
 }
 
 #[cfg(test)]
@@ -48,18 +47,19 @@ impl Registry {
         Ok(Self {
             epoll,
             by_fd: HashMap::new(),
-            by_key: HashMap::new(),
             owned: vec![Vec::new(); count],
             next_key: 0,
         })
     }
     fn retire(&mut self, index: usize) {
         for fd in self.owned[index].drain(..) {
-            if let Some(old) = self.by_fd.remove(&fd) {
-                self.by_key.remove(&old.key);
-            }
+            self.by_fd.remove(&fd);
         }
         // Owned session descriptors have closed; the kernel removes them.
+    }
+    fn registration(&self, key: u64) -> Option<&Registration> {
+        let fd = RawFd::try_from(key & u64::from(u32::MAX)).ok()?;
+        self.by_fd.get(&fd).filter(|entry| entry.key == key)
     }
     fn sync(&mut self, index: usize, session: &Session) -> io::Result<()> {
         let mut descriptors: Vec<(BorrowedFd<'_>, EpollFlags)> =
@@ -92,13 +92,10 @@ impl Registry {
             {
                 return true;
             }
-            if let Some(old) = self.by_fd.remove(fd) {
-                self.by_key.remove(&old.key);
-                if *fd == session.pty.master.as_raw_fd() {
-                    // A disabled but live master must be removed explicitly;
-                    // level-triggered HUP on a drained master otherwise spins.
-                    let _ = self.epoll.delete(&session.pty.master);
-                }
+            if self.by_fd.remove(fd).is_some() && *fd == session.pty.master.as_raw_fd() {
+                // A disabled but live master must be removed explicitly;
+                // level-triggered HUP on a drained master otherwise spins.
+                let _ = self.epoll.delete(&session.pty.master);
             }
             false
         });
@@ -108,23 +105,25 @@ impl Registry {
                     self.epoll
                         .modify(fd, &mut EpollEvent::new(flags, old.key))?;
                     old.flags = flags;
-                    self.by_key.insert(old.key, *old);
                 }
             } else {
                 self.next_key = self
                     .next_key
                     .checked_add(1)
-                    .filter(|key| *key != SIGNAL)
                     .ok_or_else(|| io::Error::other("host readiness identity exhausted"))?;
+                // The fd addresses the sole index; its generation rejects old
+                // readiness after close/reuse. Refuse before generation wrap,
+                // so a stale event can never regain authority over a new peer.
+                let key = (u64::from(self.next_key) << 32)
+                    | u64::try_from(fd.as_raw_fd()).map_err(io::Error::other)?;
                 let entry = Registration {
                     fd: fd.as_raw_fd(),
                     flags,
-                    key: self.next_key,
+                    key,
                     session: index,
                 };
                 self.epoll.add(fd, EpollEvent::new(flags, entry.key))?;
                 self.by_fd.insert(entry.fd, entry);
-                self.by_key.insert(entry.key, entry);
                 self.owned[index].push(entry.fd);
             }
         }
@@ -246,7 +245,7 @@ pub(super) fn run(
                 signal_ready = true;
                 continue;
             }
-            if let Some(entry) = registry.by_key.get(&event.data()) {
+            if let Some(entry) = registry.registration(event.data()) {
                 work.entry(entry.session)
                     .or_default()
                     .flags
@@ -436,6 +435,33 @@ mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
     #[test]
+    fn one_session_readiness_fits_240_requested_bytes() {
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/reg{}",
+            std::process::id()
+        ));
+        let mut config = crate::Config::new([6; 16], nix::unistd::Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let session = Session::new(config, 65536).unwrap();
+        let signals = SignalFd::with_flags(
+            &nix::sys::signal::SigSet::empty(),
+            nix::sys::signalfd::SfdFlags::SFD_CLOEXEC,
+        )
+        .unwrap();
+        let (registry, allocation) = crate::heap_accounting::measure(|| {
+            ownership_fixture(std::slice::from_ref(&session), &signals).unwrap()
+        });
+        assert!(
+            allocation.bytes <= 240,
+            "readiness owns {} requested bytes",
+            allocation.bytes
+        );
+        drop(registry);
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
     fn accounting_write_failure_disables_only_the_receipt() {
         let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
             ".cache/codex-scratch/process-per-user/a{}",
@@ -507,7 +533,7 @@ mod tests {
         let key = registry.by_fd[&fd].key;
         session.peers.clear();
         registry.sync(0, &session).unwrap();
-        assert!(!registry.by_key.contains_key(&key));
+        assert!(registry.registration(key).is_none());
         drop(peer);
         let peer = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
         session
