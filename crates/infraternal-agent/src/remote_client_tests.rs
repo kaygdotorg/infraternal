@@ -89,7 +89,7 @@ async fn prefixed_control_keeps_coalesced_suffix_and_suppresses_only_its_greetin
     let mut prefix = Vec::new();
     encode_frame_into(&hello.frame, &mut prefix).unwrap();
     let control = PrefixedControl {
-        channel: ControlChannel::Quic(channel),
+        channel,
         prefix: Mutex::new(prefix),
         sent_greeting: Mutex::new(Some(greeting_bytes.clone())),
         receive: Mutex::new(receive),
@@ -543,7 +543,7 @@ async fn unavailable_local_credentials_retry_without_creating_state() {
 mod idle_timers;
 
 #[tokio::test]
-async fn proven_tcp_decoder_preserves_mux_envelopes_and_buffered_suffix() {
+async fn raw_tcp_control_preserves_mux_envelopes_and_buffered_suffix() {
     let ca = root();
     let server = leaf(&ca, true);
     let client = leaf(&ca, false);
@@ -573,19 +573,10 @@ async fn proven_tcp_decoder_preserves_mux_envelopes_and_buffered_suffix() {
         combined.extend_from_slice(&frame);
     }
     peer.channel.write(&combined).await.unwrap();
+    let control = ControlChannel::Tcp(&connection.channel);
     let mut receive = Receive::default();
-    assert_eq!(
-        receive.next(&connection.channel).await.unwrap().stream_id,
-        0
-    );
-    let control = PrefixedControl {
-        channel: ControlChannel::Tcp(&connection.channel),
-        prefix: Mutex::new(Vec::new()),
-        sent_greeting: Mutex::new(None),
-        receive: Mutex::new(receive),
-    };
-    let mut consumer = Receive::default();
-    let frame = consumer.next(&control).await.unwrap();
+    assert_eq!(receive.next(&control).await.unwrap().stream_id, 0);
+    let frame = receive.next(&control).await.unwrap();
     assert_eq!(frame.stream_id, 7);
     assert_eq!(
         frame.frame,

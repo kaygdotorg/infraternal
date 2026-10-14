@@ -144,9 +144,10 @@ enum Connected {
     Tcp(remote_tls::Connection),
 }
 
-// A proven TCP decoder and a native QUIC decoder retain their buffered frames.
+// One concrete remote control adapter shares daemon and relay dispatch. TCP
+// stays raw; QUIC retains its negotiated greeting and already-buffered decoder.
 enum ControlChannel<'a> {
-    Quic(NativeChannel),
+    Quic(&'a PrefixedControl),
     Tcp(&'a crate::remote_tls::TcpTls),
 }
 impl Channel for ControlChannel<'_> {
@@ -184,13 +185,13 @@ impl Channel for ControlChannel<'_> {
 
 // Replay the negotiated Hello into common dispatch while retaining the same
 // decoder: its first read may also contain the following control frame.
-struct PrefixedControl<'a> {
-    channel: ControlChannel<'a>,
+struct PrefixedControl {
+    channel: NativeChannel,
     prefix: Mutex<Vec<u8>>,
     sent_greeting: Mutex<Option<Vec<u8>>>,
     receive: Mutex<Receive>,
 }
-impl Channel for PrefixedControl<'_> {
+impl Channel for PrefixedControl {
     fn native_stream_id(&self) -> Option<u32> {
         self.channel.native_stream_id()
     }
@@ -205,16 +206,7 @@ impl Channel for PrefixedControl<'_> {
         if prefix.is_empty() {
             let mut receive = self.receive.lock().await;
             let frame = receive.next(&self.channel).await?;
-            if self.channel.native_stream_id().is_some() {
-                encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
-            } else {
-                infraternal_protocol::encode_muxed_frame_into(
-                    frame.stream_id,
-                    &frame.frame,
-                    &mut prefix,
-                )
-                .map_err(io::Error::other)?;
-            }
+            encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
         }
         let count = target.len().min(prefix.len());
         target[..count].copy_from_slice(&prefix[..count]);
@@ -331,11 +323,12 @@ async fn quic_session_on(
         };
         standby.send_replace(caps);
         let control = PrefixedControl {
-            channel: ControlChannel::Quic(control),
+            channel: control,
             prefix: Mutex::new(prefix),
             sent_greeting: Mutex::new(Some(sent_greeting)),
             receive: Mutex::new(rx),
         };
+        let control = ControlChannel::Quic(&control);
         let dispatch = daemon::run_authenticated_with_plugins(
             &control,
             state.clone(),

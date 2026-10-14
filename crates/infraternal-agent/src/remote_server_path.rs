@@ -38,14 +38,6 @@ const BACKUP_PROBE_MARGIN: Duration = Duration::from_millis(30);
 /// `WireGuard` handshake, then the server's reply) before it is used.
 const SWITCH_MARGIN: Duration = Duration::from_millis(200);
 
-enum Proof {
-    Quic(super::ProvedControl),
-    Tcp {
-        receive: crate::transport::Receive,
-        greeting: Option<Vec<u8>>,
-    },
-}
-
 /// The dial drivers belong to a single transport, including losing probes.
 struct Link {
     connected: Connected,
@@ -55,7 +47,7 @@ struct Link {
     path: Option<Arc<PathSocket>>,
     address: SocketAddr,
     kind: ServerLinkKind,
-    proof: tokio::sync::Mutex<Option<Proof>>,
+    proof: tokio::sync::Mutex<Option<super::ProvedControl>>,
     standby: tokio::sync::watch::Sender<u64>,
 }
 impl Drop for Link {
@@ -167,29 +159,22 @@ async fn connect(
         standby: tokio::sync::watch::channel(0).0,
     };
     if prove {
+        // Only QUIC mesh candidates need pre-admission control proof. TCP
+        // is the enrolled fallback and uses the common raw control adapter.
+        let Connected::Quic(connection) = &link.connected else {
+            return Err(io::ErrorKind::Unsupported.into());
+        };
         let proof = tokio::time::timeout(PROBE_TIMEOUT, async {
-            match &link.connected {
-                Connected::Quic(connection) => {
-                    let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
-                    let control = crate::remote_native::NativeChannel::control(send, receive)?;
-                    let mut receive = crate::transport::Receive::default();
-                    prove_channel(&control, &mut receive).await?;
-                    Ok::<_, io::Error>(Proof::Quic(super::ProvedControl {
-                        control,
-                        receive,
-                        greeting: None,
-                        primed: false,
-                    }))
-                }
-                Connected::Tcp(connection) => {
-                    let mut receive = crate::transport::Receive::default();
-                    prove_channel(&connection.channel, &mut receive).await?;
-                    Ok(Proof::Tcp {
-                        receive,
-                        greeting: None,
-                    })
-                }
-            }
+            let (send, receive) = connection.open_bi().await.map_err(io::Error::other)?;
+            let control = crate::remote_native::NativeChannel::control(send, receive)?;
+            let mut receive = crate::transport::Receive::default();
+            prove_channel(&control, &mut receive).await?;
+            Ok::<_, io::Error>(super::ProvedControl {
+                control,
+                receive,
+                greeting: None,
+                primed: false,
+            })
         })
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
@@ -249,10 +234,7 @@ async fn session(
 ) -> io::Result<()> {
     match &link.connected {
         Connected::Quic(connection) => {
-            let proof = match link.proof.lock().await.take() {
-                Some(Proof::Quic(proof)) => Some(proof),
-                _ => None,
-            };
+            let proof = link.proof.lock().await.take();
             quic_session_on(
                 connection.clone(),
                 identity,
@@ -266,31 +248,17 @@ async fn session(
             .await
         }
         Connected::Tcp(connection) => {
-            if let Some(Proof::Tcp { receive, greeting }) = link.proof.lock().await.take() {
-                let channel = super::PrefixedControl {
-                    channel: super::ControlChannel::Tcp(&connection.channel),
-                    prefix: tokio::sync::Mutex::new(greeting.unwrap_or_default()),
-                    sent_greeting: tokio::sync::Mutex::new(None),
-                    receive: tokio::sync::Mutex::new(receive),
-                };
-                daemon::run_authenticated_with_plugins(
-                    &channel,
-                    state,
-                    identity.execution_uid,
-                    renewal,
-                    registry,
-                )
-                .await
-            } else {
-                daemon::run_authenticated_with_plugins(
-                    &connection.channel,
-                    state,
-                    identity.execution_uid,
-                    renewal,
-                    registry,
-                )
-                .await
-            }
+            // Both remote transports use this one concrete control adapter,
+            // sharing the daemon/relay code without decoding raw TCP twice.
+            let channel = super::ControlChannel::Tcp(&connection.channel);
+            daemon::run_authenticated_with_plugins(
+                &channel,
+                state,
+                identity.execution_uid,
+                renewal,
+                registry,
+            )
+            .await
         }
     }
 }
