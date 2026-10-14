@@ -28,13 +28,21 @@ struct State {
 }
 pub(super) struct ReceiveDiagnostic {
     origin: std::time::Instant,
+    origin_monotonic_ns: Option<[u64; 2]>,
     state: Mutex<State>,
 }
 impl ReceiveDiagnostic {
     pub(super) fn from_environment() -> Option<Arc<Self>> {
         (std::env::var("INFRATERNAL_MESH_RECEIVE_DIAGNOSTIC").as_deref() == Ok("1")).then(|| {
+            // The safe absolute reads bound the existing Instant origin. A
+            // profiler can conservatively align relative stage timestamps
+            // without assuming these two clock APIs share an exact epoch.
+            let before = monotonic_ns();
+            let origin = std::time::Instant::now();
+            let after = monotonic_ns();
             Arc::new(Self {
-                origin: std::time::Instant::now(),
+                origin,
+                origin_monotonic_ns: origin_interval(before, after),
                 state: Mutex::new(State::default()),
             })
         })
@@ -159,7 +167,7 @@ impl ReceiveDiagnostic {
     }
     pub(super) fn report(&self) -> serde_json::Value {
         let state = self.state.lock().unwrap();
-        serde_json::json!({"scope":"observer_cost_diagnostic_not_acceptance_CPU","origin":"fixture_start_monotonic_microseconds","gap_bin_upper_exclusive_us":(0..BINS).map(|bin|if bin+1==BINS {u64::MAX} else {1_u64<<bin}).collect::<Vec<_>>(),"limitations":["pending_poll_gaps_can_include_idle_time","raw_ingress_includes_duplicates_and_ACK_only_packets","failure_connection_stats_sampled_outside_UDP_callbacks","snapshots_add_observer_cost"],"stages":state.stages})
+        serde_json::json!({"scope":"observer_cost_diagnostic_not_acceptance_CPU","origin":"fixture_start_monotonic_microseconds","benchmark_origin_clock":"CLOCK_MONOTONIC","benchmark_origin_monotonic_before_ns":self.origin_monotonic_ns.map(|interval|interval[0]),"benchmark_origin_monotonic_after_ns":self.origin_monotonic_ns.map(|interval|interval[1]),"gap_bin_upper_exclusive_us":(0..BINS).map(|bin|if bin+1==BINS {u64::MAX} else {1_u64<<bin}).collect::<Vec<_>>(),"limitations":["pending_poll_gaps_can_include_idle_time","raw_ingress_includes_duplicates_and_ACK_only_packets","failure_connection_stats_sampled_outside_UDP_callbacks","snapshots_add_observer_cost"],"stages":state.stages})
     }
 }
 fn gap_bin(gap: u64) -> usize {
@@ -202,6 +210,7 @@ fn receive_diagnostic_gap_bins_have_explicit_bounds() {
 fn receive_diagnostic_counts_gro_and_only_fixed_sampled_ports() {
     let diagnostic = ReceiveDiagnostic {
         origin: std::time::Instant::now(),
+        origin_monotonic_ns: None,
         state: Mutex::new(State::default()),
     };
     diagnostic.sample_ports(&["127.0.0.3:1234".parse().unwrap()]);
@@ -281,4 +290,53 @@ impl AsyncUdpSocket for ReceiveSocket {
     fn may_fragment(&self) -> bool {
         self.socket.may_fragment()
     }
+}
+
+/// `CLOCK_MONOTONIC` is content-free and matches the external profiler clock.
+/// Invalid timestamps or arithmetic overflow make alignment unavailable rather
+/// than manufacturing a precise-looking offset.
+fn monotonic_ns() -> Option<u64> {
+    let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).ok()?;
+    checked_nanoseconds(
+        u64::try_from(time.tv_sec()).ok()?,
+        u64::try_from(time.tv_nsec()).ok()?,
+    )
+}
+fn checked_nanoseconds(seconds: u64, nanoseconds: u64) -> Option<u64> {
+    if nanoseconds >= 1_000_000_000 {
+        return None;
+    }
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanoseconds)
+}
+fn origin_interval(before: Option<u64>, after: Option<u64>) -> Option<[u64; 2]> {
+    let (before, after) = before.zip(after)?;
+    (before <= after).then_some([before, after])
+}
+
+#[test]
+fn monotonic_origin_bounds_fail_closed_without_losing_receive_receipts() {
+    assert_eq!(checked_nanoseconds(2, 3), Some(2_000_000_003));
+    assert_eq!(checked_nanoseconds(0, 1_000_000_000), None);
+    assert_eq!(checked_nanoseconds(u64::MAX, 0), None);
+    assert_eq!(
+        checked_nanoseconds(u64::MAX / 1_000_000_000, u64::MAX % 1_000_000_000 + 1),
+        None
+    );
+    assert_eq!(origin_interval(Some(10), Some(20)), Some([10, 20]));
+    assert_eq!(origin_interval(Some(20), Some(10)), None);
+    assert_eq!(origin_interval(None, Some(20)), None);
+    assert_eq!(origin_interval(Some(10), None), None);
+    let mut diagnostic = ReceiveDiagnostic {
+        origin: std::time::Instant::now(),
+        origin_monotonic_ns: None,
+        state: Mutex::new(State::default()),
+    };
+    let report = diagnostic.report();
+    assert_eq!(report["benchmark_origin_clock"], "CLOCK_MONOTONIC");
+    assert!(report["benchmark_origin_monotonic_before_ns"].is_null());
+    assert!(report["benchmark_origin_monotonic_after_ns"].is_null());
+    diagnostic.origin_monotonic_ns = Some([10, 20]);
+    let report = diagnostic.report();
+    assert_eq!(report["benchmark_origin_monotonic_before_ns"], 10);
+    assert_eq!(report["benchmark_origin_monotonic_after_ns"], 20);
 }
