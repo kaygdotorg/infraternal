@@ -144,6 +144,16 @@ fn cold_unicode_styles_and_links_replay_with_exact_native_state() {
     assert_eq!(terminal.research_state_difference(&replayed), 0);
 }
 
+#[test]
+fn ownership_receipt_accounts_encoded_history_separately() {
+    let terminal = filled();
+    let (ordinary, pages, resident, encoded, carry) = terminal.ownership().unwrap();
+    assert_eq!(ordinary + pages + encoded, terminal.memory().0);
+    assert!(encoded > 0, "retained history must appear in its own class");
+    assert!(resident <= pages);
+    assert_eq!(carry, terminal.pending.capacity());
+}
+
 fn pss() -> usize {
     std::fs::read_to_string("/proc/self/smaps_rollup")
         .unwrap()

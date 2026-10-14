@@ -157,7 +157,6 @@ impl Memory {
         }
         count
     }
-    #[cfg(all(test, feature = "compact-history"))]
     pub(super) fn encoded_bytes(&self) -> usize {
         // SAFETY: copied accounting between synchronous native calls.
         unsafe { (*self.state.get()).encoded_used }

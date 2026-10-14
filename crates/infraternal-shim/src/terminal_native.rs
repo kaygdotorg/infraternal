@@ -127,7 +127,7 @@ impl Engine {
     pub(super) fn mapped_blocks(&self) -> usize {
         self.1.as_ref().map_or(0, |m| m.mapped_blocks())
     }
-    #[cfg(all(test, feature = "compact-history"))]
+    #[cfg(feature = "process-per-user")]
     pub(super) fn encoded_bytes(&self) -> usize {
         self.1.as_ref().map_or(0, |m| m.encoded_bytes())
     }

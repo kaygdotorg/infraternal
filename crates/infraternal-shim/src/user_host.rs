@@ -232,13 +232,13 @@ impl Session {
     }
     fn record_memory(&self, index: usize, writer: &mut impl Write) -> io::Result<()> {
         let state = self.terminal.state.borrow();
-        let (ordinary, pages, resident, carry) = state
+        let (ordinary, pages, resident, encoded, carry) = state
             .terminal
             .as_ref()
-            .map_or(Ok((0, 0, 0, 0)), |t| t.ownership())?;
+            .map_or(Ok((0, 0, 0, 0, 0)), |t| t.ownership())?;
         writeln!(
             writer,
-            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"carry_bytes\":{carry},\"prefix_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}}}",
+            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"carry_bytes\":{carry},\"prefix_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}}}",
             self.allocated_bytes(),
             state.prefix.capacity(),
             self.ring.allocated_bytes(),

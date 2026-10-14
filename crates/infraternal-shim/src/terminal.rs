@@ -249,12 +249,13 @@ impl Terminal {
         self.engine.memory()
     }
     #[cfg(feature = "process-per-user")]
-    pub(super) fn ownership(&self) -> io::Result<(usize, usize, usize, usize)> {
+    pub(super) fn ownership(&self) -> io::Result<(usize, usize, usize, usize, usize)> {
         let (ordinary, pages, _) = self.engine.allocation_classes();
         Ok((
             ordinary,
             pages,
             self.engine.resident_pages()?,
+            self.engine.encoded_bytes(),
             self.pending.capacity(),
         ))
     }
