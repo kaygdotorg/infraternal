@@ -357,25 +357,16 @@ enum Steered {
 async fn steer(
     link: &Link,
     identity: &RemoteIdentity,
-    state: &std::path::Path,
-    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     registry: &crate::plugin_control::Registry,
     cooling: bool,
     reason: &mut ServerLinkReason,
+    mut active: std::pin::Pin<&mut impl std::future::Future<Output = io::Result<()>>>,
 ) -> Steered {
     let (Connected::Quic(connection), Some(endpoint), Some(path)) =
         (&link.connected, link.endpoint.as_ref(), link.path.as_ref())
     else {
         return Steered::Ended;
     };
-    let active = session(
-        link,
-        identity,
-        state.to_path_buf(),
-        renewal,
-        registry.clone(),
-    );
-    tokio::pin!(active);
     let mut proposals = registry.server_paths();
     let mut capabilities = link.standby.subscribe();
     let mut retry = Duration::from_secs(1);
@@ -540,18 +531,11 @@ async fn replacement(
 async fn replace_tcp(
     link: &Link,
     identity: &RemoteIdentity,
-    state: &std::path::Path,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     registry: &crate::plugin_control::Registry,
     cooling: bool,
+    active: std::pin::Pin<&mut impl std::future::Future<Output = io::Result<()>>>,
 ) -> Steered {
-    let active = session(
-        link,
-        identity,
-        state.to_path_buf(),
-        renewal,
-        registry.clone(),
-    );
     let replacing = replacement(link, identity, renewal, registry, cooling);
     tokio::select! {
         result = replacing => result.map_or(Steered::Ended, |(next, why)| Steered::Replaced(Box::new(next), why)),
@@ -673,21 +657,34 @@ pub(super) async fn run(
         let started = tokio::time::Instant::now();
         report(&registry, Some(&link), reason);
         connected.send_replace(true);
-        // Every session future leaves scope before the old transport retires.
-        // Aborting a partial write is safe only because Link closes that channel.
-        let steered = if link.path.is_some() {
-            steer(
-                &link,
-                identity,
-                &state,
-                renewal,
-                &registry,
-                cooling,
-                &mut reason,
-            )
-            .await
-        } else {
-            replace_tcp(&link, identity, &state, renewal, &registry, cooling).await
+        // Construct the session once, rather than embedding its large future
+        // in both path drivers. Borrowing the same pinned future adds no heap
+        // allocation. This scope drops it before the old Link retires; a
+        // cancelled partial write is safe only while that Link closes channel.
+        let steered = {
+            let active = session(&link, identity, state.clone(), renewal, registry.clone());
+            tokio::pin!(active);
+            if link.path.is_some() {
+                steer(
+                    &link,
+                    identity,
+                    &registry,
+                    cooling,
+                    &mut reason,
+                    active.as_mut(),
+                )
+                .await
+            } else {
+                replace_tcp(
+                    &link,
+                    identity,
+                    renewal,
+                    &registry,
+                    cooling,
+                    active.as_mut(),
+                )
+                .await
+            }
         };
         connected.send_replace(false);
         let (was, _) = link.current();
