@@ -384,6 +384,9 @@ async fn claude_review_idle_anonymous_sockets_cannot_starve_host_handshakes() {
 
 #[path = "remote_probe_tests.rs"]
 mod candidate_proofs;
+#[cfg(feature = "ssh")]
+#[path = "remote_ssh_tests.rs"]
+pub(crate) mod ssh_bridge;
 
 #[path = "remote_standby_tests.rs"]
 mod standby;

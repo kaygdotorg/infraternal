@@ -265,6 +265,16 @@ impl EmbeddedAgent {
         )
     }
 
+    /// Observe the currently greeted route without opening or replaying any remote work.
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    pub(crate) async fn installed_route(&self) -> Result<bool, AgentError> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::InstalledRoute(reply))
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)
+    }
     /// The secondary joins this actor only after enrolled identity admission.
     #[cfg(feature = "remote")]
     pub(crate) async fn prime(&self, link: RemoteLink) -> Result<(), AgentError> {
@@ -476,6 +486,8 @@ impl EmbeddedAgent {
 }
 
 enum Command {
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    InstalledRoute(oneshot::Sender<bool>),
     #[cfg(all(feature = "remote", feature = "ssh"))]
     RetireSsh(oneshot::Sender<()>),
     #[cfg(feature = "remote")]
@@ -1511,6 +1523,14 @@ async fn process_command(
         // The actor consumes this command before entering ordinary dispatch.
         #[cfg(all(feature = "remote", feature = "ssh"))]
         Command::RetireSsh(_) => false,
+        #[cfg(all(feature = "remote", feature = "ssh"))]
+        Command::InstalledRoute(reply) => {
+            // Commands run only after greeting. Registry queue admission can
+            // precede replacement, so it cannot stand in for this local fence.
+            let _ =
+                reply.send(matches!(&connection.peer, Peer::Remote(link) if !link.ssh_backed()));
+            true
+        }
         #[cfg(feature = "remote")]
         Command::Prime { reply, .. } => {
             let _ = reply.send(Err(AgentError::Unavailable));

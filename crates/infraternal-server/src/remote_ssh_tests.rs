@@ -80,6 +80,11 @@ except EOFError: pass
     Duplex::spawn(&mut command).unwrap()
 }
 
+/// Reuse the real pipe transport for bootstrap admission-order regressions.
+pub(crate) fn pipe_link(pidfile: &std::path::Path) -> RemoteLink {
+    RemoteLink::ssh(pipe_peer(pidfile), Arc::new(Master(Arc::default())))
+}
+
 #[tokio::test]
 async fn ssh_bridge_retires_only_after_installed_writer_acknowledges() {
     replacement(false, false).await;
@@ -140,6 +145,7 @@ async fn replacement(refuse: bool, component_off: bool) {
             .unwrap(),
         TerminalOutput::Ack { in_seq_acked: 0 }
     ));
+    assert!(!actor.installed_route().await.unwrap());
     let pid: u32 = std::fs::read_to_string(&pidfile).unwrap().parse().unwrap();
     assert!(alive(pid));
     let listeners = RemoteListeners::start(
@@ -221,6 +227,7 @@ async fn replacement(refuse: bool, component_off: bool) {
         TerminalOutput::Ack { in_seq_acked: 0 }
     ));
     if refuse {
+        assert!(!actor.installed_route().await.unwrap());
         assert!(
             alive(pid),
             "failed replacement must retain the working SSH bridge"
@@ -230,6 +237,7 @@ async fn replacement(refuse: bool, component_off: bool) {
         drop(actor);
         drop(listeners);
     } else {
+        assert!(actor.installed_route().await.unwrap());
         peer.abort();
         drop(actor);
         drop(listeners);

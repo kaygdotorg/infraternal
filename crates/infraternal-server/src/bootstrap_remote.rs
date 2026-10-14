@@ -80,16 +80,10 @@ impl RemoteBackend {
         self.uid(authority, host)?;
         // The installation service has just started. This finite wait owns no
         // background timer and cannot turn token redemption into online proof.
-        tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                if self.hosts.installed(host).await
-                    && let Some(actor) = self.hosts.actor(host).await
-                {
-                    return actor;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            wait_installed_actor(&self.hosts, host),
+        )
         .await
         .map_err(|_| {
             Failure::install(
@@ -505,6 +499,18 @@ impl Backend for RemoteBackend {
                 .map_err(|_| unavailable())?;
             self.completed_record(authority, host)
         })
+    }
+}
+/// Ledger admission alone does not identify the actor's currently greeted route.
+async fn wait_installed_actor(hosts: &RemoteHosts, host: Uuid) -> EmbeddedAgent {
+    loop {
+        if hosts.installed(host).await
+            && let Some(actor) = hosts.actor(host).await
+            && actor.installed_route().await.unwrap_or(false)
+        {
+            return actor;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 fn cookie(authority: &Authority) -> Result<&str, Failure> {
@@ -1543,3 +1549,7 @@ mod tests {
 #[cfg(test)]
 #[path = "bootstrap_canary_tests.rs"]
 mod canary_tests;
+
+#[cfg(test)]
+#[path = "bootstrap_admission_tests.rs"]
+mod admission_tests;
