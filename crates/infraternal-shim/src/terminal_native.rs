@@ -24,7 +24,7 @@ unsafe extern "C" {
     ) -> i32;
     #[cfg(test)]
     fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void, strict: bool) -> usize;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "process-per-user"))]
     fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
     fn infraternal_vt_approximate(terminal: *mut c_void, data: *mut u8, len: usize) -> usize;
     fn infraternal_vt_snapshot(
@@ -192,7 +192,7 @@ impl Engine {
         // SAFETY: read-only oracle borrows live handles synchronously and retains nothing.
         unsafe { infraternal_vt_compare(left.as_ptr(), right.as_ptr(), true) }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "process-per-user"))]
     pub fn history_rows(&self) -> usize {
         let Some(handle) = self.0 else { return 0 };
         let mut rows: usize = 0;

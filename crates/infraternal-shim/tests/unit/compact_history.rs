@@ -166,3 +166,11 @@ fn pss() -> usize {
         .parse()
         .unwrap()
 }
+#[test]
+fn retained_row_receipt_neither_restores_pages_nor_changes_encoding() {
+    let terminal = filled();
+    let before = terminal.ownership().unwrap();
+    assert_eq!(terminal.retained_history_rows(), 9977);
+    assert_eq!(terminal.ownership().unwrap(), before);
+}
+

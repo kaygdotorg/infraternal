@@ -259,6 +259,11 @@ impl Terminal {
             self.pending.capacity(),
         ))
     }
+    /// Read only native row-count metadata; compressed backing stays cold.
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn retained_history_rows(&self) -> usize {
+        self.engine.history_rows()
+    }
     /// A clean or still-pending rebuild cannot certify faithful state. Keep
     /// this provenance across peer replacement and further output/resizes.
     pub fn requires_approximation(&self) -> bool {
