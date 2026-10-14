@@ -35,15 +35,17 @@
   remain pending across budget exhaustion and socket backpressure. Completed
   enrolled returns consume their originals once; capability withdrawal cancels
   negotiated copies without cancelling pending legacy enrolled recovery.
-- The proposed additive bit 6 dual reply on #201 keeps enrolled primary replies
+- The additive bit 6 dual reply implemented for #201 keeps enrolled primary replies
   immediate and permits the same ciphertext on the admitted mesh alternative,
   eligible immediately. It shares the existing history, clock and send budget;
   alternative admission cannot displace pending enrolled returns. Duplicate
   hints never promote the primary route. Unknown coordinates stay dormant,
   capability withdrawal cancels alternatives, and component removal or lease
   retirement prevents pending work from selecting a replacement socket. Alternative replies add no
-  connection, writer, stream or admission authority. Implementation and
-  acceptance of this clarification remain pending.
+  connection, writer, stream or admission authority. Real authenticated-stream
+  copy-first and shutdown regressions cover the implementation; release
+  acceptance remains pending. Unused timers cancel without removing a live
+  endpoint's receive registration or pending enrolled recovery.
 - A candidate owns fresh acknowledgement probes until its bounded proof ends.
   Idle mesh detection requires both a physical mesh reply and fresh authenticated
   counters. Enrolled copies alone cannot prove a live mesh. Simultaneous
@@ -76,6 +78,6 @@
   counter overhead; failed watchdog cohorts are not accepted cost evidence.
 - Release acceptance, both static size ceilings and the complete fast gate are
   recorded on #201. This checklist does not assert outstanding measurements pass.
-  The proposed dual reply has no accepted healthy-1000-transport or 31-sample
+  The dual reply has no accepted healthy-1000-transport or 31-sample
   per-venue release result claimed here; those measurements, its regressions
   and the final gates remain required.

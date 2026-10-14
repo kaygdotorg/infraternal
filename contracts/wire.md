@@ -394,11 +394,11 @@ bit 6 cancels negotiated copies while preserving pending legacy enrolled
 recovery. Retiring a peer lease cancels its remaining work; retiring the last
 lease releases the clock and cache.
 
-#### Proposed bounded dual reply (#201)
+#### Bounded dual reply (#201)
 
-The following additive clarification is proposed on #201; implementation and
-acceptance remain pending. It changes no frame layout, version, capability bit
-or authority.
+The additive clarification proposed on #201 is implemented in the remote
+plugin; release acceptance remains pending on that issue. It changes no frame
+layout, version, capability bit or authority.
 
 For negotiated bit 6 peers, an enrolled primary reply remains immediate.
 The same encrypted datagram may additionally be sent to the admitted mesh
@@ -421,7 +421,7 @@ deduplication. A bounded ciphertext-suffix cache filters recent duplicate
 routing hints, including differently batched GRO input. A suffix collision
 keeps a route hint rather than admitting or dropping data. A duplicate mesh
 original received after its enrolled copy must not promote the primary route;
-the proposed alternative reply does not change this rule. The mesh liveness
+the alternative reply does not change this rule. The mesh liveness
 probe requires physical mesh arrival plus newly authenticated traffic:
 authenticated enrolled copies alone must not keep a dead mesh path selected.
 
