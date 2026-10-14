@@ -125,6 +125,11 @@ impl SessionTerminal for LazyTerminal {
         self.resize_with_ring(cols, rows, None)
     }
     fn resize_with_ring(&mut self, cols: u16, rows: u16, ring: Option<&Ring>) -> io::Result<()> {
+        // Writer selection also reapplies unchanged geometry. That is not
+        // reflow and must not allocate VT for a light-output idle session.
+        if (cols, rows) == (self.cols, self.rows) && self.state.get_mut().terminal.is_none() {
+            return Ok(());
+        }
         // Materialize at the historical geometry before applying reflow.
         self.materialize()?;
         self.state
@@ -667,6 +672,20 @@ mod tests {
         eager.process(&bytes);
         assert!(lazy.state.borrow().terminal.is_some());
         assert_eq!(lazy.state.borrow().prefix, [] as [u8; 0]);
+        assert_same_state(&lazy, &eager);
+    }
+    #[test]
+    fn same_geometry_input_selection_keeps_vt_unallocated() {
+        let mut lazy = LazyTerminal::new(80, 24, 65536);
+        lazy.process(b"prompt \x1b[31mred\x1b[0m\r\n").unwrap();
+        lazy.resize_with_ring(80, 24, None).unwrap();
+        assert!(
+            lazy.state.borrow().terminal.is_none(),
+            "first input at unchanged geometry allocated VT"
+        );
+        let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        eager.process(b"prompt \x1b[31mred\x1b[0m\r\n");
+        eager.resize(80, 24).unwrap();
         assert_same_state(&lazy, &eager);
     }
     #[test]
