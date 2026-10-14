@@ -106,6 +106,8 @@ export interface EnrolledHost {
 }
 
 export interface AddHostSink {
+  /** Start optional local renderer preparation alongside sign-in. */
+  prepareTerminal?(): void;
   /** Called once per batch result with the hosts that are ready, in the order they finished. */
   enrolled(hosts: EnrolledHost[]): void;
 }

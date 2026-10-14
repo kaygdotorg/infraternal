@@ -126,7 +126,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const loadProvisioning = (): Promise<ProvisioningService> =>
     (provisioning ??= onDemand(() => import("./addhost/real.on-demand")).then((m) => m.createRealProvisioning()).catch((e: unknown) => { provisioning = undefined; throw e; }));
   const addHost = createAddHost(core, {
-    service: loadProvisioning, sink: { enrolled(hosts) {
+    service: loadProvisioning, sink: { prepareTerminal() {
+      const font = core.font();
+      // Optional preparation shares the normal open path's cached resources.
+      // A failed prefetch leaves the eventual terminal open responsible for its error.
+      void onDemand(() => import("../terminal")).then(({ TerminalClient }) => TerminalClient.prepare(font)).catch(() => {});
+    }, enrolled(hosts) {
       for (const host of hosts) {
         if (!host.hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
         sessions.registerHost({ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });

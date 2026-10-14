@@ -567,6 +567,7 @@ export class Wizard {
   }
 
   private openRun(credential?: string): ProvisioningRun {
+    this.deps.sink.prepareTerminal?.();
     const run: ProvisioningRun = this.deps.service.open({
       onEvent: (event) => this.onEvent(run, event),
       onError: (error) => this.onCommandError(run, error.message),
