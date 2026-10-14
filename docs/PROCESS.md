@@ -144,16 +144,14 @@ Reviews and fixes run at the same time as the next lane's build.
   | Target | Measured ceiling |
   | --- | ---: |
   | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,594,856 bytes |
+  | `aarch64-unknown-linux-musl` | 19,572,048 bytes |
 
-  These are the #198 measurements of the full-feature release recipe after
-  unused native APIs, duplicated action metadata construction, OpenSSL's
-  unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
-  cut (D243, D264, #198). The x86_64 build retains AES-NI and generic AES-GCM
-  dispatch, checked against a NIST vector
-  using the shipping static crypto archive.
-  The release and host-facts plugins use size optimization; terminal and mesh
-  data paths retain speed optimization (D243).
+  These ceilings retain the lower recorded per-target measurements from #198
+  and #201 while combined-source release artifacts are checked on #201. The
+  recipe retains the approved native AES-GCM fallback and size optimization
+  for release and host-facts plugins; terminal, mesh and cryptographic
+  dependencies retain speed optimization (D243, D264, D272). Combined-source
+  size and runtime receipts are required before the final downward ratchet.
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later
