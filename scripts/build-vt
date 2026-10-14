@@ -34,7 +34,8 @@ printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
 # prevents two Cargo invocations from observing a partly installed archive.
 optimize=ReleaseSafe
 [[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
-key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/scripts/build-vt"; printf '%s %s %s\n' "$checksum" "$vt_target" "$optimize"; } | sha256sum | cut -d ' ' -f1)"
+session_image="${CARGO_FEATURE_SESSION_IMAGE:-0}"
+key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/crates/infraternal-shim/native/session_log.zig" "$root/scripts/build-vt"; printf '%s %s %s %s\n' "$checksum" "$vt_target" "$optimize" "$session_image"; } | sha256sum | cut -d ' ' -f1)"
 cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
 exec 9> "$cache_dir/lock"
@@ -52,6 +53,13 @@ fi
 cp "$root/crates/infraternal-shim/native/snapshot.zig" "$source_dir/src/infraternal_snapshot.zig"
 # Restore the exact upstream root before adding our three adapter exports.
 tar -xOf "$archive" "ghostty-$version/src/lib_vt.zig" > "$source_dir/src/lib_vt.zig"
+if [[ "$session_image" == 1 ]]; then
+    # The private executable uses only the callback-free Rust adapter. Do not
+    # expose setters that would appear to accept a callback while dropping it.
+    # Ordinary archives retain every upstream export and callback semantics.
+    cp "$root/crates/infraternal-shim/native/session_log.zig" "$source_dir/src/infraternal_session_log.zig"
+    sed -i '/\.name = "ghostty_sys_set"/d; /\.name = "ghostty_sys_log_stderr"/d; s|@import("terminal/c/sys.zig").logFn|@import("infraternal_session_log.zig").logFn|' "$source_dir/src/lib_vt.zig"
+fi
 cat >> "$source_dir/src/lib_vt.zig" <<'ZIG'
 
 comptime {
@@ -70,6 +78,14 @@ tar -xOf "$archive" "ghostty-$version/$build_definition" > "$source_dir/$build_d
 sed -i '/lib.bundle_compiler_rt = true;/a\
         lib.link_function_sections = true;\
         lib.link_data_sections = true;' "$source_dir/$build_definition"
+# The final release executable is already stripped. Tell native compilation
+# the same fact, avoiding its source-symbol reader in that distribution. Native
+# panic messages remain, but raw stack-address/external-symbol fallback is lost.
+# Keep development diagnostics, frame-pointer and unwind settings unchanged [5,243].
+if [[ "$optimize" == ReleaseFast ]]; then
+    sed -i '/lib.bundle_compiler_rt = true;/a\
+        lib.root_module.strip = true;' "$source_dir/$build_definition"
+fi
 # Baseline CPU keeps distributed binaries valid on hosts older than the builder.
 # ReleaseSafe retains bounds checks in development; release uses ReleaseFast.
 cd "$source_dir"

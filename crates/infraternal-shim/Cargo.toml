@@ -26,6 +26,8 @@ vt100 = { workspace = true, optional = true }
 
 # Comparison engines are never in the default production dependency graph.
 [features]
+# Executable images expose the callback-free Rust VT boundary only (D243).
+session-image = []
 # Audited transient process-transfer buffers are removed with the remote plugin.
 ca-handoff = ["dep:openssl"]
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
