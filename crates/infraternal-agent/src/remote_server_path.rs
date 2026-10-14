@@ -133,11 +133,8 @@ async fn connect(
     let connected = if kind == ServerLinkKind::Mesh {
         // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
         // proof below completes before any Hello can replace the server actor.
-        Connected::Quic(
-            tokio::time::timeout(PROBE_TIMEOUT, super::quic_connect(&endpoint, &identity))
-                .await
-                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??,
-        )
+        // The shared dial already owns the five-second handshake deadline.
+        Connected::Quic(super::quic_connect(&endpoint, &identity).await?)
     } else {
         let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
         dial_preferred(&endpoint, &identity, &tls).await?

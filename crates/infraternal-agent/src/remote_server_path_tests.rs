@@ -749,6 +749,32 @@ async fn pending_enrolled_proof_does_not_hide_a_latched_mesh_hint() {
     retry_during_enrolled_proof(true, false).await;
 }
 
+/// The shared dial owns the mesh handshake deadline even without an outer timer.
+#[tokio::test]
+async fn silent_mesh_handshake_keeps_the_shared_timeout_classification() {
+    use std::future::Future as _;
+    let ca = root();
+    let silent = std::net::UdpSocket::bind("127.0.0.2:0").unwrap();
+    let address = silent.local_addr().unwrap();
+    let identity = identity(&ca, address);
+    tokio::time::pause();
+    let mut candidate = std::pin::pin!(connect(
+        &identity,
+        None,
+        address,
+        ServerLinkKind::Mesh,
+        false,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(candidate.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(PROBE_TIMEOUT + Duration::from_millis(1)).await;
+    let result = candidate.await;
+    assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::TimedOut));
+}
+
 /// Mesh discovery cannot depend on a reply to already duplicated queued packets.
 #[tokio::test]
 async fn pending_enrolled_proof_does_not_hide_the_mesh_discovery_clock() {
