@@ -39,3 +39,27 @@ fn ordinary_housekeeping_does_not_probe_child_status() {
     drop(session);
     std::fs::remove_dir_all(state).unwrap();
 }
+
+#[test]
+fn threaded_startup_is_refused_before_creating_session_state() {
+    let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+        ".cache/codex-scratch/process-per-user/t{}",
+        std::process::id()
+    ));
+    assert!(!state.exists());
+    let (ready, started) = std::sync::mpsc::channel();
+    let (quit, stop) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        ready.send(()).unwrap();
+        stop.recv().unwrap();
+    });
+    started.recv().unwrap();
+    let mut config = Config::new([14; 16], Uid::effective().as_raw());
+    config.state = Some(state.clone());
+    config.readiness = true;
+    let result = run_host(vec![config]);
+    quit.send(()).unwrap();
+    thread.join().unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
+    assert!(!state.exists());
+}

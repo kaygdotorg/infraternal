@@ -43,3 +43,8 @@ optional = true
 [[example]]
 name = "vt_compare"
 required-features = ["bench-vt"]
+
+# Real lifecycle fixtures need a single-threaded main, not the test harness.
+[[example]]
+name = "ppu_host_fixture"
+required-features = ["process-per-user"]

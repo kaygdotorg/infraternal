@@ -634,8 +634,10 @@ impl Session {
 ///
 /// Per-session Rust panics retire that session. Native faults and process OOM
 /// still affect the whole host; this function does not claim process isolation.
+/// Call during single-threaded startup: process-directed SIGCHLD must remain
+/// blocked in every thread while this reactor owns its children.
 /// # Errors
-/// Rejects foreign UIDs, duplicate IDs, invalid geometry and startup failures.
+/// Rejects foreign UIDs, duplicate IDs, invalid geometry, threaded startup and other startup failures.
 #[allow(clippy::too_many_lines)]
 pub fn run_host(configs: Vec<Config>) -> io::Result<()> {
     run_host_accounted(configs, None)
@@ -644,7 +646,7 @@ pub fn run_host(configs: Vec<Config>) -> io::Result<()> {
 /// Run the research host with optional numeric ownership receipts on SIGUSR2.
 /// No timer or content capture is installed; the caller owns the private file.
 /// # Errors
-/// Rejects the same batch/startup failures as `run_host`.
+/// Requires the same single-threaded process boundary and batch validation as `run_host`.
 #[allow(clippy::too_many_lines)]
 pub fn run_host_accounted(
     mut configs: Vec<Config>,
@@ -664,6 +666,19 @@ pub fn run_host_accounted(
         })
     {
         return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // A signalfd can consume process-directed SIGCHLD only when every thread
+    // blocks it. Validate before changing the mask/umask or creating a PTY;
+    // a caller with another unblocked thread would lose exit readiness.
+    let single_threaded = {
+        let mut tasks = std::fs::read_dir("/proc/self/task")?;
+        tasks.next().transpose()?.is_some() && tasks.next().transpose()?.is_none()
+    };
+    if !single_threaded {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "shared host requires single-threaded startup",
+        ));
     }
     umask(Mode::from_bits_truncate(0o077));
     let mut mask = SigSet::empty();

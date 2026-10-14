@@ -2,36 +2,79 @@
 #![cfg(all(feature = "process-per-user", target_os = "linux"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use infraternal_shim::{Config, frame::Frame, run_host};
+use infraternal_shim::frame::Frame;
 use std::{
     fs,
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-// Run the production reactor in a fresh process: it owns signal masks and must
-// never install them inside the multithreaded Rust test runner.
-#[test]
-#[ignore = "subprocess fixture; selected only by the parent reliability test"]
-fn fixture_entry() {
-    let Some(root) = std::env::var_os("PPU_RELIABILITY_STATE") else {
-        return;
-    };
-    let configs = (1_u128..=2)
-        .map(|id| {
-            let mut config = Config::new(id.to_le_bytes(), nix::unistd::Uid::effective().as_raw());
-            config.state = Some(PathBuf::from(&root));
-            config.ring_capacity = 65536;
-            config
-        })
-        .collect();
-    run_host(configs).unwrap();
+// Compile the same feature/target/profile once, inside the caller's build
+// slot. Running a standalone main is essential: a test harness has another
+// thread which may consume process-directed child signals.
+fn fixture_binary() -> &'static PathBuf {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY.get_or_init(|| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let target = format!(
+            "{}-unknown-linux-{}",
+            std::env::consts::ARCH,
+            if cfg!(target_env = "musl") {
+                "musl"
+            } else {
+                "gnu"
+            }
+        );
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let target_dir =
+            std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+        let target_dir = if target_dir.is_absolute() {
+            target_dir
+        } else {
+            root.join(target_dir)
+        };
+        let mut build = Command::new(env!("CARGO"));
+        build.current_dir(&root).args([
+            "build",
+            "--locked",
+            "-p",
+            "infraternal-shim",
+            "--example",
+            "ppu_host_fixture",
+            "--features",
+            if cfg!(feature = "compact-history") {
+                "compact-history"
+            } else {
+                "process-per-user"
+            },
+            "--target",
+            &target,
+        ]);
+        if profile == "release" {
+            build.arg("--release");
+        }
+        assert!(
+            build.status().unwrap().success(),
+            "standalone host fixture build failed"
+        );
+        target_dir
+            .join(target)
+            .join(profile)
+            .join("examples/ppu_host_fixture")
+    })
 }
 
 struct Host {
@@ -47,8 +90,8 @@ impl Host {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", "fixture_entry", "--nocapture"])
+        fs::create_dir_all(root.parent().unwrap()).unwrap();
+        let child = Command::new(fixture_binary())
             .env("PPU_RELIABILITY_STATE", &root)
             .env(
                 "ZDOTDIR",
