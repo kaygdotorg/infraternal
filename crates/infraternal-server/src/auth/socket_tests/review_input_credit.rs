@@ -544,3 +544,79 @@ async fn idle_probe_authority_refreshes_expiry_after_authorized_activity() {
     );
     drop(held);
 }
+
+/// Incoming content-free proofs keep the real socket responsive without renewing or polling SQL.
+#[tokio::test]
+async fn idle_browser_probes_do_not_renew_or_poll_session_authority() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) =
+        socket_fixture_from_fixture(fixture().await, Some(Duration::from_secs(5))).await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "idle-proof-fixture",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    let expiry = crate::websocket::now_seconds().unwrap() + 600;
+    sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
+        .bind(expiry)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Ping {
+            nonce: 200,
+            sent_us: 200,
+        },
+    )
+    .await;
+    let wire = read_client_frame(&mut socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&wire).unwrap().frame,
+        Frame::Pong {
+            nonce: 200,
+            sent_us: 200
+        }
+    ));
+    let after: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=?")
+        .bind(hash(&f.session))
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, expiry,
+        "idle browser proofs renewed session authority"
+    );
+    // With no attachments there are no server-generated probes. Every response
+    // below therefore exercises the incoming browser proof path specifically.
+    let held = f.auth.pool.acquire().await.unwrap();
+    for nonce in 201..209 {
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Ping {
+                nonce,
+                sent_us: nonce,
+            },
+        )
+        .await;
+        let wire = read_client_frame(&mut socket).await;
+        assert!(matches!(decode_muxed_frame(&wire).unwrap().frame,
+            Frame::Pong { nonce: got, sent_us } if got == nonce && sent_us == nonce));
+    }
+    drop(held);
+    server.abort();
+}

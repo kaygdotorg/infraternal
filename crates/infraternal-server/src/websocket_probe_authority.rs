@@ -1,9 +1,9 @@
-//! Non-renewing authority for content-free server probes, watched by committed revocation and absolute expiry [D81, D265], #199.
+//! Non-renewing authority for content-free socket proofs, watched by committed revocation and absolute expiry [D81, D265], #199.
 
 use super::{WebSocketState, probe_deadline};
 use tokio::{sync::watch, time::Instant};
 
-/// This lease authorizes only server Ping bookkeeping. Payloads, browser requests
+/// This lease authorizes only content-free Ping/Pong bookkeeping. Payloads, application requests
 /// and backend rebinds retain fresh authority reads in their existing gates.
 pub(crate) struct Lease {
     revoked: watch::Receiver<()>,

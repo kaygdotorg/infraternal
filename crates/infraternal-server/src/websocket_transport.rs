@@ -2,7 +2,7 @@
 
 use super::websocket::{
     Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, WebSocketState, receive_wire, send_frame,
-    send_message, while_authorized,
+    send_message,
 };
 use crate::liveness::{Liveness, TICK};
 use axum::extract::ws::{Message, WebSocket};
@@ -67,22 +67,25 @@ impl Context {
     }
 
     async fn reply(&self, reply: Reply) -> Result<(), ()> {
-        while_authorized(&self.state, &self.user, &self.token, true, async {
-            let mut writer = self.writer.lock().await;
-            match reply {
-                Reply::Wire { nonce, sent_us } => {
-                    send_frame(
-                        &mut *writer,
-                        0,
-                        &Frame::Pong { nonce, sent_us },
-                        &mut Vec::new(),
-                    )
-                    .await
-                }
-                Reply::Transport(bytes) => send_message(&mut *writer, Message::Pong(bytes)).await,
+        if self.ended.load(Ordering::Acquire) != 0 {
+            return Err(());
+        }
+        let mut writer = self.writer.lock().await;
+        if self.ended.load(Ordering::Acquire) != 0 {
+            return Err(());
+        }
+        match reply {
+            Reply::Wire { nonce, sent_us } => {
+                send_frame(
+                    &mut *writer,
+                    0,
+                    &Frame::Pong { nonce, sent_us },
+                    &mut Vec::new(),
+                )
+                .await
             }
-        })
-        .await
+            Reply::Transport(bytes) => send_message(&mut *writer, Message::Pong(bytes)).await,
+        }
     }
 
     async fn probe(&self) -> Result<(), ()> {
@@ -400,7 +403,13 @@ async fn proofs(
             }
             reply = replies.recv() => {
                 let Some(reply) = reply else { break; };
-                context.reply(reply).await
+                authority.run(&context.state, &context.user, &context.token, async {
+                    tokio::select! {
+                        biased;
+                        () = context.closed.notified() => Err(()),
+                        result = context.reply(reply) => result,
+                    }
+                }).await
             }
             _ = ticks.tick(), if active => {
                 let expired = context.lease.lock().map_or(true, |lease| lease.expired());
