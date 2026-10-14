@@ -4,7 +4,7 @@ import type { WebSocket } from "ws";
 export type SetupStage = "install" | "join" | "start" | "ready";
 export interface SetupEvent {
   host_id: string; session_id: string; attempt: number; sequence: number;
-  stage: SetupStage; state: "running" | "done" | "failed";
+  stage: SetupStage; state: "running" | "done" | "failed"; retry_available: boolean;
   failed_step?: "install" | "join" | "start" | "readiness"; message?: string;
 }
 interface Host {
@@ -29,7 +29,7 @@ export function setupEvents(host: string, windowId: string, after: number): { re
 export function emitSetup(host: string, stage: SetupStage, state: SetupEvent["state"]): void {
   const record = hosts.get(host);
   if (!record) throw new Error("setup unavailable");
-  const event: SetupEvent = { host_id: host, session_id: record.session, attempt: record.attempt, sequence: ++record.sequence, stage, state,
+  const event: SetupEvent = { host_id: host, session_id: record.session, attempt: record.attempt, sequence: ++record.sequence, stage, state, retry_available: state === "failed" && record.attempt < 8,
     ...(state === "failed" ? { failed_step: stage === "ready" ? "readiness" : stage, message: "Setup needs another try." } : {}) };
   record.events.push(event);
   if (record.events.length > 16) record.events.shift();
