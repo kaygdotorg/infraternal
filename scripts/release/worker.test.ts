@@ -11,6 +11,10 @@ async function fixture(version: string) {
  const der=new Uint8Array(await crypto.subtle.exportKey("pkcs8",pair.privateKey));
  const blob=new Uint8Array(51); blob.set([0,0,0,11]);blob.set(enc.encode("ssh-ed25519"),4);blob.set([0,0,0,32],15);blob.set(raw,19);
  const store=new Map<string,Uint8Array>([[`releases/${version}/VERSION`,enc.encode(version+"\n")],[`releases/${version}/infraternal`,enc.encode("fixture")]]);
+ for (const arch of ["x86_64", "aarch64"]) {
+  store.set(`releases/${version}/infraternal-${arch}-musl`, enc.encode(`fixture-${arch}-host`));
+  store.set(`releases/${version}/infraternal-${arch}-session-musl`, enc.encode(`fixture-${arch}-session`));
+ }
  const env={ CALLER_TOKEN:"fixture",SIGNING_KEY:`-----BEGIN PRIVATE KEY-----\n${Buffer.from(der).toString("base64")}\n-----END PRIVATE KEY-----`,PUBLIC_KEY:`ssh-ed25519 ${Buffer.from(blob).toString("base64")}`,
  BUILDS:{head:async(name:string)=>store.has(name),get:async(name:string)=>store.has(name)?object(store.get(name)!):null,list:async({prefix}:{prefix:string})=>({objects:[...store.keys()].filter(k=>k.startsWith(prefix)).map(key=>({key})),truncated:false}),put:async(name:string,body:string)=>{store.set(name,enc.encode(body));}} };
  return {env,store};
@@ -24,6 +28,14 @@ for(const [version,channel] of [["0.1.0","stable"],["edge-20261011T071500Z","edg
   const pointer=JSON.parse(new TextDecoder().decode(store.get(`releases/channels/${channel}.json`)));
   expect(pointer).toEqual(entry);
   expect(store.has(`releases/${version}/SHA256SUMS.sig`)).toBe(true);
+  const sums=new TextDecoder().decode(store.get(`releases/${version}/SHA256SUMS`));
+  for (const arch of ["x86_64", "aarch64"]) {
+   const name=`infraternal-${arch}-session-musl`;
+   const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",store.get(`releases/${version}/${name}`)!));
+   const hex=[...digest].map(byte=>byte.toString(16).padStart(2,"0")).join("");
+   expect(entry.files).toContain(name);
+   expect(sums).toContain(`${hex}  ${name}\n`);
+  }
   expect([...store.keys()].filter(k=>k.startsWith("releases/channels/")).length).toBe(1);
  });
 }

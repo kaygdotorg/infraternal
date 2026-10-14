@@ -9,7 +9,7 @@ publication_version "$1"
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID in the environment}"
 [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[a-zA-Z0-9]+$ ]] || { printf 'invalid account identifier\n' >&2; exit 2; }
 bundle="$release_target/releases/$1"
-files=(VERSION infraternal infraternal-x86_64-musl infraternal-aarch64-musl)
+files=(VERSION infraternal infraternal-x86_64-musl infraternal-aarch64-musl infraternal-x86_64-session-musl infraternal-aarch64-session-musl)
 for name in "${files[@]}"; do [[ -f "$bundle/$name" ]] || { printf 'build the release bundle first\n' >&2; exit 1; }; done
 printf '%s\n' "$1" | cmp - "$bundle/VERSION" || { printf 'the built bundle belongs to another version\n' >&2; exit 1; }
 api="$release_api/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/infraternal-builds/objects/releases/$1"

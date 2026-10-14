@@ -11,7 +11,7 @@ test("publication with two build directories admits only one writer", async () =
   const directory = await mkdtemp(join(scratch, "publication-"));
   const manifest = await Bun.file(join(root, "Cargo.toml")).text();
   const version = manifest.match(/\[workspace\.package\][\s\S]*?^version = "([^"]+)"/m)![1]!;
-  const names = ["VERSION", "infraternal", "infraternal-x86_64-musl", "infraternal-aarch64-musl"];
+  const names = ["VERSION", "infraternal", "infraternal-x86_64-musl", "infraternal-aarch64-musl", "infraternal-x86_64-session-musl", "infraternal-aarch64-session-musl"];
   let releaseAdmission!: () => void;
   const admission = new Promise<void>((resolve) => { releaseAdmission = resolve; });
   let lists = 0;
