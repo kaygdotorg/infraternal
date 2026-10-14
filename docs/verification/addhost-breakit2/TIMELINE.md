@@ -27,6 +27,8 @@ The driver uses these additional environment variables:
 | `ADDHOST_BROWSER_PREPARE=1` | Prepare resources and a disposable renderer with sign-in for the paired comparison. |
 | `ADDHOST_TIMELINE_EVIDENCE` | Owned directory receiving public clock/packet receipts. |
 | `ADDHOST_TIMELINE_TARGET` | Same unique Docker target name passed to `--container-name`. |
+| `ADDHOST_TIMELINE_CAPTURE=1` | Default detailed trace: SSH interposer, target shell clocks and bounded header captures. |
+| `ADDHOST_TIMELINE_CAPTURE=0` | Production SSH/shell paths; retain browser/server clocks and every acceptance assertion. |
 | `ADDHOST_FAST_STEP_PROFILE=1` | Enable target shell boundaries. |
 | `ADDHOST_PROMPT_BUDGET_MS=1500` | Fail after byte-integrity and installation proof when paint exceeds this post-authentication budget. |
 | `ADDHOST_SSH_COMPRESSION=1` | Fixture-only compressed SSH master for a paired experiment; shipping configuration is unchanged. |
@@ -39,6 +41,22 @@ fixed protocol message types, not arbitrary debug text. The target wrapper also
 records public shell-program byte counts. Diagnostic subprocesses add small
 local overhead, so compare matched fixtures rather than treating an instrumented
 trace as the uninstrumented acceptance result.
+
+Run production-path acceptance with `ADDHOST_TIMELINE_CAPTURE=0`, leaving
+`ADDHOST_FAST_STEP_PROFILE`, `ADDHOST_FAST_TCP_PROFILE`,
+`ADDHOST_SSH_COMPRESSION`, `BREAKIT2_FDPASS_CANDIDATE` and
+`ADDHOST_PROMPT_PIPE_BYTES` unset. The driver refuses enabled profiling or
+transport experiments in this mode, verifies that the generated SSH wrapper
+does not invoke the tracing interposer and that the target has no shell-clock
+wrapper, then emits `PROOF production_transport_paths=true`. SSH trust,
+browser paint witnesses, all 59 acknowledged input bytes, installed-image
+digest verification, child exit propagation and the prompt budget are unchanged.
+
+Report each mode separately with its artifacts and all attempted samples.
+The detailed trace explains protocol flights; a matched production-path series
+measures acceptance without per-command Python launches, shell-clock programs,
+verbose SSH logging or packet captures. Do not subtract a guessed observer
+cost from traced results or label those results as production-path acceptance.
 
 `target-packet-headers.txt` captures the owned container's network namespace,
 in addition to the bridge and browser loopback captures. Its ingress timestamp

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect public timing boundaries and TCP headers for the owned D255 fixture; no protocol bodies or credentials (#189)."""
 import os
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 from pathlib import Path
 import runpy
@@ -14,6 +14,18 @@ import sys
 ROOT = Path(__file__).resolve().parents[3]
 EVIDENCE = Path(os.environ["ADDHOST_TIMELINE_EVIDENCE"])
 EVIDENCE.mkdir(parents=True, exist_ok=True)
+capture_mode = os.environ.get("ADDHOST_TIMELINE_CAPTURE", "1")
+if capture_mode not in ("0", "1"):
+    raise RuntimeError("Choose an explicit supported timeline capture mode")
+TRACE = capture_mode == "1"
+if not TRACE and (
+    os.environ.get("ADDHOST_FAST_STEP_PROFILE") == "1"
+    or os.environ.get("ADDHOST_FAST_TCP_PROFILE") == "1"
+    or os.environ.get("ADDHOST_SSH_COMPRESSION") == "1"
+    or os.environ.get("BREAKIT2_FDPASS_CANDIDATE") == "1"
+    or os.environ.get("ADDHOST_PROMPT_PIPE_BYTES")
+):
+    raise RuntimeError("Production-path acceptance forbids shell profiling and transport candidates")
 original = subprocess.run
 original_popen = subprocess.Popen
 prompt_ms = None
@@ -62,27 +74,42 @@ def captured_headers(name, arguments):
 def measured(command, *args, **kwargs):
     global prompt_ms
     environment = kwargs.get("env", {})
-    if isinstance(command, list) and any("cat > /usr/local/bin/sh" in argument for argument in command):
+    if TRACE and isinstance(command, list) and any("cat > /usr/local/bin/sh" in argument for argument in command):
         kwargs["input"] = (ROOT / "docs/verification/addhost-breakit2/timeline-shell.sh").read_bytes()
     if isinstance(command, list) and "BREAKIT2_TARGET" in environment and "--nocapture" in command:
         target = environment["BREAKIT2_TARGET"].split("@", 1)[1].rsplit(":", 1)[0]
         wrapper = Path(environment["INFRATERNAL_TEST_STATE_ROOT"]) / "ssh"
-        # Preserve the generated strict known-host configuration. Only the
-        # owned master adds verbosity; reduce diagnostics before storing them.
-        text = wrapper.read_text()
-        text = text.replace("exec /usr/bin/ssh", f"exec /usr/bin/python3 '{ROOT}/docs/verification/addhost-breakit2/timeline_ssh.py'")
-        wrapper.write_text(text)
         name = os.environ.get("ADDHOST_TIMELINE_TARGET", "addhost-instant-timeline")
-        pid = original(["sudo", "-n", "docker", "inspect", "--format", "{{.State.Pid}}", name], capture_output=True, text=True, check=True).stdout.strip()
-        if not pid.isdecimal() or int(pid) <= 0:
-            raise RuntimeError("Owned target network namespace is unavailable")
-        # eth0 ingress is observed before the fixture's incoming netem delay.
-        # The redirected interface observes delivery after that queue. Stop
-        # this observer at the first SYN, well before image transfer begins.
-        delayed = original(["sudo", "-n", "docker", "exec", name, "ip", "link", "show", "dev", "ifb0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        delivery = "ifb0" if delayed else "eth0"
-        with captured_headers("packet-headers.txt", ["tcpdump", "-i", "docker0", "-nn", "-tt", "-l", f"host {target} and tcp"]), captured_headers("browser-packet-headers.txt", ["tcpdump", "-i", "lo", "-nn", "-tt", "-l", "tcp port 4929"]), captured_headers("target-packet-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "3", "-i", "eth0", "-nn", "-tt", "-l", "tcp port 22"]), captured_headers("target-delivery-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "1", "-i", delivery, "-nn", "-tt", "-l", "tcp port 22 and tcp[tcpflags] & tcp-syn != 0"]):
-            print(f"TIMELINE source=collector step=target_delivery_capture interface={delivery}", flush=True)
+        with ExitStack() as captures:
+            if TRACE:
+                # Preserve the strict generated configuration. Verbose output
+                # is reduced to fixed tokens before any receipt is stored.
+                text = wrapper.read_text()
+                text = text.replace("exec /usr/bin/ssh", f"exec /usr/bin/python3 '{ROOT}/docs/verification/addhost-breakit2/timeline_ssh.py'")
+                wrapper.write_text(text)
+                pid = original(["sudo", "-n", "docker", "inspect", "--format", "{{.State.Pid}}", name], capture_output=True, text=True, check=True).stdout.strip()
+                if not pid.isdecimal() or int(pid) <= 0:
+                    raise RuntimeError("Owned target network namespace is unavailable")
+                # eth0 ingress precedes incoming netem; the redirected device
+                # observes delivery after its queue. Bound both observers.
+                delayed = original(["sudo", "-n", "docker", "exec", name, "ip", "link", "show", "dev", "ifb0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+                delivery = "ifb0" if delayed else "eth0"
+                for filename, arguments in [
+                    ("packet-headers.txt", ["tcpdump", "-i", "docker0", "-nn", "-tt", "-l", f"host {target} and tcp"]),
+                    ("browser-packet-headers.txt", ["tcpdump", "-i", "lo", "-nn", "-tt", "-l", "tcp port 4929"]),
+                    ("target-packet-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "3", "-i", "eth0", "-nn", "-tt", "-l", "tcp port 22"]),
+                    ("target-delivery-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "1", "-i", delivery, "-nn", "-tt", "-l", "tcp port 22 and tcp[tcpflags] & tcp-syn != 0"]),
+                ]:
+                    captures.enter_context(captured_headers(filename, arguments))
+                print(f"TIMELINE source=collector step=target_delivery_capture interface={delivery}", flush=True)
+            else:
+                # Acceptance must exercise actual SSH/shell paths, without a
+                # Python command interposer or target-side clock wrappers.
+                if "timeline_ssh.py" in wrapper.read_text():
+                    raise RuntimeError("Production SSH wrapper was interposed")
+                original(["sudo", "-n", "docker", "exec", name, "test", "!", "-e", "/usr/local/bin/sh"], check=True)
+                print("PROOF production_transport_paths=true", flush=True)
+            print(f"TIMELINE source=collector step=capture_mode enabled={str(TRACE).lower()}", flush=True)
             print(f"TIMELINE source=collector step=begin epoch_ms={time.time()*1000:.3f}", flush=True)
             result = original(command, *args, **kwargs, stdout=subprocess.PIPE)
             transcript = result.stdout.decode()
@@ -100,17 +127,18 @@ def measured(command, *args, **kwargs):
                     continue
                 if record.get("source") == "browser" and record.get("step") == "first_prompt_painted" and signed_in:
                     prompt_ms = record["epoch_ms"] - float(signed_in[1])
-            name = os.environ.get("ADDHOST_TIMELINE_TARGET", "addhost-instant-timeline")
-            receipts = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-step-times"], capture_output=True, text=True, check=True)
-            (EVIDENCE / "target-boundaries.jsonl").write_text(receipts.stdout)
-            packets = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-ssh-times"], capture_output=True, text=True, check=True)
-            (EVIDENCE / "target-ssh-boundaries.jsonl").write_text(packets.stdout)
+            if TRACE:
+                receipts = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-step-times"], capture_output=True, text=True, check=True)
+                (EVIDENCE / "target-boundaries.jsonl").write_text(receipts.stdout)
+                packets = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-ssh-times"], capture_output=True, text=True, check=True)
+                (EVIDENCE / "target-ssh-boundaries.jsonl").write_text(packets.stdout)
             return result
     return original(command, *args, **kwargs)
 
 
 subprocess.run = measured
-subprocess.Popen = target_ssh
+if TRACE:
+    subprocess.Popen = target_ssh
 try:
     runpy.run_path(str(ROOT / "docs/verification/addhost-breakit2/measure.py"), run_name="__main__")
 except SystemExit as result:
