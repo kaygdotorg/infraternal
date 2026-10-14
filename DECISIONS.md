@@ -2673,3 +2673,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        the AVX-512 AES-GCM code) — bytes saved, OpenSSL known-answer tests,
        and a gate check that fails if a future OpenSSL brings the code back —
        before adopting it.
+269. **Mac mesh node now, for our own traffic (owner, 2026-10-14; amends
+     D227's order):** "i would loooove if we were able to do it via our mesh
+     data plane so it would be a double bonus: measure our own data plane
+     throughput, measure our app windows feature." The macOS userspace node
+     (GotaTun with our own adapter, D169) moves ahead of NAT traversal and
+     SSH over the mesh, in the no-root mode of D228 M5: infraternal's own
+     traffic (agent ↔ server, terminals, app-window streams) rides the
+     mesh; no system tunnel, no root, no setting changed on the Mac. The
+     first underlay may be the existing NetBird addresses. App-window
+     end-to-end measurements and mesh throughput measurements run over it.
