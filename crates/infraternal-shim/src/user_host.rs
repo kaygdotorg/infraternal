@@ -757,9 +757,48 @@ mod tests {
             registration.bytes,
             slots.bytes + constructors + prefixes + viewers + registration.bytes
         );
+        print_idle_layout(&sessions[0]);
         drop(registry);
         drop(sessions);
         fs::remove_dir_all(state).unwrap();
+    }
+    fn print_idle_layout(first: &Session) {
+        // cfg(test) adds a panic-injection boolean to the lazy VT state.
+        // Report the tested layout explicitly rather than calling it shipping PSS.
+        let sizes = [
+            std::mem::size_of_val(&first.config),
+            std::mem::size_of_val(&first.listener),
+            std::mem::size_of_val(&first.path),
+            std::mem::size_of_val(&first.pty),
+            std::mem::size_of_val(&first.terminal),
+            std::mem::size_of_val(&first.ring),
+            std::mem::size_of_val(&first.input),
+            std::mem::size_of_val(&first.cursors),
+            std::mem::size_of_val(&first.peers),
+            std::mem::size_of_val(&first.created),
+            std::mem::size_of_val(&first.next_deferred),
+            std::mem::size_of_val(&first.exit),
+            std::mem::size_of_val(&first.drained),
+            std::mem::size_of_val(&first.deadline),
+        ];
+        println!(
+            "PPU_LAYOUT cfg_test=true config={} listener={} path={} pty={} lazy_vt={} ring={} input={} writers={} peers={} created={} deferred={} exit={} drained={} deadline={} padding={}",
+            sizes[0],
+            sizes[1],
+            sizes[2],
+            sizes[3],
+            sizes[4],
+            sizes[5],
+            sizes[6],
+            sizes[7],
+            sizes[8],
+            sizes[9],
+            sizes[10],
+            sizes[11],
+            sizes[12],
+            sizes[13],
+            std::mem::size_of::<Session>() - sizes.iter().sum::<usize>()
+        );
     }
     #[test]
     fn lazy_prefix_materializes_exactly_before_overflow_and_resize() {
