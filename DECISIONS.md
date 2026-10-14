@@ -2692,3 +2692,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      per-person logins per D240). Switching the default still waits for
      measured gates — soak, fault injection and the head-to-head numbers on
      #205 — and the owner's go.
+271. **Program status and connection state in the window pill (owner,
+     2026-10-14; Q22, #209, #212 gap 3):**
+     - **Q22a:** a program's own message (OSC 7501) is never written in the
+       pill. The pill shows only the status mark; the words appear on
+       hover, in the toast and in the Inbox.
+     - **Q22b:** no toast when the window that changed state is the
+       focused one; the person is already looking at it.
+     - **Connection state per window (mostly approved):** the pill's dot
+       becomes the shared connection indicator (connected, slow,
+       reconnecting, offline). Keys typed while the link is down are shown
+       by a small amber **key** on the glyph — the owner asked for the
+       thing itself instead of an amber dot — and are sent when the link
+       is back. One status dot per pill, never two.
