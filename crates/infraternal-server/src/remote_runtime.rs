@@ -42,8 +42,9 @@ pub(crate) struct RemoteHosts(
 
 /// Identity and admission limits are shared; this factory never retains its host map.
 struct ListenerFactory {
-    identity: Identity,
-    roots: Vec<X509>,
+    /// One immutable TLS configuration per startup identity/root epoch. Leased
+    /// destinations use the same handshake settings and durable admission checks.
+    tls: Arc<openssl::ssl::SslAcceptor>,
     store: EnrollmentStore,
     address: SocketAddr,
     destinations: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
@@ -474,14 +475,10 @@ impl LeasedListener {
         let tcp = TcpListener::bind(address).await?;
         let socket = quinn::TokioRuntime.wrap_udp_socket(std::net::UdpSocket::bind(address)?)?;
         let binding = factory.bindings.lease(socket)?;
-        let tls = Arc::new(remote_tls::server_config(
-            &factory.identity,
-            &factory.roots,
-        )?);
         let mut tasks = JoinSet::new();
         tasks.spawn(crate::remote_accept::tcp(
             tcp,
-            tls,
+            factory.tls.clone(),
             overlay,
             factory.store.clone(),
             factory.limits.clone(),
@@ -556,7 +553,7 @@ impl RemoteListeners {
         hosts: RemoteHosts,
     ) -> io::Result<Self> {
         let limits = crate::remote_accept::Limits::new();
-        let listener = Self::start_with_limits(
+        let (listener, tls) = Self::start_with_limits(
             address,
             identity,
             roots,
@@ -566,11 +563,7 @@ impl RemoteListeners {
         )
         .await?;
         let factory = ListenerFactory {
-            identity: Identity {
-                certificate: identity.certificate.clone(),
-                key: identity.key.clone(),
-            },
-            roots: roots.to_vec(),
+            tls,
             store,
             address: listener.local_addr()?,
             destinations: std::sync::Mutex::default(),
@@ -588,7 +581,7 @@ impl RemoteListeners {
         store: EnrollmentStore,
         hosts: RemoteHosts,
         limits: Arc<crate::remote_accept::Limits>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Arc<openssl::ssl::SslAcceptor>)> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
         let (endpoint, tcp, bindings) = reserve_transports(
@@ -605,14 +598,23 @@ impl RemoteListeners {
             store.clone(),
             limits.clone(),
         ));
-        tasks.spawn(crate::remote_accept::tcp(tcp, tls, hosts, store, limits));
-        Ok(Self {
-            tasks,
-            endpoint,
-            bindings,
-            #[cfg(test)]
-            diagnostic_hosts,
-        })
+        tasks.spawn(crate::remote_accept::tcp(
+            tcp,
+            tls.clone(),
+            hosts,
+            store,
+            limits,
+        ));
+        Ok((
+            Self {
+                tasks,
+                endpoint,
+                bindings,
+                #[cfg(test)]
+                diagnostic_hosts,
+            },
+            tls,
+        ))
     }
 }
 
