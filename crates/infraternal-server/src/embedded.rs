@@ -2267,10 +2267,27 @@ fn decode_event(stream_id: u32, sub_id: u32, event_json: &[u8], wire: &Bytes) ->
     })
 }
 
+#[allow(clippy::too_many_lines)] // Keep shared codec validation and stream admission in one path.
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
     loop {
         match decode_muxed_frame(&connection.receive) {
             Ok(decoded) => {
+                // Route proofs contain scalars only. Consume their already
+                // validated envelope without sharing a buffer or decoding it
+                // again; payload frames retain the existing borrowed path.
+                if let Frame::Pong { nonce, sent_us } = decoded.frame {
+                    let stream_id = decoded.stream_id;
+                    let wire_len = decoded.wire_len;
+                    if stream_id % 2 != 0 {
+                        return None;
+                    }
+                    connection.receive.advance(wire_len);
+                    return Some(Incoming::Pong {
+                        stream_id,
+                        nonce,
+                        sent_us,
+                    });
+                }
                 let wire = connection.receive.split_to(decoded.wire_len).freeze();
                 let decoded = decode_muxed_frame(&wire).ok()?;
                 let stream_id = decoded.stream_id;
