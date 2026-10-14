@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn session_constructor_retains_only_the_bound_socket_path() {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/p{}",
+            ".cache/codex-scratch/process-per-user/ctor{}",
             std::process::id()
         ));
         // Global locale initialization is fixed process ownership, not this
