@@ -59,6 +59,25 @@ pub(super) async fn run(
         .await
         .unwrap()
         .unwrap();
+    if !result.success() {
+        // Only fixed schema/authority existence flags survive a refusal. A
+        // cancelled single-connection in-memory acquisition may replace its
+        // database; neither SQL errors nor session material belongs in logs.
+        let schema_present = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='users'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .is_ok_and(|count| count == 1);
+        let session_present = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM sessions WHERE token_hash=?",
+        )
+        .bind(crate::auth::hash(&f.cookie))
+        .fetch_one(&f.pool)
+        .await
+        .is_ok_and(|count| count == 1);
+        eprintln!("FIXTURE schema_users_present={schema_present} session_present={session_present}");
+    }
     server.abort();
     assert!(result.success(), "production-browser timeline failed");
 }

@@ -29,7 +29,7 @@ try {
     clockOffset = (event.wallTime - event.timestamp) * 1000;
     console.log(JSON.stringify({ source: "browser", step: "ws_upgrade_sent", path: requests.get(event.requestId), epoch_ms: event.wallTime * 1000 }));
   });
-  cdp.on("Network.webSocketHandshakeResponseReceived", (event) => console.log(JSON.stringify({ source: "browser", step: "ws_upgrade_received", path: requests.get(event.requestId), epoch_ms: event.timestamp * 1000 + clockOffset })));
+  cdp.on("Network.webSocketHandshakeResponseReceived", (event) => console.log(JSON.stringify({ source: "browser", step: "ws_upgrade_received", path: requests.get(event.requestId), status: event.response.status, epoch_ms: event.timestamp * 1000 + clockOffset })));
   cdp.on("Network.responseReceived", (event) => {
     const timing = event.response.timing;
     if (timing) console.log(JSON.stringify({ source: "browser", step: "response_timing", path: requests.get(event.requestId), timing }));
