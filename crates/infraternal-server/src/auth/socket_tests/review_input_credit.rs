@@ -346,8 +346,9 @@ async fn assert_overload_isolation(browser: &mut WebSocketStream<MaybeTlsStream<
     )
     .await;
     let mut closed = false;
+    let mut responsive = false;
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
+        while !closed || !responsive {
             let wire = read_client_frame(browser).await;
             let decoded = decode_muxed_frame(&wire).unwrap();
             match decoded.frame {
@@ -356,10 +357,10 @@ async fn assert_overload_isolation(browser: &mut WebSocketStream<MaybeTlsStream<
                     assert!(!closed);
                     closed = true;
                 }
-                Frame::Pong { nonce: 130, .. } => {
-                    assert!(closed);
-                    break;
-                }
+                // Control proofs are independent of terminal admission. As in
+                // the browser, observe both results without treating a latency
+                // Pong on stream 0 as a fence for stream 1's queued input.
+                Frame::Pong { nonce: 130, .. } => responsive = true,
                 other => panic!("unexpected overload response: {other:?}"),
             }
         }
