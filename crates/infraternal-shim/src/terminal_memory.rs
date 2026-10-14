@@ -257,6 +257,11 @@ unsafe extern "C" fn allocate(
         if raw == libc::MAP_FAILED {
             ptr::null_mut()
         } else {
+            // Sparse pools restore and decommit individual pages. Avoid
+            // faulting untouched arena tails through a huge-page mapping.
+            // SAFETY: this entire private mapping is page-aligned and live;
+            // the advice changes residency, not bytes or pointer identity.
+            let _ = unsafe { libc::madvise(raw, layout.size(), libc::MADV_NOHUGEPAGE) };
             raw.cast::<u8>()
         }
     } else {
