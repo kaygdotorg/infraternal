@@ -55,16 +55,31 @@ Object.assign(window, { addhostTimeline: async (address: string) => {
   let prompted = false;
   let ready = false;
   let sentAfter = false;
+  let paintedBefore = false;
+  let paintedAfter = false;
   let setup: WebSocket | undefined;
   let wizard: ProvisioningRun;
   let check = (): void => {};
   const traceSeen = new Set<string>();
+  const proofSeen = new Set<string>();
+  let previousAck = -1n;
   const result = new Promise<typeof records>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("timeline timeout")), 120000);
+    const timeout = setTimeout(() => { mark("integrity_timeout", Number(terminal?.inputAcknowledged ?? 0n)); reject(new Error("timeline timeout")); }, 120000);
     check = (): void => {
-      if (!terminal || !ready || !output.includes("BEFORE_HANDOVER\r\n") || terminal.inputAcknowledged < terminal.inputSequence) return;
-      if (!sentAfter) { sentAfter = true; terminal.injectInput("printf 'AFTER_%s\\n' HANDOVER\n"); }
-      if (output.includes("AFTER_HANDOVER\r\n") && terminal.inputAcknowledged === terminal.inputSequence) {
+      // Keep byte counters and fixed witness flags on refusal; never retain
+      // terminal text. These distinguish a cursor stall from repaint syntax.
+      if (terminal && terminal.inputAcknowledged !== previousAck) {
+        previousAck = terminal.inputAcknowledged;
+        mark("input_acknowledged", Number(previousAck));
+      }
+      for (const [name, witness] of [["before_marker", "BEFORE_HANDOVER"], ["before_line", "BEFORE_HANDOVER\r\n"], ["after_marker", "AFTER_HANDOVER"], ["after_line", "AFTER_HANDOVER\r\n"]]) {
+        if (name && witness && !proofSeen.has(name) && output.includes(witness)) { proofSeen.add(name); mark(name); }
+      }
+      if (paintedBefore && !proofSeen.has("before_complete_row")) { proofSeen.add("before_complete_row"); mark("before_complete_row"); }
+      if (paintedAfter && !proofSeen.has("after_complete_row")) { proofSeen.add("after_complete_row"); mark("after_complete_row"); }
+      if (!terminal || !ready || !paintedBefore || terminal.inputAcknowledged < terminal.inputSequence) return;
+      if (!sentAfter) { sentAfter = true; terminal.injectInput("printf 'AFTER_%s\\n' HANDOVER\n"); mark("after_command_enqueued", Number(terminal.inputSequence)); }
+      if (paintedAfter && terminal.inputAcknowledged === terminal.inputSequence) {
         mark("integrity_confirmed", Number(terminal.inputAcknowledged));
         clearTimeout(timeout);
         setup?.close(); wizard.close(); terminal.dispose(); connection.dispose();
@@ -90,6 +105,12 @@ Object.assign(window, { addhostTimeline: async (address: string) => {
         onPaintedOutput(bytes, at) {
           output += new TextDecoder().decode(bytes);
           if (!prompted && /[$#] /.test(output)) { prompted = true; records.push({ step: "first_prompt_painted", epoch_ms: performance.timeOrigin + at, bytes: bytes.length }); terminal?.injectInput("printf 'BEFORE_%s\\n' HANDOVER\n"); }
+          // A Snapshot is a positioned repaint, not the original PTY byte
+          // stream. Require whole rows from the shipped reader after paint;
+          // timer polling must not accept parsed-but-unpainted output.
+          const rows = terminal?.readScreenText().split("\n") ?? [];
+          paintedBefore = rows.includes("BEFORE_HANDOVER");
+          paintedAfter = rows.includes("AFTER_HANDOVER");
           check();
         },
       } }).then((value) => { terminal = value; mark("renderer_open"); }).catch(() => { clearTimeout(timeout); reject(new Error("renderer failed")); });
