@@ -38,6 +38,10 @@ impl Drop for DialRuntime {
 #[derive(Debug)]
 struct Drivers(Mutex<Vec<tokio::task::JoinHandle<()>>>);
 impl Runtime for Drivers {
+    fn now(&self) -> std::time::Instant {
+        // Pacing and timer deadlines must share the delegated runtime's clock.
+        quinn::TokioRuntime.now()
+    }
     fn new_timer(&self, instant: std::time::Instant) -> Pin<Box<dyn AsyncTimer>> {
         quinn::TokioRuntime.new_timer(instant)
     }
@@ -53,5 +57,21 @@ impl Runtime for Drivers {
     }
     fn wrap_udp_socket(&self, socket: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {
         quinn::TokioRuntime.wrap_udp_socket(socket)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The owned driver must read the same clock that creates its timers.
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_driver_clock_advances_with_its_timer_runtime() {
+        let owner = DialRuntime::new();
+        let runtime = owner.runtime();
+        let before = runtime.now();
+        let interval = std::time::Duration::from_secs(10);
+        tokio::time::advance(interval).await;
+        assert_eq!(runtime.now().duration_since(before), interval);
     }
 }
