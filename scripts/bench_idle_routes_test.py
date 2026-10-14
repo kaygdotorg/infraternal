@@ -5,6 +5,7 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 spec = importlib.util.spec_from_file_location('idle_routes', Path(__file__).with_name('bench-idle-routes.py'))
 fixture = importlib.util.module_from_spec(spec)
@@ -29,6 +30,14 @@ class PeerInspection(unittest.TestCase):
                     self.assertEqual(fixture.shim_pids(runtime), [os.getpid()])
             finally:
                 os.close(directory)
+
+
+class SampleAccounting(unittest.IsolatedAsyncioTestCase):
+    async def test_exited_thread_invalidates_sample(self):
+        # Dropping a worker must not turn its accumulated CPU into apparent idle.
+        with patch.object(fixture, 'snapshot', side_effect=[{1: (100, 0, 2), 2: (500, 0, 7)}, {1: (110, 0, 3)}]), patch.object(fixture.asyncio, 'sleep', new=AsyncMock()), patch.object(Path, 'read_text', return_value='worker'):
+            with self.assertRaisesRegex(AssertionError, 'thread set changed'):
+                await fixture.measure(123, 60)
 
 
 if __name__ == '__main__':

@@ -65,7 +65,8 @@ class Browser:
             assert len(self.pending) <= 128, 'fixture pending proof bound'
             await self.send(0, 8, struct.pack('<QQ', nonce, sent))
             nonce += 1
-            await asyncio.sleep(.025)
+            # Schedule from probe start, matching the browser after a slow write.
+            await asyncio.sleep(max(0, .025 - (time.monotonic() - now)))
 
     async def send(self, stream, kind, body=b''):
         wire = bytes(varint(stream) + varint(len(body) + 1)) + bytes([kind]) + body
@@ -197,8 +198,10 @@ async def measure(pid, seconds):
     await asyncio.sleep(seconds)
     elapsed = time.monotonic() - started
     after = snapshot(pid)
-    threads = {tid: {'cpu_ns': values[0] - before.get(tid, (0, 0, 0))[0],
-                     'schedule_ins': values[2] - before.get(tid, (0, 0, 0))[2],
+    # An exited worker would silently lose its CPU; churn invalidates this sample.
+    assert before.keys() == after.keys(), 'fixture thread set changed during sample'
+    threads = {tid: {'cpu_ns': values[0] - before[tid][0],
+                     'schedule_ins': values[2] - before[tid][2],
                      'name': Path(f'/proc/{pid}/task/{tid}/comm').read_text().strip()}
                for tid, values in after.items()}
     return dict(seconds=elapsed, cpu_percent_one_core=sum(v['cpu_ns'] for v in threads.values()) / elapsed / 1e7,
