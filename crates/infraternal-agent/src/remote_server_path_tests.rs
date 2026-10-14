@@ -621,6 +621,113 @@ async fn a_latched_mesh_reply_wakes_retry_without_selecting_the_path() {
     assert_eq!(path.path(), Path::Enrolled);
 }
 
+/// A late hint must reach the caller's retry decision while enrolled proof is pending.
+#[tokio::test]
+async fn pending_enrolled_proof_does_not_hide_a_latched_mesh_hint() {
+    use quinn::AsyncUdpSocket as _;
+    use std::future::Future as _;
+    let ca = root();
+    let server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let identity = identity(&ca, enrolled);
+    let registry = registry();
+    let link = connect(&identity, None, enrolled, ServerLinkKind::Fallback, false)
+        .await
+        .unwrap();
+    let path = link.path.as_ref().expect("fixture requires native QUIC");
+    let mesh_socket = server.reserved.as_ref().unwrap().try_clone().unwrap();
+    mesh_socket.set_nonblocking(true).unwrap();
+    let mesh = tokio::net::UdpSocket::from_std(mesh_socket).unwrap();
+    preference(&registry, Some(mesh.local_addr().unwrap().ip())).await;
+    server
+        .dropping
+        .store(true, std::sync::atomic::Ordering::Release);
+    // Real mutual TLS has completed. Virtual time now controls only expiry
+    // ordering; no assertion depends on a measured wall-clock duration.
+    tokio::time::pause();
+    let mut active = std::pin::pin!(std::future::pending::<io::Result<()>>());
+    let mut reason = ServerLinkReason::MeshProven;
+    let mut steering = std::pin::pin!(steer(
+        &link,
+        &identity,
+        &registry,
+        false,
+        &mut reason,
+        active.as_mut(),
+    ));
+    for _ in 0..10_000 {
+        std::future::poll_fn(|cx| {
+            assert!(steering.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        if matches!(path.path(), Path::Mesh(_)) {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    assert!(matches!(path.path(), Path::Mesh(_)));
+    tokio::time::advance(Duration::from_secs(10)).await;
+    std::future::poll_fn(|cx| {
+        assert!(steering.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(
+        path.path(),
+        Path::Enrolled,
+        "candidate miss did not start return proof"
+    );
+    // Latch precisely the raw routing hint accepted by retry_path's existing
+    // isolated test. It grants no authority and must trigger fresh proof.
+    let since = std::time::Instant::now();
+    server
+        .reserved
+        .as_ref()
+        .unwrap()
+        .send_to(b"late route hint", path.local_addr().unwrap())
+        .unwrap();
+    let mut bytes = [0; 64];
+    let mut buffers = [std::io::IoSliceMut::new(&mut bytes)];
+    let mut metadata = [quinn::udp::RecvMeta::default()];
+    for _ in 0..10_000 {
+        if path.heard_since(since) {
+            break;
+        }
+        // Keep the test runnable while UDP readiness is dispatched, preventing
+        // paused time from auto-advancing the enrolled proof's deadline.
+        std::future::poll_fn(|cx| {
+            if let std::task::Poll::Ready(result) = path.poll_recv(cx, &mut buffers, &mut metadata)
+            {
+                result.unwrap();
+            }
+            std::task::Poll::Ready(())
+        })
+        .await;
+        tokio::task::yield_now().await;
+    }
+    assert!(path.heard_since(since), "late hint was not latched");
+    let mut control = std::pin::pin!(retry_path(
+        path,
+        tokio::time::Instant::now() + Duration::from_secs(3600),
+        since
+    ));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(
+        control.as_mut().poll(&mut context).is_ready(),
+        "isolated retry did not see the hint"
+    );
+    assert!(steering.as_mut().poll(&mut context).is_pending());
+    assert!(
+        matches!(path.path(), Path::Mesh(_)),
+        "pending enrolled proof hid a latched hint from the caller's fresh mesh proof"
+    );
+}
+
 /// A recovered mesh is retried on the same connection after the cool-down.
 #[tokio::test]
 async fn interrupted_mesh_is_retried_on_the_same_connection() {

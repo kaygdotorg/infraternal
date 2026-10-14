@@ -402,7 +402,17 @@ async fn steer(
                     // resent on the enrolled path and the move retries later.
                     *reason = ServerLinkReason::MeshRefused;
                     retry_since = std::time::Instant::now();
-                    let _ = to_enrolled(link, registry, *reason).await;
+                    // Selecting enrolled is synchronous. A late mesh reply may
+                    // start fresh proof without waiting for enrolled recovery;
+                    // the hint itself neither proves nor changes the path.
+                    tokio::select! {
+                        // Poll the return first so a pre-latched hint cannot
+                        // skip selecting enrolled after the candidate miss.
+                        biased;
+                        _ = &mut active => return Steered::Ended,
+                        _ = to_enrolled(link, registry, *reason) => {},
+                        () = path.mesh_heard(retry_since) => {},
+                    }
                     not_before = tokio::time::Instant::now() + retry;
                     retry = (retry * 2).min(Duration::from_secs(30));
                 }
