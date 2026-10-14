@@ -440,6 +440,9 @@ export class TerminalClient {
     client.keepLigaturesOff();
     client.installCursorLayerHook();
     client.loadStyledFaces();
+    // An already opened terminal has paid the same first-renderer cost. Also
+    // supersede an optional warm-up still waiting for resources on this font.
+    TerminalClient.rendererWarmups.set(font.id, Promise.resolve());
     return client;
   }
 
@@ -465,6 +468,7 @@ export class TerminalClient {
     let warmup = TerminalClient.rendererWarmups.get(font.id);
     if (!warmup) {
       warmup = TerminalClient.prepareResources(font).then(() => {
+        if (TerminalClient.rendererWarmups.get(font.id) !== warmup) return;
         // First canvas/font setup can block long enough to expire a healthy
         // socket. Exercise it before publication, with no input or live loop
         // left behind. Inert, hidden content cannot steal sign-in focus.
