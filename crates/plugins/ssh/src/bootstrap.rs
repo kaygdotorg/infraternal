@@ -278,6 +278,7 @@ impl Bootstrap {
             result = tokio::time::timeout(self.deadline, work) => result.unwrap_or_else(|_| Err(Failure::install("Host setup exceeded its time limit."))),
         };
         if let Err(failure) = &result {
+            self.cleanup_probe(&authority, host).await;
             self.backend
                 .record_failure(&saved.target, Some(host), Step::Install, failure);
             let _ = self.setup.emit(
@@ -641,6 +642,7 @@ impl Bootstrap {
             if resources.published
                 && let Some(host) = resources.host
             {
+                self.cleanup_probe(&batch.authority, host).await;
                 let stage = setup_failure_stage(failure);
                 let _ = self.setup.emit(
                     &batch.authority.owner,
@@ -1102,17 +1104,10 @@ impl Bootstrap {
                             // ownership and UID admission. Both must succeed before
                             // the commit signal; a failed sibling may leave only the
                             // registered private canary to finish, never the user shell.
-                            if let Err(failure) = tokio::try_join!(
+                            tokio::try_join!(
                                 self.backend.connected_facts(authority, host),
                                 self.backend.terminal_canary(authority, host),
-                            ) {
-                                let _ = tokio::time::timeout(
-                                    Duration::from_secs(5),
-                                    self.backend.cleanup_sessions(authority, host),
-                                )
-                                .await;
-                                return Err(failure);
-                            }
+                            )?;
                         } else {
                             // Older adapters retain their existing proof ordering.
                             self.backend.connected_facts(authority, host).await?;
@@ -1127,7 +1122,7 @@ impl Bootstrap {
                 // Completion discharges durable retirement only after proof and commit.
                 self.backend.completed(authority, host).await
             };
-            if published {
+            let result = if published {
                 tokio::select! {
                     biased;
                     _ = self.backend.setup_cancelled(host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
@@ -1135,8 +1130,24 @@ impl Bootstrap {
                 }
             } else {
                 proof.await
+            };
+            if published && result.is_err() {
+                // Cleanup belongs outside both cancellation fences: a stopped
+                // commit channel or retired host drops the private proof future.
+                // The callback owns only its registered canary, never the shell.
+                self.cleanup_probe(authority, host).await;
             }
+            result
         })
+    }
+
+    /// Idempotent cleanup also covers an outer setup deadline dropping proof.
+    async fn cleanup_probe(&self, authority: &Authority, host: uuid::Uuid) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.backend.cleanup_sessions(authority, host),
+        )
+        .await;
     }
 
     /// Confirm only this failed attempt's public observation; the caller supplies

@@ -165,7 +165,6 @@ async fn failed_published_facts_clean_only_the_private_probe_and_never_commit() 
 /// A stopped commit channel cancels the sibling proof futures after the private
 /// probe has started. Cleanup must cover this exit as well as a proof refusal.
 #[tokio::test]
-#[ignore = "R189-01: unresolved independent review regression; run explicitly"]
 async fn review_stopped_commit_channel_finishes_the_private_probe() {
     let (runner, authority, installation, proofs, host) = context();
     let operation = runner.complete_setup(&authority, host, &installation, true);
