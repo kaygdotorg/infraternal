@@ -499,3 +499,7 @@ mod child_locale_tests {
         }));
     }
 }
+
+#[cfg(feature = "process-per-user")]
+#[path = "pty_handoff.rs"]
+pub(crate) mod handoff;

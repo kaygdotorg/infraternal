@@ -73,3 +73,6 @@ pub mod openssl_secure;
 
 #[cfg(feature = "process-per-user")]
 pub use session::user_host::run_host;
+
+#[cfg(feature = "process-per-user")]
+pub use pty::handoff::{receive_masters, send_masters};
