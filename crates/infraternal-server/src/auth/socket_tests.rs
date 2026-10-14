@@ -550,9 +550,9 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
 #[allow(clippy::too_many_lines)] // Keep one real socket's handshake, snapshot, edits, and invalidations ordered.
 async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
     let _guard = SERIAL.lock().await;
-    // This case checks ordered inventory behavior. Hold runtime time across
-    // real I/O; separate deadline cases still advance it and verify refusal.
-    let clock = FrozenSocketTime::new().await;
+    // Inventory ordering does not test a deadline. Hold runtime time across
+    // real I/O; dedicated expiry cases advance it and verify refusal (#118, #173).
+    let _clock = FrozenSocketTime::new().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
