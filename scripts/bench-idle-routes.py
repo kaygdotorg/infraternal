@@ -86,6 +86,8 @@ class Browser:
                         else:
                             self.queue.put_nowait((stream, kind, body))
                 elif opcode == 8:
+                    code = struct.unpack('!H', wire[:2])[0] if len(wire) >= 2 else None
+                    print(json.dumps(dict(phase='browser_close', code=code)), flush=True)
                     raise EOFError('fixture browser closed')
         except (EOFError, asyncio.IncompleteReadError):
             self.queue.put_nowait(None)
@@ -185,6 +187,7 @@ async def run(args):
             await asyncio.sleep(.05)
         else:
             raise RuntimeError('fixture startup failed')
+        server_pid = int(subprocess.check_output(['systemctl', 'show', unit, '-p', 'MainPID', '--value']))
         token = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('=')
         digest = base64.urlsafe_b64encode(hashlib.sha256(token.encode()).digest()).decode().rstrip('=')
         with sqlite3.connect(root / 'data/infraternal.sqlite') as db:
@@ -204,6 +207,9 @@ async def run(args):
                     assert body[4] == 1, f'PTY open refused at {call}'
                     sessions.append(uuid.UUID(json.loads(body[5:])['session_id']))
                     break
+                assert kind != 0x0f, 'fixture protocol close'
+            if call % 32 == 0:
+                print(json.dumps(dict(phase='create', revision=args.revision, real_ptys=call)), flush=True)
             await asyncio.sleep(.01)
         await creator.close()
         browsers.clear()
@@ -222,7 +228,6 @@ async def run(args):
                     if got_stream == stream and kind == 0x13:
                         break
                 await browser.send(stream, 0x14, struct.pack('<I', 1048576))
-        server_pid = int(subprocess.check_output(['systemctl', 'show', unit, '-p', 'MainPID', '--value']))
         print(json.dumps(dict(phase='settle', revision=args.revision, sessions=len(sessions), clients=len(browsers),
                               attached_sessions=min(len(sessions), args.clients * 25),
                               server_pid=server_pid, seconds=args.settle)), flush=True)
