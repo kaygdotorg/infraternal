@@ -888,8 +888,9 @@ mod tests {
             .lock()
             .unwrap()
             .arm(tokio::time::Instant::now() - std::time::Duration::from_secs(1));
-        // Let Tokio's timer driver publish readiness; no duration is asserted.
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        // Let every retained entry reach its own deadline as well as publishing
+        // the shared clock's readiness; no elapsed duration is asserted.
+        tokio::time::sleep(crate::remote_path_copies::COPY_DELAY).await;
         let mut bytes = [0; 64];
         let mut buffers = [IoSliceMut::new(&mut bytes)];
         let mut metadata = [RecvMeta::default()];
@@ -928,7 +929,7 @@ mod tests {
                     );
             }
             let before = sends.load(Ordering::Relaxed);
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            tokio::time::sleep(crate::remote_path_copies::COPY_DELAY).await;
             let _ = bindings.poll_recv(&mut cx, &mut buffers, &mut metadata);
             assert!(sends.load(Ordering::Relaxed) - before <= 32);
         }

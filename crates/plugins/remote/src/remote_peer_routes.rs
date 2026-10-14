@@ -58,8 +58,8 @@ impl Recent {
         copy_at
     }
     /// At the socket's earliest copy deadline, send up to the shared poll budget.
-    /// Include younger entries: sustained output can evict older entries before
-    /// their deadline, and must not starve backup transmission indefinitely.
+    /// Each retained entry owns its deadline: another peer's clock or an evicted
+    /// older entry must not send a backup before its mesh original can arrive.
     /// Exhaustion retains unsent entries and requests the next poll immediately.
     /// A full socket defers a copy; other errors leave recovery to QUIC.
     pub fn copies(
@@ -71,7 +71,7 @@ impl Recent {
     ) -> Option<tokio::time::Instant> {
         let now = tokio::time::Instant::now();
         for sent in &mut self.datagrams {
-            if sent.copy_at.is_some() {
+            if sent.copy_at.is_some_and(|deadline| deadline <= now) {
                 if *remaining == 0 {
                     return Some(now);
                 }
@@ -299,6 +299,36 @@ mod tests {
     //! GSO batches remain within both replay bounds even when many old packets must retire.
     use super::*;
     #[tokio::test]
+    async fn shared_copy_clock_preserves_each_datagrams_deadline() {
+        use quinn::Runtime as _;
+        let socket = quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let destination = "127.0.0.1:40001".parse().unwrap();
+        let mut recent = Recent::default();
+        recent.keep_copying(
+            &Transmit {
+                destination,
+                contents: b"fresh ciphertext",
+                ecn: None,
+                segment_size: None,
+                src_ip: None,
+            },
+            true,
+        );
+        // Another peer's expired clock cannot advance this peer's deadline.
+        // Set a distant deadline explicitly; no wall-clock timing is asserted.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3600);
+        recent.datagrams.front_mut().unwrap().copy_at = Some(deadline);
+        let mut budget = COPY_BATCH;
+        assert_eq!(
+            recent.copies(socket.as_ref(), destination, true, &mut budget),
+            Some(deadline)
+        );
+        assert_eq!(budget, COPY_BATCH);
+        assert_eq!(recent.datagrams.front().unwrap().copy_at, Some(deadline));
+    }
+    #[tokio::test]
     async fn output_evicting_the_oldest_copy_still_copies_one_bounded_batch() {
         use quinn::Runtime as _;
         let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -332,8 +362,12 @@ mod tests {
                 true,
             );
         }
-        // The clock's oldest scheduled entry has been evicted. Firing that
-        // clock must flush the retained batch even when its entries are younger.
+        // Eviction leaves the retained deadlines intact. Once those deadlines
+        // expire, the complete bounded batch remains eligible for copying.
+        let due = tokio::time::Instant::now();
+        for sent in &mut recent.datagrams {
+            sent.copy_at = Some(due);
+        }
         let mut copy_budget = COPY_BATCH;
         assert!(
             recent
