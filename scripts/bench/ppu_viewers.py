@@ -202,8 +202,8 @@ async def add_viewer(host, groups, number, record):
         assert peer.pid == host.pid, 'viewer attached to foreign host'
         start = time.monotonic()
         echo = await confirm(peer, [other[index] for other in groups], f'attach-{number}-{index}'.encode())
+        peer.attach_receipt['typable_ms'] = peer.attach_receipt['snapshot_ms'] + (time.monotonic() - start) * 1000
         record.write('attach', viewer=number, terminal=index, writer=writer_id(number),
-            typable_ms=peer.attach_receipt['snapshot_ms'] + (time.monotonic() - start) * 1000,
             **peer.attach_receipt, snapshot=peer.snapshot_receipt, ring=peer.ring_receipt, **echo)
     require_live(groups, host.count)
 
@@ -226,6 +226,11 @@ async def measure(host, groups, args, record):
         idle_cpu_percent=cpu_percent(before, idle[-1], elapsed), idle_window_s=elapsed,
         idle_cpu_ticks=idle[-1]['cpu_ticks'] - before['cpu_ticks'],
         cpu_ticks_per_second=os.sysconf('SC_CLK_TCK'))
+    attachments = [peer.attach_receipt for group in groups for peer in group]
+    summary.update(cumulative_attach_samples=len(attachments),
+        cumulative_attach_hello_p99_ms=percentile([row['hello_ms'] for row in attachments], .99),
+        cumulative_attach_snapshot_p99_ms=percentile([row['snapshot_ms'] for row in attachments], .99),
+        cumulative_attach_typable_p99_ms=percentile([row['typable_ms'] for row in attachments], .99))
     echoes, seen = [], []
     before, start = sample(host.pid), time.monotonic()
     for probe in range(args.samples):
@@ -281,6 +286,8 @@ async def run(args):
     loop.add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     try:
         await host.ready()
+        birth = Path(f'/proc/{host.pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+        record.write('host-ready', pid=host.pid, birth=birth, shell_identities=host.shells)
         await fill(host, args.lines, record)
         await asyncio.gather(*(peer.close() for peer in host.peers))
         host.peers.clear()
