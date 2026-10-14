@@ -301,6 +301,13 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
         pids
     );
     attached = attach_all(address, &f.auth.session, &sessions, ORIGIN).await;
+    println!(
+        "STAGING retained_browser_ordinals={:?}",
+        attached
+            .iter()
+            .map(|browser| browser.ordinal)
+            .collect::<Vec<_>>()
+    );
     let mut echoed = 0;
     for (browser, chunk) in attached.iter_mut().zip(sessions.chunks(25)) {
         for index in 0..chunk.len() {
@@ -369,6 +376,33 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
         * 1024;
     println!(
         "METRIC name=signed_deploy_idle server_cpu_percent_one_core={cpu:.3} server_rss_bytes={rss} real_pty_sessions=128 browser_connections=6 sample_seconds=5"
+    );
+    // Echoes before the idle sample cannot prove that its sockets stayed usable.
+    // Require a fresh control exchange on every retained browser before teardown.
+    for (index, browser) in attached.iter_mut().enumerate() {
+        let nonce = u64::try_from(index).unwrap() + 1;
+        wire_send(
+            browser,
+            0,
+            &infraternal_protocol::Frame::Ping {
+                nonce,
+                sent_us: nonce,
+            },
+        )
+        .await;
+        loop {
+            let bytes = wire_read(browser).await;
+            let frame = infraternal_protocol::decode_muxed_frame(&bytes).unwrap();
+            if frame.stream_id == 0
+                && matches!(frame.frame, infraternal_protocol::Frame::Pong { nonce: reply, sent_us } if reply == nonce && sent_us == nonce)
+            {
+                break;
+            }
+        }
+    }
+    println!(
+        "STAGING retained_browser_sockets_responsive={}",
+        attached.len()
     );
     gaps.sort_by(f64::total_cmp);
     intervals.sort_by(f64::total_cmp);

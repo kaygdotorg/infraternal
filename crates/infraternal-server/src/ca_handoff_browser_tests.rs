@@ -6,9 +6,13 @@ use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
+// Fixture ordinals identify sockets in safe receipts without logging authority.
+static NEXT_BROWSER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
 /// A fixture event loop answers probes even while the caller runs deployment or sibling setup.
 /// Queues are bounded; overflowing test output fails rather than hiding a stalled client.
 pub(crate) struct Browser {
+    pub(crate) ordinal: usize,
     commands: mpsc::Sender<(Bytes, oneshot::Sender<bool>)>,
     messages: mpsc::Receiver<Message>,
     task: tokio::task::JoinHandle<()>,
@@ -26,6 +30,7 @@ impl Browser {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> Self {
+        let ordinal = NEXT_BROWSER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (commands, mut outgoing) = mpsc::channel::<(Bytes, oneshot::Sender<bool>)>(32);
         let (incoming, messages) = mpsc::channel(4096);
         let task = tokio::spawn(async move {
@@ -69,7 +74,7 @@ impl Browser {
                         } else {
                             let closed = matches!(message, Message::Close(_));
                             if let Message::Close(ref frame) = message {
-                                println!("STAGING terminal_message=Close code={:?}", frame.as_ref().map(|frame| frame.code));
+                                println!("STAGING browser={ordinal} terminal_message=Close code={:?}", frame.as_ref().map(|frame| frame.code));
                             }
                             // Never await a full output queue: that would stop answering
                             // probes and recreate the client's original failure mode.
@@ -81,6 +86,7 @@ impl Browser {
             }
         });
         Self {
+            ordinal,
             commands,
             messages,
             task,
