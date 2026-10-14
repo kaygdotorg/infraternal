@@ -676,7 +676,7 @@ async fn while_authorized_operation<T: Send>(
     );
     check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(operation);
-    loop {
+    let result = loop {
         tokio::select! {
             biased;
             changed = revocations.changed() => {
@@ -684,19 +684,46 @@ async fn while_authorized_operation<T: Send>(
                 expiry = socket_deadline(state, user, token).await?;
             }
             () = tokio::time::sleep_until(expiry) => { expiry = socket_deadline(state, user, token).await?; }
-            _ = check.tick() => { expiry = socket_deadline(state, user, token).await?; }
-            result = &mut operation => {
-                // The entry read authenticates this operation. All production revocations
-                // publish after commit, and renewal can only extend expiry. Recheck that
-                // generation/deadline without two redundant SQLite reads per fast frame.
-                // Backend/persistence boundaries still read actual authority and predicate SQL.
-                if revocations.has_changed().map_err(|_| ())? || tokio::time::Instant::now() >= expiry {
-                    socket_deadline(state, user, token).await?;
+            _ = check.tick() => {
+                // The operation may own the connection this read needs. Keep
+                // polling its owner instead of suspending a transaction while
+                // waiting for that same pool. Neither completion nor progress
+                // renews the already-started authority read's deadline.
+                let authority = socket_deadline(state, user, token);
+                tokio::pin!(authority);
+                tokio::select! {
+                    biased;
+                    changed = revocations.changed() => {
+                        changed.map_err(|_| ())?;
+                        // A guarded poll may itself send bytes. Stop polling
+                        // it on authority loss; a late result check cannot
+                        // undo a write. Finish this same bounded read, then
+                        // recheck after the notification, not its old snapshot.
+                        authority.await?;
+                        expiry = socket_deadline(state, user, token).await?;
+                    }
+                    () = tokio::time::sleep_until(expiry) => {
+                        authority.await?;
+                        expiry = socket_deadline(state, user, token).await?;
+                    }
+                    checked = &mut authority => { expiry = checked?; }
+                    result = &mut operation => {
+                        expiry = authority.await?;
+                        break result;
+                    }
                 }
-                return result;
             }
+            result = &mut operation => break result,
         }
+    };
+    // The entry read authenticates this operation. All production revocations
+    // publish after commit, and renewal can only extend expiry. Recheck that
+    // generation/deadline without two redundant SQLite reads per fast frame.
+    // Backend/persistence boundaries still read actual authority and predicate SQL.
+    if revocations.has_changed().map_err(|_| ())? || tokio::time::Instant::now() >= expiry {
+        socket_deadline(state, user, token).await?;
     }
+    result
 }
 
 // Initial subscription must distinguish an unread state from a known absence.

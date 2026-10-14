@@ -43,8 +43,14 @@ use tokio_tungstenite::{
 use tower::ServiceExt;
 
 pub(crate) static SERIAL: Mutex<()> = Mutex::const_new(());
+
+/// Model a committed revocation notification with a fixed signal and no authority data.
+pub(crate) fn publish_revocation(auth: &Auth) {
+    auth.revocations.send_replace(());
+}
+
 #[path = "socket_clock.rs"]
-mod socket_clock;
+pub(crate) mod socket_clock;
 use socket_clock::FrozenSocketTime;
 const NOW: i64 = 1_800_000_000;
 const ORIGIN: &str = "https://auth.example.test";
