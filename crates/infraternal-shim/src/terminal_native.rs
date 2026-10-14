@@ -103,6 +103,12 @@ impl Engine {
     pub fn memory(&self) -> (usize, usize, bool) {
         self.1.as_ref().map_or((0, 0, false), |m| m.stats())
     }
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub fn allocation_classes(&self) -> (usize, usize, usize) {
+        self.1
+            .as_ref()
+            .map_or((0, 0, 0), |m| m.allocation_classes())
+    }
     pub fn process(&mut self, data: &[u8]) {
         let Some(handle) = self.0 else { return };
         // SAFETY: uniquely owned terminal; Ghostty consumes the borrowed slice

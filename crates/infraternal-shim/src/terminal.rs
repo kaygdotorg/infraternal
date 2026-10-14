@@ -349,3 +349,7 @@ mod resize_recovery;
 #[cfg(test)]
 #[path = "../tests/unit/recovery_bench.rs"]
 mod recovery_measurements;
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/ppu_memory_bench.rs"]
+mod ppu_memory_bench;

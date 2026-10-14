@@ -78,6 +78,19 @@ impl Memory {
         (state.used, state.peak, state.refused)
     }
     #[cfg(test)]
+    pub(super) fn allocation_classes(&self) -> (usize, usize, usize) {
+        // SAFETY: the synchronous test inspects copied ownership metadata only,
+        // between native calls; the list is never borrowed across a callback.
+        let state = unsafe { &*self.state.get() };
+        let mut block = state.first;
+        let mut count = 0;
+        while let Some(current) = block {
+            block = unsafe { current.as_ref().next };
+            count += 1;
+        }
+        (state.used - state.mapped_used, state.mapped_used, count)
+    }
+    #[cfg(test)]
     pub(super) fn refuse_new_allocations(&mut self) {
         let state = self.state.get_mut();
         state.limit = state.used;
