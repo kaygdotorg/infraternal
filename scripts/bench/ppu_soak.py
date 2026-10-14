@@ -243,7 +243,7 @@ class Peer:
 
 class Host:
     """Fixture ownership is explicit; cleanup signals only captured child identities."""
-    def __init__(self, binary, root, count, origin, nofile=None, scope=None):
+    def __init__(self, binary, root, count, origin, nofile=None, scope=None, accounting=None):
         self.root, self.count, self.origin = root, count, origin
         root.mkdir(mode=0o700)
         self.log = (root / 'host-stderr.log').open('wb')
@@ -253,6 +253,10 @@ class Host:
         command = [str(binary), '__shim', '--session', f'{origin:032x}',
             '--uid', str(os.getuid()), '--host-sessions', str(count), '--ring-capacity', '65536',
             '--state', str(root)]
+        if accounting is not None:
+            # A separate numeric receipt is created by the host before any
+            # PTY. The driver requests it explicitly, never on idle timers.
+            command += ['--host-accounting', str(accounting)]
         if scope:
             command = ['systemd-run', '--quiet', '--scope', '--unit', scope,
                        '-p', 'MemoryAccounting=yes', '-p', 'CPUWeight=10000', '--'] + command

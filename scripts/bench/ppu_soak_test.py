@@ -25,6 +25,24 @@ def rows():
 
 
 class Admission(unittest.TestCase):
+    def test_optional_accounting_belongs_to_only_the_fixture_host(self):
+        class Root:
+            def mkdir(self, **unused):
+                pass
+            def __truediv__(self, unused):
+                return self
+            def open(self, unused):
+                return object()
+            def __str__(self):
+                return '/owned-fixture'
+        with patch.object(ppu.subprocess, 'Popen') as spawn:
+            spawn.return_value.pid = 42
+            ppu.Host('binary', Root(), 10, 1, accounting=Path('/owned-receipt'))
+            command = spawn.call_args.args[0]
+            self.assertEqual(command[-2:], ['--host-accounting', '/owned-receipt'])
+            ppu.Host('binary', Root(), 10, 1)
+            self.assertNotIn('--host-accounting', spawn.call_args.args[0])
+
     def test_every_phase_fits_a_linux_socket_with_the_longest_run_id(self):
         args = SimpleNamespace(smoke=False, source='fixture-source', run='abcdefghij',
                                panic_test_binary=None)
