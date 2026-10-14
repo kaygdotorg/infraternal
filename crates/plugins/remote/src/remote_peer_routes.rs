@@ -1,5 +1,8 @@
 //! Leases trusted alternative peer tuples and bounded encrypted replay below the existing QUIC endpoint [198,215,263], #201.
-use crate::remote_path_copies::{COPY_BATCH, COPY_DELAY};
+use crate::{
+    remote_bindings::Lease,
+    remote_path_copies::{COPY_BATCH, COPY_DELAY},
+};
 use quinn::{
     AsyncUdpSocket,
     udp::{EcnCodepoint, Transmit},
@@ -18,9 +21,29 @@ pub(super) struct Datagram {
     pub ecn: Option<EcnCodepoint>,
     source: Option<IpAddr>,
     copy_at: Option<tokio::time::Instant>,
-    /// Return replay consumes an original; an ordinary backup retains it.
-    /// Keep this identity across another route change while draining.
-    returning: bool,
+    /// The purpose survives later routing hints; redundant mesh replies must
+    /// never become enrolled recovery history.
+    kind: CopyKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyKind {
+    Original,
+    Return,
+    MeshReply,
+}
+
+#[derive(Clone, Copy)]
+struct CopyRoute<'a> {
+    socket: &'a dyn AsyncUdpSocket,
+    destination: SocketAddr,
+    source: Option<IpAddr>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct MeshRoute {
+    pub binding: Option<u64>,
+    pub local: Option<IpAddr>,
 }
 
 #[derive(Default)]
@@ -39,7 +62,10 @@ impl Recent {
                 .iter()
                 .filter(|sent| sent.copy_at.is_some())
                 .count(),
-            self.datagrams.iter().filter(|sent| sent.returning).count(),
+            self.datagrams
+                .iter()
+                .filter(|sent| sent.kind == CopyKind::Return)
+                .count(),
         ]
     }
 
@@ -71,10 +97,75 @@ impl Recent {
             ecn: transmit.ecn,
             source: transmit.src_ip,
             copy_at,
-            returning: false,
+            kind: CopyKind::Original,
         });
         copy_at
     }
+    /// A successful enrolled primary may also answer through the known mesh
+    /// ingress. Redundancy shares the existing storage, but cannot evict pending
+    /// enrolled recovery. Unknown coordinates keep it dormant without a clock.
+    pub fn mesh_reply(
+        &mut self,
+        transmit: &Transmit<'_>,
+        ready: bool,
+    ) -> Option<tokio::time::Instant> {
+        if transmit.contents.len() > MAX_BYTES {
+            return None;
+        }
+        let mut bytes = self.bytes;
+        let mut count = self.datagrams.len();
+        let mut evict = 0;
+        for old in &self.datagrams {
+            if count < MAX_DATAGRAMS && bytes + transmit.contents.len() <= MAX_BYTES {
+                break;
+            }
+            if old.kind == CopyKind::Return {
+                return None;
+            }
+            bytes -= old.contents.len();
+            count -= 1;
+            evict += 1;
+        }
+        for _ in 0..evict {
+            self.datagrams.pop_front();
+        }
+        self.bytes = bytes + transmit.contents.len();
+        let copy_at = ready.then(tokio::time::Instant::now);
+        self.datagrams.push_back(Datagram {
+            contents: transmit.contents.to_vec(),
+            segment_size: transmit.segment_size,
+            ecn: transmit.ecn,
+            source: None,
+            copy_at,
+            kind: CopyKind::MeshReply,
+        });
+        copy_at
+    }
+    /// A duplicate supplies coordinates only: it neither selects a primary
+    /// route nor retires recovery. Repeated hints preserve backpressure clocks.
+    pub fn mesh_ready(&mut self) -> Option<tokio::time::Instant> {
+        let mut armed = None;
+        for sent in &mut self.datagrams {
+            if sent.kind == CopyKind::MeshReply && sent.copy_at.is_none() {
+                let now = tokio::time::Instant::now();
+                sent.copy_at = Some(now);
+                armed = Some(armed.map_or(now, |old: tokio::time::Instant| old.min(now)));
+            }
+        }
+        armed
+    }
+    pub fn cancel_mesh_replies(&mut self) {
+        let bytes = &mut self.bytes;
+        self.datagrams.retain(|sent| {
+            if sent.kind == CopyKind::MeshReply {
+                *bytes -= sent.contents.len();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// Select enrolled recovery without moving ciphertext into another queue.
     /// Existing return entries retain their backpressure deadline; only new
     /// mesh originals become immediately eligible. Their source follows the
@@ -82,11 +173,13 @@ impl Recent {
     pub fn replay(&mut self, source: Option<IpAddr>) -> Option<tokio::time::Instant> {
         let now = tokio::time::Instant::now();
         for sent in &mut self.datagrams {
-            if !sent.returning {
-                sent.returning = true;
+            if sent.kind == CopyKind::Original {
+                sent.kind = CopyKind::Return;
                 sent.copy_at = Some(now);
             }
-            sent.source = source;
+            if sent.kind == CopyKind::Return {
+                sent.source = source;
+            }
         }
         self.deadline()
     }
@@ -105,45 +198,66 @@ impl Recent {
         bound: bool,
         remaining: &mut usize,
     ) -> Option<tokio::time::Instant> {
+        self.copies_to(socket, destination, bound, None, remaining)
+    }
+    fn copies_to(
+        &mut self,
+        socket: &dyn AsyncUdpSocket,
+        destination: SocketAddr,
+        bound: bool,
+        mesh: Option<CopyRoute<'_>>,
+        remaining: &mut usize,
+    ) -> Option<tokio::time::Instant> {
         let now = tokio::time::Instant::now();
-        for sent in &mut self.datagrams {
-            if sent.copy_at.is_some_and(|deadline| deadline <= now) {
-                if *remaining == 0 {
-                    break;
-                }
-                *remaining -= 1;
-                let result = socket.try_send(&Transmit {
-                    destination,
-                    contents: &sent.contents,
-                    ecn: sent.ecn,
-                    segment_size: sent.segment_size,
-                    src_ip: if bound { None } else { sent.source },
-                });
-                sent.copy_at = match result {
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        Some(now + COPY_DELAY)
-                    }
-                    _ => None,
-                };
-            }
-        }
-        // Remove completed returns even when this poll exhausts its budget.
-        // Leaving them until a later poll would let a route change re-arm old
-        // ciphertext. New mesh sends share the same existing storage bounds.
         let bytes = &mut self.bytes;
-        self.datagrams.retain(|sent| {
-            let keep = !sent.returning || sent.copy_at.is_some();
-            if !keep {
-                *bytes -= sent.contents.len();
+        let mut next = None;
+        self.datagrams.retain_mut(|sent| {
+            if sent.copy_at.is_some_and(|deadline| deadline <= now) && *remaining != 0 {
+                let route = if sent.kind == CopyKind::MeshReply {
+                    mesh
+                } else {
+                    Some(CopyRoute {
+                        socket,
+                        destination,
+                        source: if bound { None } else { sent.source },
+                    })
+                };
+                if let Some(route) = route {
+                    *remaining -= 1;
+                    let result = route.socket.try_send(&Transmit {
+                        destination: route.destination,
+                        contents: &sent.contents,
+                        ecn: sent.ecn,
+                        segment_size: sent.segment_size,
+                        src_ip: route.source,
+                    });
+                    if result.is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock) {
+                        sent.copy_at = Some(now + COPY_DELAY);
+                    } else {
+                        sent.copy_at = None;
+                        if sent.kind != CopyKind::Original {
+                            *bytes -= sent.contents.len();
+                            return false;
+                        }
+                    }
+                } else {
+                    // No usable mesh coordinates: wait for real ingress rather
+                    // than repeatedly waking an endpoint that cannot send.
+                    sent.copy_at = None;
+                }
             }
-            keep
+            if let Some(at) = sent.copy_at {
+                next = Some(next.map_or(at, |old: tokio::time::Instant| old.min(at)));
+            }
+            true
         });
-        self.deadline()
+        next
     }
     pub fn cancel_copies(&mut self) {
+        self.cancel_mesh_replies();
         for sent in &mut self.datagrams {
             // Legacy enrolled recovery is independent of negotiated backups.
-            if !sent.returning {
+            if sent.kind == CopyKind::Original {
                 sent.copy_at = None;
             }
         }
@@ -203,6 +317,9 @@ pub(super) struct Peer {
     pub physical: SocketAddr,
     pub binding: Option<u64>,
     pub local: Option<IpAddr>,
+    /// Last real ingress on the trusted alternative, including duplicates.
+    /// This never replaces the primary reply hint.
+    pub mesh: Option<MeshRoute>,
     pub recent: Recent,
     pub seen: Seen,
     pub backup: bool,
@@ -226,6 +343,7 @@ impl Peers {
         &mut self,
         socket: &dyn AsyncUdpSocket,
         bound: bool,
+        leases: &[Lease],
     ) -> Option<tokio::time::Instant> {
         let len = self.slots.len();
         if len == 0 {
@@ -236,12 +354,32 @@ impl Peers {
         let mut remaining = COPY_BATCH;
         let mut deadline = None;
         for (index, slot) in after.iter_mut().chain(before.iter_mut()).enumerate() {
-            if let Some(peer) = slot
-                && let Some(at) = peer
-                    .recent
-                    .copies(socket, peer.logical, bound, &mut remaining)
-            {
-                deadline = Some(deadline.map_or(at, |old: tokio::time::Instant| old.min(at)));
+            if let Some(peer) = slot {
+                let mesh = peer.mesh.and_then(|route| {
+                    let (socket, source) = if let Some(id) = route.binding {
+                        (
+                            leases.iter().find(|lease| lease.id == id)?.socket.as_ref(),
+                            None,
+                        )
+                    } else {
+                        (socket, if bound { None } else { route.local })
+                    };
+                    Some(CopyRoute {
+                        socket,
+                        destination: peer.alternate,
+                        source,
+                    })
+                });
+                if peer.mesh.is_some() && mesh.is_none() {
+                    peer.recent.cancel_mesh_replies();
+                    peer.mesh = None;
+                }
+                if let Some(at) =
+                    peer.recent
+                        .copies_to(socket, peer.logical, bound, mesh, &mut remaining)
+                {
+                    deadline = Some(deadline.map_or(at, |old: tokio::time::Instant| old.min(at)));
+                }
             }
             if remaining == 0 {
                 self.copy_cursor = (start + index + 1) % len;
@@ -305,6 +443,7 @@ impl Peers {
             physical: logical,
             binding: None,
             local: None,
+            mesh: None,
             recent: Recent::default(),
             seen: Seen::default(),
             backup: false,
@@ -348,6 +487,172 @@ impl Peers {
 mod tests {
     //! GSO batches remain within both replay bounds even when many old packets must retire.
     use super::*;
+    #[tokio::test]
+    async fn alternative_backpressure_keeps_one_copy_and_hints_preserve_its_deadline() {
+        use quinn::Runtime as _;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        #[derive(Debug)]
+        struct Gate {
+            inner: Arc<dyn AsyncUdpSocket>,
+            blocked: AtomicBool,
+        }
+        impl AsyncUdpSocket for Gate {
+            fn create_io_poller(self: Arc<Self>) -> std::pin::Pin<Box<dyn quinn::UdpPoller>> {
+                self.inner.clone().create_io_poller()
+            }
+            fn try_send(&self, transmit: &Transmit<'_>) -> std::io::Result<()> {
+                if self.blocked.load(Ordering::Relaxed) {
+                    return Err(std::io::ErrorKind::WouldBlock.into());
+                }
+                self.inner.try_send(transmit)
+            }
+            fn poll_recv(
+                &self,
+                cx: &mut std::task::Context<'_>,
+                bufs: &mut [std::io::IoSliceMut<'_>],
+                meta: &mut [quinn::udp::RecvMeta],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                self.inner.poll_recv(cx, bufs, meta)
+            }
+            fn local_addr(&self) -> std::io::Result<SocketAddr> {
+                self.inner.local_addr()
+            }
+        }
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let socket = Arc::new(Gate {
+            inner: quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap(),
+            blocked: AtomicBool::new(true),
+        });
+        let mut writable = socket.clone().create_io_poller();
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        let transmit = Transmit {
+            destination,
+            contents: b"one-alternative",
+            ecn: None,
+            segment_size: None,
+            src_ip: None,
+        };
+        let mut recent = Recent::default();
+        assert!(recent.mesh_reply(&transmit, true).is_some());
+        let route = Some(CopyRoute {
+            socket: socket.as_ref(),
+            destination,
+            source: None,
+        });
+        let mut remaining = 1;
+        let deadline = recent
+            .copies_to(socket.as_ref(), destination, true, route, &mut remaining)
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(recent.datagrams.len(), 1);
+        assert!(recent.mesh_ready().is_none());
+        recent.replay(None);
+        assert_eq!(recent.deadline(), Some(deadline));
+        assert!(
+            recent
+                .datagrams
+                .iter()
+                .all(|sent| sent.kind == CopyKind::MeshReply)
+        );
+        // Publish retry readiness explicitly; no elapsed-time threshold is
+        // asserted, and the production retry deadline above remains unchanged.
+        recent.datagrams.front_mut().unwrap().copy_at = Some(tokio::time::Instant::now());
+        socket.blocked.store(false, Ordering::Relaxed);
+        let mut remaining = 1;
+        assert!(
+            recent
+                .copies_to(socket.as_ref(), destination, true, route, &mut remaining)
+                .is_none()
+        );
+        assert_eq!(remaining, 0);
+        assert!(recent.datagrams.is_empty());
+        assert_eq!(recent.bytes, 0);
+        let mut bytes = [0; 64];
+        let (count, _) = receiver.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(&bytes[..count], transmit.contents);
+    }
+
+    #[tokio::test]
+    async fn alternative_admission_never_evicts_pending_enrolled_return() {
+        let mut recent = Recent::default();
+        let transmit = Transmit {
+            destination: "127.0.0.1:40001".parse().unwrap(),
+            contents: b"retained",
+            ecn: None,
+            segment_size: None,
+            src_ip: None,
+        };
+        for _ in 0..MAX_DATAGRAMS {
+            recent.keep(&transmit);
+        }
+        let deadline = recent.replay(None);
+        let bytes = recent.bytes;
+        assert!(recent.mesh_reply(&transmit, true).is_none());
+        assert_eq!(recent.datagrams.len(), MAX_DATAGRAMS);
+        assert_eq!(recent.bytes, bytes);
+        assert_eq!(recent.deadline(), deadline);
+        assert!(
+            recent
+                .datagrams
+                .iter()
+                .all(|sent| sent.kind == CopyKind::Return)
+        );
+        recent.clear();
+        let large = vec![7; MAX_BYTES];
+        recent.keep(&Transmit {
+            contents: &large,
+            ..transmit
+        });
+        recent.replay(None);
+        assert!(recent.mesh_reply(&transmit, true).is_none());
+        assert_eq!(recent.datagrams.len(), 1);
+        assert_eq!(recent.bytes, MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn alternative_queue_shares_bounds_and_never_becomes_return_history() {
+        let mut recent = Recent::default();
+        let transmit = Transmit {
+            destination: "127.0.0.1:40001".parse().unwrap(),
+            contents: b"reply",
+            ecn: None,
+            segment_size: None,
+            src_ip: None,
+        };
+        for _ in 0..MAX_DATAGRAMS * 2 {
+            assert!(recent.mesh_reply(&transmit, true).is_some());
+            assert!(recent.datagrams.len() <= MAX_DATAGRAMS);
+            assert!(recent.bytes <= MAX_BYTES);
+        }
+        let deadlines: Vec<_> = recent.datagrams.iter().map(|sent| sent.copy_at).collect();
+        recent.replay(Some("127.0.0.9".parse().unwrap()));
+        assert_eq!(
+            recent
+                .datagrams
+                .iter()
+                .map(|sent| sent.copy_at)
+                .collect::<Vec<_>>(),
+            deadlines
+        );
+        assert!(
+            recent
+                .datagrams
+                .iter()
+                .all(|sent| sent.kind == CopyKind::MeshReply)
+        );
+        recent.cancel_copies();
+        assert!(recent.datagrams.is_empty());
+        assert_eq!(recent.bytes, 0);
+    }
+
     #[tokio::test]
     async fn completed_return_entries_stay_consumed_when_new_mesh_history_arrives() {
         use quinn::Runtime as _;

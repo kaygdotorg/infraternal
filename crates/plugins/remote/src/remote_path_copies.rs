@@ -53,8 +53,17 @@ impl CopyClock {
         false
     }
     #[cfg(test)]
+    pub fn armed(&self) -> bool {
+        self.timer.is_some()
+    }
+    #[cfg(test)]
     pub fn empty(&self) -> bool {
         self.timer.is_none() && self.receiver.is_none()
+    }
+    /// Retiring the last queued item cancels its timer while a live endpoint
+    /// keeps its receive registration for the next successful transmit.
+    pub fn cancel_timer(&mut self) {
+        self.timer = None;
     }
     pub fn clear(&mut self) {
         self.timer = None;
@@ -79,6 +88,24 @@ mod tests {
             self.0.store(true, Ordering::Relaxed);
         }
     }
+    #[tokio::test]
+    async fn cancelling_retired_work_keeps_the_next_send_receive_wakeup() {
+        let signal = Arc::new(Wake(AtomicBool::new(false)));
+        let waker = std::task::Waker::from(signal.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut clock = CopyClock::default();
+        assert!(!clock.poll(&mut cx));
+        clock.arm(tokio::time::Instant::now() + COPY_DELAY);
+        clock.cancel_timer();
+        assert!(!clock.armed());
+        signal.0.store(false, Ordering::Relaxed);
+        clock.arm(tokio::time::Instant::now() + COPY_DELAY);
+        assert!(clock.armed());
+        assert!(signal.0.load(Ordering::Relaxed));
+        clock.clear();
+        assert!(clock.empty());
+    }
+
     #[tokio::test]
     async fn arming_after_pending_wakes_the_owned_endpoint_and_clear_drops_it() {
         let signal = Arc::new(Wake(AtomicBool::new(false)));

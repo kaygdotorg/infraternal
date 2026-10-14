@@ -13,7 +13,10 @@
 //! follow a migration; the learned peer route can. Routes are hints, never
 //! authority: the connection's keys authenticate every datagram either way.
 
-use crate::{remote_path_copies::CopyClock, remote_peer_routes::Peers};
+use crate::{
+    remote_path_copies::CopyClock,
+    remote_peer_routes::{MeshRoute, Peers},
+};
 use quinn::{
     AsyncUdpSocket, UdpPoller,
     udp::{RecvMeta, Transmit},
@@ -37,10 +40,10 @@ use std::{
 const MAX_ROUTES: usize = 65_536;
 
 #[derive(Clone)]
-struct Lease {
-    id: u64,
+pub(super) struct Lease {
+    pub id: u64,
     ip: IpAddr,
-    socket: Arc<dyn AsyncUdpSocket>,
+    pub socket: Arc<dyn AsyncUdpSocket>,
 }
 
 /// The primary socket plus leased destination sockets behind one endpoint.
@@ -98,10 +101,14 @@ impl PeerBinding {
                 peer.recent.cancel_copies();
                 if peers
                     .iter_mut()
-                    .all(|peer| !peer.backup && peer.recent.deadline().is_none())
+                    .all(|peer| peer.recent.deadline().is_none())
                     && let Ok(mut clock) = self.bindings.copies.lock()
                 {
-                    clock.clear();
+                    if peers.iter_mut().all(|peer| !peer.backup) {
+                        clock.clear();
+                    } else {
+                        clock.cancel_timer();
+                    }
                 }
             }
         }
@@ -166,10 +173,15 @@ impl Bindings {
         if let Ok(mut peers) = self.peers.lock() {
             peers.remove(logical, id);
             self.peer_count.store(peers.len(), Ordering::Release);
-            if peers.len() == 0
-                && let Ok(mut clock) = self.copies.lock()
-            {
-                clock.clear();
+            if let Ok(mut clock) = self.copies.lock() {
+                if peers.len() == 0 {
+                    clock.clear();
+                } else if peers
+                    .iter_mut()
+                    .all(|peer| peer.recent.deadline().is_none())
+                {
+                    clock.cancel_timer();
+                }
             }
         }
     }
@@ -187,6 +199,17 @@ impl Bindings {
                 let physical = received.addr;
                 if let Some(peer) = peers.by_physical(physical) {
                     let logical = peer.logical;
+                    if physical == peer.alternate {
+                        peer.mesh = Some(MeshRoute {
+                            binding: lease,
+                            local: received.dst_ip,
+                        });
+                        if let Some(at) = peer.recent.mesh_ready()
+                            && let Ok(mut clock) = self.copies.lock()
+                        {
+                            clock.arm(at);
+                        }
+                    }
                     fresh = bufs
                         .get(index)
                         .and_then(|buf| buf.get(..received.len))
@@ -280,6 +303,21 @@ impl Bindings {
             *leases = Arc::new(next);
         }
         self.generation.fetch_add(1, Ordering::Release);
+        if let Ok(mut peers) = self.peers.lock() {
+            for peer in peers.iter_mut() {
+                if peer.mesh.is_some_and(|route| route.binding == Some(id)) {
+                    peer.mesh = None;
+                    peer.recent.cancel_mesh_replies();
+                }
+            }
+            if peers
+                .iter_mut()
+                .all(|peer| peer.recent.deadline().is_none())
+                && let Ok(mut clock) = self.copies.lock()
+            {
+                clock.cancel_timer();
+            }
+        }
         if let Ok(mut routes) = self.routes.lock() {
             routes.retain(|_, lease| *lease != id);
             self.route_count.store(routes.len(), Ordering::Relaxed);
@@ -413,11 +451,22 @@ impl AsyncUdpSocket for Bindings {
         // old packets eligible for another burst on a later upgrade.
         if result.is_ok()
             && let Some(peer) = peer
-            && peer.physical != peer.logical
-            && let Some(at) = peer.recent.keep_copying(transmit, peer.backup)
-            && let Ok(mut clock) = self.copies.lock()
         {
-            clock.arm(at);
+            let at = if peer.physical != peer.logical {
+                peer.recent.keep_copying(transmit, peer.backup)
+            } else if peer.backup {
+                // Primary enrolled success is independent of this optional
+                // immediate mesh reply. It shares the same bounded history
+                // and cannot evict pending enrolled recovery.
+                peer.recent.mesh_reply(transmit, peer.mesh.is_some())
+            } else {
+                None
+            };
+            if let Some(at) = at
+                && let Ok(mut clock) = self.copies.lock()
+            {
+                clock.arm(at);
+            }
         }
         result
     }
@@ -428,17 +477,17 @@ impl AsyncUdpSocket for Bindings {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let leases = self.snapshot();
         let due = self.peer_count.load(Ordering::Acquire) != 0
             && self.copies.lock().is_ok_and(|mut clock| clock.poll(cx));
         if due
             && let Ok(mut peers) = self.peers.lock()
-            && let Some(at) = peers.copies(self.primary.as_ref(), self.primary_bound)
+            && let Some(at) = peers.copies(self.primary.as_ref(), self.primary_bound, &leases)
             && let Ok(mut clock) = self.copies.lock()
         {
             clock.arm(at);
         }
-        let generation = self.generation.load(Ordering::Acquire);
-        let leases = self.snapshot();
         let sources = leases.len() + 1;
         // Rotate the first socket so a flood on one address cannot starve another.
         let start = self.cursor.fetch_add(1, Ordering::Relaxed) % sources;
@@ -1012,7 +1061,6 @@ mod tests {
             let logical = enrolled.local_addr().unwrap();
             let alternative = alternate.local_addr().unwrap();
             let peer = bindings.route_peer(logical, alternative).unwrap();
-            peer.set_backup(backup);
             let mut writable = bindings.clone().create_io_poller();
             std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
                 .await
@@ -1034,6 +1082,9 @@ mod tests {
                 1,
                 "an upgrade must not replay cold enrolled history"
             );
+            // Negotiate only after the cold send so this fixture counts
+            // original-history recovery, independently of alternative replies.
+            peer.set_backup(backup);
             for index in 0_u64..8 {
                 let mut ciphertext = [0_u8; 32];
                 ciphertext[24..].copy_from_slice(&index.to_le_bytes());
@@ -1207,6 +1258,342 @@ mod tests {
     #[tokio::test]
     async fn legacy_enrolled_return_replay_is_bounded_and_consumed_once() {
         enrolled_return_replay_is_bounded_and_consumed(false).await;
+    }
+
+    /// Both a leased mesh socket and a wildcard primary must preserve enrolled
+    /// source selection while sending the optional copy from mesh coordinates.
+    #[tokio::test]
+    async fn enrolled_dual_replies_preserve_primary_and_mesh_sources() {
+        for leased in [false, true] {
+            let bindings = Bindings::new(bound(if leased { "127.0.0.1:0" } else { "0.0.0.0:0" }));
+            let port = bindings.local_addr().unwrap().port();
+            let enrolled_destination = SocketAddr::new("127.0.0.1".parse().unwrap(), port);
+            let mesh_destination = SocketAddr::new("127.0.0.2".parse().unwrap(), port);
+            let _lease = leased.then(|| {
+                bindings
+                    .lease(bound(&mesh_destination.to_string()))
+                    .unwrap()
+            });
+            let enrolled = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+            let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+            let logical = enrolled.local_addr().unwrap();
+            let peer = bindings
+                .route_peer(logical, mesh.local_addr().unwrap())
+                .unwrap();
+            peer.set_backup(true);
+            mesh.send_to(b"mesh-first", mesh_destination).await.unwrap();
+            receive(&bindings).await;
+            enrolled
+                .send_to(b"return-fresh", enrolled_destination)
+                .await
+                .unwrap();
+            receive(&bindings).await;
+            send(&bindings, logical, b"dual-reply", None);
+            let mut bytes = [0; 64];
+            let (count, source) = enrolled.recv_from(&mut bytes).await.unwrap();
+            assert_eq!(&bytes[..count], b"dual-reply");
+            assert_eq!(source, enrolled_destination);
+            let (count, source) = tokio::select! {
+                result = mesh.recv_from(&mut bytes) => result.unwrap(),
+                _ = receive(&bindings) => panic!("no peer sent another packet"),
+            };
+            assert_eq!(&bytes[..count], b"dual-reply");
+            assert_eq!(source, mesh_destination);
+            let peers = bindings.peers.lock().unwrap();
+            let selected = peers.get(logical).unwrap();
+            assert_eq!(selected.physical, logical);
+            assert_eq!(selected.binding, None);
+            assert_eq!(selected.local, Some(enrolled_destination.ip()));
+        }
+    }
+
+    /// An unknown mesh source stays dormant until a real duplicate supplies
+    /// coordinates. The duplicate cannot move the selected enrolled primary.
+    #[tokio::test]
+    async fn unknown_mesh_reply_waits_for_duplicate_coordinates_and_off_retires_it() {
+        let bindings = Bindings::new(bound("127.0.0.1:0"));
+        let primary = bindings.local_addr().unwrap();
+        let mesh_destination = SocketAddr::new("127.0.0.2".parse().unwrap(), primary.port());
+        let _lease = bindings
+            .lease(bound(&mesh_destination.to_string()))
+            .unwrap();
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let peer = bindings
+            .route_peer(logical, mesh.local_addr().unwrap())
+            .unwrap();
+        peer.set_backup(true);
+        enrolled.send_to(b"identical", primary).await.unwrap();
+        receive(&bindings).await;
+        send(&bindings, logical, b"dormant", None);
+        let mut bytes = [0; 64];
+        assert_eq!(enrolled.recv_from(&mut bytes).await.unwrap().0, 7);
+        assert!(!bindings.copies.lock().unwrap().armed());
+        assert!(
+            bindings
+                .peers
+                .lock()
+                .unwrap()
+                .get(logical)
+                .unwrap()
+                .recent
+                .deadline()
+                .is_none()
+        );
+        mesh.send_to(b"identical", mesh_destination).await.unwrap();
+        receive(&bindings).await;
+        let (count, source) = tokio::select! {
+            result = mesh.recv_from(&mut bytes) => result.unwrap(),
+            _ = receive(&bindings) => panic!("no peer sent another packet"),
+        };
+        assert_eq!(&bytes[..count], b"dormant");
+        assert_eq!(source, mesh_destination);
+        assert_eq!(
+            bindings
+                .peers
+                .lock()
+                .unwrap()
+                .get(logical)
+                .unwrap()
+                .physical,
+            logical
+        );
+        send(&bindings, logical, b"cancel", None);
+        assert_eq!(enrolled.recv_from(&mut bytes).await.unwrap().0, 6);
+        peer.set_backup(false);
+        assert!(bindings.copies.lock().unwrap().empty());
+        let mut buffers = [IoSliceMut::new(&mut bytes)];
+        let mut metadata = [RecvMeta::default()];
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let _ = bindings.poll_recv(&mut cx, &mut buffers, &mut metadata);
+        assert_eq!(
+            mesh.try_recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_mesh_lease_cancels_only_queued_alternative_reply() {
+        let bindings = Bindings::new(bound("127.0.0.1:0"));
+        let primary = bindings.local_addr().unwrap();
+        let mesh_destination = SocketAddr::new("127.0.0.2".parse().unwrap(), primary.port());
+        let lease = bindings
+            .lease(bound(&mesh_destination.to_string()))
+            .unwrap();
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let peer = bindings
+            .route_peer(logical, mesh.local_addr().unwrap())
+            .unwrap();
+        peer.set_backup(true);
+        mesh.send_to(b"mesh", mesh_destination).await.unwrap();
+        receive(&bindings).await;
+        enrolled.send_to(b"return", primary).await.unwrap();
+        receive(&bindings).await;
+        send(&bindings, logical, b"survives-on-primary", None);
+        drop(lease);
+        assert!(
+            !bindings.copies.lock().unwrap().armed(),
+            "retired mesh lease left an idle copy timer armed"
+        );
+        let mut bytes = [0; 64];
+        let (count, source) = enrolled.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(&bytes[..count], b"survives-on-primary");
+        assert_eq!(source, primary);
+        {
+            let peers = bindings.peers.lock().unwrap();
+            let selected = peers.get(logical).unwrap();
+            assert!(selected.mesh.is_none());
+            assert!(selected.recent.deadline().is_none());
+            assert_eq!(selected.physical, logical);
+        }
+        let mut buffers = [IoSliceMut::new(&mut bytes)];
+        let mut metadata = [RecvMeta::default()];
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let _ = bindings.poll_recv(&mut cx, &mut buffers, &mut metadata);
+        assert_eq!(
+            mesh.try_recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_one_peer_removes_alternative_work_while_another_peer_lives() {
+        let bindings = Bindings::new(bound("127.0.0.1:0"));
+        let primary = bindings.local_addr().unwrap();
+        let mesh_destination = SocketAddr::new("127.0.0.2".parse().unwrap(), primary.port());
+        let _lease = bindings
+            .lease(bound(&mesh_destination.to_string()))
+            .unwrap();
+        let enrolled = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let peer = bindings
+            .route_peer(logical, mesh.local_addr().unwrap())
+            .unwrap();
+        let _survivor = bindings
+            .route_peer(
+                "127.0.0.5:49999".parse().unwrap(),
+                "127.0.0.6:49999".parse().unwrap(),
+            )
+            .unwrap();
+        peer.set_backup(true);
+        mesh.send_to(b"mesh", mesh_destination).await.unwrap();
+        receive(&bindings).await;
+        enrolled.send_to(b"return", primary).await.unwrap();
+        receive(&bindings).await;
+        send(&bindings, logical, b"primary-before-retirement", None);
+        drop(peer);
+        assert!(
+            !bindings.copies.lock().unwrap().armed(),
+            "retired peer left an idle copy timer armed"
+        );
+        {
+            let peers = bindings.peers.lock().unwrap();
+            assert_eq!(peers.len(), 1);
+            assert!(peers.get(logical).is_none());
+        }
+        let mut bytes = [0; 64];
+        let (count, _) = enrolled.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(&bytes[..count], b"primary-before-retirement");
+        // Publish the already-due shared clock; another peer keeps the endpoint
+        // alive, but the retired peer owns no payload that it could send.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let mut buffers = [IoSliceMut::new(&mut bytes)];
+        let mut metadata = [RecvMeta::default()];
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let _ = bindings.poll_recv(&mut cx, &mut buffers, &mut metadata);
+        assert_eq!(
+            mesh.try_recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_one_route_preserves_another_peers_enrolled_return() {
+        for retire_peer in [false, true] {
+            let bindings = Bindings::new(bound("127.0.0.1:0"));
+            let primary = bindings.local_addr().unwrap();
+            let mesh_destination = SocketAddr::new("127.0.0.2".parse().unwrap(), primary.port());
+            let lease = bindings
+                .lease(bound(&mesh_destination.to_string()))
+                .unwrap();
+            let enrolled = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+            let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+            let logical = enrolled.local_addr().unwrap();
+            let peer = bindings
+                .route_peer(logical, mesh.local_addr().unwrap())
+                .unwrap();
+            let survivor_socket = tokio::net::UdpSocket::bind("127.0.0.5:0").await.unwrap();
+            let survivor_logical = survivor_socket.local_addr().unwrap();
+            let _survivor = bindings
+                .route_peer(
+                    survivor_logical,
+                    SocketAddr::new("127.0.0.6".parse().unwrap(), survivor_logical.port()),
+                )
+                .unwrap();
+            peer.set_backup(true);
+            mesh.send_to(b"mesh", mesh_destination).await.unwrap();
+            receive(&bindings).await;
+            enrolled.send_to(b"return", primary).await.unwrap();
+            receive(&bindings).await;
+            send(&bindings, logical, b"cancelled-alternative", None);
+            let at = {
+                let mut peers = bindings.peers.lock().unwrap();
+                let survivor = peers.get_mut(survivor_logical).unwrap();
+                survivor.recent.keep(&Transmit {
+                    destination: survivor_logical,
+                    contents: b"surviving-return",
+                    ecn: None,
+                    segment_size: None,
+                    src_ip: None,
+                });
+                survivor.recent.replay(None).unwrap()
+            };
+            bindings.copies.lock().unwrap().arm(at);
+            if retire_peer {
+                drop(peer);
+            } else {
+                drop(lease);
+            }
+            assert!(bindings.copies.lock().unwrap().armed());
+            let mut bytes = [0; 64];
+            let (count, source) = tokio::select! {
+                result = survivor_socket.recv_from(&mut bytes) => result.unwrap(),
+                _ = receive(&bindings) => panic!("no peer sent another packet"),
+            };
+            assert_eq!(&bytes[..count], b"surviving-return");
+            assert_eq!(source, primary);
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_withdrawal_reconciles_idle_peers_without_canceling_another_return() {
+        for pending_return in [false, true] {
+            let bindings = Bindings::new(bound("127.0.0.1:0"));
+            let primary = bindings.local_addr().unwrap();
+            let mesh_destination = SocketAddr::new("127.0.0.2".parse().unwrap(), primary.port());
+            let _lease = bindings
+                .lease(bound(&mesh_destination.to_string()))
+                .unwrap();
+            let enrolled = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+            let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
+            let logical = enrolled.local_addr().unwrap();
+            let peer = bindings
+                .route_peer(logical, mesh.local_addr().unwrap())
+                .unwrap();
+            let survivor_socket = tokio::net::UdpSocket::bind("127.0.0.5:0").await.unwrap();
+            let survivor_logical = survivor_socket.local_addr().unwrap();
+            let survivor = bindings
+                .route_peer(
+                    survivor_logical,
+                    SocketAddr::new("127.0.0.6".parse().unwrap(), survivor_logical.port()),
+                )
+                .unwrap();
+            peer.set_backup(true);
+            survivor.set_backup(true);
+            mesh.send_to(b"mesh", mesh_destination).await.unwrap();
+            receive(&bindings).await;
+            enrolled.send_to(b"return", primary).await.unwrap();
+            receive(&bindings).await;
+            send(&bindings, logical, b"withdrawn-alternative", None);
+            if pending_return {
+                let at = {
+                    let mut peers = bindings.peers.lock().unwrap();
+                    let queued = peers.get_mut(survivor_logical).unwrap();
+                    queued.recent.keep(&Transmit {
+                        destination: survivor_logical,
+                        contents: b"surviving-return",
+                        ecn: None,
+                        segment_size: None,
+                        src_ip: None,
+                    });
+                    queued.recent.replay(None).unwrap()
+                };
+                bindings.copies.lock().unwrap().arm(at);
+            }
+            peer.set_backup(false);
+            assert_eq!(
+                bindings.copies.lock().unwrap().armed(),
+                pending_return,
+                "withdrawing the last queued alternative must cancel its timer independently of idle peer capabilities"
+            );
+            let mut bytes = [0; 64];
+            if pending_return {
+                let (count, source) = tokio::select! {
+                    result = survivor_socket.recv_from(&mut bytes) => result.unwrap(),
+                    _ = receive(&bindings) => panic!("no peer sent another packet"),
+                };
+                assert_eq!(&bytes[..count], b"surviving-return");
+                assert_eq!(source, primary);
+            }
+            assert_eq!(
+                mesh.try_recv_from(&mut bytes).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
     }
 
     #[tokio::test]
