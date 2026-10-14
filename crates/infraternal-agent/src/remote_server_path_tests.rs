@@ -631,7 +631,6 @@ async fn candidate_proof_keeps_probing_after_its_first_packet_is_lost() {
     let initial = connection.stats().frame_tx.datagram;
     let since = tokio::time::Instant::now();
     path.use_mesh(mesh);
-    announce(link.endpoint.as_ref().unwrap(), path);
     remote_quic::probe_liveness(connection);
     assert!(!answered(connection, path, since, true).await);
     assert!(

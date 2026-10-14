@@ -2,9 +2,9 @@
 //!
 //! Every QUIC connection names the enrolled server address. Its `PathSocket`
 //! decides where datagrams physically go. A mesh proposal moves the live
-//! connection in place: the endpoint is rebound to the same socket state so
-//! the connection announces itself at once, and the server's shared endpoint
-//! validates the new source with QUIC path migration. Streams, writer
+//! connection in place: a fresh encrypted probe announces the selected route,
+//! and the server's shared endpoint maps admitted source aliases and
+//! authenticates every datagram. Streams, writer
 //! bindings and terminal offsets never change, so no application data is
 //! replayed or reattached. While on the mesh the host asks for an acknowledgement every
 //! probe interval; the first unanswered probe after one RTT plus a margin
@@ -257,17 +257,9 @@ async fn session(
     }
 }
 
-/// Rebind the endpoint to a fresh handle over the same socket state. QUIC
-/// treats this as a local address change and sends a PING (with a new
-/// connection ID) immediately, so the new path carries traffic at once.
-fn announce(endpoint: &quinn::Endpoint, path: &Arc<PathSocket>) {
-    // The handle shares the descriptor; failure only delays the first packet.
-    let _ = endpoint.rebind_abstract(path.alias());
-}
-
 /// Wait until the current path answers: a datagram from that exact address,
 /// then newly authenticated traffic. Returns false at the deadline.
-async fn answered(
+pub(super) async fn answered(
     connection: &quinn::Connection,
     path: &PathSocket,
     since: tokio::time::Instant,
@@ -324,14 +316,11 @@ async fn to_enrolled(
     registry: &crate::plugin_control::Registry,
     reason: ServerLinkReason,
 ) -> bool {
-    let (Connected::Quic(connection), Some(endpoint), Some(path)) =
-        (&link.connected, link.endpoint.as_ref(), link.path.as_ref())
-    else {
+    let (Connected::Quic(connection), Some(path)) = (&link.connected, link.path.as_ref()) else {
         return false;
     };
     let since = tokio::time::Instant::now();
     path.use_enrolled();
-    announce(endpoint, path);
     // Status describes the selected physical path. Its proof continues on the
     // same connection, without hiding the completed route change for another RTT.
     report(registry, Some(link), reason);
@@ -356,9 +345,7 @@ async fn steer(
     reason: &mut ServerLinkReason,
     mut active: std::pin::Pin<&mut impl std::future::Future<Output = io::Result<()>>>,
 ) -> Steered {
-    let (Connected::Quic(connection), Some(endpoint), Some(path)) =
-        (&link.connected, link.endpoint.as_ref(), link.path.as_ref())
-    else {
+    let (Connected::Quic(connection), Some(path)) = (&link.connected, link.path.as_ref()) else {
         return Steered::Ended;
     };
     let mut proposals = registry.server_paths();
@@ -392,7 +379,6 @@ async fn steer(
                         & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
                         != 0,
                 );
-                announce(endpoint, path);
                 remote_quic::probe_liveness(connection);
                 let moved = tokio::select! {
                     _ = &mut active => return Steered::Ended,
