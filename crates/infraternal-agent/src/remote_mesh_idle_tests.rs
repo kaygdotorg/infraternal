@@ -294,3 +294,6 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
     server.close(0_u32.into(), b"");
     drop((connections, accepted, drivers));
 }
+
+#[path = "remote_mesh_copy_cost_tests.rs"]
+mod copy_cost;
