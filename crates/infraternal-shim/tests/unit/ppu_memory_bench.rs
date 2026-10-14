@@ -160,3 +160,22 @@ fn native_session_allocations_settle_after_geometry_warmup() {
         }
     }
 }
+
+#[test]
+fn fresh_shell_filler_snapshot_gap_is_independent_of_allocator_refusal() {
+    let mut terminal = Terminal::with_history_budget(80, 24, 64 * 1024 * 1024 / 50).unwrap();
+    for number in 1..=10_000 {
+        terminal
+            .process(format!("{number:06} {}\r\n", "0123456789".repeat(6) + "01234").as_bytes());
+    }
+    assert!(
+        !terminal.memory().2,
+        "filler must not hit the per-session native allocation cap"
+    );
+    assert!(
+        !terminal.requires_approximation(),
+        "recovery provenance remains exact"
+    );
+    let error = terminal.snapshot().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
