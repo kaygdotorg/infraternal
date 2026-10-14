@@ -2018,11 +2018,31 @@ pub(super) async fn send_message<K>(sink: &mut K, message: Message) -> Result<()
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    tokio::time::timeout(WRITE_TIMEOUT, sink.send(message))
-        .await
-        .map_err(|_| ())?
-        .map_err(|_| ())
+    send_messages(sink, [message]).await
 }
+
+/// Flush one bounded group while retaining a separate WebSocket message per item.
+/// The deadline covers the whole group, including backpressure and final flush.
+pub(super) async fn send_messages<K>(
+    sink: &mut K,
+    messages: impl IntoIterator<Item = Message>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    tokio::time::timeout(WRITE_TIMEOUT, async {
+        for message in messages {
+            sink.feed(message).await.map_err(|_| ())?;
+        }
+        sink.flush().await.map_err(|_| ())
+    })
+    .await
+    .map_err(|_| ())?
+}
+
+#[cfg(test)]
+#[path = "websocket_write_tests.rs"]
+mod write_tests;
 
 /// Recover active rows after a process restart, granting the documented resume grace period.
 pub(crate) async fn recover_connections(pool: &SqlitePool, now: i64) -> Result<(), sqlx::Error> {
