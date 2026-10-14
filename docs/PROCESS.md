@@ -143,11 +143,13 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 22,204,304 bytes |
-  | `aarch64-unknown-linux-musl` | 19,638,744 bytes |
+  | `x86_64-unknown-linux-musl` | 22,111,120 bytes |
+  | `aarch64-unknown-linux-musl` | 19,581,800 bytes |
 
   These are the #198 measurements of the full-feature release recipe after
   unused native APIs and duplicated action metadata construction were cut.
+  The release and host-facts plugins use size optimization; terminal and mesh
+  data paths retain speed optimization (D243).
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later

@@ -102,3 +102,11 @@ panic = "unwind"
 # Bound async orchestration code; Mesh and cryptographic dependencies retain speed optimization [5,198].
 [profile.release.package.infraternal-server]
 opt-level = "s"
+
+# Keep management metadata and host-facts actions size-optimized; terminal and
+# mesh data paths retain the speed profile [243].
+[profile.release.package.infraternal-plugin-release]
+opt-level = "s"
+
+[profile.release.package.infraternal-plugin-host-facts]
+opt-level = "s"
