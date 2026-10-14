@@ -2653,3 +2653,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        + 50 ms** (TCP, TLS, upgrade, then the first-message resume token
        of D265), replacing D265's three. Reusable links keep one round trip
        + 50 ms; the last screen still returns within one frame.
+268. **Flood, memory and OpenSSL size decisions (owner, 2026-10-14,
+     Q19–Q21):**
+     - **Q19 (#197):** ship the reviewed server-side flow control now
+       (keystrokes ahead of bulk output; native echo p99 4.5/156/328 ms at
+       LAN/150/300 ms against ~600 ms before) and start the browser fix as
+       its own lane: background windows' terminal output is decoded off the
+       main thread (a worker), so it never delays the window being typed
+       in. The owner also asks the orchestrator to look actively for user
+       experience gaps of this kind.
+     - **Q20 (#205):** reduce relocation-dirtied memory now by shrinking
+       pointer tables (no security trade; ASLR stays), and start work on one
+       process per user hosting that user's sessions, measured against
+       isolation, D240 per-person logins, restart survival (D128) and
+       upgrades. Goal from the owner: "really crush idle, average and worst
+       case usage."
+     - **Q21 (D264):** measure the assembler-capability override in the
+       pinned compiler wrapper (OpenSSL then emits its own stubs instead of
+       the AVX-512 AES-GCM code) — bytes saved, OpenSSL known-answer tests,
+       and a gate check that fails if a future OpenSSL brings the code back —
+       before adopting it.
