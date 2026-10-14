@@ -11,7 +11,11 @@ static UPLOAD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 async fn measured<T>(step: &'static str, operation: Operation<'_, T>) -> Result<T, Failure> {
     let started = Instant::now();
     let result = operation.await;
-    println!("METRIC breakit2 step={step} elapsed_ms={:.3} ok={}", started.elapsed().as_secs_f64() * 1000.0, result.is_ok());
+    println!(
+        "METRIC breakit2 step={step} elapsed_ms={:.3} ok={}",
+        started.elapsed().as_secs_f64() * 1000.0,
+        result.is_ok()
+    );
     result
 }
 
@@ -24,8 +28,12 @@ impl SshSession for TimedSession {
             let step = match &input {
                 Input::File(_) => "upload",
                 Input::Bytes(_) => "join",
-                Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => "check",
-                Input::Empty if script.contains("ln \"$cache/payload\" \"$stage/payload\"") => "reuse_payload",
+                Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => {
+                    "check"
+                }
+                Input::Empty if script.contains("ln \"$cache/payload\" \"$stage/payload\"") => {
+                    "reuse_payload"
+                }
                 Input::Empty if script.contains("validate_cache") => "payload_lookup",
                 Input::Empty if script.contains("validate_receipt") => "rollback",
                 Input::Empty if script.contains("enable --now") => "start",
@@ -47,11 +55,16 @@ impl SshSession for TimedSession {
             }
             let file_bytes = if let Input::File(path) = &input {
                 path.metadata().ok().map(|metadata| metadata.len())
-            } else { None };
+            } else {
+                None
+            };
             let started = Instant::now();
             let result = self.inner.run(script, input).await;
             if let Some(bytes) = file_bytes {
-                println!("METRIC breakit2 file_input_bytes={bytes} accepted={}", result.is_ok());
+                println!(
+                    "METRIC breakit2 file_input_bytes={bytes} accepted={}",
+                    result.is_ok()
+                );
             }
 
             println!(
@@ -160,10 +173,17 @@ impl Backend for ObservedBackend {
         self.0.invitation_with_trust(a, t, c, lookup)
     }
     fn invitation_registered<'a>(
-        &'a self, a: &'a Authority, t: &'a Target, c: &'a Check,
-        lookup: Option<String>, register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
+        &'a self,
+        a: &'a Authority,
+        t: &'a Target,
+        c: &'a Check,
+        lookup: Option<String>,
+        register: &'a mut (dyn FnMut(Uuid) -> Result<(), Failure> + Send),
     ) -> Operation<'a, JoinMaterial> {
-        Box::pin(measured("invitation", self.0.invitation_registered(a, t, c, lookup, register)))
+        Box::pin(measured(
+            "invitation",
+            self.0.invitation_registered(a, t, c, lookup, register),
+        ))
     }
     fn resolve<'a>(
         &'a self,
@@ -253,9 +273,16 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
     let command = "\n";
     let mut wire = Vec::new();
     let delayed_credit = std::env::var_os("BREAKIT2_DELAY_CREDIT").is_some();
-    let input = Frame::Input { in_seq: 0, bytes: command.as_bytes() };
+    let input = Frame::Input {
+        in_seq: 0,
+        bytes: command.as_bytes(),
+    };
     let credit = Frame::Credit { bytes: 65536 };
-    let frames = if delayed_credit { [input, credit] } else { [credit, input] };
+    let frames = if delayed_credit {
+        [input, credit]
+    } else {
+        [credit, input]
+    };
     for frame in frames {
         // A valid unfunded attachment makes owner EOF win while final PTY bytes
         // remain queued. Normal timing runs preserve the production input order.
@@ -293,7 +320,9 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
                         .as_str()
                         .and_then(|id| Uuid::parse_str(id).ok())
                         .is_some_and(|id| id.as_bytes() == &session);
-                    println!("DIAG breakit2 primary_exit_matches={exited} marker_found={confirmed}");
+                    println!(
+                        "DIAG breakit2 primary_exit_matches={exited} marker_found={confirmed}"
+                    );
                     return if confirmed && exited && notice["status"] == 0 {
                         Ok(())
                     } else {
@@ -321,7 +350,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let address = std::env::var("BREAKIT2_TARGET").unwrap();
     let controller_ip = std::env::var("BREAKIT2_CONTROLLER_IP")
         .unwrap_or_else(|_| "10.69.69.125".into())
-        .parse::<std::net::IpAddr>().unwrap();
+        .parse::<std::net::IpAddr>()
+        .unwrap();
     let mode = if std::env::var("BREAKIT2_MODE").unwrap_or_default() == "root" {
         InstallMode::Root
     } else {
@@ -377,11 +407,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     )
     .unwrap();
     let server = tokio::spawn(
-        axum_server::bind_openssl(
-            std::net::SocketAddr::new(controller_ip, 4929),
-            http_tls,
-        )
-        .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
+        axum_server::bind_openssl(std::net::SocketAddr::new(controller_ip, 4929), http_tls)
+            .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
     );
     f.backend = Arc::new(RemoteBackend {
         base: PendingRemoteRuntime {
