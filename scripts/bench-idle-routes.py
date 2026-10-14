@@ -74,7 +74,7 @@ class Browser:
         if now - self.last_ping + 1e-12 < self.probe_interval(now):
             return
         grace = 2 if self.rtt is None else self.rtt + .05
-        if getattr(self, 'adaptive', False) and not self.pending and now - self.last_pong >= grace:
+        if getattr(self, 'adaptive', False) and not self.pending and (self.rtt is None or now - self.last_pong >= grace):
             self.last_pong = now
         # Publish the sample before yielding: receive and timer must not double-send.
         self.last_ping = now

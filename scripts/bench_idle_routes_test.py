@@ -68,6 +68,20 @@ class SampleAccounting(unittest.IsolatedAsyncioTestCase):
             await browser.sample_probe()
             self.assertEqual(browser.send.await_count, 1)
 
+    async def test_adaptive_first_probe_starts_unknown_rtt_grace(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.last_ping = float('-inf')
+        browser.last_pong = 0
+        browser.rtt = None
+        browser.adaptive = True
+        browser.fast_until = 0
+        browser.next_nonce = 1 << 63
+        browser.pending = {}
+        browser.send = AsyncMock()
+        with patch.object(fixture.time, 'monotonic', return_value=1.999):
+            await browser.sample_probe()
+        self.assertEqual(browser.last_pong, 1.999)
+
     async def test_exited_thread_invalidates_sample(self):
         # Dropping a worker must not turn its accumulated CPU into apparent idle.
         with patch.object(fixture, 'snapshot', side_effect=[{1: (100, 0, 2), 2: (500, 0, 7)}, {1: (110, 0, 3)}]), patch.object(fixture.asyncio, 'sleep', new=AsyncMock()), patch.object(Path, 'read_text', return_value='worker'):
