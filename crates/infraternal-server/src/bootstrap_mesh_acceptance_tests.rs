@@ -72,6 +72,11 @@ fn fence_rules(node: std::net::IpAddr, controller: std::net::IpAddr, name: &str)
     )
 }
 
+/// Hold only this fixture's encrypted outer path; enrolled control stays live.
+fn mesh_cut_rules(port: u16, name: &str) -> String {
+    format!("table inet {name} {{ chain input {{ type filter hook input priority -10; policy accept; udp dport {port} counter drop; }} chain output {{ type filter hook output priority -10; policy accept; udp sport {port} counter drop; }} }}")
+}
+
 fn save_canary_fence(
     scratch: &std::path::Path,
     capture: &crate::remote_autoswitch_probe::Capture,
@@ -148,11 +153,21 @@ async fn mesh_acceptance_node_counters() {
         .parse()
         .unwrap();
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let unix = std::env::var_os("ACCEPTANCE_COUNTER_PIPE")
+        .map(|path| tokio::net::UnixListener::bind(path).unwrap());
     loop {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        tokio::select! {
+            accepted = listener.accept() => serve_peer_counter(accepted.unwrap().0).await,
+            accepted = async { unix.as_ref().unwrap().accept().await }, if unix.is_some() => serve_peer_counter(accepted.unwrap().0).await,
+        }
+    }
+}
+
+/// Both fixture transports expose the identical bounded public counter query.
+async fn serve_peer_counter<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut socket: S) {
         let mut key = [0_u8; 32];
         if socket.read_exact(&mut key).await.is_err() {
-            continue;
+            return;
         }
         let peer = Device::counters()
             .ok()
@@ -167,7 +182,6 @@ async fn mesh_acceptance_node_counters() {
             .write_all(&serde_json::to_vec(&report).unwrap())
             .await;
         let _ = socket.shutdown().await;
-    }
 }
 
 /// One post-arrival query reads the node's exact public kernel timestamp without
@@ -176,9 +190,16 @@ async fn node_counters_observation(
     node: std::net::IpAddr,
     server_key: PublicKey,
 ) -> Option<serde_json::Value> {
-    let mut socket = tokio::net::TcpStream::connect(SocketAddr::new(node, 4931))
+    if let Some(path) = std::env::var_os("ACCEPTANCE_COUNTER_PIPE") {
+        return read_node_counter_stream(tokio::net::UnixStream::connect(path).await.ok()?, server_key).await;
+    }
+    read_node_counter_stream(tokio::net::TcpStream::connect(SocketAddr::new(node, 4931))
         .await
-        .ok()?;
+        .ok()?, server_key).await
+}
+
+/// Read one bounded response; the private fixture pipe avoids emulated RTT.
+async fn read_node_counter_stream<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut socket: S, server_key: PublicKey) -> Option<serde_json::Value> {
     socket.write_all(&server_key.0).await.ok()?;
     let mut reply = Vec::new();
     socket.take(4096).read_to_end(&mut reply).await.ok()?;
@@ -302,6 +323,12 @@ async fn mesh_acceptance_real_addhost() {
             .unwrap(),
     )
     .unwrap();
+    // A separate controlled profile creates a real enrolled PTY before joining.
+    // Its intentional hold is reported, never counted as natural join latency.
+    let standing = std::env::var("ACCEPTANCE_MODE").is_ok_and(|mode| mode == "standing-switch");
+    if standing {
+        nft(&mesh_cut_rules(server_mesh.port, "acceptance_initial_hold"));
+    }
     let inventory = infraternal_plugin_mesh::api::MeshService::new(pool.clone()).dataplane();
     inventory
         .attach(
@@ -544,7 +571,7 @@ async fn mesh_acceptance_real_addhost() {
             .unwrap();
     let host = Uuid::from_slice(&id).unwrap();
     let remote = hosts.actor(host).await.unwrap();
-    wait_link(&remote, ServerLinkKind::Mesh).await;
+    wait_link(&remote, if standing { ServerLinkKind::Fallback } else { ServerLinkKind::Mesh }).await;
     let session = remote
         .open(TerminalSize {
             cols: 80,
@@ -572,9 +599,45 @@ async fn mesh_acceptance_real_addhost() {
             "bootstrap authority lookup was not observed"
         );
     }
+    let mut standing_first = None;
+    let mut standing_peer = None;
+    let mut release_wall = None;
+    if standing {
+        assert!(std::env::var_os("ACCEPTANCE_COUNTER_PIPE").is_some(), "standing observer must bypass the emulated network");
+        let prepared = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some(peer) = node_counters_observation(node, server_mesh.public_key).await { break peer; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(prepared["handshake_secs"], 0, "held mesh already joined");
+        release_wall = Some(SystemTime::now());
+        nft("delete table inet acceptance_initial_hold");
+        // Observe the exact node clock over the private fixture pipe. A TCP
+        // counter RPC would add the emulated RTT before generating the marker.
+        // Polling and firewall overhead remain in the result; subtract nothing.
+        standing_peer = Some(tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some(peer) = node_counters_observation(node, server_mesh.public_key).await
+                    && peer["handshake_secs"].as_u64().is_some_and(|seconds|seconds != 0) { break peer; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap());
+        capture.clear_terminal_milestones();
+        nft(&fence_rules(node, controller, "acceptance_standing_fence"));
+        let boundary = Instant::now();
+        let marker = format!("standing-mesh-{}|", Uuid::new_v4());
+        expected.extend_from_slice(marker.as_bytes());
+        echo.send(marker.as_bytes()).await;
+        echo.wait(&expected).await;
+        standing_first = capture.events().into_iter().filter(|event| event.kind == crate::remote_autoswitch_probe::Kind::TerminalByte && event.monotonic >= boundary).min_by_key(|event| event.monotonic);
+        assert!(standing_first.is_some(), "fresh standing marker has no authenticated Output witness");
+        nft("delete table inet acceptance_standing_fence");
+        wait_link(&remote, ServerLinkKind::Mesh).await;
+    }
     // Query kernel public state only after unrestricted output. This worker did
     // not poll or add wakeups during the measured automatic joining interval.
-    let peer = match early_peer {
+    let peer = match standing_peer.or(early_peer) {
         Some(peer) => peer,
         None => node_counters(node, server_mesh.public_key).await,
     };
@@ -588,6 +651,9 @@ async fn mesh_acceptance_real_addhost() {
             joined >= start_wall && joined <= first.wall,
             "node handshake does not precede first causal canary Output"
         );
+    }
+    if let Some(first) = &standing_first {
+        assert!(joined >= release_wall.unwrap() && joined <= first.wall, "standing witness is not after the fresh node handshake");
     }
     assert!(
         joined >= start_wall && joined <= SystemTime::now(),
@@ -629,10 +695,7 @@ async fn mesh_acceptance_real_addhost() {
     nft("delete table inet acceptance_fence");
     // Silent mesh cut preserves interface and routes; the very same attachment
     // and shell must continue over the original enrolled fallback.
-    nft(&format!(
-        "table inet acceptance_cut {{ chain input {{ type filter hook input priority -10; policy accept; udp dport {} counter drop; }} chain output {{ type filter hook output priority -10; policy accept; udp sport {} counter drop; }} }}",
-        server_mesh.port, server_mesh.port
-    ));
+    nft(&mesh_cut_rules(server_mesh.port, "acceptance_cut"));
     let cut = Instant::now();
     // Queue fresh input while the mesh is still cut. Status and byte receipt
     // observations run concurrently, so no status RTT precedes the actual echo.
@@ -702,7 +765,8 @@ async fn mesh_acceptance_real_addhost() {
         "same_terminal_attachment":true,"connection_preservation_required":!baseline_transport,"connection_preservation_claimed":!baseline_transport,
         "initial_tls_callbacks":tls_count,"final_tls_callbacks":final_tls,"initial_control_callbacks":control_count,"final_control_callbacks":final_controls,"initial_admission_callbacks":admission_count,"final_admission_callbacks":final_admissions,
         "tls_admission_counts_unchanged":tls_count==final_tls && admission_count==final_admissions,"control_counts_unchanged":control_count==final_controls,"terminal_opened_after_initial_mesh_join":true,"initial_ssh_shell_handoff_proven":false,"terminal_byte_integrity":byte_integrity,"fresh_real_ssh_install":true,"inventory_only_extra_peers":0});
-    for fields in [canary_report, session_report] {
+    let standing_report = serde_json::json!({"controlled_standing_session_switch":standing,"intentional_initial_mesh_hold":standing,"standing_release_wall_us":release_wall.map(wall_us),"standing_first_mesh_output_wall_us":standing_first.as_ref().map(|event|wall_us(event.wall)),"node_handshake_to_standing_first_mesh_output_us":standing_first.as_ref().map(|event|event.wall.duration_since(joined).unwrap().as_micros()),"standing_first_output_path_proven":standing_first.is_some(),"standing_uses_same_writer_and_attachment":standing,"terminal_opened_after_initial_mesh_join":!standing,"acceptance_mode":if standing {"standing-switch"} else if fenced_canary {"fenced-canary"} else {"unrestricted"},"ordinary_latency_acceptance":!standing && !diagnostic_profile && !cfg!(debug_assertions)});
+    for fields in [canary_report, session_report, standing_report] {
         report
             .as_object_mut()
             .unwrap()
