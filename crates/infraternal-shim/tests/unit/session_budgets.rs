@@ -4,6 +4,7 @@ use super::*;
 mod budgets {
     //! Exercises session invariants against real data and frozen expectations.
     use super::*;
+    #[cfg(feature = "process-per-user")]
     #[test]
     fn bounded_flush_keeps_partial_frame_and_wire_order() {
         let (stream, mut remote) = UnixStream::pair().unwrap();

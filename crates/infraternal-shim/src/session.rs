@@ -258,6 +258,22 @@ impl Peer {
         config.rows = rows;
         Ok(true)
     }
+    #[cfg(not(feature = "process-per-user"))]
+    fn flush(&mut self) -> io::Result<()> {
+        while self.written < self.pending.len() {
+            match self.stream.write(&self.pending[self.written..]) {
+                Ok(0) => return Err(io::ErrorKind::BrokenPipe.into()),
+                Ok(n) => self.written += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.pending.clear();
+        self.written = 0;
+        Ok(())
+    }
+    #[cfg(feature = "process-per-user")]
     fn flush(&mut self) -> io::Result<()> {
         let mut bytes = usize::MAX;
         let mut attempts = usize::MAX;
@@ -266,6 +282,7 @@ impl Peer {
     /// Shared hosts spend one byte/syscall budget across state and output
     /// frames. A partial write retains the original frame and cursor; only a
     /// completed frame may release its storage or admit a following frame.
+    #[cfg(feature = "process-per-user")]
     fn flush_bounded(&mut self, bytes: &mut usize, attempts: &mut usize) -> io::Result<()> {
         while self.written < self.pending.len() && *bytes > 0 && *attempts > 0 {
             let end = self.pending.len().min(self.written.saturating_add(*bytes));
@@ -283,7 +300,6 @@ impl Peer {
         }
         if self.written == self.pending.len() {
             self.pending.clear();
-            #[cfg(feature = "process-per-user")]
             if self.pending.capacity() > CHUNK * 4 {
                 // Completion may be the last event before an indefinite idle
                 // wait. Release large repaint storage at that boundary.
