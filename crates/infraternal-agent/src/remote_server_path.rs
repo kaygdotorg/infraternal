@@ -169,12 +169,7 @@ async fn connect(
             let control = crate::remote_native::NativeChannel::control(send, receive)?;
             let mut receive = crate::transport::Receive::default();
             prove_channel(&control, &mut receive).await?;
-            Ok::<_, io::Error>(super::ProvedControl {
-                control,
-                receive,
-                greeting: None,
-                primed: false,
-            })
+            Ok::<_, io::Error>(super::ProvedControl { control, receive })
         })
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
@@ -243,7 +238,6 @@ async fn session(
                 registry,
                 proof,
                 &link.standby,
-                false,
             )
             .await
         }

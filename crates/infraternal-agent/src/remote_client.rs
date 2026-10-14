@@ -248,12 +248,10 @@ fn client_greeting(renewal: bool) -> infraternal_protocol::Frame<'static> {
     }
 }
 
-/// A proved stream retains its decoder and an optional parked server greeting.
+/// A proved native stream retains the decoder that consumed its nonce reply.
 struct ProvedControl {
     control: NativeChannel,
     receive: Receive,
-    greeting: Option<Vec<u8>>,
-    primed: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -265,14 +263,11 @@ async fn quic_session_on(
     plugins: crate::plugin_control::Registry,
     proof: Option<ProvedControl>,
     standby: &tokio::sync::watch::Sender<u64>,
-    external_native: bool,
 ) -> io::Result<()> {
     let result = async {
         let ProvedControl {
             control,
             receive: mut rx,
-            greeting: cached,
-            primed,
         } = if let Some(proof) = proof {
             proof
         } else {
@@ -280,42 +275,20 @@ async fn quic_session_on(
             ProvedControl {
                 control: NativeChannel::control(send, receive)?,
                 receive: Receive::default(),
-                greeting: None,
-                primed: false,
             }
         };
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
         let greeting = client_greeting(renewal.is_some());
-        if primed {
-            // Priming already sent Hello. Only this negotiated activation may
-            // replace the server's actor and release the parked identity slot.
-            tx.send(
-                &control,
-                0,
-                &infraternal_protocol::Frame::Call {
-                    call_id: 0,
-                    action_id: "transport.activate",
-                    input_json: b"{}",
-                },
-            )
-            .await?;
-        } else {
-            tx.send(&control, 0, &greeting).await?;
-        }
+        tx.send(&control, 0, &greeting).await?;
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
-        let prefix = if let Some(cached) = cached {
-            cached
-        } else {
-            let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control))
-                .await
-                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-            let mut encoded = Vec::new();
-            encode_frame_into(&hello.frame, &mut encoded).map_err(io::Error::other)?;
-            encoded
-        };
+        let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        let mut prefix = Vec::new();
+        encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
         let hello = infraternal_protocol::decode_frame(&prefix).map_err(io::Error::other)?;
         let binding = remote_quic::negotiate_binding(&connection, &hello.frame)?;
         let infraternal_protocol::Frame::Hello { caps, .. } = hello.frame else {
@@ -336,18 +309,11 @@ async fn quic_session_on(
             renewal,
             plugins,
         );
-        let native = async {
-            if external_native {
-                std::future::pending::<io::Result<()>>().await
-            } else {
-                primed_native::serve(
-                    &binding,
-                    state,
-                    caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0,
-                )
-                .await
-            }
-        };
+        let native = primed_native::serve(
+            &binding,
+            state,
+            caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0,
+        );
         tokio::select! {
             result = dispatch => result,
             result = native => result,
