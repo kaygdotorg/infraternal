@@ -42,7 +42,7 @@ impl Ring {
     /// # Errors
     /// Fails rather than wrapping the absolute offset after `u64::MAX` bytes.
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.head = self
+        let head = self
             .head
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| io::Error::other("output offset exhausted"))?;
@@ -53,7 +53,32 @@ impl Ring {
             .saturating_add(keep)
             .saturating_sub(self.capacity);
         self.bytes.drain(..discard);
+        #[cfg(feature = "process-per-user")]
+        {
+            let needed = self.bytes.len() + keep;
+            // Geometric VecDeque growth can double a non-power-of-two share.
+            // Past the lazy VT prefix, commit small scale shares once: sparse
+            // producers must not fault in more ring pages for hours. Large
+            // single-session rings still grow lazily, bounded by their share.
+            let precommit = needed > 4096 && self.capacity <= 128 * 1024;
+            let reserve = if precommit {
+                self.capacity
+            } else {
+                needed.next_power_of_two().min(self.capacity)
+            };
+            if reserve > self.bytes.capacity() {
+                self.bytes
+                    .try_reserve_exact(reserve - self.bytes.len())
+                    .map_err(io::Error::other)?;
+                if precommit {
+                    let retained = self.bytes.len();
+                    self.bytes.resize(self.capacity, 0);
+                    self.bytes.truncate(retained);
+                }
+            }
+        }
         self.bytes.extend(&bytes[bytes.len() - keep..]);
+        self.head = head;
         Ok(())
     }
     /// Read at most limit bytes, or None if the offset is outside retained history.

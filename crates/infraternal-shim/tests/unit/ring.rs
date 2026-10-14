@@ -17,4 +17,16 @@ mod tests {
         ring.append(b"0123456789").unwrap();
         assert_eq!(ring.read(12, 99), Some(b"6789".to_vec()));
     }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
+    fn shared_history_reservation_never_rounds_past_its_share() {
+        let mut ring = Ring::new(67_108);
+        for _ in 0..40 {
+            ring.append(&[b'x'; 4096]).unwrap();
+            assert!(ring.allocated_bytes() <= 67_108);
+        }
+        assert_eq!(ring.head() - ring.start(), 67_108);
+        assert_eq!(ring.read(ring.start(), 4), Some(b"xxxx".to_vec()));
+    }
 }
