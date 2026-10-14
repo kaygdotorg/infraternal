@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Stage a standalone fuzz-only manifest in job scratch; build on the build host [D270]."""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--scratch', type=Path, required=True)
+parser.add_argument('--toolchain', default='nightly')
+args = parser.parse_args()
+repo = Path(__file__).resolve().parents[2]
+scratch = args.scratch.resolve()
+if repo == scratch or repo in scratch.parents:
+    parser.error('fuzz manifest/builds must be outside the checkout')
+scratch.mkdir(parents=True, exist_ok=True)
+# Pin versions already used by the repository. This is a disposable harness
+# package, never a foundational product dependency or workspace manifest edit.
+manifest = f'''# Scratch-only parser fuzz package [D270].
+[package]
+name = "ppu-terminal-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+[package.metadata]
+cargo-fuzz = true
+[workspace]
+[features]
+default = ["process-per-user"]
+process-per-user = []
+[dependencies]
+infraternal-shim = {{ path = {json.dumps(str(repo / 'crates/infraternal-shim'))}, features = ["process-per-user"] }}
+vte = "=0.15.0"
+nix = "=0.30.1"
+libfuzzer-sys = "=0.4.13"
+[[bin]]
+name = "ppu_terminal"
+path = {json.dumps(str(repo / 'scripts/bench/ppu_terminal_fuzz.rs'))}
+test = false
+doc = false
+bench = false
+'''
+(scratch / 'Cargo.toml').write_text(manifest)
+corpus = scratch / 'corpus'
+corpus.mkdir(exist_ok=True)
+for path in sorted((repo / 'crates/infraternal-shim/tests/fixtures').glob('*.vt')):
+    (corpus / path.name).write_bytes(path.read_bytes())
+for name, data in [('long-osc', b'\x1b]0;' + b'x' * 65536 + b'\x07'),
+                   ('deep-csi', b'\x1b[' + b'123456789;' * 4096 + b'm'),
+                   ('utf8', b'\xff\xfe\xc0\xaf\xf0\x80\x80\x80'),
+                   ('carry', b'\x1b]8;;https://example.org\x1b\\x\x1b[31;')]:
+    (corpus / name).write_bytes(data)
+raise SystemExit(subprocess.run(['cargo', f'+{args.toolchain}', 'fuzz', 'build',
+    '--fuzz-dir', str(scratch), 'ppu_terminal'], cwd=repo).returncode)
