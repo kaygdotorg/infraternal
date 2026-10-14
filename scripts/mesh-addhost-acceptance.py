@@ -7,6 +7,9 @@ exist only in memory and stdin pipes. Unrestricted route hints are diagnostics;
 the separate post-fence marker establishes mesh byte delivery causally. The
 fenced-canary profile blocks the enrolled ingress before creating its readiness
 PTY, so its first authenticated Output supplies a separate causal mesh witness.
+Unrestricted runs also timestamp the existing post-success fenced marker: this
+bounds usability after natural unheld joining, including fixture overhead; it
+never claims the earliest mesh Output of bootstrap itself.
 """
 import argparse
 import base64
@@ -224,6 +227,14 @@ def lifecycle(args, venue, index):
             assert report.get("acceptance_mode") == "fenced-canary", "fixture does not implement requested fenced profile"
             assert report["first_fenced_canary_output_path_proven"]
             assert report["node_handshake_to_first_fenced_canary_output_us"] >= 0
+        if args.acceptance_mode == "unrestricted":
+            assert report["natural_unheld_join_post_success_witness"]
+            assert report["natural_first_post_fence_output_path_proven"]
+            assert not report["natural_earliest_mesh_output_claimed"]
+            for origin in ("start", "success", "node_handshake"):
+                first = report[f"natural_{origin}_to_first_post_fence_output_us"]
+                complete = report[f"natural_{origin}_to_complete_post_fence_marker_us"]
+                assert 0 <= first <= complete
         if args.acceptance_mode == "standing-switch":
             assert report["controlled_standing_session_switch"]
             assert report["standing_first_output_path_proven"]
@@ -285,7 +296,8 @@ def main():
                   "profile":args.profile,"acceptance_mode":args.acceptance_mode,"transport_expectation":args.transport_expectation,
                   "diagnostic_profile":args.diagnostics,"packet_diagnostic_observer":args.packet_diagnostics,
                   "ordinary_latency_acceptance":args.profile == "release" and args.diagnostics == "none" and args.acceptance_mode != "standing-switch" and not args.packet_diagnostics,"debug_numbers_are_acceptance":False,
-                  "unrestricted_exact_first_mesh_byte_claimed":False}
+                  "unrestricted_exact_first_mesh_byte_claimed":False,
+                  "unrestricted_post_success_witness_scope":"upper bound including fixture overhead; initial join unheld; readiness and commit unblocked"}
     (destination / "provenance.json").write_text(json.dumps(provenance, indent=2))
     for venue in args.venues:
         reports = []

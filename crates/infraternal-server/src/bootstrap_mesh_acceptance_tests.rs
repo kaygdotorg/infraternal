@@ -659,6 +659,14 @@ async fn mesh_acceptance_real_addhost() {
         joined >= start_wall && joined <= SystemTime::now(),
         "fresh lifecycle handshake unavailable"
     );
+    // Reuse the existing post-success fence: readiness and commit have already
+    // completed without a mesh hold. Earlier Echo bytes are fully drained.
+    // This supplies an upper bound on natural mesh usability, including all
+    // intervening fixture work; it cannot identify the earliest natural byte.
+    let natural_witness = !standing && !fenced_canary;
+    if natural_witness {
+        capture.clear_terminal_milestones();
+    }
     // Established traffic must hit this earlier chain before an established
     // accept. Both enrolled directions/ports differ from the WireGuard outer
     // datagrams; decrypted mesh traffic retains its mesh destination address.
@@ -671,6 +679,23 @@ async fn mesh_acceptance_real_addhost() {
     echo.send(marker.as_bytes()).await;
     echo.wait(&expected).await;
     let witness = Instant::now();
+    let witness_wall = SystemTime::now();
+    let natural_first = natural_witness.then(|| {
+        let first = capture
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.kind == crate::remote_autoswitch_probe::Kind::TerminalByte
+                    // Echo's existing attachment uses stream 2; readiness output
+                    // on another stream must not satisfy this fresh witness.
+                    && event.stream == 2
+                    && event.monotonic >= fence
+            })
+            .min_by_key(|event| event.monotonic)
+            .expect("post-success marker has no authenticated Output witness");
+        assert!(first.wall >= joined && first.monotonic >= done);
+        first
+    });
     if !baseline_transport {
         assert_eq!(
             capture.count(crate::remote_autoswitch_probe::Kind::TlsHandshake),
@@ -766,7 +791,22 @@ async fn mesh_acceptance_real_addhost() {
         "initial_tls_callbacks":tls_count,"final_tls_callbacks":final_tls,"initial_control_callbacks":control_count,"final_control_callbacks":final_controls,"initial_admission_callbacks":admission_count,"final_admission_callbacks":final_admissions,
         "tls_admission_counts_unchanged":tls_count==final_tls && admission_count==final_admissions,"control_counts_unchanged":control_count==final_controls,"terminal_opened_after_initial_mesh_join":true,"initial_ssh_shell_handoff_proven":false,"terminal_byte_integrity":byte_integrity,"fresh_real_ssh_install":true,"inventory_only_extra_peers":0});
     let standing_report = serde_json::json!({"controlled_standing_session_switch":standing,"intentional_initial_mesh_hold":standing,"standing_release_wall_us":release_wall.map(wall_us),"standing_first_mesh_output_wall_us":standing_first.as_ref().map(|event|wall_us(event.wall)),"node_handshake_to_standing_first_mesh_output_us":standing_first.as_ref().map(|event|event.wall.duration_since(joined).unwrap().as_micros()),"standing_first_output_path_proven":standing_first.is_some(),"standing_uses_same_writer_and_attachment":standing,"terminal_opened_after_initial_mesh_join":!standing,"acceptance_mode":if standing {"standing-switch"} else if fenced_canary {"fenced-canary"} else {"unrestricted"},"ordinary_latency_acceptance":!standing && !diagnostic_profile && !cfg!(debug_assertions)});
-    for fields in [canary_report, session_report, standing_report] {
+    let natural_report = serde_json::json!({
+        "natural_unheld_join_post_success_witness":natural_witness,
+        "natural_witness_scope":"upper bound after normal readiness, commit, terminal setup, initial echo, counter query, local fence, and marker input/echo; no overhead subtracted",
+        "natural_earliest_mesh_output_claimed":false,
+        "natural_first_post_fence_output_path_proven":natural_first.is_some(),
+        "natural_first_post_fence_output_boundary":"authenticated Output arrival before actor delivery on the existing Echo stream",
+        "natural_first_post_fence_output_wall_us":natural_first.as_ref().map(|event|wall_us(event.wall)),
+        "natural_start_to_first_post_fence_output_us":natural_first.as_ref().map(|event|event.monotonic.duration_since(start).as_micros()),
+        "natural_success_to_first_post_fence_output_us":natural_first.as_ref().map(|event|event.monotonic.duration_since(done).as_micros()),
+        "natural_node_handshake_to_first_post_fence_output_us":natural_first.as_ref().map(|event|event.wall.duration_since(joined).unwrap().as_micros()),
+        "natural_complete_post_fence_marker_wall_us":natural_witness.then(||wall_us(witness_wall)),
+        "natural_start_to_complete_post_fence_marker_us":natural_witness.then(||witness.duration_since(start).as_micros()),
+        "natural_success_to_complete_post_fence_marker_us":natural_witness.then(||witness.duration_since(done).as_micros()),
+        "natural_node_handshake_to_complete_post_fence_marker_us":natural_witness.then(||witness_wall.duration_since(joined).unwrap().as_micros()),
+    });
+    for fields in [canary_report, session_report, standing_report, natural_report] {
         report
             .as_object_mut()
             .unwrap()
