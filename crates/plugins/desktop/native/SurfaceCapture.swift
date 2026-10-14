@@ -1,0 +1,161 @@
+/// Role: opt-in, same-process ScreenCaptureKit IOSurface → hardware encoder candidate; latest damage replaces queued surfaces [D204,D266].
+import AppKit
+import CoreMedia
+import ScreenCaptureKit
+import VideoToolbox
+
+final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
+    private let mailbox = NSLock()
+    private let encoding = DispatchQueue(label: "infraternal.desktop.surface.encode", qos: .userInteractive)
+    private let callbacks = DispatchQueue(label: "infraternal.desktop.surface.capture", qos: .userInteractive)
+    private let encoder = Encoder()
+    private var stream: SCStream?
+    private var latest: (CVPixelBuffer, UInt64)?
+    private var retained: (CVPixelBuffer, UInt64)?
+    private var active = false
+    private var stopped = false
+    private var repairing = false
+    private var congested = false
+    private var policy = DamageEncodingState()
+    private var bitrate: AdaptiveBitrate
+    private var refresh: DispatchSourceTimer?
+    private let size: CGSize
+    private let rect: CGRect
+    private let target: [String: Any]
+    private let hevc: Bool
+    private let fps: Int
+    private let output: (UInt8, Data) throws -> Void
+
+    init(target: [String: Any], rect: CGRect, size: CGSize, hevc: Bool, fps: Int, output: @escaping (UInt8, Data) throws -> Void) {
+        self.target = target; self.rect = rect; self.size = size; self.hevc = hevc; self.fps = fps; self.output = output
+        bitrate = AdaptiveBitrate(maximum: max(500_000, Int(size.width * size.height) * 3))
+    }
+
+    func start() async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        let display: SCDisplay
+        let filter: SCContentFilter
+        if target["type"] as? String == "screen" {
+            guard let id = target["display_id"] as? UInt32, let found = content.displays.first(where: { $0.displayID == id }), found.frame == rect else { throw HelperFailure.unavailable }
+            display = found; filter = SCContentFilter(display: found, excludingWindows: [])
+        } else {
+            guard let id = target["window_id"] as? UInt32, let pid = target["owner_pid"] as? Int32,
+                  let window = content.windows.first(where: { $0.windowID == id && $0.owningApplication?.processID == pid }), let app = window.owningApplication,
+                  let found = content.displays.first(where: { $0.frame.intersects(rect) }) else { throw HelperFailure.unavailable }
+            display = found; filter = SCContentFilter(display: found, including: [app], exceptingWindows: [])
+        }
+        let configuration = SCStreamConfiguration()
+        configuration.width = Int(size.width); configuration.height = Int(size.height)
+        configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        configuration.queueDepth = 3
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fps))
+        configuration.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        configuration.destinationRect = fittedContent(rect, size)
+        configuration.scalesToFit = true; configuration.preservesAspectRatio = true
+        configuration.showsCursor = true
+        let candidate = SCStream(filter: filter, configuration: configuration, delegate: self)
+        try candidate.addStreamOutput(self, type: .screen, sampleHandlerQueue: callbacks)
+        // Enumeration and stream creation can finish after EOF/Stop. Never publish
+        // that late stream into an already retired session.
+        let cancelled = mailbox.withLock { if !stopped { stream = candidate }; return stopped }
+        guard !cancelled else { return }
+        try await candidate.startCapture()
+        let retired = mailbox.withLock { stopped }
+        if retired { try await candidate.stopCapture() }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        if stop() {
+            try? output(69, Data("{\"error\":\"Desktop capture is unavailable.\"}".utf8))
+        }
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, CMSampleBufferDataIsReady(sample),
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let info = attachments.first, info[.status] as? Int == SCFrameStatus.complete.rawValue,
+              let pixel = CMSampleBufferGetImageBuffer(sample) else { return }
+        let ticks = info[.displayTime] as? UInt64 ?? mach_absolute_time()
+        mailbox.lock()
+        guard !stopped else { mailbox.unlock(); return }
+        // Missing damage metadata is conservatively treated as changed. Empty
+        // rectangles suppress duplicate surfaces after the first usable picture.
+        let damaged = (info[.dirtyRects] as? [Any])?.isEmpty != true || retained == nil
+        if damaged { latest = (pixel, ticks) }
+        let schedule = damaged && !active
+        if schedule { active = true }
+        mailbox.unlock()
+        if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil {
+            fputs("METRIC source_frame capture_ns=\(nanos(ticks)) damaged=\(damaged)\n", stderr)
+        }
+        if schedule { encoding.async { [weak self] in self?.drain() } }
+    }
+
+    private func drain() {
+        do {
+            try encoder.configure(width: Int(size.width), height: Int(size.height), hevc: hevc, fps: fps)
+            while true {
+                mailbox.lock()
+                let frame = latest; latest = nil
+                let repair = repairing; repairing = false
+                let pressure = congested; congested = false
+                let retired = stopped
+                if let frame { retained = frame }
+                let current = retained
+                mailbox.unlock()
+                if retired { break }
+                if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
+                if frame != nil { policy.changed(at: ProcessInfo.processInfo.systemUptime) }
+                if repair { policy.repair() }
+                guard let current, let decision = policy.next(at: ProcessInfo.processInfo.systemUptime) else { break }
+                let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
+                let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget)
+                let began = ProcessInfo.processInfo.systemUptime
+                try output(70, body)
+                policy.completed(delivered: true)
+                _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
+            }
+            if let deadline = policy.refreshDeadline {
+                if refresh == nil {
+                    let timer = DispatchSource.makeTimerSource(queue: encoding)
+                    timer.setEventHandler { [weak self] in
+                        guard let self else { return }
+                        self.refresh?.schedule(deadline: .distantFuture)
+                        self.drain()
+                    }
+                    refresh = timer; timer.resume()
+                }
+                refresh?.schedule(deadline: .now() + max(0, deadline - ProcessInfo.processInfo.systemUptime))
+            }
+        } catch {
+            // Configuration/submission failure is terminal. Retire the pending
+            // surface before reporting it, or drain would immediately retry the
+            // same failed frame forever and saturate the control pipe.
+            if stop() { try? output(69, Data("{\"error\":\"Desktop encoding is unavailable.\"}".utf8)) }
+        }
+        mailbox.lock(); active = false; let queued = latest != nil || repairing; let retired = stopped
+        if queued && !retired { active = true }; mailbox.unlock()
+        if queued && !retired { encoding.async { [weak self] in self?.drain() } }
+    }
+
+    func congestion() { mailbox.lock(); congested = true; mailbox.unlock() }
+
+    func repair() {
+        mailbox.lock(); repairing = true; let schedule = !active && !stopped
+        if schedule { active = true }; mailbox.unlock()
+        if schedule { encoding.async { [weak self] in self?.drain() } }
+    }
+
+    @discardableResult func stop() -> Bool {
+        mailbox.lock()
+        // Capture, encoder and Start completion can fail concurrently. Only the
+        // caller that retires the live stream may publish its terminal error.
+        guard !stopped else { mailbox.unlock(); return false }
+        stopped = true; latest = nil; retained = nil; let captured = stream; stream = nil; mailbox.unlock()
+        if let captured { Task { try? await captured.stopCapture() } }
+        // Stop does not block the GUI behind an output write. The private process
+        // owner closes the pipes and joins it at retirement; callbacks cannot restart.
+        encoding.async { [weak self] in self?.refresh?.cancel(); self?.refresh = nil; self?.encoder.stop() }
+        return true
+    }
+}

@@ -28,5 +28,15 @@ tokio = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { version = "=11.0.0", default-features = false, features = ["macos_14_2"], optional = true }
 
+[[bin]]
+name = "infraternal-desktop-helper"
+path = "src/bin/helper.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "infraternal-desktop-client"
+path = "src/bin/client.rs"
+required-features = ["desktop"]
+
 [lints]
 workspace = true
