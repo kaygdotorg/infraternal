@@ -14,28 +14,17 @@ use crate::{
     channel::Channel,
     relay,
     sessions::{self, Manager, Reader, Session},
-    transport::{Receive, Socket, Transmit},
+    transport::{Receive, Socket},
 };
 use infraternal_protocol::Frame;
 use infraternal_shim::frame::{APPROXIMATE_SNAPSHOT, Frame as Shim, SEQUENCED_INPUT};
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    io,
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
-};
+use std::{collections::HashMap, io, path::PathBuf, time::Instant};
 
-/// Process-wide count of approximate repaints written to the leg-B socket.
-/// Constant-space and content-free; metrics adapters can export this value.
-static APPROXIMATE_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
-
-/// Monotonic approximation counter for the infraternal agent metrics adapter.
-#[must_use]
-pub fn approximate_snapshots_total() -> u64 {
-    APPROXIMATE_SNAPSHOTS.load(Ordering::Relaxed)
-}
+pub use crate::daemon_writer::approximate_snapshots_total;
+use crate::daemon_writer::{Message, reply, writer};
+#[cfg(test)]
+use crate::{daemon_writer::deferred_reply, transport::Transmit};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -64,17 +53,6 @@ use crate::remote_renewal::RenewalIdentity;
 // The private local-only dispatcher always supplies None in core builds.
 #[cfg(not(feature = "remote"))]
 type RenewalIdentity = ();
-enum Message {
-    Shim(u32, Shim),
-    Result(u32, u32, bool, Vec<u8>),
-    Deferred(u32, u32, infraternal_plugin_api::ActionReply),
-    Event(u32, Vec<u8>),
-    Exited(u32, Vec<u8>, oneshot::Sender<()>),
-    Pong(u32, u64, u64),
-    Close(u32, &'static str),
-    /// The session's shim is gone: a final stream close, never retried (wire §4).
-    Ended(u32),
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
@@ -83,30 +61,6 @@ struct Open {
     uid: u32,
     cols: u16,
     rows: u16,
-}
-
-// A failed or cancelled write drops the continuation without starting its effect.
-async fn deferred_reply(
-    tx: &mut Transmit,
-    socket: &impl Channel,
-    stream: u32,
-    call_id: u32,
-    reply: infraternal_plugin_api::ActionReply,
-) -> io::Result<()> {
-    tx.send(
-        socket,
-        stream,
-        &Frame::Result {
-            call_id,
-            ok: true,
-            json: &reply.json,
-        },
-    )
-    .await?;
-    if let Some(after_write) = reply.after_write {
-        after_write();
-    }
-    Ok(())
 }
 
 /// The pre-sent QUIC greeting and daemon greeting must serialize identically:
@@ -126,131 +80,6 @@ pub(crate) fn hello_capabilities(native: bool, renewal: bool) -> u64 {
         } else {
             0
         }
-}
-
-async fn writer(
-    socket: &impl Channel,
-    mut messages: mpsc::Receiver<Message>,
-    mut control: Option<mpsc::Receiver<Message>>,
-    greeting: bool,
-    renewal: bool,
-) -> io::Result<()> {
-    let mut tx = Transmit::default();
-    if greeting {
-        tx.send(
-            socket,
-            0,
-            &Frame::Hello {
-                version: 1,
-                caps: hello_capabilities(socket.native_stream_id().is_some(), renewal),
-                client_info: "infraternal agent",
-            },
-        )
-        .await?;
-    }
-    // Only dispatch owns the control sender. Its closure ends this channel;
-    // bulk events retain their FIFO order, including notice before Snapshot.
-    while let Some(message) = tokio::select! {
-        biased;
-        message = async {
-            match control.as_mut() {
-                Some(receiver) => receiver.recv().await,
-                None => std::future::pending().await,
-            }
-        } => message,
-        message = messages.recv() => message,
-    } {
-        match message {
-            Message::Shim(stream, frame) => {
-                let wire = match &frame {
-                    Shim::Output(seq, bytes) => Frame::Output {
-                        out_seq: *seq,
-                        bytes,
-                    },
-                    Shim::Snapshot(seq, bytes) | Shim::SnapshotWithFlags(seq, _, bytes) => {
-                        Frame::Snapshot {
-                            out_seq: *seq,
-                            bytes,
-                        }
-                    }
-                    Shim::InputAck(seq) => Frame::Ack { in_seq_acked: *seq },
-                    _ => return Err(sessions::invalid("invalid relay message")),
-                };
-                tx.send(socket, stream, &wire).await?;
-                if matches!(frame, Shim::SnapshotWithFlags(_, flags, _) if flags & 1 != 0) {
-                    APPROXIMATE_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            Message::Result(stream, call_id, ok, json) => {
-                tx.send(
-                    socket,
-                    stream,
-                    &Frame::Result {
-                        call_id,
-                        ok,
-                        json: &json,
-                    },
-                )
-                .await?;
-            }
-            Message::Deferred(stream, call_id, reply) => {
-                deferred_reply(&mut tx, socket, stream, call_id, reply).await?;
-            }
-            Message::Event(stream, json) => write_event(&mut tx, socket, stream, &json).await?,
-            Message::Exited(stream, json, delivered) => {
-                write_event(&mut tx, socket, stream, &json).await?;
-                let _ = delivered.send(());
-            }
-            Message::Pong(stream, nonce, sent_us) => {
-                tx.send(socket, stream, &Frame::Pong { nonce, sent_us })
-                    .await?;
-            }
-            Message::Ended(stream) => {
-                tx.send(
-                    socket,
-                    stream,
-                    &Frame::Close {
-                        code: infraternal_protocol::CLOSE_SESSION_GONE,
-                        reason: infraternal_protocol::SESSION_GONE_REASON,
-                    },
-                )
-                .await?;
-            }
-            Message::Close(stream, reason) => {
-                tx.send(socket, stream, &Frame::Close { code: 1, reason })
-                    .await?;
-            }
-        }
-    }
-    Ok(())
-}
-/// Keep both ordinary and acknowledged exit Events on the same ordered wire path.
-async fn write_event(
-    tx: &mut Transmit,
-    socket: &impl Channel,
-    stream: u32,
-    json: &[u8],
-) -> io::Result<()> {
-    tx.send(
-        socket,
-        stream,
-        &Frame::Event {
-            sub_id: 0,
-            event_json: json,
-        },
-    )
-    .await
-}
-
-// Shared dispatch must never await the capacity consumed by a stalled writer.
-// Unacknowledged input remains with the shim and can be replayed on reconnect.
-fn reply(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
-    tx.try_send(message).map_err(|error| match error {
-        mpsc::error::TrySendError::Full(_) => {
-            io::Error::new(io::ErrorKind::WouldBlock, "control reply queue full")
-        }
-        mpsc::error::TrySendError::Closed(_) => io::ErrorKind::BrokenPipe.into(),
-    })
 }
 
 async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
@@ -410,8 +239,8 @@ async fn run_channel(
     plugins: crate::plugin_control::Registry,
 ) -> io::Result<()> {
     let mut events = plugins.subscribe();
-    let (plugin_replies, mut results) = mpsc::channel(8);
-    let worker = crate::plugin_control::Worker::start(plugins.clone(), plugin_replies);
+    let mut plugin_calls = crate::plugin_control::Control::new(plugins.clone());
+    let wire_caps = plugins.wire_capabilities(socket);
     let running = std::env::current_exe()?;
     // A sealed/deleted image has no install pathname for an indirect init
     // launcher. Use the existing detached shim mode and direct kernel image.
@@ -446,6 +275,9 @@ async fn run_channel(
                 if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if socket.native_stream_id().is_none() || caps & infraternal_plugin_api::channel::REMOTE_WRITER_BINDING != 0) {
                     return Err(sessions::invalid("remote control Hello required"));
                 }
+                if let Frame::Hello { caps, .. } = hello.frame {
+                    plugins.capabilities(caps & wire_caps);
+                }
                 Ok(())
             })
             .await
@@ -477,8 +309,8 @@ async fn run_channel(
                     drop(capacity.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?);
                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
-                result=results.recv()=> {
-                    let (call_id,result)=result.ok_or_else(||sessions::invalid("plugin worker stopped"))?;
+                result=plugin_calls.completed(), if plugin_calls.pending() => {
+                    let (call_id,result)=result?;
                     match result {
                         Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
                         Err(_)=>reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
@@ -576,8 +408,10 @@ async fn run_channel(
                         Frame::Call {call_id, action_id, input_json} if stream == 0 => {
                             registry.refresh();
                             census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
-                            if input_json.len()>infraternal_plugin_api::MAX_ACTION_BYTES || action_id.len()>128 || worker.sender.try_send(crate::plugin_control::Request {call_id,action:action_id.to_owned(),input:input_json.to_vec(),context:registry.context()}).is_err() {
-                                reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?;
+                            match plugin_calls.start(call_id, action_id, input_json, registry.context()) {
+                                Ok(Some(result)) => reply(&control, Message::Deferred(0, call_id, result))?,
+                                Ok(None) => {},
+                                Err(_) => reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
                             }
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {
@@ -642,7 +476,7 @@ async fn run_channel(
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some()) => result }
+    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some(), wire_caps) => result }
 }
 
 /// Run one authenticated, capability-bound native terminal using the common shim relay.
@@ -654,7 +488,16 @@ async fn run_channel(
 #[allow(clippy::too_many_lines)]
 #[cfg(feature = "remote")]
 pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) -> io::Result<()> {
-    run_bound_terminal_mode(channel, state, false).await
+    run_bound_terminal_mode(
+        channel,
+        state,
+        false,
+        #[cfg(any(test, feature = "native-streams"))]
+        Receive::default(),
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+    )
+    .await
 }
 
 /// Accept optional per-stream priming intent on a capability-negotiated connection.
@@ -668,7 +511,16 @@ pub async fn run_negotiated_bound_terminal(
     channel: &impl Channel,
     state: Option<PathBuf>,
 ) -> io::Result<()> {
-    run_bound_terminal_mode(channel, state, true).await
+    run_bound_terminal_mode(
+        channel,
+        state,
+        true,
+        #[cfg(any(test, feature = "native-streams"))]
+        Receive::default(),
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+    )
+    .await
 }
 
 #[cfg(feature = "remote")]
@@ -677,6 +529,8 @@ async fn run_bound_terminal_mode(
     channel: &impl Channel,
     state: Option<PathBuf>,
     allow_priming: bool,
+    #[cfg(any(test, feature = "native-streams"))] mut receive: Receive,
+    #[cfg(any(test, feature = "native-streams"))] opening: Option<bytes::Bytes>,
 ) -> io::Result<()> {
     let writer_id = channel
         .native_stream_id()
@@ -684,14 +538,27 @@ async fn run_bound_terminal_mode(
         .ok_or_else(|| sessions::invalid("native terminal writer binding required"))?;
     let _retire = RetireChannel(channel);
     let state = sessions::state(state)?;
+    // Generic native classification may hand off an owned opening. Terminal-only
+    // builds retain the borrowed reader and never carry that optional packet.
+    #[cfg(not(any(test, feature = "native-streams")))]
     let mut receive = Receive::default();
     let (id, cursor, input, primed) =
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let first = receive.next(channel).await?;
+            #[cfg(not(any(test, feature = "native-streams")))]
+            let first = receive.next(channel).await?.frame;
+            #[cfg(any(test, feature = "native-streams"))]
+            let first = match opening.as_ref() {
+                Some(packet) => {
+                    infraternal_protocol::decode_frame(packet)
+                        .map_err(io::Error::other)?
+                        .frame
+                }
+                None => receive.next(channel).await?.frame,
+            };
             // Shared intent is ordered on this writer, so a binding already in
             // flight across promotion cannot become an ordinary replacement.
             let primed = matches!(
-                first.frame,
+                first,
                 Frame::Call {
                     call_id: 0,
                     action_id: "transport.prime",
@@ -699,11 +566,11 @@ async fn run_bound_terminal_mode(
                 }
             ) && allow_priming;
             let first = if primed {
-                receive.next(channel).await?
+                receive.next(channel).await?.frame
             } else {
                 first
             };
-            match first.frame {
+            match first {
                 Frame::AttachTerm {
                     session_id,
                     last_out_seq,
@@ -750,7 +617,7 @@ async fn run_bound_terminal_mode(
             }
         }
     };
-    let writer = writer(channel, rx, None, false, false);
+    let writer = writer(channel, rx, None, false, false, 0);
     tokio::pin!(writer);
     tokio::select! {
         result = dispatch => result,
@@ -1339,3 +1206,15 @@ mod readiness_exit_tests;
 #[cfg(test)]
 #[path = "daemon_liveness_tests.rs"]
 mod liveness_tests;
+
+/// Preserve classified opening bytes and the decoder through negotiated priming.
+#[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+pub(crate) async fn run_bound_terminal_opened_mode(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    receive: Receive,
+    opening: Option<bytes::Bytes>,
+    allow_priming: bool,
+) -> io::Result<()> {
+    run_bound_terminal_mode(channel, state, allow_priming, receive, opening).await
+}

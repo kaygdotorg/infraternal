@@ -2,10 +2,21 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
 pub mod cli;
+#[cfg(target_os = "linux")]
 pub mod daemon;
+#[cfg(not(target_os = "linux"))]
+pub use control as daemon;
+#[path = "daemon_portable.rs"]
+pub mod control;
+mod daemon_writer;
+#[cfg(target_os = "linux")]
 mod lifecycle;
+#[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
+mod native_dispatch;
 pub mod plugin_control;
 pub mod plugins;
+// Shim census exists only on the local terminal platform; portable control has no PTYs.
+#[cfg(target_os = "linux")]
 mod process_exits;
 pub mod relay;
 #[cfg(feature = "remote")]
@@ -20,8 +31,11 @@ pub use infraternal_plugin_remote::remote_quic;
 pub use infraternal_plugin_remote::remote_renewal;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_tls;
+#[cfg(target_os = "linux")]
 pub mod sessions;
 pub mod transport;
+#[cfg(any(test, feature = "native-streams"))]
+pub mod wire;
 
 /// Run the standalone inherited-fd daemon after synchronous CLI dispatch [9][13].
 /// Its shim children exec the synchronous hidden CLI arm before they fork; the
@@ -35,10 +49,10 @@ pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Resu
     runtime.block_on(daemon::run(fd, state))
 }
 
-#[cfg(all(test, feature = "remote"))]
+#[cfg(all(test, feature = "remote", target_os = "linux"))]
 mod transport_diagnostics;
 
-#[cfg(all(test, feature = "remote"))]
+#[cfg(all(test, feature = "remote", target_os = "linux"))]
 #[path = "remote_native_tests.rs"]
 mod remote_native_tests;
 

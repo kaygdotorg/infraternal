@@ -719,8 +719,29 @@ pub(super) async fn run(
     registry: crate::plugin_control::Registry,
     connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
-    // No preference is valid; an error means the local worker is unavailable.
-    // The retry owner replaces only a terminated worker before reconnecting.
+    run_observed(
+        identity,
+        state,
+        renewal,
+        registry,
+        connected,
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+    )
+    .await
+}
+
+// One supervisor loop owns path selection, proof and the optional failure
+// observer; splitting it would pass the same retained link state around.
+#[allow(clippy::too_many_lines)]
+pub(super) async fn run_observed(
+    identity: &RemoteIdentity,
+    state: PathBuf,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    registry: crate::plugin_control::Registry,
+    connected: tokio::sync::watch::Sender<bool>,
+    #[cfg(any(test, feature = "native-streams"))] observer: Option<&super::FailureObserver<'_>>,
+) -> io::Result<()> {
     registry
         .initialize_paths()
         .await
@@ -747,6 +768,8 @@ pub(super) async fn run(
                     link
                 }
                 Err(error) => {
+                    #[cfg(any(test, feature = "native-streams"))]
+                    super::observe_failure(observer, "dial", &error);
                     force_fallback = false;
                     if error.kind() == io::ErrorKind::Interrupted {
                         continue;
@@ -835,6 +858,7 @@ pub(super) async fn run(
                 }
             }
         }
+        registry.capabilities(0);
         drop(link);
     }
 }

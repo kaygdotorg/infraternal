@@ -1,6 +1,7 @@
 //! Reproduces a blocked fallback writer filling the shared reply queue; dispatcher admission must remain bounded [130], #78.
 
 use super::*;
+use std::sync::atomic::Ordering;
 #[cfg(feature = "remote")]
 use std::sync::{Mutex, atomic::AtomicBool};
 
@@ -149,6 +150,22 @@ impl Channel for Capture {
 }
 
 #[tokio::test]
+async fn mux_greeting_omits_cached_native_provider_capabilities() {
+    let (bulk, bulk_rx) = mpsc::channel(1);
+    drop(bulk);
+    let (written, mut frames) = mpsc::unbounded_channel();
+    writer(&Capture(written), bulk_rx, None, true, false, 64)
+        .await
+        .unwrap();
+    let bytes = frames.recv().await.unwrap();
+    let greeting = infraternal_protocol::decode_muxed_frame(&bytes).unwrap();
+    assert!(
+        matches!(greeting.frame, Frame::Hello { caps, .. } if caps & 64 == 0),
+        "TCP/inherited channels cannot open native provider lanes"
+    );
+}
+
+#[tokio::test]
 async fn control_precedes_bulk_without_reordering_snapshot_notice() {
     let (bulk, bulk_rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
@@ -169,7 +186,15 @@ async fn control_precedes_bulk_without_reordering_snapshot_notice() {
     assert!(control.try_send(Message::Pong(0, 456, 0)).is_ok());
     let (written, mut frames) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
+        writer(
+            &Capture(written),
+            bulk_rx,
+            Some(control_rx),
+            false,
+            false,
+            0,
+        )
+        .await
     });
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
         .await
@@ -291,7 +316,15 @@ async fn census_and_open_result_share_fifo_order() {
     reply(&control, Message::Result(0, 1, true, b"{}".to_vec())).unwrap();
     let (written, mut frames) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
+        writer(
+            &Capture(written),
+            bulk_rx,
+            Some(control_rx),
+            false,
+            false,
+            0,
+        )
+        .await
     });
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
         .await

@@ -1384,7 +1384,9 @@ dependencies = [
 name = "infraternal-agent"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "infraternal-plugin-api",
+ "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
  "infraternal-plugin-remote",
@@ -1395,6 +1397,7 @@ dependencies = [
  "quinn",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "tokio-openssl",
  "uuid",
