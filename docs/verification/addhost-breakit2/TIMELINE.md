@@ -40,6 +40,14 @@ records public shell-program byte counts. Diagnostic subprocesses add small
 local overhead, so compare matched fixtures rather than treating an instrumented
 trace as the uninstrumented acceptance result.
 
+`target-packet-headers.txt` captures the owned container's network namespace,
+in addition to the bridge and browser loopback captures. This distinguishes
+actual target TCP receipt from packets still crossing the configured one-way
+delay. It stops after the three TCP handshake packets, before payload transfer;
+the bridge capture and target SSH/shell clocks cover the remaining traffic.
+Enter only that container's network namespace; no target filesystem or
+unrelated process is selected.
+
 The owner cookie and generated SSH identity travel only through child stdin.
 No request headers, WebSocket bodies, terminal contents, private key or cookie
 are stored. The fixture's generated public host key remains strictly pinned;

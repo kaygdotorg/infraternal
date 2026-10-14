@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Collect public timing boundaries and TCP headers for the owned D255 fixture; no protocol bodies or credentials (#189)."""
 import os
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import runpy
@@ -38,6 +39,26 @@ raise SystemExit(child.wait())'''
     return original_popen(command, *args, **kwargs)
 
 
+@contextmanager
+def captured_headers(name, arguments):
+    """Retire only this capture, including partial startup or fixture refusal."""
+    with (EVIDENCE / name).open("w") as output:
+        capture = original_popen(arguments, stdout=output, stderr=subprocess.PIPE)
+        try:
+            yield
+        finally:
+            capture.send_signal(signal.SIGINT)
+            try:
+                _, diagnostics = capture.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                capture.kill()
+                capture.communicate(timeout=10)
+                raise RuntimeError("Owned header capture did not stop") from None
+            print(diagnostics.decode(), flush=True)
+            if capture.returncode not in (0, -signal.SIGINT):
+                raise RuntimeError(f"Owned header capture failed: {name}")
+
+
 def measured(command, *args, **kwargs):
     global prompt_ms
     environment = kwargs.get("env", {})
@@ -51,42 +72,34 @@ def measured(command, *args, **kwargs):
         text = wrapper.read_text()
         text = text.replace("exec /usr/bin/ssh", f"exec /usr/bin/python3 '{ROOT}/docs/verification/addhost-breakit2/timeline_ssh.py'")
         wrapper.write_text(text)
-        with (EVIDENCE / "packet-headers.txt").open("w") as output:
-            capture = subprocess.Popen(["tcpdump", "-i", "docker0", "-nn", "-tt", "-l", f"host {target} and tcp"], stdout=output, stderr=subprocess.PIPE)
-            browser_headers = (EVIDENCE / "browser-packet-headers.txt").open("w")
-            browser_capture = subprocess.Popen(["tcpdump", "-i", "lo", "-nn", "-tt", "-l", "tcp port 4929"], stdout=browser_headers, stderr=subprocess.PIPE)
-            try:
-                print(f"TIMELINE source=collector step=begin epoch_ms={time.time()*1000:.3f}", flush=True)
-                result = original(command, *args, **kwargs, stdout=subprocess.PIPE)
-                transcript = result.stdout.decode()
-                print(transcript, end="", flush=True)
-                (EVIDENCE / "controller.log").write_text(transcript)
-                signed_in = re.search(r"TIMELINE source=server step=key_sign_in state=end epoch_ms=([0-9.]+)", transcript)
-                for line in transcript.splitlines():
-                    if not line.startswith('{'):
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        # Concurrent fixed server/browser records may share a
-                        # line; missing required boundaries fail the budget.
-                        continue
-                    if record.get("source") == "browser" and record.get("step") == "first_prompt_painted" and signed_in:
-                        prompt_ms = record["epoch_ms"] - float(signed_in[1])
-                name = os.environ.get("ADDHOST_TIMELINE_TARGET", "addhost-instant-timeline")
-                receipts = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-step-times"], capture_output=True, text=True, check=True)
-                (EVIDENCE / "target-boundaries.jsonl").write_text(receipts.stdout)
-                packets = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-ssh-times"], capture_output=True, text=True, check=True)
-                (EVIDENCE / "target-ssh-boundaries.jsonl").write_text(packets.stdout)
-                return result
-            finally:
-                capture.send_signal(signal.SIGINT)
-                _, diagnostics = capture.communicate(timeout=10)
-                print(diagnostics.decode(), flush=True)
-                browser_capture.send_signal(signal.SIGINT)
-                _, diagnostics = browser_capture.communicate(timeout=10)
-                browser_headers.close()
-                print(diagnostics.decode(), flush=True)
+        name = os.environ.get("ADDHOST_TIMELINE_TARGET", "addhost-instant-timeline")
+        pid = original(["sudo", "-n", "docker", "inspect", "--format", "{{.State.Pid}}", name], capture_output=True, text=True, check=True).stdout.strip()
+        if not pid.isdecimal() or int(pid) <= 0:
+            raise RuntimeError("Owned target network namespace is unavailable")
+        with captured_headers("packet-headers.txt", ["tcpdump", "-i", "docker0", "-nn", "-tt", "-l", f"host {target} and tcp"]), captured_headers("browser-packet-headers.txt", ["tcpdump", "-i", "lo", "-nn", "-tt", "-l", "tcp port 4929"]), captured_headers("target-packet-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "3", "-i", "eth0", "-nn", "-tt", "-l", "tcp port 22"]):
+            print(f"TIMELINE source=collector step=begin epoch_ms={time.time()*1000:.3f}", flush=True)
+            result = original(command, *args, **kwargs, stdout=subprocess.PIPE)
+            transcript = result.stdout.decode()
+            print(transcript, end="", flush=True)
+            (EVIDENCE / "controller.log").write_text(transcript)
+            signed_in = re.search(r"TIMELINE source=server step=key_sign_in state=end epoch_ms=([0-9.]+)", transcript)
+            for line in transcript.splitlines():
+                if not line.startswith('{'):
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    # Concurrent fixed server/browser records may share a
+                    # line; missing required boundaries fail the budget.
+                    continue
+                if record.get("source") == "browser" and record.get("step") == "first_prompt_painted" and signed_in:
+                    prompt_ms = record["epoch_ms"] - float(signed_in[1])
+            name = os.environ.get("ADDHOST_TIMELINE_TARGET", "addhost-instant-timeline")
+            receipts = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-step-times"], capture_output=True, text=True, check=True)
+            (EVIDENCE / "target-boundaries.jsonl").write_text(receipts.stdout)
+            packets = original(["sudo", "-n", "docker", "exec", name, "cat", "/run/addhost-fast-ssh-times"], capture_output=True, text=True, check=True)
+            (EVIDENCE / "target-ssh-boundaries.jsonl").write_text(packets.stdout)
+            return result
     return original(command, *args, **kwargs)
 
 
