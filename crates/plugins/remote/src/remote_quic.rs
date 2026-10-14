@@ -319,7 +319,7 @@ pub async fn path_interrupted(
     let mut closed = std::pin::pin!(connection.closed());
     // The endpoint may queue a probe while its socket is not writable. Only
     // a successful encrypted socket send starts the network-response clock.
-    let mut queued: Option<tokio::time::Instant> = None;
+    let mut queued: Option<crate::remote_path_socket::MeshTransmission<'_>> = None;
     let mut pending: Option<tokio::time::Instant> = None;
     loop {
         let deadline = pending.map(|sent| sent + connection.rtt() + margin);
@@ -330,15 +330,15 @@ pub async fn path_interrupted(
                 if pending.is_some_and(|sent| path.heard_since(sent.into_std()) && silence < sent.elapsed()) {
                     pending = None;
                 }
-                if pending.is_none() {
-                    queued.get_or_insert_with(tokio::time::Instant::now);
+                if pending.is_none() && queued.is_none() {
+                    queued = Some(path.mesh_transmitted_after(std::time::Instant::now())?);
                 }
                 probe_liveness(connection);
             }
             sent = async {
-                path.mesh_transmitted_after(queued.unwrap_or_else(tokio::time::Instant::now).into_std()).await
+                queued.as_ref().ok_or(io::ErrorKind::Interrupted)?.sent().await
             }, if queued.is_some() => {
-                pending = Some(sent.into());
+                pending = Some(sent?.into());
                 queued = None;
             }
             () = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {

@@ -42,6 +42,8 @@ struct Paths {
     resend: Recent,
     mesh_heard: Option<Instant>,
     mesh_sent: Option<Instant>,
+    probe_generation: u64,
+    probe_queued: Option<(u64, Instant)>,
     enrolled_heard: Option<Instant>,
 }
 
@@ -76,6 +78,55 @@ pub enum Path {
     Mesh(SocketAddr),
 }
 
+/// Owns one pending probe's first successful physical send. Replacing or
+/// dropping this request retires its observation without retaining the socket.
+pub struct MeshTransmission<'a> {
+    path: &'a PathSocket,
+    generation: u64,
+}
+impl MeshTransmission<'_> {
+    /// Wait for the first successful send after arming this request. A delayed
+    /// waiter must not adopt a later ACK-only packet as its response clock.
+    ///
+    /// # Errors
+    /// Returns `Interrupted` if replaced or the mesh path changed, or a socket-state error.
+    pub async fn sent(&self) -> io::Result<Instant> {
+        loop {
+            let notified = self.path.sent.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let sent = {
+                let paths = self.path.paths.lock().map_err(|_| io::ErrorKind::Other)?;
+                if paths
+                    .probe_queued
+                    .is_none_or(|(generation, _)| generation != self.generation)
+                {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                paths.mesh_sent
+            };
+            if let Some(sent) = sent {
+                return Ok(sent);
+            }
+            notified.await;
+        }
+    }
+}
+impl Drop for MeshTransmission<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut paths) = self.path.paths.lock()
+            && paths
+                .probe_queued
+                .is_some_and(|(generation, _)| generation == self.generation)
+        {
+            paths.probe_queued = None;
+            paths.mesh_sent = None;
+            drop(paths);
+            self.path.sent.notify_waiters();
+        }
+    }
+}
+
 impl PathSocket {
     /// `logical` is the enrolled server address the connection was dialed to.
     #[must_use]
@@ -89,6 +140,8 @@ impl PathSocket {
                 resend: Recent::default(),
                 mesh_heard: None,
                 mesh_sent: None,
+                probe_generation: 0,
+                probe_queued: None,
                 enrolled_heard: None,
             }),
             mesh_datagrams: AtomicU64::new(0),
@@ -133,9 +186,11 @@ impl PathSocket {
             }
             paths.mesh = Some(mesh);
             paths.mesh_sent = None;
+            paths.probe_queued = None;
             paths.resend.clear();
             self.on_mesh.store(true, Ordering::Release);
         }
+        self.sent.notify_waiters();
     }
 
     /// Enable overlap only after the authenticated peer advertises support.
@@ -158,10 +213,13 @@ impl PathSocket {
         let pending = match self.paths.lock() {
             Ok(mut paths) => {
                 self.on_mesh.store(false, Ordering::Release);
+                paths.mesh_sent = None;
+                paths.probe_queued = None;
                 paths.resend.take()
             }
             Err(_) => return,
         };
+        self.sent.notify_waiters();
         for sent in pending {
             // Best effort: a full socket buffer leaves the rest to QUIC's own recovery.
             let _ = self.socket.try_send(&Transmit {
@@ -216,22 +274,25 @@ impl PathSocket {
         self.heard.notified().await;
     }
 
-    /// Wait for a successful socket send after a queued probe. Queueing a
-    /// QUIC DATAGRAM alone cannot start its network-response deadline.
-    pub async fn mesh_transmitted_after(&self, queued: Instant) -> Instant {
-        loop {
-            let notified = self.sent.notified();
-            tokio::pin!(notified);
-            // Register before checking the timestamp, avoiding a lost wake if
-            // the endpoint emits between the check and the first await.
-            notified.as_mut().enable();
-            if let Some(sent) = self.paths.lock().ok().and_then(|paths| paths.mesh_sent)
-                && sent >= queued
-            {
-                return sent;
-            }
-            notified.await;
-        }
+    /// Arm before queueing a probe, then await its first physical transmission.
+    /// Ciphertext packet types stay opaque here: this is a send boundary, not
+    /// a packet-number acknowledgement. A later send cannot move that boundary.
+    ///
+    /// # Errors
+    /// Returns a socket-state error if routing state is unavailable.
+    pub fn mesh_transmitted_after(&self, queued: Instant) -> io::Result<MeshTransmission<'_>> {
+        let mut paths = self.paths.lock().map_err(|_| io::ErrorKind::Other)?;
+        paths.probe_generation = paths.probe_generation.wrapping_add(1);
+        paths.probe_queued = Some((paths.probe_generation, queued));
+        paths.mesh_sent = None;
+        let generation = paths.probe_generation;
+        drop(paths);
+        // A superseded request must observe cancellation even if no packet follows.
+        self.sent.notify_waiters();
+        Ok(MeshTransmission {
+            path: self,
+            generation,
+        })
     }
 
     /// A distinct socket handle over the same routing state. Rebinding the
@@ -245,6 +306,9 @@ impl PathSocket {
     }
 
     fn keep(&self, transmit: &Transmit<'_>) {
+        // Record the successful send boundary before waiting for routing/history
+        // locks; their scheduling delay must not move the response deadline.
+        let now = Instant::now();
         if let Ok(mut paths) = self.paths.lock() {
             if let Some(at) = paths
                 .resend
@@ -253,7 +317,11 @@ impl PathSocket {
             {
                 clock.arm(at);
             }
-            paths.mesh_sent = Some(Instant::now());
+            if paths.mesh_sent.is_none()
+                && paths.probe_queued.is_some_and(|(_, queued)| now >= queued)
+            {
+                paths.mesh_sent = Some(now);
+            }
         }
     }
 }
@@ -382,6 +450,251 @@ mod tests {
     use super::*;
     use quinn::Runtime as _;
     use std::{io::IoSliceMut, sync::Arc, time::Duration};
+
+    #[derive(Debug)]
+    struct CountedSocket {
+        inner: Arc<dyn AsyncUdpSocket>,
+        sent: Arc<AtomicU64>,
+        blocked: Arc<AtomicBool>,
+    }
+    impl AsyncUdpSocket for CountedSocket {
+        fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+            self.inner.clone().create_io_poller()
+        }
+        fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+            if self.blocked.load(Ordering::Acquire) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.inner.try_send(transmit)?;
+            self.sent.fetch_add(1, Ordering::Release);
+            Ok(())
+        }
+        fn poll_recv(
+            &self,
+            cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+            meta: &mut [RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            self.inner.poll_recv(cx, bufs, meta)
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delayed_probe_waiter_keeps_first_send_clock_after_ack_only_traffic() {
+        use crate::remote_tls::tests::{leaf, root};
+        let ca = root();
+        // Suppress unrelated MTU probes only in this fixture, so Quinn's own
+        // frame counters can prove that the later physical send is ACK-only.
+        let mut transport = quinn::TransportConfig::default();
+        transport.mtu_discovery_config(None);
+        transport.datagram_receive_buffer_size(Some(64));
+        transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        let transport = Arc::new(transport);
+        let mut config = crate::remote_quic::server_config(
+            &leaf(&ca, true),
+            std::slice::from_ref(&ca.certificate),
+        )
+        .unwrap();
+        config.transport_config(transport.clone());
+        let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let physical = server.local_addr().unwrap();
+        let logical = SocketAddr::new("127.0.0.2".parse().unwrap(), physical.port());
+        let sent = Arc::new(AtomicU64::new(0));
+        let path = PathSocket::new(
+            Arc::new(CountedSocket {
+                inner: quinn::TokioRuntime
+                    .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                    .unwrap(),
+                sent: sent.clone(),
+                blocked: Arc::default(),
+            }),
+            logical,
+        );
+        path.use_mesh(physical);
+        let mut client = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            path.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .unwrap();
+        let mut config =
+            crate::remote_quic::client_config(&leaf(&ca, false), &[ca.certificate]).unwrap();
+        config.transport_config(transport);
+        client.set_default_client_config(config);
+        let (dial, accept) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+            server.accept().await.unwrap().await
+        });
+        let dial = dial.unwrap();
+        let accept = accept.unwrap();
+        let queued = Instant::now();
+        let request = path.mesh_transmitted_after(queued).unwrap();
+        let mut delayed = std::pin::pin!(request.sent());
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(
+                std::future::Future::poll(delayed.as_mut(), cx).is_pending()
+            ))
+            .await
+        );
+        dial.send_datagram(bytes::Bytes::from_static(b"probe"))
+            .unwrap();
+        assert_eq!(accept.read_datagram().await.unwrap().as_ref(), b"probe");
+        let first = path.paths.lock().unwrap().mesh_sent.unwrap();
+        let before = dial.stats().frame_tx;
+        let sends = sent.load(Ordering::Acquire);
+        accept
+            .send_datagram(bytes::Bytes::from_static(b"response"))
+            .unwrap();
+        assert_eq!(dial.read_datagram().await.unwrap().as_ref(), b"response");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if dial.stats().frame_tx.acks > before.acks && sent.load(Ordering::Acquire) > sends
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut after = dial.stats().frame_tx;
+        assert!(after.acks > before.acks);
+        after.acks = before.acks;
+        assert_eq!(
+            format!("{after:?}"),
+            format!("{before:?}"),
+            "later physical send contained an ack-eliciting frame"
+        );
+        assert!(
+            path.heard_since(first),
+            "authenticated response did not arrive on the mesh tuple"
+        );
+        let observed = delayed.await.unwrap();
+        client.close(0u32.into(), b"");
+        server.close(0u32.into(), b"");
+        assert_eq!(
+            observed, first,
+            "an ACK-only send replaced the queued probe's first transmission clock"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_request_latches_before_its_waiter_is_polled() {
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let logical = SocketAddr::new(
+            "127.0.0.2".parse().unwrap(),
+            mesh.local_addr().unwrap().port(),
+        );
+        let path = PathSocket::new(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap(),
+            logical,
+        );
+        path.use_mesh(mesh.local_addr().unwrap());
+        let request = path.mesh_transmitted_after(Instant::now()).unwrap();
+        send(&path, logical, b"first").await;
+        assert_eq!(arrival(&mesh).await, b"first");
+        let first = path.paths.lock().unwrap().mesh_sent.unwrap();
+        send(&path, logical, b"later").await;
+        assert_eq!(arrival(&mesh).await, b"later");
+        assert_eq!(request.sent().await.unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn backpressure_never_starts_or_replaces_the_probe_send_clock() {
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let logical = SocketAddr::new(
+            "127.0.0.2".parse().unwrap(),
+            mesh.local_addr().unwrap().port(),
+        );
+        let blocked = Arc::new(AtomicBool::new(true));
+        let path = PathSocket::new(
+            Arc::new(CountedSocket {
+                inner: quinn::TokioRuntime
+                    .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                    .unwrap(),
+                sent: Arc::default(),
+                blocked: blocked.clone(),
+            }),
+            logical,
+        );
+        path.use_mesh(mesh.local_addr().unwrap());
+        let request = path.mesh_transmitted_after(Instant::now()).unwrap();
+        let transmit = Transmit {
+            destination: logical,
+            contents: b"probe",
+            ecn: None,
+            segment_size: None,
+            src_ip: None,
+        };
+        assert_eq!(
+            path.try_send(&transmit).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(path.paths.lock().unwrap().mesh_sent.is_none());
+        {
+            let mut waiter = std::pin::pin!(request.sent());
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(
+                    std::future::Future::poll(waiter.as_mut(), cx).is_pending()
+                ))
+                .await
+            );
+        }
+        // Cancelling one poll future does not cancel the owning request.
+        blocked.store(false, Ordering::Release);
+        send(&path, logical, b"probe").await;
+        let first = request.sent().await.unwrap();
+        assert_eq!(arrival(&mesh).await, b"probe");
+        blocked.store(true, Ordering::Release);
+        assert_eq!(
+            path.try_send(&transmit).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        blocked.store(false, Ordering::Release);
+        send(&path, logical, b"probe").await;
+        assert_eq!(request.sent().await.unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn cancelling_old_requests_cannot_clear_a_new_probe_generation() {
+        let mesh = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let logical = SocketAddr::new(
+            "127.0.0.2".parse().unwrap(),
+            mesh.local_addr().unwrap().port(),
+        );
+        let path = PathSocket::new(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap(),
+            logical,
+        );
+        path.use_mesh(mesh.local_addr().unwrap());
+        let old = path.mesh_transmitted_after(Instant::now()).unwrap();
+        let current = path.mesh_transmitted_after(Instant::now()).unwrap();
+        assert_eq!(
+            old.sent().await.unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        drop(old);
+        send(&path, logical, b"new generation").await;
+        assert_eq!(arrival(&mesh).await, b"new generation");
+        assert!(current.sent().await.is_ok());
+        drop(current);
+        send(&path, logical, b"unobserved").await;
+        assert_eq!(arrival(&mesh).await, b"unobserved");
+        assert!(path.paths.lock().unwrap().mesh_sent.is_none());
+        let retired = path.mesh_transmitted_after(Instant::now()).unwrap();
+        path.use_enrolled();
+        assert_eq!(
+            retired.sent().await.unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
 
     async fn send(socket: &Arc<PathSocket>, destination: SocketAddr, contents: &[u8]) {
         let transmit = Transmit {
