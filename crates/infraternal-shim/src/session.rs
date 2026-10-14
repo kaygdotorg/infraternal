@@ -35,6 +35,34 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+/// Statically dispatched state boundary shared with the optional hosting experiment.
+trait SessionTerminal {
+    fn snapshot(&self) -> io::Result<Vec<u8>>;
+    fn approximate_snapshot(&self) -> Vec<u8>;
+    fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()>;
+    fn resize_with_ring(&mut self, cols: u16, rows: u16, ring: Option<&Ring>) -> io::Result<()>;
+    fn requires_approximation(&self) -> bool;
+}
+impl SessionTerminal for Terminal {
+    fn snapshot(&self) -> io::Result<Vec<u8>> {
+        self.snapshot()
+    }
+    fn approximate_snapshot(&self) -> Vec<u8> {
+        self.approximate_snapshot()
+    }
+    fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
+        self.resize(cols, rows)
+    }
+    fn resize_with_ring(&mut self, cols: u16, rows: u16, ring: Option<&Ring>) -> io::Result<()> {
+        self.resize_with_ring(cols, rows, ring)
+    }
+    fn requires_approximation(&self) -> bool {
+        self.requires_approximation()
+    }
+}
+#[cfg(feature = "process-per-user")]
+#[path = "user_host.rs"]
+pub(crate) mod user_host;
 const CHUNK: usize = 16 * 1024;
 const MAX_PEERS: usize = 32;
 #[path = "inputs.rs"]
@@ -165,7 +193,7 @@ impl Peer {
         self.written = 0;
         Ok(())
     }
-    fn snapshot(&mut self, terminal: &Terminal, head: u64) -> io::Result<()> {
+    fn snapshot(&mut self, terminal: &impl SessionTerminal, head: u64) -> io::Result<()> {
         match terminal.snapshot() {
             Ok(bytes) => {
                 self.queue(&Frame::Snapshot(head, bytes))?;
@@ -198,7 +226,7 @@ impl Peer {
     fn resize(
         &mut self,
         pty: &mut Pty,
-        terminal: &mut Terminal,
+        terminal: &mut impl SessionTerminal,
         ring: &Ring,
         config: &mut Config,
     ) -> io::Result<bool> {
@@ -746,7 +774,7 @@ fn consume_peer(
     bytes: &[u8],
     p: &mut Peer,
     pty: &mut Pty,
-    terminal: &mut Terminal,
+    terminal: &mut impl SessionTerminal,
     ring: &Ring,
     config: &mut Config,
     input: &mut VecDeque<u8>,
@@ -801,7 +829,7 @@ fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
     pty: &mut Pty,
-    terminal: &mut Terminal,
+    terminal: &mut impl SessionTerminal,
     ring: &Ring,
     config: &mut Config,
     input: &mut VecDeque<u8>,

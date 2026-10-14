@@ -70,3 +70,6 @@ pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd
 }
 #[cfg(feature = "ca-handoff")]
 pub mod openssl_secure;
+
+#[cfg(feature = "process-per-user")]
+pub use session::user_host::run_host;

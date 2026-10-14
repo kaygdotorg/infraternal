@@ -41,6 +41,8 @@ enum Recovery {
 }
 pub struct Terminal {
     engine: Engine,
+    #[cfg(feature = "process-per-user")]
+    history_budget: usize,
     observer: Observer,
     parser: vte::Parser,
     pending: Vec<u8>,
@@ -51,6 +53,12 @@ pub struct Terminal {
     recovery_pending: bool,
 }
 impl Terminal {
+    /// Compare native state independently of the bounded repaint serializer.
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(crate) fn research_state_difference(&self, other: &Self) -> usize {
+        self.engine.state_difference(&other.engine)
+            + usize::from(self.pending != other.pending || self.dimensions != other.dimensions)
+    }
     #[cfg(test)]
     pub(crate) fn allocation_fixture(engine: Engine, prefix: &[u8]) -> Self {
         let mut terminal = Self::new(80, 24).unwrap();
@@ -62,8 +70,14 @@ impl Terminal {
     }
 
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
+        Self::with_history_budget(cols, rows, SCROLLBACK_BYTES)
+    }
+    /// Reuse the selected VT engine with an explicit research retention budget.
+    pub(super) fn with_history_budget(cols: u16, rows: u16, history: usize) -> io::Result<Self> {
         Ok(Self {
-            engine: Engine::new(cols, rows, SCROLLBACK_BYTES)?,
+            engine: Engine::new(cols, rows, history)?,
+            #[cfg(feature = "process-per-user")]
+            history_budget: history,
             observer: Observer::default(),
             parser: vte::Parser::new(),
             pending: Vec::with_capacity(4096),
@@ -147,6 +161,10 @@ impl Terminal {
         Ok(())
     }
     fn recover(&mut self, ring: Option<&Ring>) -> io::Result<()> {
+        #[cfg(feature = "process-per-user")]
+        let mut restored =
+            Self::with_history_budget(self.dimensions.0, self.dimensions.1, self.history_budget)?;
+        #[cfg(not(feature = "process-per-user"))]
         let mut restored = Self::new(self.dimensions.0, self.dimensions.1)?;
         let complete = ring.filter(|ring| ring.start() == 0 && self.recovery == Recovery::Exact);
         if let Some(ring) = complete {
