@@ -486,16 +486,23 @@ async fn steer(
                     if !interrupted {
                         continue;
                     }
-                    *reason = ServerLinkReason::MeshInterrupted;
+                }
+                // A component edit and an interruption deadline can become
+                // ready in the same poll. The latest proposal owns the reason,
+                // even when select chose the deadline instead of the edit.
+                let proposed = (*proposals.borrow_and_update())
+                    .map(|ip| SocketAddr::new(ip, identity.endpoint.port()));
+                *reason = if proposed.is_none() {
+                    ServerLinkReason::MeshDisabled
+                } else {
+                    ServerLinkReason::MeshInterrupted
+                };
+                if proposed.is_some_and(|proposed| {
+                    proposed.ip().to_canonical() == current.ip().to_canonical()
+                }) {
                     not_before = tokio::time::Instant::now() + retry;
                     retry = (retry * 2).min(Duration::from_secs(30));
                 } else {
-                    // Component down or a new address: leave the mesh now.
-                    *reason = if proposed.is_none() {
-                        ServerLinkReason::MeshDisabled
-                    } else {
-                        ServerLinkReason::MeshInterrupted
-                    };
                     not_before = tokio::time::Instant::now();
                 }
                 let returned = tokio::select! {
