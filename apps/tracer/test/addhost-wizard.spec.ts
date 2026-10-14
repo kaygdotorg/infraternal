@@ -7,6 +7,11 @@
 import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 
+// These journeys contain several real socket/UI operations. The functional
+// watchdog must cover the existing 45-second readiness waits; it is not a
+// latency budget. Individual operation assertions retain their own deadlines.
+test.setTimeout(120_000);
+
 type Probe = { views(): Array<{ id: string; windows: string[] }> };
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
@@ -23,7 +28,7 @@ async function open(page: Page, query = "", settings: Record<string, string> = {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=ink&bg=none${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 45_000 });
-  await expect.poll(() => probe(page, (p) => p.views().length)).toBeGreaterThan(0);
+  await expect.poll(() => probe(page, (p) => p.views().length), { timeout: 45_000 }).toBeGreaterThan(0);
   await page.waitForTimeout(400);
 }
 
