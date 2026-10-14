@@ -621,10 +621,50 @@ async fn a_latched_mesh_reply_wakes_retry_without_selecting_the_path() {
     assert_eq!(path.path(), Path::Enrolled);
 }
 
-/// A late hint must reach the caller's retry decision while enrolled proof is pending.
-#[tokio::test]
-async fn pending_enrolled_proof_does_not_hide_a_latched_mesh_hint() {
+/// Latch a non-authoritative hint without letting paused recovery expire.
+async fn latch_retry_hint(path: &PathSocket, sender: &std::net::UdpSocket) {
     use quinn::AsyncUdpSocket as _;
+    use std::future::Future as _;
+    // Latch precisely the raw routing hint accepted by retry_path's existing
+    // isolated test. It grants no authority and must trigger fresh proof.
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let since = std::time::Instant::now();
+    sender
+        .send_to(b"late route hint", path.local_addr().unwrap())
+        .unwrap();
+    let mut bytes = [0; 64];
+    let mut buffers = [std::io::IoSliceMut::new(&mut bytes)];
+    let mut metadata = [quinn::udp::RecvMeta::default()];
+    for _ in 0..10_000 {
+        if path.heard_since(since) {
+            break;
+        }
+        // Keep the test runnable while UDP readiness is dispatched, preventing
+        // paused time from auto-advancing the enrolled proof's deadline.
+        std::future::poll_fn(|cx| {
+            if let std::task::Poll::Ready(result) = path.poll_recv(cx, &mut buffers, &mut metadata)
+            {
+                result.unwrap();
+            }
+            std::task::Poll::Ready(())
+        })
+        .await;
+        tokio::task::yield_now().await;
+    }
+    assert!(path.heard_since(since), "late hint was not latched");
+    let mut control = std::pin::pin!(retry_path(
+        path,
+        tokio::time::Instant::now() + Duration::from_secs(3600),
+        since
+    ));
+    assert!(
+        control.as_mut().poll(&mut context).is_ready(),
+        "isolated retry did not see the hint"
+    );
+}
+
+/// Exercise caller retry ordering while the admitted enrolled path is silent.
+async fn retry_during_enrolled_proof(late_hint: bool, backup: bool) {
     use std::future::Future as _;
     let ca = root();
     let server = Server::new(
@@ -639,6 +679,11 @@ async fn pending_enrolled_proof_does_not_hide_a_latched_mesh_hint() {
         .await
         .unwrap();
     let path = link.path.as_ref().expect("fixture requires native QUIC");
+    // The authenticated session normally publishes this negotiated flag.
+    if backup {
+        link.standby
+            .send_replace(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+    }
     let mesh_socket = server.reserved.as_ref().unwrap().try_clone().unwrap();
     mesh_socket.set_nonblocking(true).unwrap();
     let mesh = tokio::net::UdpSocket::from_std(mesh_socket).unwrap();
@@ -682,50 +727,39 @@ async fn pending_enrolled_proof_does_not_hide_a_latched_mesh_hint() {
         Path::Enrolled,
         "candidate miss did not start return proof"
     );
-    // Latch precisely the raw routing hint accepted by retry_path's existing
-    // isolated test. It grants no authority and must trigger fresh proof.
-    let since = std::time::Instant::now();
-    server
-        .reserved
-        .as_ref()
-        .unwrap()
-        .send_to(b"late route hint", path.local_addr().unwrap())
-        .unwrap();
-    let mut bytes = [0; 64];
-    let mut buffers = [std::io::IoSliceMut::new(&mut bytes)];
-    let mut metadata = [quinn::udp::RecvMeta::default()];
-    for _ in 0..10_000 {
-        if path.heard_since(since) {
-            break;
-        }
-        // Keep the test runnable while UDP readiness is dispatched, preventing
-        // paused time from auto-advancing the enrolled proof's deadline.
-        std::future::poll_fn(|cx| {
-            if let std::task::Poll::Ready(result) = path.poll_recv(cx, &mut buffers, &mut metadata)
-            {
-                result.unwrap();
-            }
-            std::task::Poll::Ready(())
-        })
-        .await;
-        tokio::task::yield_now().await;
-    }
-    assert!(path.heard_since(since), "late hint was not latched");
-    let mut control = std::pin::pin!(retry_path(
-        path,
-        tokio::time::Instant::now() + Duration::from_secs(3600),
-        since
-    ));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    assert!(
-        control.as_mut().poll(&mut context).is_ready(),
-        "isolated retry did not see the hint"
-    );
+    if late_hint {
+        latch_retry_hint(path, server.reserved.as_ref().unwrap()).await;
+    } else {
+        // A handshake can drain only packets already copied on enrolled. With
+        // no fresh mesh reply, discovery must still resume on its owned clock.
+        // Dispatch the timer wheel beyond its millisecond rounding boundary.
+        tokio::time::advance(BACKUP_PROBE_INTERVAL + Duration::from_millis(1)).await;
+    }
     assert!(steering.as_mut().poll(&mut context).is_pending());
     assert!(
-        matches!(path.path(), Path::Mesh(_)),
-        "pending enrolled proof hid a latched hint from the caller's fresh mesh proof"
+        matches!(path.path(), Path::Mesh(_)) == (late_hint || backup),
+        "retry ignored the discovery clock or bypassed legacy cooling"
     );
+}
+
+/// A late hint can wake fresh proof while enrolled recovery is pending.
+#[tokio::test]
+async fn pending_enrolled_proof_does_not_hide_a_latched_mesh_hint() {
+    retry_during_enrolled_proof(true, false).await;
+}
+
+/// Mesh discovery cannot depend on a reply to already duplicated queued packets.
+#[tokio::test]
+async fn pending_enrolled_proof_does_not_hide_the_mesh_discovery_clock() {
+    retry_during_enrolled_proof(false, true).await;
+}
+
+/// An unnegotiated peer keeps its existing outage cooling rather than losing
+/// enrolled service to repeated candidates without ciphertext backup.
+#[tokio::test]
+async fn unnegotiated_backup_preserves_the_enrolled_retry_cooling() {
+    retry_during_enrolled_proof(false, false).await;
 }
 
 /// A recovered mesh is retried on the same connection after the cool-down.

@@ -402,6 +402,20 @@ async fn steer(
                     // resent on the enrolled path and the move retries later.
                     *reason = ServerLinkReason::MeshRefused;
                     retry_since = std::time::Instant::now();
+                    let backed = *capabilities.borrow_and_update()
+                        & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                        != 0;
+                    // A joining peer can release only queued copies, yielding
+                    // no fresh mesh reply. Negotiated backup keeps enrolled
+                    // traffic live while discovery retries on the probe clock.
+                    // Without it, preserve recovery and exponential cooling;
+                    // its bounded enrolled guard always ends before five seconds.
+                    not_before = tokio::time::Instant::now()
+                        + if backed {
+                            BACKUP_PROBE_INTERVAL
+                        } else {
+                            PROBE_TIMEOUT
+                        };
                     // Selecting enrolled is synchronous. A late mesh reply may
                     // start fresh proof without waiting for enrolled recovery;
                     // the hint itself neither proves nor changes the path.
@@ -411,10 +425,12 @@ async fn steer(
                         biased;
                         _ = &mut active => return Steered::Ended,
                         _ = to_enrolled(link, registry, *reason) => {},
-                        () = path.mesh_heard(retry_since) => {},
+                        () = retry_path(path, not_before, retry_since) => {},
                     }
-                    not_before = tokio::time::Instant::now() + retry;
-                    retry = (retry * 2).min(Duration::from_secs(30));
+                    if !backed {
+                        not_before = tokio::time::Instant::now() + retry;
+                        retry = (retry * 2).min(Duration::from_secs(30));
+                    }
                 }
                 report(registry, Some(link), *reason);
             }
