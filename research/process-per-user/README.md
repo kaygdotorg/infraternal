@@ -47,9 +47,14 @@ add a core role. No work starts when this feature is compiled out.
 ## State and idle behavior
 
 One thread waits on indexed readiness for listeners, PTY masters and peer sockets. A session gets
-at most one 16-KiB PTY read per reactor round. All ready input/control
-requests precede bulk work; a global 16-read quantum rotates through sessions
+at most one 4-KiB PTY read attempt per reactor round. Ready input/control
+requests precede the rotating bulk queue; a global one-read quantum rotates through sessions
 so 1,000 flooding PTYs cannot monopolize one round.
+Attached PTYs with at most 1 KiB waiting are promoted ahead of that queue using
+a non-consuming readiness hint. Detached producers avoid that classification
+syscall. Read-attempt deduplication prevents a promoted session from spending
+another budget through an older bulk entry. PTY and viewer backpressure keep
+bulk producers from allocating an unbounded transmit queue.
 Blocked/drained PTYs are omitted to prevent level-triggered HUP spin. Live
 idle sessions have no timers: the readiness wait sleeps indefinitely until socket, PTY or
 child-exit readiness. Exited sessions alone use the existing ten-minute
@@ -74,6 +79,69 @@ shares are retention limits, not a total host RSS budget. At 1,000 sessions each
 retention trade-off, not a free process-sharing win; a smaller ring triggers
 more snapshots and provides less replay history. A production adoption still needs a dynamic whole-host byte pool and admission
 limits against the machine budget, including shell and kernel PTY memory.
+
+The opt-in native page quantum is 80 columns by 32 rows, with one preheated
+pool item. Larger geometries still use the existing capacity/reflow algorithm.
+This removes the large minimum pool that otherwise multiplies small retention
+shares. Rings never round a non-power-of-two host share beyond its byte limit.
+Small shares reserve their full bounded capacity after the first 4 KiB of
+output; this settles residency during activity rather than touching more ring
+pages gradually over hours. Larger rings grow lazily within the same limit.
+Empty appends allocate nothing, and the last viewer's removal releases vacant
+peer slots. First attachment reserves only the next peer record.
+
+## Ownership diagnosis and idle bookkeeping
+
+`__shim --host-sessions N --host-accounting PATH` optionally creates a new
+mode-0600 numeric receipt file. An explicit SIGUSR2 request records each
+session's native ordinary, mapped, resident and encoded bytes, carry/prefix,
+ring, input/writer and peer capacities. Mapping residency uses `mincore`
+without faulting in payload pages. No terminal content is recorded. Existing
+files are refused before PTY creation; a write failure disables only the
+receipt. Without the option there is no file, profiling timer or signal work.
+
+The `idle_session_ownership_ledger` ignored unit probe runs at 1, 10, 100 and
+1,000 sessions on the perf VM. It separately counts the session vector,
+constructor paths/cursors, lazy prompt/raw ring, retired viewers, and indexed
+descriptor registrations. Its test allocator forwards unchanged allocation
+layouts. Requested owned bytes, allocator resident slack, fixed executable
+pages, shell processes and kernel PTYs are distinct costs; total host PSS
+divided by session count cannot identify the incremental idle-session floor.
+The byte ledger and paired before/after PSS receipts are on issue #205.
+
+## Compact cold history experiment
+
+`compact-history` is a separate build feature that requires `process-per-user`;
+both remain disabled by default. Cold pages store UTF-8 text runs and
+run-length raw cell attributes. Nontext union bits, wide cells, graphemes,
+styles, links, protection and opaque native metadata remain exact. Invalid
+text falls back to the existing codec. Allocation-free decoding rejects bad
+dimensions, run counts, UTF-8, truncation and trailing bytes; native tests
+include a coverage-guided malformed-input target.
+
+Encoded copies have a separate charged history share. An opportunistic
+encoding refusal keeps the original page and its exact-state certificate.
+Virtual page reservations remain for infallible restore; their ownership and
+resident backing are reported separately. One candidate is compacted after
+each nonempty write. The direct-terminal resident probe explicitly requests
+full compaction, whereas the reactor currently has no idle continuation.
+Snapshot/search/reflow can restore cold pages; a full-compacted measurement
+does not prove the same retained footprint after those operations.
+
+The fidelity fixture verifies every numbered 72-column line in 10,000-line
+history, full replay, reconstructed search/selection spans and reflow. Another
+fixture checks Unicode, styles and links before and after future input. The
+paired resident increment excludes the raw wire ring. Its comparison with
+the published reference, allocator/header breakdown and limitations are on
+issue #205; no reference-memory parity is assumed.
+
+`scripts/bench/ppu_viewers.py` measures additional native viewers with 50
+filled terminals. Each viewer has one distinct writer/socket on every
+terminal, drains continuously and must observe every typed marker. Receipts
+separate attach/repaint fences, idle CPU ticks, resident increments and echo
+delivery. This is host-side socket cost: it excludes browser, shell and kernel
+memory. The fixture validates all fill output but discloses bounded retained
+history rather than claiming that each terminal still holds every fill line.
 
 ## Crash containment and revocation
 
