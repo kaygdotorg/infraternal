@@ -4,7 +4,7 @@
 The private fixture persists only a hash of its in-memory browser capability.
 Scheduler activations are schedule-ins (schedstat field three), not hardware interrupts.
 The default profile preserves the original 25ms browser workload;
---adaptive-browser mirrors the healthy 40ms cadence. Responses-only identifies
+--adaptive-browser mirrors the healthy answer-paced cadence. Responses-only identifies
 the earlier incomplete fixture. Client timer counts describe this equivalent
 wire driver, not a browser process CPU measurement.
 """
@@ -64,14 +64,17 @@ class Browser:
         self.fast_until = self.last_pong + .250
         self.probe_task = asyncio.create_task(self.probe())
 
-    def probe_interval(self, now):
-        """Mirror the production browser's healthy idle and recent-doubt cadence."""
-        return .04 if getattr(self, 'adaptive', False) and self.rtt is not None and now >= self.fast_until else .025
+    def next_probe_at(self, now):
+        """Mirror fast pipelining and one outstanding healthy-idle browser proof."""
+        first = self.last_ping + .025
+        if getattr(self, 'adaptive', False) and self.rtt is not None and now >= self.fast_until:
+            return float('inf') if self.pending else max(first, self.last_pong + .010)
+        return first
 
     async def sample_probe(self):
         """Share one cadence between timer callbacks and incoming server probes."""
         now = time.monotonic()
-        if now - self.last_ping + 1e-12 < self.probe_interval(now):
+        if now + 1e-12 < self.next_probe_at(now):
             return
         grace = 2 if self.rtt is None else self.rtt + .05
         if getattr(self, 'adaptive', False) and not self.pending and (self.rtt is None or now - self.last_pong >= grace):
@@ -97,7 +100,7 @@ class Browser:
             await self.sample_probe()
             clock = time.monotonic()
             grace = 2 if self.rtt is None else self.rtt + .05
-            next_probe = self.last_ping + self.probe_interval(clock) - clock
+            next_probe = self.next_probe_at(clock) - clock
             remaining = self.last_pong + grace - clock if self.pending or not self.adaptive else float('inf')
             # A correlated reply cancels the obsolete response timer, as in the
             # production browser. Count actual timer expirations separately.

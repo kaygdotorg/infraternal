@@ -48,23 +48,26 @@ class SampleAccounting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.send.await_count, 2)
         self.assertEqual(len(browser.pending), 2)
 
-    async def test_adaptive_idle_cadence_matches_browser_and_resets_only_stale_answered_lease(self):
+    async def test_adaptive_idle_cadence_matches_browser_and_preserves_answered_deadline(self):
         browser = fixture.Browser.__new__(fixture.Browser)
         browser.last_ping = 10
-        browser.last_pong = 10.001
-        browser.rtt = .001
+        browser.last_pong = 9.85
+        browser.rtt = .150
         browser.adaptive = True
         browser.fast_until = 9
         browser.next_nonce = 1 << 63
-        browser.pending = {}
+        browser.pending = {1 << 63: (10_000_000, 10)}
         browser.send = AsyncMock()
-        with patch.object(fixture.time, 'monotonic', side_effect=[10.026, 10.04, 10.05]):
+        with patch.object(fixture.time, 'monotonic', side_effect=[10.05, 10.155, 10.16, 10.17]):
             await browser.sample_probe()
-            self.assertEqual(browser.send.await_count, 0)
+            self.assertEqual(browser.send.await_count, 0, 'idle does not pipeline')
+            browser.pending.clear()
+            browser.last_pong = 10.15
+            await browser.sample_probe()
+            self.assertEqual(browser.send.await_count, 0, 'allow scheduling after the answer')
             await browser.sample_probe()
             self.assertEqual(browser.send.await_count, 1)
-            # Ordinary cadence cannot postpone the fresh liveness deadline.
-            self.assertEqual(browser.last_pong, 10.001)
+            self.assertEqual(browser.last_pong, 10.15, 'a new request cannot renew the lease')
             await browser.sample_probe()
             self.assertEqual(browser.send.await_count, 1)
 
