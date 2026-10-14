@@ -634,7 +634,8 @@ pub(super) async fn run(
             match available(identity, renewal, &registry, force_fallback).await {
                 Ok(link) => {
                     force_fallback = false;
-                    if link.current().0 == ServerLinkKind::Mesh {
+                    // Available proves only its mesh dial before activation.
+                    if link.proof.is_some() {
                         reason = ServerLinkReason::MeshProven;
                     }
                     link
