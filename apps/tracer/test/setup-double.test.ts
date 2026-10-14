@@ -19,3 +19,17 @@ test("setup replay preserves the published session and projects each subscriber'
   expect(replay.events.every((event) => event.window_id === "window-two")).toBe(true);
   expect(replay.events[1]?.sequence).toBe(20);
 });
+
+
+test("late setup replay retains a failure reason and retry eligibility", () => {
+  const host = "12345678-1234-1234-1234-123456789def";
+  const session = "abcdefab-1234-1234-1234-123456789def";
+  publishSetup(host, session);
+  emitSetup(host, "install", "done");
+  emitSetup(host, "join", "failed");
+  const event = setupEvents(host, "late-window", 1).events[0];
+  expect(event?.state).toBe("failed");
+  expect(event?.failed_step).toBe("join");
+  expect(event?.message).toBe("Setup needs another try.");
+  expect(event?.retry_available).toBe(true);
+});
