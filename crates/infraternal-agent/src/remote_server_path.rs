@@ -376,9 +376,26 @@ async fn steer(
                         != 0,
                 );
                 remote_quic::probe_liveness(connection);
-                let moved = tokio::select! {
-                    _ = &mut active => return Steered::Ended,
-                    moved = answered(connection, path, since, true) => moved,
+                let proof = answered(connection, path, since, true);
+                tokio::pin!(proof);
+                let moved = loop {
+                    tokio::select! {
+                        _ = &mut active => return Steered::Ended,
+                        moved = &mut proof => break moved,
+                        changed = capabilities.changed() => {
+                            if changed.is_err() {
+                                return Steered::Ended;
+                            }
+                            // Hello can negotiate backup while this first
+                            // candidate is pending. Apply it to subsequent
+                            // ciphertext without restarting its proof deadline.
+                            path.set_backup(
+                                *capabilities.borrow_and_update()
+                                    & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                                    != 0,
+                            );
+                        }
+                    }
                 };
                 if moved {
                     retry = Duration::from_secs(1);

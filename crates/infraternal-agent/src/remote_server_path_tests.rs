@@ -109,7 +109,10 @@ impl AgentPlugin for Fixture {
 struct DroppedReplies {
     inner: Arc<dyn quinn::AsyncUdpSocket>,
     dropping: Arc<std::sync::atomic::AtomicBool>,
+    marker: Arc<tokio::sync::Notify>,
 }
+/// Public, deliberately invalid QUIC input witnesses physical copying only.
+const BACKUP_MARKER: &[u8] = b"infraternal-test-enrolled-backup";
 impl quinn::AsyncUdpSocket for DroppedReplies {
     fn create_io_poller(self: Arc<Self>) -> std::pin::Pin<Box<dyn quinn::UdpPoller>> {
         self.inner.clone().create_io_poller()
@@ -127,7 +130,15 @@ impl quinn::AsyncUdpSocket for DroppedReplies {
         bufs: &mut [std::io::IoSliceMut<'_>],
         meta: &mut [quinn::udp::RecvMeta],
     ) -> std::task::Poll<io::Result<usize>> {
-        self.inner.poll_recv(cx, bufs, meta)
+        let result = self.inner.poll_recv(cx, bufs, meta);
+        if let std::task::Poll::Ready(Ok(count)) = &result {
+            for (buffer, received) in bufs.iter().zip(meta.iter()).take(*count) {
+                if buffer[..received.len] == *BACKUP_MARKER {
+                    self.marker.notify_one();
+                }
+            }
+        }
+        result
     }
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
@@ -148,6 +159,7 @@ struct Server {
     task: tokio::task::JoinHandle<()>,
     connection_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     dropping: Arc<std::sync::atomic::AtomicBool>,
+    marker: Arc<tokio::sync::Notify>,
     reserved: Option<std::net::UdpSocket>,
 }
 
@@ -214,9 +226,11 @@ impl Server {
     ) -> Self {
         use quinn::Runtime as _;
         let dropping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = Arc::new(tokio::sync::Notify::new());
         let bindings = Bindings::new(Arc::new(DroppedReplies {
             inner: quinn::TokioRuntime.wrap_udp_socket(socket).unwrap(),
             dropping: dropping.clone(),
+            marker: marker.clone(),
         }));
         let endpoint = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
@@ -293,6 +307,7 @@ impl Server {
             task,
             connection_count,
             dropping,
+            marker,
             reserved,
         }
     }
@@ -786,6 +801,126 @@ async fn pending_enrolled_proof_does_not_hide_the_mesh_discovery_clock() {
 #[tokio::test]
 async fn unnegotiated_backup_preserves_the_enrolled_retry_cooling() {
     retry_during_enrolled_proof(false, false).await;
+}
+
+/// Dispatch the initial retry timer without advancing a pending proof's clock.
+async fn start_mesh_candidate(
+    mut steering: std::pin::Pin<&mut impl std::future::Future<Output = Steered>>,
+    path: &PathSocket,
+) {
+    for _ in 0..100 {
+        std::future::poll_fn(|cx| {
+            assert!(steering.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        if matches!(path.path(), Path::Mesh(_)) {
+            return;
+        }
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    panic!("fixture did not start its mesh candidate");
+}
+
+/// Late capability publication must activate physical enrolled copies during
+/// pending proof. Real QUIC establishes the link, but the opaque marker bypasses
+/// QUIC pacing and proves only socket routing, not authenticated stream delivery.
+#[tokio::test]
+async fn backup_published_during_candidate_proof_keeps_enrolled_control_live() {
+    use quinn::AsyncUdpSocket as _;
+    use std::future::Future as _;
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let identity = identity(&ca, enrolled);
+    let registry = registry();
+    let link = connect(&identity, None, enrolled, ServerLinkKind::Fallback, false)
+        .await
+        .unwrap();
+    let Connected::Quic(connection) = &link.connected else {
+        panic!("fixture requires native QUIC")
+    };
+    let (send, receive) = connection.open_bi().await.unwrap();
+    let control = NativeChannel::control(send, receive).unwrap();
+    Transmit::default()
+        .send(&control, 0, &super::super::client_greeting(false))
+        .await
+        .unwrap();
+    assert!(matches!(
+        Receive::default().next(&control).await.unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    let _accepted = server.admitted_channel().await;
+    // Keep the reserved mesh tuple silent. Publish the negotiated capability
+    // separately, just as the session future does after decoding server Hello.
+    preference(
+        &registry,
+        Some(server.reserved.as_ref().unwrap().local_addr().unwrap().ip()),
+    )
+    .await;
+    tokio::time::pause();
+    let path = link.path.as_ref().unwrap();
+    let mut active = std::pin::pin!(std::future::pending::<io::Result<()>>());
+    let mut reason = ServerLinkReason::Connecting;
+    let mut steering = std::pin::pin!(steer(
+        &link,
+        &identity,
+        &registry,
+        false,
+        &mut reason,
+        active.as_mut(),
+    ));
+    start_mesh_candidate(steering.as_mut(), path).await;
+    link.standby
+        .send_replace(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+    // Poll publication before sending the marker: only subsequent datagrams
+    // need backup, so this does not depend on replaying older queued packets.
+    std::future::poll_fn(|cx| {
+        assert!(steering.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    path.try_send(&quinn::udp::Transmit {
+        destination: enrolled,
+        ecn: None,
+        contents: BACKUP_MARKER,
+        segment_size: None,
+        src_ip: None,
+    })
+    .unwrap();
+    // The direct successful send is the physical mesh boundary. Advance beyond
+    // the existing 20 ms copy deadline, then explicitly poll the owning adapter
+    // to flush its due copies, independently of Quinn's connection pacing.
+    tokio::time::advance(Duration::from_millis(21)).await;
+    let mut buffer = [0; 2048];
+    let mut buffers = [std::io::IoSliceMut::new(&mut buffer)];
+    let mut metadata = [quinn::udp::RecvMeta::default()];
+    std::future::poll_fn(|cx| {
+        if let std::task::Poll::Ready(result) = path.poll_recv(cx, &mut buffers, &mut metadata) {
+            result.unwrap();
+        }
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let observed = server.marker.notified();
+    tokio::pin!(observed);
+    // The actual pending proof owns failure: once refusal selects enrolled,
+    // delivery would no longer establish overlap during the candidate. No
+    // number of scheduler polls or wall-clock threshold decides success.
+    std::future::poll_fn(|cx| {
+        assert!(steering.as_mut().poll(cx).is_pending());
+        assert!(
+            matches!(path.path(), Path::Mesh(_)),
+            "late backup negotiation did not copy the marker before candidate refusal"
+        );
+        observed.as_mut().poll(cx)
+    })
+    .await;
+    assert_eq!(server.connections(), 1);
 }
 
 /// A recovered mesh is retried on the same connection after the cool-down.
