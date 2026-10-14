@@ -730,16 +730,16 @@ async fn retry_during_enrolled_proof(late_hint: bool, backup: bool) {
         tokio::time::advance(Duration::from_millis(1)).await;
     }
     assert!(matches!(path.path(), Path::Mesh(_)));
-    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::advance(Duration::from_secs(if backup { 4 } else { 10 })).await;
     std::future::poll_fn(|cx| {
         assert!(steering.as_mut().poll(cx).is_pending());
         std::task::Poll::Ready(())
     })
     .await;
     assert_eq!(
-        path.path(),
-        Path::Enrolled,
-        "candidate miss did not start return proof"
+        matches!(path.path(), Path::Mesh(_)),
+        backup,
+        "candidate refusal did not preserve backed discovery or legacy return"
     );
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     if late_hint {
@@ -1522,4 +1522,246 @@ async fn failed_control_worker_returns_to_retry_owner() {
     .await
     .expect("failed worker must return to the owner that recreates its service");
     assert!(result.is_err());
+}
+
+/// Retain the authenticated control handles while testing unproven discovery.
+async fn backed_candidate_fixture() -> (
+    Server,
+    RemoteIdentity,
+    crate::plugin_control::Registry,
+    Link,
+    tokio::net::UdpSocket,
+    NativeChannel,
+    Accepted,
+) {
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let identity = identity(&ca, enrolled);
+    let registry = registry();
+    let link = connect(&identity, None, enrolled, ServerLinkKind::Fallback, false)
+        .await
+        .unwrap();
+    let Connected::Quic(connection) = &link.connected else {
+        panic!("fixture requires native QUIC")
+    };
+    let (send, receive) = connection.open_bi().await.unwrap();
+    let control = NativeChannel::control(send, receive).unwrap();
+    Transmit::default()
+        .send(&control, 0, &super::super::client_greeting(false))
+        .await
+        .unwrap();
+    assert!(matches!(
+        Receive::default().next(&control).await.unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    let accepted = server.admitted_channel().await;
+    let mesh_socket = server.reserved.as_ref().unwrap().try_clone().unwrap();
+    mesh_socket.set_nonblocking(true).unwrap();
+    let mesh = tokio::net::UdpSocket::from_std(mesh_socket).unwrap();
+    preference(&registry, Some(mesh.local_addr().unwrap().ip())).await;
+    link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+    (server, identity, registry, link, mesh, control, accepted)
+}
+
+/// Negotiated backup must retain physical mesh discovery across candidate
+/// refusal. This witnesses raw socket routing, not authenticated stream latency.
+#[tokio::test]
+async fn backed_candidate_refusal_keeps_new_datagrams_on_mesh_discovery() {
+    use quinn::AsyncUdpSocket as _;
+    use std::future::Future as _;
+    let (server, identity, registry, link, mesh, _control, _accepted) =
+        backed_candidate_fixture().await;
+    let enrolled = identity.endpoint;
+    tokio::time::pause();
+    let path = link.path.as_ref().unwrap();
+    let mut active = std::pin::pin!(std::future::pending::<io::Result<()>>());
+    let mut reason = ServerLinkReason::Connecting;
+    let mut steering = std::pin::pin!(steer(
+        &link,
+        &identity,
+        &registry,
+        false,
+        &mut reason,
+        active.as_mut(),
+    ));
+    start_mesh_candidate(steering.as_mut(), path).await;
+    // No mesh listener answers. Advance beyond the maximum candidate guard
+    // (two RTTs capped at three seconds, plus margin), then poll exactly once to
+    // process refusal. Any new recovery/retry timers start at this boundary.
+    let unproven_since = std::time::Instant::now();
+    tokio::time::advance(Duration::from_secs(4)).await;
+    std::future::poll_fn(|cx| {
+        assert!(steering.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(
+        !path.heard_since(unproven_since),
+        "silent candidate unexpectedly answered"
+    );
+    path.try_send(&quinn::udp::Transmit {
+        destination: enrolled,
+        ecn: None,
+        contents: BACKUP_MARKER,
+        segment_size: None,
+        src_ip: None,
+    })
+    .unwrap();
+    let mesh_marker = async {
+        let mut packet = [0; 2048];
+        loop {
+            let count = mesh.recv(&mut packet).await.unwrap();
+            if packet[..count] == *BACKUP_MARKER {
+                return;
+            }
+        }
+    };
+    // Both witnesses are actual UDP receipts. Routing is frozen at the
+    // post-refusal boundary; waiting neither polls steering nor advances its
+    // retry timer. Earlier encrypted probes cannot satisfy the public marker.
+    let reached_mesh = tokio::select! {
+        biased;
+        () = mesh_marker => true,
+        () = server.marker.notified() => false,
+    };
+    assert!(
+        reached_mesh,
+        "candidate refusal sent the new datagram only to enrolled, leaving a mesh discovery gap"
+    );
+    assert_eq!(server.connections(), 1);
+}
+
+/// Pending discovery must react to control changes without pretending it proved
+/// mesh. Independent authenticated silence must still retire both-dead UDP.
+#[tokio::test]
+async fn backed_discovery_keeps_control_cancellation_and_udp_recovery_bounded() {
+    use std::future::Future as _;
+    for change in 0..4 {
+        let (server, identity, registry, link, _mesh, _control, _accepted) =
+            backed_candidate_fixture().await;
+        if change == 2 {
+            server
+                .dropping
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        report(&registry, Some(&link), ServerLinkReason::Connecting);
+        tokio::time::pause();
+        let path = link.path.as_ref().unwrap();
+        let mut active = std::pin::pin!(std::future::pending::<io::Result<()>>());
+        let mut reason = ServerLinkReason::Connecting;
+        let mut steering = std::pin::pin!(steer(
+            &link,
+            &identity,
+            &registry,
+            false,
+            &mut reason,
+            active.as_mut(),
+        ));
+        start_mesh_candidate(steering.as_mut(), path).await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        std::future::poll_fn(|cx| {
+            assert!(steering.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            matches!(path.path(), Path::Mesh(_)),
+            "backed discovery opened an enrolled-only gap"
+        );
+        assert_eq!(
+            status(&registry).await.kind,
+            ServerLinkKind::Fallback,
+            "unanswered discovery was reported as proven mesh"
+        );
+        if change == 0 {
+            preference(&registry, None).await;
+        } else if change == 1 {
+            link.negotiated(0);
+        } else if change == 3 {
+            preference(&registry, Some("127.0.0.3".parse().unwrap())).await;
+        } else {
+            // Every proof epoch is shorter than this virtual step. Even if a
+            // final pre-cut ACK is observed at the first boundary, it must not
+            // let repeated candidate epochs reset the independent silence guard.
+            let mut ended = false;
+            for _ in 0..4 {
+                tokio::time::advance(Duration::from_secs(6)).await;
+                ended = std::future::poll_fn(|cx| match steering.as_mut().poll(cx) {
+                    std::task::Poll::Ready(Steered::Ended) => std::task::Poll::Ready(true),
+                    std::task::Poll::Ready(Steered::Replaced(..)) => {
+                        panic!("QUIC discovery replaced its own link")
+                    }
+                    std::task::Poll::Pending => std::task::Poll::Ready(false),
+                })
+                .await;
+                if ended {
+                    break;
+                }
+            }
+            assert!(
+                ended,
+                "both dead UDP paths stayed in mesh discovery instead of releasing the TCP dial race"
+            );
+            tokio::time::resume();
+            continue;
+        }
+        std::future::poll_fn(|cx| {
+            assert!(steering.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            path.path(),
+            Path::Enrolled,
+            "control change failed to cancel unproven mesh discovery"
+        );
+        assert_eq!(status(&registry).await.kind, ServerLinkKind::Fallback);
+        tokio::time::resume();
+    }
+}
+
+/// Session completion cancels continuous discovery before another proof epoch.
+#[tokio::test]
+async fn backed_discovery_ends_with_its_owned_session() {
+    use std::future::Future as _;
+    let (_server, identity, registry, link, _mesh, _control, _accepted) =
+        backed_candidate_fixture().await;
+    tokio::time::pause();
+    let path = link.path.as_ref().unwrap();
+    let (finished, completion) = tokio::sync::oneshot::channel::<()>();
+    let mut active = std::pin::pin!(async {
+        completion.await.unwrap();
+        Ok(())
+    });
+    let mut reason = ServerLinkReason::Connecting;
+    let mut steering = std::pin::pin!(steer(
+        &link,
+        &identity,
+        &registry,
+        false,
+        &mut reason,
+        active.as_mut(),
+    ));
+    start_mesh_candidate(steering.as_mut(), path).await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    std::future::poll_fn(|cx| {
+        assert!(steering.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(matches!(path.path(), Path::Mesh(_)));
+    finished.send(()).unwrap();
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            steering.as_mut().poll(cx),
+            std::task::Poll::Ready(Steered::Ended)
+        ));
+        std::task::Poll::Ready(())
+    })
+    .await;
 }

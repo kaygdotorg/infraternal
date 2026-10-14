@@ -339,6 +339,61 @@ async fn retry_path(path: &PathSocket, deadline: tokio::time::Instant, since: st
     }
 }
 
+/// Candidate proof is separate from proven-path interruption. Backed discovery
+/// retains its physical mesh sends and bounded history across failed epochs.
+#[derive(PartialEq, Eq)]
+enum Candidate {
+    Proven,
+    Refused,
+    Unreachable,
+}
+
+async fn candidate(
+    connection: &quinn::Connection,
+    path: &PathSocket,
+    proposals: &mut tokio::sync::watch::Receiver<Option<std::net::IpAddr>>,
+    capabilities: &mut tokio::sync::watch::Receiver<u64>,
+) -> Candidate {
+    // This observer outlives individual mesh proof epochs. Resetting it with
+    // every unanswered candidate would strand both-dead UDP until QUIC expiry.
+    let mut alive = remote_quic::PeerFreshness::new(connection);
+    loop {
+        let backed = *capabilities.borrow_and_update()
+            & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+            != 0;
+        let moved = tokio::select! {
+            changed = proposals.changed() => {
+                let _ = changed;
+                return Candidate::Refused;
+            }
+            () = async {
+                let mut negotiated = backed;
+                while capabilities.changed().await.is_ok() {
+                    let next = *capabilities.borrow_and_update()
+                        & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0;
+                    if negotiated && !next { return; }
+                    negotiated = next;
+                }
+            } => return Candidate::Refused,
+            moved = answered(connection, path, tokio::time::Instant::now(), true) => moved,
+        };
+        if moved {
+            return Candidate::Proven;
+        }
+        if *capabilities.borrow_and_update() & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+            == 0
+        {
+            return Candidate::Refused;
+        }
+        if alive.silence(connection) >= PROBE_TIMEOUT {
+            return Candidate::Unreachable;
+        }
+        // Keep copies and ciphertext history intact. A new answered epoch
+        // requires a new authenticated counter change and keeps probing on its
+        // existing clock; an old reply cannot become proof through elapsed time.
+    }
+}
+
 /// Drive one QUIC link: move it between paths in place until its session ends.
 #[allow(clippy::too_many_lines)]
 async fn steer(
@@ -377,7 +432,6 @@ async fn steer(
                     }
                     () = retry_path(path, not_before, retry_since) => {}
                 }
-                let since = tokio::time::Instant::now();
                 path.use_mesh(mesh);
                 path.set_backup(
                     *capabilities.borrow_and_update()
@@ -387,43 +441,48 @@ async fn steer(
                 remote_quic::probe_liveness(connection);
                 let moved = tokio::select! {
                     _ = &mut active => return Steered::Ended,
-                    moved = answered(connection, path, since, true) => moved,
+                    moved = candidate(connection, path, &mut proposals, &mut capabilities) => moved,
                 };
-                if moved {
+                let latest = *proposals.borrow_and_update();
+                if moved == Candidate::Proven && latest == Some(mesh.ip()) {
                     retry = Duration::from_secs(1);
                     *reason = ServerLinkReason::MeshProven;
                 } else {
-                    // An unanswered switch keeps the session: its datagrams are
-                    // resent on the enrolled path and the move retries later.
-                    *reason = ServerLinkReason::MeshRefused;
+                    // Legacy refusal and cancelled intent return synchronously;
+                    // healthy backed discovery never selects this enrolled-only
+                    // gap. Only independent silence can expire both UDP paths.
+                    *reason = if latest.is_none() {
+                        ServerLinkReason::MeshDisabled
+                    } else {
+                        ServerLinkReason::MeshRefused
+                    };
                     retry_since = std::time::Instant::now();
+                    not_before = tokio::time::Instant::now() + PROBE_TIMEOUT;
+                    if moved == Candidate::Unreachable {
+                        let returned = tokio::select! {
+                            _ = &mut active => return Steered::Ended,
+                            returned = to_enrolled(link, registry, *reason) => returned,
+                        };
+                        if !returned {
+                            return Steered::Ended;
+                        }
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = &mut active => return Steered::Ended,
+                            _ = to_enrolled(link, registry, *reason) => {},
+                            () = retry_path(path, not_before, retry_since) => {},
+                        }
+                    }
+                    if latest.is_none() {
+                        path.forget_mesh();
+                    }
                     let backed = *capabilities.borrow_and_update()
                         & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
                         != 0;
-                    // A joining peer can release only queued copies, yielding
-                    // no fresh mesh reply. Negotiated backup keeps enrolled
-                    // traffic live while discovery retries on the probe clock.
-                    // Without it, preserve recovery and exponential cooling;
-                    // its bounded enrolled guard always ends before five seconds.
-                    not_before = tokio::time::Instant::now()
-                        + if backed {
-                            BACKUP_PROBE_INTERVAL
-                        } else {
-                            PROBE_TIMEOUT
-                        };
-                    // Selecting enrolled is synchronous. A late mesh reply may
-                    // start fresh proof without waiting for enrolled recovery;
-                    // the hint itself neither proves nor changes the path.
-                    tokio::select! {
-                        // Poll the return first so a pre-latched hint cannot
-                        // skip selecting enrolled after the candidate miss.
-                        biased;
-                        _ = &mut active => return Steered::Ended,
-                        _ = to_enrolled(link, registry, *reason) => {},
-                        () = retry_path(path, not_before, retry_since) => {},
-                    }
-                    if !backed {
-                        not_before = tokio::time::Instant::now() + retry;
+                    not_before = tokio::time::Instant::now();
+                    if !backed && latest == Some(mesh.ip()) {
+                        not_before += retry;
                         retry = (retry * 2).min(Duration::from_secs(30));
                     }
                 }
