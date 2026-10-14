@@ -358,6 +358,19 @@ pub struct Decoder {
     bytes: Vec<u8>,
 }
 impl Decoder {
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.bytes.capacity()
+    }
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn growth_bound(&self, incoming: usize) -> usize {
+        let needed = self.bytes.len().saturating_add(incoming);
+        if needed <= self.bytes.capacity() {
+            0
+        } else {
+            self.bytes.capacity().saturating_mul(2).max(needed).max(8) - self.bytes.capacity()
+        }
+    }
     /// Consume bytes and return complete frames, preserving an incomplete suffix.
     /// # Errors
     /// Rejects invalid frames and storage beyond one maximum-sized frame.

@@ -243,6 +243,10 @@ impl Terminal {
         *self = restored;
         Ok(())
     }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn memory(&self) -> (usize, usize, bool) {
+        self.engine.memory()
+    }
     /// A clean or still-pending rebuild cannot certify faithful state. Keep
     /// this provenance across peer replacement and further output/resizes.
     pub fn requires_approximation(&self) -> bool {

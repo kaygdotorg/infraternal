@@ -19,6 +19,11 @@ impl Ring {
         }
     }
     #[must_use]
+    #[cfg(feature = "process-per-user")]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.bytes.capacity()
+    }
+    #[must_use]
     pub fn head(&self) -> u64 {
         self.head
     }

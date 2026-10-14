@@ -47,6 +47,17 @@ impl Inputs {
         }
     }
     #[cfg(feature = "process-per-user")]
+    pub(super) fn allocated_bytes(&self) -> usize {
+        let buckets = if self.cursors.capacity() == 0 {
+            0
+        } else {
+            (self.cursors.capacity() + 1).next_power_of_two()
+        };
+        buckets * (std::mem::size_of::<(u32, InputCursors)>() + 1)
+            + if buckets == 0 { 0 } else { 32 }
+            + self.segments.capacity() * std::mem::size_of::<(u32, usize)>()
+    }
+    #[cfg(feature = "process-per-user")]
     pub(super) fn available(&self, writer: u32, queued: usize) -> usize {
         if self.segments.len() >= self.segment_limit
             && self

@@ -38,6 +38,8 @@ const PREFIX_LIMIT: usize = 4096;
 const OUTPUTS_PER_ROUND: usize = 16;
 // Aggregate history is bounded at scale rather than multiplying defaults by 1000.
 const HOST_HISTORY_BYTES: usize = 64 * 1024 * 1024;
+const PEER_BYTES: usize = 4 * 1024 * 1024;
+const SESSION_BYTES: usize = 16 * 1024 * 1024;
 
 /// A complete origin prefix is retained until VT materialization, never an evicting tail.
 struct LazyTerminal {
@@ -79,6 +81,14 @@ impl LazyTerminal {
             state.prefix = Vec::new();
         }
         Ok(())
+    }
+    fn allocated_bytes(&self) -> usize {
+        let state = self.state.borrow();
+        state.prefix.capacity()
+            + state
+                .terminal
+                .as_ref()
+                .map_or(0, |t| t.memory().0 + 8192 + std::mem::size_of::<Terminal>())
     }
     fn process(&mut self, bytes: &[u8]) -> io::Result<()> {
         #[cfg(test)]
@@ -198,6 +208,21 @@ impl Session {
             deadline: None,
         })
     }
+    fn peer_bytes(&self) -> usize {
+        self.peers
+            .iter()
+            .map(|p| p.decoder.allocated_bytes() + p.pending.capacity() + p.trailing.capacity())
+            .sum()
+    }
+    fn allocated_bytes(&self) -> usize {
+        self.terminal.allocated_bytes()
+            + self.ring.allocated_bytes()
+            + self.input.capacity()
+            + self.cursors.allocated_bytes()
+            + self.peer_bytes()
+            + self.peers.capacity() * std::mem::size_of::<Peer>()
+            + std::mem::size_of::<Self>()
+    }
     fn can_read(&self) -> bool {
         !self.drained
             && (!self.peers.iter().any(|p| p.cursor.is_some())
@@ -217,9 +242,21 @@ impl Session {
             );
             self.deadline = Some(Instant::now() + crate::ended::MAX_RETENTION);
         }
+        if self.allocated_bytes()
+            > SESSION_BYTES + self.terminal.history * 2 + self.config.ring_capacity
+        {
+            return Err(io::Error::other("session memory budget exhausted"));
+        }
+        for p in &mut self.peers {
+            if p.pending.is_empty() && p.pending.capacity() > CHUNK * 4 {
+                p.pending = Vec::new();
+            }
+        }
+        let mut wire_bytes = self.peer_bytes();
         let oldest = self.peers.iter().filter_map(|p| p.deferred).min();
         let mut retired = Vec::new();
         for (i, p) in self.peers.iter_mut().enumerate() {
+            let before = p.decoder.allocated_bytes() + p.pending.capacity() + p.trailing.capacity();
             if p.deferred.is_some() || !p.trailing.is_empty() {
                 let mut trailing = std::mem::take(&mut p.trailing);
                 match consume_peer(
@@ -264,14 +301,26 @@ impl Session {
             {
                 match request {
                     Request::Read(seq) => p.cursor = Some(seq),
-                    Request::Snapshot => p.snapshot(&self.terminal, self.ring.head())?,
+                    Request::Snapshot => {
+                        if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
+                            p.snapshot(&self.terminal, self.ring.head())?;
+                        } else {
+                            p.queue(&Frame::Error(1, "session memory budget exhausted".into()))?;
+                            p.cursor = None;
+                        }
+                    }
                 }
             }
             if p.pending.is_empty()
                 && let Some(seq) = p.cursor
             {
                 if seq < self.ring.start() {
-                    p.snapshot(&self.terminal, self.ring.head())?;
+                    if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
+                        p.snapshot(&self.terminal, self.ring.head())?;
+                    } else {
+                        p.queue(&Frame::Error(1, "session memory budget exhausted".into()))?;
+                        p.cursor = None;
+                    }
                 } else if seq < self.ring.head() {
                     let bytes = self
                         .ring
@@ -287,6 +336,10 @@ impl Session {
                     p.exited_sent = true;
                 }
             }
+            wire_bytes = wire_bytes - before
+                + p.decoder.allocated_bytes()
+                + p.pending.capacity()
+                + p.trailing.capacity();
         }
         for i in retired.into_iter().rev() {
             self.peers.remove(i);
@@ -403,6 +456,7 @@ impl Session {
         let oldest = self.peers.iter().filter_map(|p| p.deferred).min();
         let mut disconnects = [false; MAX_PEERS];
         for (i, flags) in peers.iter().copied().enumerate() {
+            let retained = self.peer_bytes();
             let p = &mut self.peers[i];
             let mut disconnect = flags.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
             if flags.contains(PollFlags::POLLOUT) && p.flush().is_err() {
@@ -415,6 +469,9 @@ impl Session {
                 let mut bytes = [0; CHUNK];
                 match p.stream.read(&mut bytes) {
                     Ok(0) => disconnect = true,
+                    Ok(n) if retained + p.decoder.growth_bound(n) + 2 * CHUNK > PEER_BYTES => {
+                        disconnect = true;
+                    }
                     Ok(n) => match consume_peer(
                         &bytes[..n],
                         p,
