@@ -79,7 +79,7 @@ pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd
 pub mod openssl_secure;
 
 #[cfg(feature = "process-per-user")]
-pub use session::user_host::run_host;
+pub use session::user_host::{run_host, run_host_accounted};
 
 #[cfg(feature = "process-per-user")]
 pub use pty::handoff::{receive_masters, send_masters};

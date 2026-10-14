@@ -4,13 +4,14 @@ use nix::{
     poll::PollFlags,
     sys::{
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout},
+        signal::Signal,
         signalfd::SignalFd,
     },
 };
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
-    io,
+    io::{self, Write},
     os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
     panic::{AssertUnwindSafe, catch_unwind},
     time::{Duration, Instant},
@@ -31,6 +32,7 @@ struct Registry {
     owned: Vec<Vec<RawFd>>,
     next_key: u64,
 }
+
 impl Registry {
     fn new(count: usize, signals: &SignalFd) -> io::Result<Self> {
         let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?;
@@ -181,7 +183,11 @@ fn retire_failed(index: usize, slots: &mut [Option<Session>], registry: &mut Reg
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> {
+pub(super) fn run(
+    sessions: Vec<Session>,
+    signals: &SignalFd,
+    mut accounting: Option<std::fs::File>,
+) -> io::Result<()> {
     let mut registry = Registry::new(sessions.len(), signals)?;
     let mut slots: Vec<_> = sessions.into_iter().map(Some).collect();
     let mut timers: BinaryHeap<Reverse<(Instant, usize)>> = BinaryHeap::new();
@@ -226,9 +232,10 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
         };
         let mut work: HashMap<usize, Ready> = HashMap::new();
         let mut child_exit = false;
+        let mut signal_ready = false;
         for event in &events[..count] {
             if event.data() == SIGNAL {
-                child_exit = true;
+                signal_ready = true;
                 continue;
             }
             if let Some(entry) = registry.by_key.get(&event.data()) {
@@ -238,8 +245,19 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
                     .insert(entry.key, event.events());
             }
         }
+        if signal_ready {
+            while let Some(information) = signals.read_signal().map_err(io::Error::from)? {
+                let signal = i32::try_from(information.ssi_signo)
+                    .ok()
+                    .and_then(|value| Signal::try_from(value).ok());
+                match signal {
+                    Some(Signal::SIGCHLD) => child_exit = true,
+                    Some(Signal::SIGUSR2) => record_ownership(&slots, &mut accounting),
+                    _ => {}
+                }
+            }
+        }
         if child_exit {
-            while signals.read_signal().map_err(io::Error::from)?.is_some() {}
             // SIGCHLD coalesces, so this single event reconciles every child.
             // No other event scans idle sessions or calls waitpid on them.
             for (index, slot) in slots.iter().enumerate() {
@@ -387,10 +405,61 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
     }
 }
 
+/// A profiling failure closes only the optional receipt, never live sessions.
+/// Numeric ownership is sampled between native calls on the reactor thread.
+fn record_ownership(slots: &[Option<Session>], accounting: &mut Option<std::fs::File>) {
+    let result = accounting.as_mut().map(|file| -> io::Result<()> {
+        let mut writer = io::BufWriter::new(file);
+        for (index, session) in slots.iter().enumerate() {
+            if let Some(session) = session {
+                session.record_memory(index, &mut writer)?;
+            }
+        }
+        writer.flush()
+    });
+    if let Some(Err(error)) = result {
+        *accounting = None;
+        eprintln!("shared-host accounting stopped: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
+    #[test]
+    fn accounting_write_failure_disables_only_the_receipt() {
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/a{}",
+            std::process::id()
+        ));
+        let mut config = crate::Config::new([5; 16], nix::unistd::Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut slots = [Some(Session::new(config, 65536).unwrap())];
+        let mut accounting = Some(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        );
+        record_ownership(&slots, &mut accounting);
+        assert!(accounting.is_none());
+        assert!(
+            slots[0]
+                .as_mut()
+                .unwrap()
+                .pty
+                .child
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        record_ownership(&slots, &mut accounting);
+        drop(slots);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
     #[test]
     fn reused_peer_descriptor_receives_a_new_readiness_identity() {
         const CASE: &str = "session::user_host::reactor::tests::reused_peer_descriptor_receives_a_new_readiness_identity";

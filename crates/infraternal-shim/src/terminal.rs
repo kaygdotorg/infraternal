@@ -248,6 +248,16 @@ impl Terminal {
     pub(super) fn memory(&self) -> (usize, usize, bool) {
         self.engine.memory()
     }
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn ownership(&self) -> io::Result<(usize, usize, usize, usize)> {
+        let (ordinary, pages, _) = self.engine.allocation_classes();
+        Ok((
+            ordinary,
+            pages,
+            self.engine.resident_pages()?,
+            self.pending.capacity(),
+        ))
+    }
     /// A clean or still-pending rebuild cannot certify faithful state. Keep
     /// this provenance across peer replacement and further output/resizes.
     pub fn requires_approximation(&self) -> bool {

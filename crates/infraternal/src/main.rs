@@ -1041,6 +1041,11 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     if matches.get_one::<i64>("host_sessions").is_some() {
         return user_host_cli::run(matches);
     }
+    #[cfg(feature = "process-per-user")]
+    if matches.get_one::<String>("host_accounting").is_some() {
+        eprintln!("--host-accounting requires --host-sessions");
+        return ExitCode::from(2);
+    }
     match run_shim(
         session,
         uid,

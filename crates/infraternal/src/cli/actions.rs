@@ -263,6 +263,8 @@ fn session_shim_action() -> ActionDefinition {
             [
                 #[cfg(feature = "process-per-user")]
                 ("host_sessions".to_owned(), JsonSchema::integer("Research-only count of sessions in one existing person login; 1–1000.")),
+                #[cfg(feature = "process-per-user")]
+                ("host_accounting".to_owned(), JsonSchema::string("Research-only new private file for numeric session ownership receipts on SIGUSR2; no timer or terminal content.")),
                 (
                     "session".to_owned(),
                     JsonSchema::string("Validated session identifier."),

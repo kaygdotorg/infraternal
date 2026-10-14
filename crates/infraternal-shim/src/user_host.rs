@@ -222,7 +222,31 @@ impl Session {
             + self.cursors.allocated_bytes()
             + self.peer_bytes()
             + self.peers.capacity() * std::mem::size_of::<Peer>()
+            + self
+                .config
+                .state
+                .as_ref()
+                .map_or(0, std::path::PathBuf::capacity)
+            + self.path.0.capacity()
             + std::mem::size_of::<Self>()
+    }
+    fn record_memory(&self, index: usize, writer: &mut impl Write) -> io::Result<()> {
+        let state = self.terminal.state.borrow();
+        let (ordinary, pages, resident, carry) = state
+            .terminal
+            .as_ref()
+            .map_or(Ok((0, 0, 0, 0)), |t| t.ownership())?;
+        writeln!(
+            writer,
+            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"carry_bytes\":{carry},\"prefix_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}}}",
+            self.allocated_bytes(),
+            state.prefix.capacity(),
+            self.ring.allocated_bytes(),
+            self.input.capacity(),
+            self.cursors.allocated_bytes(),
+            self.peer_bytes(),
+            self.peers.capacity() * std::mem::size_of::<Peer>()
+        )
     }
     fn can_read(&self) -> bool {
         !self.drained
@@ -523,7 +547,19 @@ impl Session {
 /// # Errors
 /// Rejects foreign UIDs, duplicate IDs, invalid geometry and startup failures.
 #[allow(clippy::too_many_lines)]
-pub fn run_host(mut configs: Vec<Config>) -> io::Result<()> {
+pub fn run_host(configs: Vec<Config>) -> io::Result<()> {
+    run_host_accounted(configs, None)
+}
+
+/// Run the research host with optional numeric ownership receipts on SIGUSR2.
+/// No timer or content capture is installed; the caller owns the private file.
+/// # Errors
+/// Rejects the same batch/startup failures as `run_host`.
+#[allow(clippy::too_many_lines)]
+pub fn run_host_accounted(
+    mut configs: Vec<Config>,
+    accounting: Option<std::fs::File>,
+) -> io::Result<()> {
     if configs.is_empty()
         || configs.len() > 1000
         || configs.iter().enumerate().any(|(i, c)| {
@@ -542,6 +578,9 @@ pub fn run_host(mut configs: Vec<Config>) -> io::Result<()> {
     umask(Mode::from_bits_truncate(0o077));
     let mut mask = SigSet::empty();
     mask.add(Signal::SIGCHLD);
+    if accounting.is_some() {
+        mask.add(Signal::SIGUSR2);
+    }
     mask.thread_block().map_err(io::Error::from)?;
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
@@ -554,7 +593,7 @@ pub fn run_host(mut configs: Vec<Config>) -> io::Result<()> {
         .into_iter()
         .map(|config| Session::new(config, history))
         .collect::<io::Result<Vec<_>>>()?;
-    reactor::run(sessions, &signals)
+    reactor::run(sessions, &signals, accounting)
 }
 
 #[path = "user_host_reactor.rs"]

@@ -77,7 +77,6 @@ impl Memory {
         let state = unsafe { &*self.state.get() };
         (state.used, state.peak, state.refused)
     }
-    #[cfg(test)]
     pub(super) fn allocation_classes(&self) -> (usize, usize, usize) {
         // SAFETY: the synchronous test inspects copied ownership metadata only,
         // between native calls; the list is never borrowed across a callback.
@@ -89,6 +88,48 @@ impl Memory {
             count += 1;
         }
         (state.used - state.mapped_used, state.mapped_used, count)
+    }
+    /// Inspect only this terminal's private mappings; mincore never faults in
+    /// their contents. Ordinary heap blocks share allocator pages and are
+    /// reported by requested bytes instead of falsely attributing whole pages.
+    pub(super) fn resident_pages(&self) -> std::io::Result<usize> {
+        // SAFETY: the reactor invokes this between native calls; every node
+        // and mapping remains owned and no callback overlaps this traversal.
+        let state = unsafe { &*self.state.get() };
+        let mut block = state.first;
+        let mut resident = 0;
+        let mut residency = [0_u8; 256];
+        while let Some(current) = block {
+            let current = unsafe { current.as_ref() };
+            block = current.next;
+            if !current.mapped {
+                continue;
+            }
+            let pages = current.layout.size() / state.page_size;
+            let mut first = 0;
+            while first < pages {
+                let count = (pages - first).min(residency.len());
+                // SAFETY: the aligned range lies entirely inside this owned
+                // mapping; the vector has one writable byte per queried page.
+                let result = unsafe {
+                    libc::mincore(
+                        current.base.as_ptr().add(first * state.page_size).cast(),
+                        count * state.page_size,
+                        residency.as_mut_ptr(),
+                    )
+                };
+                if result == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                resident += residency[..count]
+                    .iter()
+                    .filter(|byte| **byte & 1 != 0)
+                    .count()
+                    * state.page_size;
+                first += count;
+            }
+        }
+        Ok(resident)
     }
     #[cfg(test)]
     pub(super) fn refuse_new_allocations(&mut self) {
@@ -362,6 +403,29 @@ mod payload_tests {
             assert_eq!(memory.stats().0, 0);
             assert!(!allocate(ctx, 512 * 1024, 3, usize::MAX).is_null());
             assert!(memory.stats().0 >= 512 * 1024);
+        }
+    }
+
+    #[test]
+    fn residency_query_observes_only_owned_page_mappings_without_faulting_payload() {
+        let payload = 2 * page_size();
+        let memory = Memory::new(8 * page_size());
+        let ctx = memory.state.get().cast();
+        assert_eq!(memory.resident_pages().unwrap(), 0);
+        // SAFETY: both allocations borrow this stable context. The entire
+        // payload is writable and release/drop reclaim only its owned blocks.
+        unsafe {
+            let ordinary = allocate(ctx, 1024, 4, 0);
+            assert!(!ordinary.is_null());
+            assert_eq!(memory.resident_pages().unwrap(), 0);
+            let pages = allocate(ctx, payload, 12, usize::MAX);
+            assert!(!pages.is_null());
+            let before = memory.resident_pages().unwrap();
+            assert_eq!(memory.resident_pages().unwrap(), before);
+            pages.cast::<u8>().write_bytes(1, payload);
+            assert_eq!(memory.resident_pages().unwrap(), before + payload);
+            release(ctx, pages, payload, 12, 0);
+            assert_eq!(memory.resident_pages().unwrap(), 0);
         }
     }
 }

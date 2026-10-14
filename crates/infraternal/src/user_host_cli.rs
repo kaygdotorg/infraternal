@@ -1,6 +1,7 @@
 //! Explicit research-only batch launch through the existing hidden shim action [D7/D268].
 use crate::{ArgMatches, ExitCode, PathBuf, shim_integer};
-use infraternal_shim::{Config, run_host};
+use infraternal_shim::{Config, run_host_accounted};
+use std::os::unix::fs::OpenOptionsExt;
 
 pub(super) fn run(matches: &ArgMatches) -> ExitCode {
     match start(matches) {
@@ -36,6 +37,21 @@ fn start(matches: &ArgMatches) -> std::io::Result<()> {
     if matches.get_flag("readiness") || matches.get_flag("detach") {
         return Err(invalid());
     }
+    // Profiling cannot change login authority or overwrite an existing file.
+    // No terminal content is recorded; failure here precedes PTY creation.
+    if config.uid != nix::unistd::Uid::effective().as_raw() {
+        return Err(invalid());
+    }
+    let accounting = matches
+        .get_one::<String>("host_accounting")
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+        })
+        .transpose()?;
     let configs = (0..count)
         .map(|i| {
             let mut config = config.clone();
@@ -43,5 +59,5 @@ fn start(matches: &ArgMatches) -> std::io::Result<()> {
             config
         })
         .collect();
-    run_host(configs)
+    run_host_accounted(configs, accounting)
 }
