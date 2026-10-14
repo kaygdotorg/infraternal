@@ -25,6 +25,54 @@ pub struct Pty {
 fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
+
+/// Classify already-ready PTY output without consuming or reordering bytes.
+/// The shared reactor uses this hint to read short interactive replies before
+/// bulk output. Read readiness remains authoritative if the hint changes.
+#[cfg(feature = "process-per-user")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn available_output(master: &File) -> io::Result<usize> {
+    let mut count: nix::libc::c_int = 0;
+    // SAFETY: FIONREAD synchronously writes one c_int through this valid
+    // pointer. The borrowed PTY master stays open throughout the ioctl.
+    let result =
+        unsafe { nix::libc::ioctl(master.as_raw_fd(), nix::libc::FIONREAD, &raw mut count) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    usize::try_from(count).map_err(|_| io::Error::other("negative PTY readable byte count"))
+}
+
+#[cfg(all(test, feature = "process-per-user"))]
+mod output_readiness_tests {
+    //! Readable-byte classification borrows a real PTY without consuming data.
+    use super::*;
+    use nix::poll::{PollFd, PollFlags, poll};
+    use std::{io::Read, os::fd::AsFd};
+
+    #[test]
+    fn readable_byte_hint_preserves_the_complete_output_stream() {
+        let terminal = openpty(None, None).unwrap();
+        let mut master = File::from(terminal.master);
+        assert_eq!(available_output(&master).unwrap(), 0);
+        unistd::write(&terminal.slave, b"short-reply").unwrap();
+        assert_eq!(
+            poll(
+                &mut [PollFd::new(master.as_fd(), PollFlags::POLLIN)],
+                5000_u16
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(available_output(&master).unwrap(), 11);
+        assert_eq!(available_output(&master).unwrap(), 11);
+        let mut bytes = [0; 11];
+        master.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"short-reply");
+        assert_eq!(available_output(&master).unwrap(), 0);
+    }
+}
+
 impl Pty {
     #[cfg(test)]
     pub fn spawn(uid: u32, cols: u16, rows: u16) -> io::Result<Self> {
