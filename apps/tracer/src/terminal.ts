@@ -286,6 +286,7 @@ export class TerminalClient {
   private linkController: TerminalLinkController | undefined;
   private linkControllerLoading: Promise<void> | undefined;
   private readonly pendingLinkRows = new Set<number>();
+  private readonly forcedLinkRows = new Set<number>();
   /** D249: the live cursor, a layer of its own that the compositor blinks; the renderer never draws it while this shows. */
   private cursorLayer: TerminalCursorLayer | undefined;
   private rendererCursorHidden = false;
@@ -761,6 +762,7 @@ export class TerminalClient {
     this.linkController?.dispose();
     this.linkController = undefined;
     this.pendingLinkRows.clear();
+    this.forcedLinkRows.clear();
     this.disposeTouch();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
@@ -1854,14 +1856,14 @@ export class TerminalClient {
     renderer.render = (...args) => {
       const changedRows = this.takeChangedLinkRows(args[0], args[1] === true);
       render(...args);
-      if (changedRows) this.queueLinkRows(changedRows);
+      if (changedRows) this.queueLinkRows(changedRows.rows, changedRows.force);
       this.renderPasses += 1;
       this.syncCursorLayer();
     };
   }
 
   /** Reads the renderer's dirty rows before its pass clears them; no detection runs on the write or input path. */
-  private takeChangedLinkRows(value: unknown, forceAll: boolean): number[] | undefined {
+  private takeChangedLinkRows(value: unknown, forceAll: boolean): { rows: number[]; force: boolean } | undefined {
     if (!this.linkRowsArmed || this.suspended) return undefined;
     this.linkRowsArmed = false;
     const active = this.terminal.buffer.active;
@@ -1873,7 +1875,7 @@ export class TerminalClient {
       const visible = this.visibleLinkRange();
       const rows: number[] = [];
       for (let y = visible.first; y <= visible.last; y += 1) rows.push(y);
-      return rows;
+      return { rows, force: false };
     }
     const buffer = value as {
       isDirty?: () => boolean;
@@ -1886,7 +1888,7 @@ export class TerminalClient {
     if (full) {
       const all: number[] = [];
       for (let y = visible.first; y <= visible.last; y += 1) all.push(y);
-      return all;
+      return { rows: all, force: true };
     }
     buffer.isDirty?.(); // Updates Ghostty's dirty snapshot once before the row checks.
     const scrollback = active.type === "alternate" ? 0 : Math.max(0, active.length - this.terminal.rows);
@@ -1896,13 +1898,16 @@ export class TerminalClient {
       const absolute = scrollback + row;
       if (absolute >= visible.first && absolute <= visible.last) changed.push(absolute);
     }
-    return changed;
+    return { rows: changed, force: true };
   }
 
   /** Makes only the named rows available to the deferred detector. */
-  private queueLinkRows(rows: readonly number[]): void {
+  private queueLinkRows(rows: readonly number[], force = true): void {
     if (this.closed || this.suspended || rows.length === 0) return;
-    for (const row of rows) this.pendingLinkRows.add(row);
+    for (const row of rows) {
+      this.pendingLinkRows.add(row);
+      if (force) this.forcedLinkRows.add(row);
+    }
     if (this.linkController) this.flushLinkRows();
     else this.loadLinkController();
   }
@@ -1911,9 +1916,9 @@ export class TerminalClient {
   private queueVisibleLinkRows(): void {
     if (this.closed || this.suspended) return;
     const visible = this.visibleLinkRange();
-    for (let row = visible.first; row <= visible.last; row += 1) this.pendingLinkRows.add(row);
-    if (this.linkController) this.flushLinkRows();
-    else this.loadLinkController();
+    const rows: number[] = [];
+    for (let row = visible.first; row <= visible.last; row += 1) rows.push(row);
+    this.queueLinkRows(rows, true);
   }
 
   private loadLinkController(): void {
@@ -1951,8 +1956,12 @@ export class TerminalClient {
     const controller = this.linkController;
     if (!controller || this.pendingLinkRows.size === 0 || this.suspended) return;
     const rows = [...this.pendingLinkRows];
+    const forced = rows.filter((row) => this.forcedLinkRows.has(row));
+    const candidates = rows.filter((row) => !this.forcedLinkRows.has(row));
     this.pendingLinkRows.clear();
-    controller.updateRows(rows);
+    this.forcedLinkRows.clear();
+    controller.updateRows(forced, true);
+    controller.updateRows(candidates, false);
   }
 
   private visibleLinkRange(): { first: number; last: number } {

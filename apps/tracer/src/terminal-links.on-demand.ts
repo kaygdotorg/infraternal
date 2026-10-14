@@ -186,7 +186,7 @@ interface LinkIndexOptions {
 /** Incremental row cache and pointer bridge for a single live terminal. */
 export interface TerminalLinkController {
   /** Queue changed buffer rows; actual parsing runs once in an idle slice. */
-  updateRows(rows: readonly number[]): void;
+  updateRows(rows: readonly number[], force?: boolean): void;
   /** Queue the current viewport after scrolling or a full redraw. */
   updateVisibleRows(): void;
   /** Drop visible link state after resize or an active-buffer switch, preserving scrollback wrap fingerprints. */
@@ -203,8 +203,10 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
   const rowCache = new Map<string, { wrapped: boolean; fingerprint: string }>();
   const links = new Map<string, TerminalLink>();
   const pendingRows = new Set<number>();
+  const forcedRows = new Set<number>();
   let idleHandle = 0;
   let focusedLink: TerminalLink | undefined;
+  let refreshHover = false;
   let lastPoint: { x: number; y: number } | undefined;
   let down: { x: number; y: number; key?: string; dragged: boolean } | undefined;
   let released: { key?: string; dragged: boolean } | undefined;
@@ -214,7 +216,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
 
   const linkKey = (link: TerminalLink): string => `${link.kind}:${link.range.start.y}:${link.range.start.x}:${link.range.end.y}:${link.range.end.x}:${link.target}`;
 
-  const rowsAt = (y: number, scannedRows: Map<number, TerminalLinkRow>): TerminalLinkRow | undefined => {
+  const rowsAt = (y: number, scannedRows: Map<number, TerminalLinkRow>, changedRows?: Set<number>): TerminalLinkRow | undefined => {
     const scanned = scannedRows.get(y);
     if (scanned) return scanned;
     const next = options.getRow(y);
@@ -224,6 +226,9 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     const previous = rowCache.get(cacheKey);
     // Scrollback drops Ghostty's wrap bit; retain it only while the exact row contents still match.
     const cached = Boolean(previous && previous.fingerprint === fingerprint);
+    const changed = !previous || previous.fingerprint !== fingerprint ||
+      (next.wrapKnown !== false && previous.wrapped !== next.wrapped);
+    if (changed) changedRows?.add(y);
     const wrapped = next.wrapKnown === false
       ? Boolean(cached && previous?.wrapped)
       : next.wrapped;
@@ -236,24 +241,29 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     return row;
   };
 
-  const logicalGroup = (y: number, visible: { first: number; last: number }, scannedRows: Map<number, TerminalLinkRow>): TerminalLinkRow[] => {
-    const row = rowsAt(y, scannedRows);
+  const logicalGroup = (
+    y: number,
+    visible: { first: number; last: number },
+    scannedRows: Map<number, TerminalLinkRow>,
+    changedRows?: Set<number>,
+  ): TerminalLinkRow[] => {
+    const row = rowsAt(y, scannedRows, changedRows);
     if (!row) return [];
     let first = y;
     while (first > visible.first) {
-      const current = rowsAt(first, scannedRows);
+      const current = rowsAt(first, scannedRows, changedRows);
       if (!current?.wrapped) break;
       first -= 1;
     }
     let last = y;
     while (last < visible.last) {
-      const next = rowsAt(last + 1, scannedRows);
+      const next = rowsAt(last + 1, scannedRows, changedRows);
       if (!next?.wrapped) break;
       last += 1;
     }
     const result: TerminalLinkRow[] = [];
     for (let current = first; current <= last; current += 1) {
-      const item = rowsAt(current, scannedRows);
+      const item = rowsAt(current, scannedRows, changedRows);
       if (item) result.push(item);
     }
     return result;
@@ -290,6 +300,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     const screenY = Math.floor((clientY - rect.top) / metrics.height);
     const y = options.getVisibleRange().first + screenY;
     for (const link of links.values()) {
+      if (touchesRows(link, pendingRows)) continue;
       if (y < link.range.start.y || y > link.range.end.y) continue;
       const within = y === link.range.start.y ? x >= link.range.start.x
         : y === link.range.end.y ? x <= link.range.end.x
@@ -303,16 +314,29 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     idleHandle = 0;
     if (disposed) return;
     const visible = options.getVisibleRange();
-    const changed = [...pendingRows].filter((y) => y >= visible.first && y <= visible.last).sort((a, b) => a - b);
+    const queued = [...pendingRows].filter((y) => y >= visible.first && y <= visible.last).sort((a, b) => a - b);
+    const forced = new Set([...forcedRows].filter((y) => y >= visible.first && y <= visible.last));
     pendingRows.clear();
-    if (changed.length === 0) return;
+    forcedRows.clear();
+    if (queued.length === 0) return;
     const scannedRows = new Map<number, TerminalLinkRow>();
     const groups = new Map<string, TerminalLinkRow[]>();
-    for (const y of changed) {
-      const group = logicalGroup(y, visible, scannedRows);
+    const changedRows = new Set<number>();
+    for (const y of queued) {
+      const row = rowsAt(y, scannedRows, changedRows);
+      if (!row || (!forced.has(y) && !changedRows.has(y))) continue;
+      if (forced.has(y)) changedRows.add(y);
+      const group = logicalGroup(y, visible, scannedRows, changedRows);
       if (group.length === 0) continue;
       const key = `${group[0]!.y}-${group.at(-1)!.y}`;
       groups.set(key, group);
+    }
+    for (const [key, link] of links) {
+      if (touchesRows(link, changedRows)) links.delete(key);
+    }
+    if (focusedLink && touchesRows(focusedLink, changedRows)) {
+      hideTipAt(options.host);
+      refreshHover = true;
     }
     for (const [key, link] of links) {
       if (link.range.end.y < visible.first || link.range.start.y > visible.last) links.delete(key);
@@ -328,7 +352,11 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
         links.set(linkKey(link), link);
       }
     }
-    if (lastPoint) repaintHover(hitTest(lastPoint.x, lastPoint.y), lastPoint);
+    if (lastPoint) {
+      if (refreshHover) focusedLink = undefined;
+      refreshHover = false;
+      repaintHover(hitTest(lastPoint.x, lastPoint.y), lastPoint);
+    }
   };
 
   const requestScan = (): void => {
@@ -390,6 +418,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
   };
   const onPointerLeave = (): void => {
     lastPoint = undefined;
+    refreshHover = false;
     repaintHover(undefined);
   };
 
@@ -400,38 +429,46 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
   options.host.addEventListener("pointerleave", onPointerLeave);
 
   return {
-    updateRows(changedRows) {
+    updateRows(changedRows, force = true) {
       if (disposed) return;
       const dirtyRows = [...new Set(changedRows)];
       if (dirtyRows.length > 0) {
         for (const y of dirtyRows) pendingRows.add(y);
+        if (force) for (const y of dirtyRows) forcedRows.add(y);
         const touchesDirtyGroup = (link: TerminalLink): boolean => dirtyRows.some((y) =>
           y >= link.range.start.y - 1 && y <= link.range.end.y + 1);
-        // Drop stale activation targets without reading terminal cells on the render or typing path.
-        for (const [key, link] of links) {
-          if (touchesDirtyGroup(link)) links.delete(key);
+        if (force) {
+          // Drop known dirty activation targets without reading terminal cells on the render or typing path.
+          for (const [key, link] of links) {
+            if (touchesDirtyGroup(link)) links.delete(key);
+          }
         }
-        if (focusedLink && touchesDirtyGroup(focusedLink)) hideTipAt(options.host);
+        if (focusedLink && touchesDirtyGroup(focusedLink)) {
+          hideTipAt(options.host);
+          refreshHover = true;
+        }
       }
       requestScan();
     },
     updateVisibleRows() {
       if (disposed) return;
       const visible = options.getVisibleRange();
-      for (let y = visible.first; y <= visible.last; y += 1) pendingRows.add(y);
-      requestScan();
+      const rows: number[] = [];
+      for (let y = visible.first; y <= visible.last; y += 1) rows.push(y);
+      this.updateRows(rows, true);
     },
     invalidateBuffer() {
       if (disposed) return;
       links.clear();
       pendingRows.clear();
+      forcedRows.clear();
       repaintHover(undefined);
       this.updateVisibleRows();
     },
     linksOnScreen() {
       const visible = options.getVisibleRange();
       return [...links.values()]
-        .filter((link) => link.openable && link.range.start.y <= visible.last && link.range.end.y >= visible.first)
+        .filter((link) => link.openable && link.range.start.y <= visible.last && link.range.end.y >= visible.first && !touchesRows(link, pendingRows))
         .sort((left, right) => left.range.start.y - right.range.start.y || left.range.start.x - right.range.start.x);
     },
     openTarget(target) {
@@ -458,8 +495,16 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       rowCache.clear();
       links.clear();
       pendingRows.clear();
+      forcedRows.clear();
     },
   };
+}
+
+function touchesRows(link: TerminalLink, rows: ReadonlySet<number>): boolean {
+  for (const row of rows) {
+    if (row >= link.range.start.y - 1 && row <= link.range.end.y + 1) return true;
+  }
+  return false;
 }
 
 function rowFingerprint(row: TerminalLinkRow): string {

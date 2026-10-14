@@ -223,3 +223,52 @@ test("drops a changed row's cached link before deferred detection runs", () => {
     else (globalThis as unknown as { window?: Window }).window = originalWindow;
   }
 });
+
+test("keeps unchanged candidate rows out of parsing while pending rows cannot activate", () => {
+  const target = "https://scroll.example.test/unchanged";
+  const visibleRows = [row(target, 0), row("next", 1)];
+  const callbacks: Array<() => void> = [];
+  const originalWindow = (globalThis as unknown as { window?: Window }).window;
+  (globalThis as unknown as { window?: Window }).window = {
+    requestIdleCallback(callback: () => void) { callbacks.push(callback); return callbacks.length; },
+    cancelIdleCallback() {},
+    setTimeout,
+    clearTimeout,
+  } as unknown as Window;
+  const host = { addEventListener() {}, removeEventListener() {} } as unknown as HTMLElement;
+  const canvas = { style: {}, getBoundingClientRect: () => new DOMRect(0, 0, 80, 40) } as unknown as HTMLCanvasElement;
+  const controller = createTerminalLinkController({
+    host,
+    canvas,
+    getBufferLength: () => visibleRows.length,
+    getVisibleRange: () => ({ first: 0, last: 1 }),
+    getRow: (y) => visibleRows.find((candidate) => candidate.y === y),
+    getCellMetrics: () => ({ width: 1, height: 1 }),
+    paint: () => undefined,
+    open: () => undefined,
+  });
+  const scan = (): void => callbacks.shift()?.();
+  try {
+    controller.updateVisibleRows();
+    scan();
+    expect(controller.linksOnScreen().map((link) => link.target)).toEqual([target]);
+
+    controller.updateRows([0], false);
+    expect(controller.linksOnScreen()).toEqual([]);
+    expect(controller.openTarget(target)).toBe(false);
+    scan();
+    expect(controller.linksOnScreen().map((link) => link.target)).toEqual([target]);
+
+    const replacement = "https://scroll.example.test/replacement";
+    visibleRows[0] = row(replacement, 0);
+    controller.updateRows([0], false);
+    expect(controller.linksOnScreen()).toEqual([]);
+    expect(controller.openTarget(target)).toBe(false);
+    scan();
+    expect(controller.linksOnScreen().map((link) => link.target)).toEqual([replacement]);
+  } finally {
+    controller.dispose();
+    if (originalWindow === undefined) delete (globalThis as unknown as { window?: Window }).window;
+    else (globalThis as unknown as { window?: Window }).window = originalWindow;
+  }
+});
