@@ -1,0 +1,53 @@
+# Reclaims document handlers on renderer disposal and partial-open failure (#189).
+diff --git a/lib/selection-manager.ts b/lib/selection-manager.ts
+index 56d4605..802df5d 100644
+--- a/lib/selection-manager.ts
++++ b/lib/selection-manager.ts
+@@ -61,6 +61,7 @@ export class SelectionManager {
+   private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
+   private boundClickHandler: ((e: MouseEvent) => void) | null = null;
+   private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
++  private boundDocumentMouseDownHandler: ((e: MouseEvent) => void) | null = null;
+ 
+   // Auto-scroll state for drag selection
+   private autoScrollInterval: ReturnType<typeof setInterval> | null = null;
+@@ -399,6 +400,11 @@ export class SelectionManager {
+       this.boundMouseUpHandler = null;
+     }
+ 
++    if (this.boundDocumentMouseDownHandler) {
++      document.removeEventListener('mousedown', this.boundDocumentMouseDownHandler);
++      this.boundDocumentMouseDownHandler = null;
++    }
++
+     // Clean up document mousemove listener
+     if (this.boundDocumentMouseMoveHandler) {
+       document.removeEventListener('mousemove', this.boundDocumentMouseMoveHandler);
+@@ -566,9 +572,10 @@ export class SelectionManager {
+     document.addEventListener('mousemove', this.boundDocumentMouseMoveHandler);
+ 
+     // Track mousedown on document to know if a click started inside the canvas
+-    document.addEventListener('mousedown', (e: MouseEvent) => {
++    this.boundDocumentMouseDownHandler = (e: MouseEvent) => {
+       this.mouseDownTarget = e.target;
+-    });
++    };
++    document.addEventListener('mousedown', this.boundDocumentMouseDownHandler);
+ 
+     // CRITICAL FIX: Listen for mouseup on DOCUMENT, not just canvas
+     // This catches mouseup events that happen outside the canvas (common during drag)
+diff --git a/lib/terminal.ts b/lib/terminal.ts
+index 878e40f..2575633 100644
+--- a/lib/terminal.ts
++++ b/lib/terminal.ts
+@@ -1255,8 +1255,8 @@ export class Terminal implements ITerminalCore {
+       this.element.removeAttribute('aria-multiline');
+     }
+ 
+-    // Remove document-level listeners (only if opened)
+-    if (this.isOpen && typeof document !== 'undefined') {
++    // Disposal and failed opening clear isOpen before reaching cleanup.
++    if (typeof document !== 'undefined') {
+       document.removeEventListener('mouseup', this.handleMouseUp);
+     }
+ 
