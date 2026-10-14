@@ -197,7 +197,10 @@ export class MuxConnection {
       // Even an attachment closed before replay completes retains a server writer row.
       if (frame.type === "AttachTerm") this.writersUsed.add(streamId);
       if (frame.type === "Input" && this.streams.has(streamId)) {
-        this.unacknowledgedInput.set(streamId, frame.inSeq + BigInt(frame.bytes.byteLength));
+        const end = frame.inSeq + BigInt(frame.bytes.byteLength);
+        const previous = this.unacknowledgedInput.get(streamId) ?? 0n;
+        // Replayed earlier bytes cannot lower the outstanding input watermark.
+        this.unacknowledgedInput.set(streamId, end > previous ? end : previous);
         this.fastProbeUntil = performance.now() + 250;
         this.scheduleLiveness();
       }

@@ -100,3 +100,30 @@ test("unacknowledged input keeps probes fast until the matching stream acknowled
     expect(f.disconnects).toBe(0);
   } finally { f.dispose(); }
 });
+
+for (const rtt of [1, 30, 150]) for (const phase of [0, 7, 20, 39]) test(`idle silence deadline survives probe phase ${phase} at RTT ${rtt}`, () => {
+  const f = fixture(rtt, 1);
+  try {
+    f.advance(1000 + phase);
+    f.stopForwarding();
+    f.advance(rtt); // Allow only the already issued exact replies to drain.
+    f.advance(rtt + 50);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("retransmitting an earlier input range cannot forget a later unacknowledged byte", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    const bytes = new Uint8Array([1]);
+    f.connection.send(1, { type: "Input", inSeq: 0n, bytes });
+    f.connection.send(1, { type: "Input", inSeq: 1n, bytes });
+    f.connection.send(1, { type: "Input", inSeq: 0n, bytes });
+    f.receive(1, { type: "Ack", inSeqAcked: 1n });
+    f.advance(1000);
+    const probes = f.probes;
+    f.advance(1000);
+    expect(f.probes - probes).toBeGreaterThanOrEqual(39);
+  } finally { f.dispose(); }
+});
