@@ -1,5 +1,5 @@
 //! Index ready sessions without idle scans; only child-exit readiness reconciles all owned children [D81/D268].
-use super::{BULK_READ_BYTES, INTERACTIVE_READ_BYTES, OUTPUTS_PER_ROUND, Session};
+use super::{BULK_READ_BYTES, INTERACTIVE_READ_BYTES, MAX_PEERS, OUTPUTS_PER_ROUND, Session};
 use nix::{
     poll::PollFlags,
     sys::{
@@ -10,7 +10,7 @@ use nix::{
 };
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
+    collections::{BinaryHeap, HashMap, VecDeque},
     io::{self, Write},
     os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -62,9 +62,12 @@ impl Registry {
         self.by_fd.get(&fd).filter(|entry| entry.key == key)
     }
     fn sync(&mut self, index: usize, session: &Session) -> io::Result<()> {
-        let mut descriptors: Vec<(BorrowedFd<'_>, EpollFlags)> =
-            Vec::with_capacity(session.peers.len() + 2);
-        descriptors.push((session.listener.as_fd(), EpollFlags::EPOLLIN));
+        // Peer admission already caps this array. Steady interest changes
+        // borrow a small stack list rather than allocate on every settle.
+        let mut storage: [Option<(BorrowedFd<'_>, EpollFlags)>; MAX_PEERS + 2] =
+            [None; MAX_PEERS + 2];
+        storage[0] = Some((session.listener.as_fd(), EpollFlags::EPOLLIN));
+        let mut descriptor_count = 1;
         let mut master = EpollFlags::empty();
         if session.can_read() {
             master |= EpollFlags::EPOLLIN;
@@ -73,7 +76,8 @@ impl Registry {
             master |= EpollFlags::EPOLLOUT;
         }
         if !master.is_empty() {
-            descriptors.push((session.pty.master.as_fd(), master));
+            storage[descriptor_count] = Some((session.pty.master.as_fd(), master));
+            descriptor_count += 1;
         }
         for peer in &session.peers {
             let mut flags = EpollFlags::empty();
@@ -83,11 +87,14 @@ impl Registry {
             if session.can_write(peer) {
                 flags |= EpollFlags::EPOLLOUT;
             }
-            descriptors.push((peer.stream.as_fd(), flags));
+            storage[descriptor_count] = Some((peer.stream.as_fd(), flags));
+            descriptor_count += 1;
         }
+        let descriptors = &storage[..descriptor_count];
         self.owned[index].retain(|fd| {
             if descriptors
                 .iter()
+                .flatten()
                 .any(|(current, _)| current.as_raw_fd() == *fd)
             {
                 return true;
@@ -99,7 +106,7 @@ impl Registry {
             }
             false
         });
-        for (fd, flags) in descriptors {
+        for (fd, flags) in descriptors.iter().flatten().copied() {
             if let Some(old) = self.by_fd.get_mut(&fd.as_raw_fd()) {
                 if old.flags != flags {
                     self.epoll
@@ -132,15 +139,39 @@ impl Registry {
 }
 #[derive(Default)]
 struct Ready {
-    flags: HashMap<u64, EpollFlags>,
+    first: Option<(u64, EpollFlags)>,
+    more: Vec<(u64, EpollFlags)>,
 }
 impl Ready {
+    fn insert(&mut self, key: u64, flags: EpollFlags) {
+        if let Some((first, current)) = &mut self.first {
+            if *first == key {
+                *current |= flags;
+            } else if let Some((_, current)) = self.more.iter_mut().find(|(old, _)| *old == key) {
+                *current |= flags;
+            } else {
+                self.more.push((key, flags));
+            }
+        } else {
+            self.first = Some((key, flags));
+        }
+    }
+    fn get(&self, key: u64) -> Option<EpollFlags> {
+        self.first
+            .filter(|(old, _)| *old == key)
+            .map(|(_, flags)| flags)
+            .or_else(|| {
+                self.more
+                    .iter()
+                    .find(|(old, _)| *old == key)
+                    .map(|(_, flags)| *flags)
+            })
+    }
     fn flags(&self, fd: RawFd, registry: &Registry) -> PollFlags {
         let flags = registry
             .by_fd
             .get(&fd)
-            .and_then(|entry| self.flags.get(&entry.key))
-            .copied()
+            .and_then(|entry| self.get(entry.key))
             .unwrap_or_else(EpollFlags::empty);
         let mut result = PollFlags::empty();
         if flags.contains(EpollFlags::EPOLLIN) {
@@ -156,6 +187,53 @@ impl Ready {
             result |= PollFlags::POLLERR;
         }
         result
+    }
+}
+
+/// Membership follows immutable session slots, not descriptor numbers. Read
+/// generations avoid clearing all idle slots on each busy reactor turn.
+struct ReadyMarks {
+    queued: Vec<u8>,
+    read: Vec<u32>,
+    round: u32,
+}
+impl ReadyMarks {
+    fn new(count: usize) -> Self {
+        Self {
+            queued: vec![0; count],
+            read: vec![0; count],
+            round: 1,
+        }
+    }
+    fn next_round(&mut self) {
+        if let Some(round) = self.round.checked_add(1) {
+            self.round = round;
+        } else {
+            // Clear before reusing a generation: old marks can never skip
+            // a newly ready session, even after billions of busy turns.
+            self.read.fill(0);
+            self.round = 1;
+        }
+    }
+    fn queue(&mut self, index: usize) -> bool {
+        // 0 has no deque entry; 1 is bulk; 2 is cancelled by promotion.
+        // Revive a cancelled entry in place rather than inserting a duplicate.
+        std::mem::replace(&mut self.queued[index], 1) == 0
+    }
+    fn promote(&mut self, index: usize) {
+        if self.queued[index] != 0 {
+            self.queued[index] = 2;
+        }
+    }
+    fn take_bulk(&mut self, index: usize) -> bool {
+        std::mem::replace(&mut self.queued[index], 0) == 1
+    }
+    fn read_once(&mut self, index: usize) -> bool {
+        if self.read[index] == self.round {
+            return false;
+        }
+        self.read[index] = self.round;
+        true
     }
 }
 
@@ -206,13 +284,12 @@ pub(super) fn run(
     let mut live = slots.len();
     let mut failed = false;
     let mut bulk = VecDeque::new();
-    let mut queued = HashSet::new();
-    let mut read_attempted = HashSet::new();
+    let mut marks = ReadyMarks::new(slots.len());
     // All ordinary PTYs/listeners fit this batch at the requested 1000-session
     // scale; control readiness is not hidden behind many small bulk-only waits.
     let mut events = vec![EpollEvent::empty(); 2048];
     while live > 0 {
-        read_attempted.clear();
+        marks.next_round();
         while timers
             .peek()
             .is_some_and(|Reverse((_, index))| slots[*index].is_none())
@@ -248,7 +325,6 @@ pub(super) fn run(
             if let Some(entry) = registry.registration(event.data()) {
                 work.entry(entry.session)
                     .or_default()
-                    .flags
                     .insert(entry.key, event.events());
             }
         }
@@ -322,8 +398,8 @@ pub(super) fn run(
                         .is_ok_and(|bytes| bytes <= 1024)
                 {
                     small_reads.push((index, INTERACTIVE_READ_BYTES));
-                    queued.remove(&index);
-                } else if queued.insert(index) {
+                    marks.promote(index);
+                } else if marks.queue(index) {
                     bulk.push_back(index);
                 }
             }
@@ -340,23 +416,24 @@ pub(super) fn run(
                 let ready = work
                     .get(&index)
                     .ok_or_else(|| io::Error::other("host readiness disappeared"))?;
-                let peers: Vec<_> = session
-                    .peers
-                    .iter()
-                    .map(|p| ready.flags(p.stream.as_raw_fd(), &registry))
-                    .collect();
+                let flags: [PollFlags; MAX_PEERS] = std::array::from_fn(|i| {
+                    session.peers.get(i).map_or_else(PollFlags::empty, |p| {
+                        ready.flags(p.stream.as_raw_fd(), &registry)
+                    })
+                });
+                let peers = &flags[..session.peers.len()];
                 let incoming = peers.iter().any(|flags| flags.contains(PollFlags::POLLIN));
                 session.step(
                     ready.flags(session.listener.as_raw_fd(), &registry),
                     ready.flags(session.pty.master.as_raw_fd(), &registry) & PollFlags::POLLOUT,
-                    &peers,
+                    peers,
                     false,
                 )?;
                 // Acceptance precedes peer retirement inside step. No further
                 // accept occurs before the final settle, so
                 // publish readiness once after immediate writes have finished.
                 if incoming {
-                    read_attempted.insert(index);
+                    marks.read_once(index);
                     session.step_budget(
                         PollFlags::empty(),
                         PollFlags::POLLIN,
@@ -374,7 +451,7 @@ pub(super) fn run(
             if let Some(session) = &slots[index]
                 && session.exit.is_some()
                 && session.can_read()
-                && queued.insert(index)
+                && marks.queue(index)
             {
                 // Descendants can retain a slave after the owned shell exits.
                 // Probe once without waiting for a readiness event from them.
@@ -384,16 +461,18 @@ pub(super) fn run(
                 live -= 1;
             }
         }
-        // A promoted session may already have an older bulk entry. Remove it
-        // before selecting the quantum so it cannot spend two read budgets.
-        bulk.retain(|index| queued.contains(index));
-        for _ in 0..OUTPUTS_PER_ROUND {
+        // Cancelled entries are discarded only when popped. Each session has
+        // at most one deque entry; no turn scans the whole bulk backlog.
+        let mut outputs = 0;
+        while outputs < OUTPUTS_PER_ROUND {
             let Some(index) = bulk.pop_front() else { break };
-            queued.remove(&index);
-            small_reads.push((index, BULK_READ_BYTES));
+            if marks.take_bulk(index) {
+                small_reads.push((index, BULK_READ_BYTES));
+                outputs += 1;
+            }
         }
         for (index, read_budget) in small_reads {
-            if !read_attempted.insert(index) {
+            if !marks.read_once(index) {
                 continue;
             }
             if slots[index].is_none() {
@@ -448,6 +527,111 @@ fn record_ownership(slots: &[Option<Session>], accounting: &mut Option<std::fs::
 mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
+    #[test]
+    fn inline_and_extra_descriptor_flags_merge_without_losing_generations() {
+        let mut ready = Ready::default();
+        ready.insert(7, EpollFlags::EPOLLIN);
+        ready.insert(8, EpollFlags::EPOLLHUP);
+        ready.insert(7, EpollFlags::EPOLLOUT);
+        ready.insert(8, EpollFlags::EPOLLIN);
+        assert_eq!(
+            ready.get(7),
+            Some(EpollFlags::EPOLLIN | EpollFlags::EPOLLOUT)
+        );
+        assert_eq!(
+            ready.get(8),
+            Some(EpollFlags::EPOLLHUP | EpollFlags::EPOLLIN)
+        );
+        assert_eq!(ready.get(9), None);
+        assert_eq!(ready.more.len(), 1);
+    }
+    #[test]
+    fn single_ready_descriptor_needs_no_heap_allocation() {
+        let (_ready, delta) = crate::heap_accounting::measure(|| {
+            let mut ready = Ready::default();
+            ready.insert(7, EpollFlags::EPOLLIN);
+            assert_eq!(ready.get(7), Some(EpollFlags::EPOLLIN));
+            ready
+        });
+        assert_eq!(delta.allocations, 0);
+    }
+    #[test]
+    fn unchanged_registration_sync_needs_no_heap_allocation() {
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/q{}",
+            std::process::id()
+        ));
+        let mut config = crate::Config::new([12; 16], nix::unistd::Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let session = Session::new(config, 65536).unwrap();
+        let signals = SignalFd::with_flags(
+            &nix::sys::signal::SigSet::empty(),
+            nix::sys::signalfd::SfdFlags::SFD_CLOEXEC,
+        )
+        .unwrap();
+        let mut registry = ownership_fixture(std::slice::from_ref(&session), &signals).unwrap();
+        let ((), delta) = crate::heap_accounting::measure(|| registry.sync(0, &session).unwrap());
+        assert_eq!(delta.allocations, 0);
+        drop(registry);
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn cancelled_bulk_membership_reuses_the_existing_deque_entry() {
+        let mut marks = ReadyMarks::new(1000);
+        assert!(marks.queue(999));
+        marks.promote(999);
+        assert!(
+            !marks.queue(999),
+            "revival must not create a second deque entry"
+        );
+        assert!(marks.take_bulk(999));
+        assert!(!marks.take_bulk(999));
+        marks.promote(999);
+        assert!(marks.queue(999));
+        marks.promote(999);
+        assert!(!marks.take_bulk(999));
+        assert!(marks.queue(999));
+    }
+    #[test]
+    fn round_reset_and_wrap_preserve_bulk_membership_without_reviving_reads() {
+        let mut marks = ReadyMarks::new(1000);
+        assert!(marks.queue(999));
+        assert!(!marks.queue(999));
+        assert!(marks.read_once(0));
+        assert!(!marks.read_once(0));
+        marks.next_round();
+        assert_eq!(marks.queued[999], 1);
+        assert!(marks.read_once(0));
+        marks.round = u32::MAX;
+        marks.read[999] = u32::MAX;
+        marks.read[0] = 1;
+        marks.next_round();
+        assert!(marks.read_once(0));
+        assert!(marks.read_once(999));
+        assert!(!marks.read_once(999));
+        assert_eq!(marks.queued[999], 1);
+        assert!(marks.take_bulk(999));
+        assert!(!marks.take_bulk(999));
+    }
+    #[test]
+    fn readiness_membership_stays_within_five_bytes_per_session() {
+        let (_marks, allocation) = crate::heap_accounting::measure(|| {
+            let mut marks = ReadyMarks::new(1000);
+            marks.next_round();
+            for index in 0..1000 {
+                assert!(marks.queue(index));
+                assert!(marks.read_once(index));
+            }
+            marks
+        });
+        assert!(
+            allocation.bytes <= 5000,
+            "ready membership owns {} requested bytes",
+            allocation.bytes
+        );
+    }
     #[test]
     fn replay_continues_after_its_frame_was_written_inline() {
         let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
@@ -606,11 +790,13 @@ mod tests {
         let replacement = registry.by_fd[&fd].key;
         assert_ne!(key, replacement);
         let obsolete = Ready {
-            flags: HashMap::from([(key, EpollFlags::EPOLLIN)]),
+            first: Some((key, EpollFlags::EPOLLIN)),
+            more: Vec::new(),
         };
         assert_eq!(obsolete.flags(fd, &registry), PollFlags::empty());
         let current = Ready {
-            flags: HashMap::from([(replacement, EpollFlags::EPOLLIN)]),
+            first: Some((replacement, EpollFlags::EPOLLIN)),
+            more: Vec::new(),
         };
         assert_eq!(current.flags(fd, &registry), PollFlags::POLLIN);
         drop(peer);

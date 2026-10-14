@@ -1,6 +1,7 @@
 //! Test-only requested-byte accounting forwards unchanged layouts to the system allocator [D270].
 //! Scopes are thread-local and retain no addresses or contents. This separates
 //! per-session ownership from fixed image pages and allocator resident slack.
+//! Successful allocation counts also expose transient churn after storage is freed.
 #![allow(unsafe_code)]
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -11,6 +12,7 @@ use std::{
 pub(crate) struct Delta {
     pub(crate) bytes: i64,
     pub(crate) blocks: i64,
+    pub(crate) allocations: u64,
 }
 thread_local! {
     static CURRENT: Cell<Option<Delta>> = const { Cell::new(None) };
@@ -24,6 +26,7 @@ fn record(bytes: i64, blocks: i64) {
         if let Some(mut delta) = current.get() {
             delta.bytes += bytes;
             delta.blocks += blocks;
+            delta.allocations += u64::from(blocks > 0);
             current.set(Some(delta));
         }
     });
@@ -90,4 +93,13 @@ fn accounting_keeps_exact_layouts_and_balances_reallocation() {
     let ((), released) = measure(|| drop(bytes));
     assert_eq!(allocated.bytes + growth.bytes + released.bytes, 0);
     assert_eq!(allocated.blocks + released.blocks, 0);
+}
+
+#[test]
+fn transient_allocations_are_visible_after_their_storage_is_freed() {
+    let ((), delta) = measure(|| {
+        let bytes = Vec::<u8>::with_capacity(19);
+        drop(bytes);
+    });
+    assert_eq!((delta.bytes, delta.blocks, delta.allocations), (0, 0, 1));
 }
