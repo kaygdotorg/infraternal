@@ -57,6 +57,23 @@ impl Registry {
         }
         // Owned session descriptors have closed; the kernel removes them.
     }
+    /// Input retirement precedes the next listener admission. Remove only
+    /// closed identities here: publishing temporary writable interest before
+    /// the reply batch is flushed would add two epoll changes per keystroke.
+    fn retire_closed(&mut self, index: usize, session: &Session) {
+        self.owned[index].retain(|fd| {
+            let live = *fd == session.listener.as_raw_fd()
+                || *fd == session.pty.master.as_raw_fd()
+                || session
+                    .peers
+                    .iter()
+                    .any(|peer| peer.stream.as_raw_fd() == *fd);
+            if !live {
+                self.by_fd.remove(fd);
+            }
+            live
+        });
+    }
     fn registration(&self, key: u64) -> Option<&Registration> {
         let fd = RawFd::try_from(key & u64::from(u32::MAX)).ok()?;
         self.by_fd.get(&fd).filter(|entry| entry.key == key)
@@ -382,7 +399,7 @@ pub(super) fn run(
                     .iter()
                     .any(|p| !ready.flags(p.stream.as_raw_fd(), &registry).is_empty());
             if control || child_exit || session.exit.is_some() {
-                controls.push(index);
+                controls.push((index, false));
             }
             if ready
                 .flags(session.pty.master.as_raw_fd(), &registry)
@@ -404,12 +421,12 @@ pub(super) fn run(
                 }
             }
         }
-        // Service all input/control before the rotating bounded bulk quantum.
-        for index in controls {
+        // Give every ready shell its input before terminal output, repaint
+        // generation or listener admission. Each child can run while the
+        // remaining cohort is serviced, rather than behind another VT batch.
+        for (index, incoming) in &mut controls {
+            let index = *index;
             let result = catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
-                if !settle(index, &mut slots, &mut registry, &mut timers)? {
-                    return Ok(());
-                }
                 let session = slots[index]
                     .as_mut()
                     .ok_or_else(|| io::Error::other("host session disappeared"))?;
@@ -422,16 +439,51 @@ pub(super) fn run(
                     })
                 });
                 let peers = &flags[..session.peers.len()];
-                let incoming = peers.iter().any(|flags| flags.contains(PollFlags::POLLIN));
+                *incoming = peers.iter().any(|flags| flags.contains(PollFlags::POLLIN));
                 session.step(
-                    ready.flags(session.listener.as_raw_fd(), &registry),
+                    PollFlags::empty(),
                     ready.flags(session.pty.master.as_raw_fd(), &registry) & PollFlags::POLLOUT,
                     peers,
                     false,
                 )?;
-                // Acceptance precedes peer retirement inside step. No further
-                // accept occurs before the final settle, so
-                // publish readiness once after immediate writes have finished.
+                // Closing a peer can free a descriptor number. Publish that
+                // retirement before any later listener can reuse it; stale
+                // readiness must never acquire authority over a new socket.
+                registry.retire_closed(index, session);
+                Ok(())
+            }));
+            if result.map_or(true, |result| result.is_err()) {
+                failed = true;
+                retire_failed(index, &mut slots, &mut registry);
+                live -= 1;
+            }
+        }
+        for (index, incoming) in controls {
+            if slots[index].is_none() {
+                continue;
+            }
+            let result = catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
+                // An expired retention deadline still fences listener
+                // admission; ordinary live input needs no pre-work settle.
+                if slots[index]
+                    .as_ref()
+                    .is_some_and(|session| session.deadline.is_some_and(|d| Instant::now() >= d))
+                    && !settle(index, &mut slots, &mut registry, &mut timers)?
+                {
+                    return Ok(());
+                }
+                let session = slots[index]
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("host session disappeared"))?;
+                let ready = work
+                    .get(&index)
+                    .ok_or_else(|| io::Error::other("host readiness disappeared"))?;
+                session.step(
+                    ready.flags(session.listener.as_raw_fd(), &registry),
+                    PollFlags::empty(),
+                    &[],
+                    false,
+                )?;
                 if incoming {
                     marks.read_once(index);
                     session.step_budget(
@@ -527,6 +579,53 @@ fn record_ownership(slots: &[Option<Session>], accounting: &mut Option<std::fs::
 mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
+    #[test]
+    fn input_phase_retires_closed_identity_without_publishing_transient_interest() {
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/i{}",
+            std::process::id()
+        ));
+        let mut config = crate::Config::new([16; 16], nix::unistd::Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        let signals = SignalFd::with_flags(
+            &nix::sys::signal::SigSet::empty(),
+            nix::sys::signalfd::SfdFlags::SFD_CLOEXEC,
+        )
+        .unwrap();
+        let mut registry = ownership_fixture(std::slice::from_ref(&session), &signals).unwrap();
+        let fd = session.peers[0].stream.as_raw_fd();
+        let key = registry.by_fd[&fd].key;
+        session.peers[0].input_reply = Some(super::super::InputReply::State);
+        let ((), delta) = crate::heap_accounting::measure(|| registry.retire_closed(0, &session));
+        assert_eq!(delta.allocations, 0);
+        assert_eq!(
+            registry.registration(key).unwrap().flags,
+            EpollFlags::EPOLLIN
+        );
+        drop(client);
+        session
+            .step(
+                PollFlags::empty(),
+                PollFlags::empty(),
+                &[PollFlags::POLLHUP],
+                false,
+            )
+            .unwrap();
+        assert!(session.peers.is_empty());
+        registry.retire_closed(0, &session);
+        assert!(registry.registration(key).is_none());
+        assert!(!registry.owned[0].contains(&fd));
+        drop(registry);
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn inline_and_extra_descriptor_flags_merge_without_losing_generations() {
         let mut ready = Ready::default();
