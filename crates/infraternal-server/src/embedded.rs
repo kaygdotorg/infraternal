@@ -365,6 +365,8 @@ impl EmbeddedAgent {
     }
 
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
+    // Native attachments belong to remote bootstrap; browser-only builds use monitored routes.
+    #[cfg(any(test, feature = "remote"))]
     pub async fn attach(
         &self,
         session_id: [u8; 16],
