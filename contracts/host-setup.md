@@ -112,7 +112,7 @@ private bytes until it exits prevents over-read from consuming an invitation.
 The duplex shim-first path already has its separate verified upload receipt.
 Neither receipt authorizes a host or replaces the existing admission checks.
 
-Configured public payloads warm after the HTTP listener binds. The global
+Resolved public payloads warm after the HTTP listener binds. The global
 four-entry cache index covers only lookup and eviction; each file identity and
 codec has its own single-flight cell. Compression runs outside the index lock.
 Component-off cancels warming through the existing activity lifecycle; missing
@@ -128,9 +128,19 @@ raw diagnostic text. SSH control-socket admission remains the sign-in proof.
 A release may supply `infraternal-<architecture>-session-musl` beside the full
 host payload. It is the same executable built with the session and SSH component
 only, using the same shim, rendezvous protocol and terminal dispatcher. These
-paths are trusted server configuration; target requests cannot select a payload.
-A missing session artifact retains full-payload staging. A present symlink,
-directory or inaccessible artifact is refused.
+paths cannot be selected by target requests. The default server authenticates
+the session image against its exact-version signed release manifest on both
+architectures (D224/D225). Only an authenticated omission permits full-payload
+staging; an advertised missing image, wrong version, untrusted signature or
+digest mismatch refuses the attempt. Explicit local path adapters retain their
+trusted server configuration and refuse symlinks, directories and inaccessible
+artifacts. Development fallback requires the initial manifest request to be 404.
+
+New release bundles contain both session images and both host images; every
+image is included in the existing signer-generated manifest. Older signed
+bundles may omit session images. The full same-architecture host image remains
+the running server executable (D225). Warmup resolves and encodes those actual
+admitted images rather than assuming configured paths select the same files.
 
 After read-only admission, verified session-payload staging starts the original
 shim-owned shell. Once its session is protected and published, the existing
@@ -138,7 +148,12 @@ session-preserving setup retry path stages the full host payload over another
 command channel on the same authenticated SSH connection. It retires only the
 owned installation journal and never truncates the inode backing a live process.
 The session, writer cursors, host identity and rendezvous remain unchanged. The
-private enrollment input still follows verified full-payload staging. Cancellation,
+private enrollment input still follows verified full-payload staging. Full-image
+acquisition begins after the terminal is published when a signed session image
+is available. Acquisition failure retains that shell and emits the existing
+`install` failure with its reason and retry availability. A retry verifies the
+full image before renewing enrollment authority and keeps the original session
+identity. Cancellation,
 component-off, ownership checks and failed-setup retry retain their existing
 boundaries. D240/D247's per-person login requirement applies to both builds.
 
@@ -167,7 +182,7 @@ check-time hint authorizes installation or bypasses ownership, digest, terminal
 proof or commit checks.
 
 The session image is built with the internal `session-payload` feature, which
-implies SSH and selects its private entrypoints when server/transport/host-facts
+selects the private SSH and shim entrypoints when server/transport/host-facts
 components are absent. The same shim option record, defaults and runner remain
 shared with the full build. Its argv decoder accepts only the canonical shape
 emitted by the session launcher, including readiness and detach suffixes; it
