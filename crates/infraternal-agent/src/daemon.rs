@@ -863,6 +863,24 @@ async fn input_state(link: &mut Link) -> io::Result<u64> {
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim input state timed out"))?
 }
 
+/// State fences may replace a standalone Ack; forward only newly written input.
+/// Unchanged probes must remain Pong-only, avoiding idle storage work upstream.
+async fn input_progress(
+    tx: &mpsc::Sender<Message>,
+    stream: u32,
+    acknowledged: &mut u64,
+    written: u64,
+) -> io::Result<()> {
+    if written < *acknowledged {
+        return Err(sessions::invalid("shim input cursor regressed"));
+    }
+    if written > *acknowledged {
+        emit(tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+        *acknowledged = written;
+    }
+    Ok(())
+}
+
 /// Limits one affordable raw suffix so a shim frame cannot cross the replay boundary.
 fn replay_prefix_len(cursor: u64, available: usize, fence: Option<u64>) -> usize {
     let Some(fence) = fence else {
@@ -1064,6 +1082,7 @@ async fn terminal_run(
         ));
     }
     emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+    let mut acknowledged = written;
     if !primed {
         session
             .as_mut()
@@ -1188,6 +1207,7 @@ async fn terminal_run(
             };
             let written = input_state(&mut next).await?;
             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+            acknowledged = acknowledged.max(written);
             // A credit deadline discards only the daemon's pending frame,
             // never the client's offset. Let the shim select retained replay
             // first, then faithful or negotiated approximate repaint on a gap.
@@ -1241,6 +1261,7 @@ async fn terminal_run(
                             let Some(mut next) = relink(&path, id, stream, &tx, true).await? else { return Ok(()); };
                             let written = input_state(&mut next).await?;
                             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+                            acknowledged = acknowledged.max(written);
                             session = Some(next);
                         }
                         let link = session.as_mut().ok_or_else(|| sessions::invalid("missing shim"))?;
@@ -1257,7 +1278,8 @@ async fn terminal_run(
                         let detached = session.is_none();
                         if detached {
                             let Some(mut next) = relink(&path, id, stream, &tx, primed).await? else { return Ok(()); };
-                                            input_state(&mut next).await?;
+                            let written = input_state(&mut next).await?;
+                            input_progress(&tx, stream, &mut acknowledged, written).await?;
                             session = Some(next);
                         }
                         let peer = session.as_mut().ok_or_else(|| sessions::invalid("missing shim"))?;
@@ -1288,6 +1310,7 @@ async fn terminal_run(
                             // accepted input survives until the PTY writes it.
                             let written = input_state(peer).await?;
                             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
+                            acknowledged = acknowledged.max(written);
                             session = None; probe = None;
                             output.retry_recovery();
                         }
@@ -1310,8 +1333,12 @@ async fn terminal_run(
             }, if pending.is_none() => {
                 match frame? {
                     frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
-                    Shim::InputAck(seq) => emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?,
+                    Shim::InputAck(seq) => {
+                        emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
+                        acknowledged = acknowledged.max(seq);
+                    }
                     Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
+                        input_progress(&tx, stream, &mut acknowledged, written).await?;
                         let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
                         emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
                     }
