@@ -8,6 +8,8 @@ use std::{
 
 const MAX_EVENTS: usize = 8192;
 static ACTIVE: Mutex<Option<Weak<Mutex<Events>>>> = Mutex::new(None);
+// Observer integration tests share this owner without blocking an async runtime.
+pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Kind {
@@ -31,6 +33,8 @@ struct Events {
     routes: Option<Arc<infraternal_plugin_remote::remote_bindings::Bindings>>,
     first: BTreeMap<(Kind, SocketAddr, u32), Event>,
     overflow: bool,
+    counts: BTreeMap<Kind, usize>,
+    peer_counts: BTreeMap<(Kind, SocketAddr), usize>,
 }
 impl Events {
     fn record(&mut self, mut event: Event) {
@@ -41,11 +45,17 @@ impl Events {
             return;
         }
         let key = (event.kind, event.peer, event.stream);
-        if self.first.contains_key(&key) {
+        // Per-peer callback counts cannot allocate beyond the first-event bound.
+        if !self.first.contains_key(&key) && self.first.len() == MAX_EVENTS {
+            self.overflow = true;
             return;
         }
-        if self.first.len() == MAX_EVENTS {
-            self.overflow = true;
+        *self.counts.entry(event.kind).or_default() += 1;
+        *self
+            .peer_counts
+            .entry((event.kind, event.peer))
+            .or_default() += 1;
+        if self.first.contains_key(&key) {
             return;
         }
         self.first.insert(key, event);
@@ -64,6 +74,8 @@ impl Capture {
             routes: None,
             first: BTreeMap::new(),
             overflow: false,
+            counts: BTreeMap::new(),
+            peer_counts: BTreeMap::new(),
         }));
         let mut active = ACTIVE
             .lock()
@@ -73,8 +85,9 @@ impl Capture {
         Self(events)
     }
 
-    /// Resolve the retained connection's logical tuple to its current physical
-    /// path at each callback, so an in-place move has a real byte boundary.
+    /// Resolve a logical tuple to its current physical route for diagnostics.
+    /// Buffered or reordered plaintext has no packet provenance here; exact
+    /// mesh-byte claims need the separate path-exclusive fresh-marker proof.
     pub(crate) fn with_routes(
         self,
         routes: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
@@ -84,6 +97,26 @@ impl Capture {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .routes = Some(routes);
         self
+    }
+    /// Counts callbacks even when the first-milestone map already has that tuple.
+    pub(crate) fn count(&self, kind: Kind) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .counts
+            .get(&kind)
+            .copied()
+            .unwrap_or(0)
+    }
+    /// Integration assertions isolate their real TLS tuple from concurrent tests.
+    pub(crate) fn count_peer(&self, kind: Kind, peer: SocketAddr) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .peer_counts
+            .get(&(kind, peer))
+            .copied()
+            .unwrap_or(0)
     }
     pub(crate) fn events(&self) -> Vec<Event> {
         let events = self
@@ -139,6 +172,7 @@ mod tests {
     use super::*;
     #[test]
     fn capture_retains_first_milestones_and_releases_ownership() {
+        let _owner = TEST_SERIAL.blocking_lock();
         let peer = SocketAddr::from(([127, 0, 0, 1], 7443));
         let capture = Capture::start(|peer| peer == SocketAddr::from(([127, 0, 0, 1], 7443)));
         record(Kind::TlsHandshake, peer, 0);
@@ -151,6 +185,8 @@ mod tests {
         );
         record(Kind::TerminalByte, peer, 2);
         assert_eq!(capture.events().len(), 2);
+        assert_eq!(capture.count(Kind::TerminalByte), 2);
+        assert_eq!(capture.count(Kind::TlsHandshake), 1);
         assert_eq!(capture.events()[1].monotonic, first[1].monotonic);
         assert_eq!(capture.events()[1].wall, first[1].wall);
         record(Kind::TerminalByte, peer, 4);

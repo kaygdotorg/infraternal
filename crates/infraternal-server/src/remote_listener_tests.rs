@@ -502,3 +502,191 @@ async fn admitted_connection_moves_to_a_leased_address_and_back_without_readmiss
     );
     drop((channel, connection, endpoint, primary));
 }
+
+/// Both a leased listener and the primary listener must expose actual TCP/mTLS
+/// admission and a decoded nonempty terminal Output. A fresh authenticated tuple
+/// isolates each assertion from other tests; no current-route hint proves an
+/// earliest unrestricted mesh byte here.
+#[cfg(feature = "mesh-transport-proof")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn tcp_observer_counts_leased_and_primary_admission_and_nonempty_output() {
+    use crate::embedded::{TerminalOutput, TerminalSize};
+    use crate::remote_autoswitch_probe::{Capture, Kind, TEST_SERIAL};
+    const WRITER: u32 = 0x2010_0002;
+    const MARKER: &[u8] = b"public-tcp-observer";
+    let _owner = TEST_SERIAL.lock().await;
+    let capture = Capture::start(|peer| peer.ip().is_loopback());
+    let (server, node, root, _) = identities();
+    let (store, _pool, host_id, _) = super::revocation::admitted_store(&node, &root).await;
+    let hosts = RemoteHosts::default();
+    let primary = RemoteListeners::start(
+        "127.0.0.1:0".parse().unwrap(),
+        &server,
+        std::slice::from_ref(&root),
+        store,
+        hosts.clone(),
+    )
+    .await
+    .unwrap();
+    let lease = hosts
+        .listen("127.0.0.3".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut seen = Vec::new();
+    for (index, address) in [lease.local_addr().unwrap(), primary.local_addr().unwrap()]
+        .into_iter()
+        .enumerate()
+    {
+        let writer = WRITER + u32::try_from(index).unwrap() * 2;
+        let previous_generation = hosts
+            .0
+            .lock()
+            .await
+            .get(&host_id)
+            .map(|host| host.generation);
+        let started = std::time::Instant::now();
+        let config = remote_tls::client_config(&node, std::slice::from_ref(&root)).unwrap();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let connection = remote_tls::dial(address, "localhost", &config)
+                .await
+                .unwrap();
+            respond(&connection.channel).await;
+            let mut receive = Receive::default();
+            let attached = receive.next(&connection.channel).await.unwrap();
+            assert_eq!(attached.stream_id, writer);
+            assert!(matches!(attached.frame, Frame::AttachTerm { .. }));
+            let credit = receive.next(&connection.channel).await.unwrap();
+            assert_eq!(credit.stream_id, writer);
+            assert!(matches!(credit.frame, Frame::Credit { .. }));
+            for bytes in [&b""[..], MARKER] {
+                Transmit::default()
+                    .send(
+                        &connection.channel,
+                        writer,
+                        &Frame::Output { out_seq: 0, bytes },
+                    )
+                    .await
+                    .unwrap();
+            }
+            let census = serde_json::json!({
+                "type": "terminal.sessions.snapshot",
+                "session_ids": [Uuid::from_u128(7)],
+            })
+            .to_string();
+            Transmit::default()
+                .send(
+                    &connection.channel,
+                    0,
+                    &Frame::Event {
+                        sub_id: 0,
+                        event_json: census.as_bytes(),
+                    },
+                )
+                .await
+                .unwrap();
+            let _ = released.await;
+        });
+        let actor = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let registered = hosts
+                    .0
+                    .lock()
+                    .await
+                    .get(&host_id)
+                    .is_some_and(|host| Some(host.generation) != previous_generation);
+                if registered && let Some(actor) = hosts.actor(host_id).await {
+                    break actor;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let session = tokio::time::timeout(
+            Duration::from_secs(5),
+            actor.open(TerminalSize {
+                cols: 80,
+                rows: 24,
+                px_w: 0,
+                px_h: 0,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (handle, mut output) = actor.attach(session, 0, 0, writer).await.unwrap().split();
+        let mut credit = Vec::new();
+        infraternal_protocol::encode_muxed_frame_into(1, &Frame::Credit { bytes: 64 }, &mut credit)
+            .unwrap();
+        handle.send_frame(bytes::Bytes::from(credit)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let TerminalOutput::Output { bytes, .. } = output.recv().await.unwrap()
+                    && !bytes.is_empty()
+                {
+                    assert_eq!(&bytes[..], MARKER);
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let events = capture.events();
+        let first = events
+            .iter()
+            .find(|event| {
+                event.kind == Kind::TerminalByte
+                    && event.stream == writer
+                    && event.monotonic >= started
+            })
+            .expect("authenticated TCP Output is missing from transport observation");
+        // TCP may reuse a source port against a different destination. The
+        // fresh writer distinguishes Output events; header counts still grow.
+        let occurrence = seen.iter().filter(|peer| **peer == first.peer).count() + 1;
+        seen.push(first.peer);
+        for kind in [
+            Kind::TlsHandshake,
+            Kind::LedgerAdmission,
+            Kind::ControlReady,
+            Kind::TerminalByte,
+        ] {
+            assert_eq!(
+                capture.count_peer(kind, first.peer),
+                occurrence,
+                "TCP {kind:?} callback absent or duplicated"
+            );
+            assert!(
+                capture.count(kind) >= seen.len(),
+                "TCP callbacks absent from total {kind:?} count"
+            );
+        }
+        assert_eq!(
+            capture.count_peer(Kind::TerminalByte, first.peer),
+            occurrence,
+            "empty Output was counted as a terminal byte"
+        );
+        // The durable actor survives disconnects. Use its authenticated census
+        // and retirement state to synchronize churn independently of callbacks.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !hosts.online(host_id).await {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("authenticated session census never became available");
+        drop(handle);
+        release.send(()).unwrap();
+        peer.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while hosts.online(host_id).await {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("previous TCP transport did not retire");
+    }
+    drop((lease, primary));
+}

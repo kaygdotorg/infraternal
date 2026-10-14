@@ -34,6 +34,10 @@ enum LinkTransport {
 /// Authority is attached only after durable mTLS admission and guards both
 /// transport directions; direct actor tests may still construct an unguarded link.
 pub(crate) struct RemoteLink {
+    // TCP has no Quinn peer accessor. Retain only its public authenticated tuple
+    // in opt-in tests; this field is absent from every shipping build.
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    diagnostic_peer: Option<std::net::SocketAddr>,
     transport: LinkTransport,
     authority: Option<crate::remote_guard::AuthorityGuard>,
     renewal: std::sync::atomic::AtomicBool,
@@ -187,6 +191,8 @@ impl RemoteLink {
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
         Ok(Self {
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            diagnostic_peer: None,
             transport: LinkTransport::Tcp {
                 channel,
                 receive: Mutex::new(receive),
@@ -242,6 +248,8 @@ impl RemoteLink {
             receive,
         ));
         Ok(Self {
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            diagnostic_peer: None,
             transport: LinkTransport::Quic(QuicLink {
                 connection,
                 binding: Mutex::new(None),
@@ -262,6 +270,14 @@ impl RemoteLink {
         })
     }
 
+    /// Public TCP coordinates label authenticated observations, never authority
+    /// or packet provenance for unrestricted terminal bytes.
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    pub(crate) fn with_diagnostic_peer(mut self, peer: std::net::SocketAddr) -> Self {
+        self.diagnostic_peer = Some(peer);
+        self
+    }
+
     async fn read_transport(
         &self,
         target: &mut BytesMut,
@@ -279,6 +295,18 @@ impl RemoteLink {
                 }
                 let mut receive = receive.lock().await;
                 let decoded = receive.next(channel).await?;
+                #[cfg(all(test, feature = "mesh-transport-proof"))]
+                if matches!(decoded.frame, Frame::Output {bytes,..} if !bytes.is_empty())
+                    && let Some(peer) = self.diagnostic_peer
+                {
+                    // Reuse the existing authenticated decoder. This is the same
+                    // pre-actor boundary as QUIC's pump, not a second parser.
+                    crate::remote_autoswitch_probe::record(
+                        crate::remote_autoswitch_probe::Kind::TerminalByte,
+                        peer,
+                        decoded.stream_id,
+                    );
+                }
                 let mut bytes = Vec::new();
                 encode_muxed_frame_into(decoded.stream_id, &decoded.frame, &mut bytes)
                     .map_err(io::Error::other)?;
