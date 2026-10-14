@@ -377,30 +377,52 @@ async fn delayed_proxy_keeps_replies_bound_to_the_original_udp_client() {
     assert_eq!(replies.1, b"second");
 }
 
-#[tokio::test]
-#[ignore = "Physical packet-spacing budget: run on the perf VM under the shared benchmark lock."]
+/// Reports relay consumption so virtual flight times start at known packet arrivals.
+struct ObservedProxyInput {
+    reader: tokio::io::DuplexStream,
+    arrivals: tokio::sync::mpsc::UnboundedSender<()>,
+}
+impl tokio::io::AsyncRead for ObservedProxyInput {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buffer.filled().len();
+        let result = tokio::io::AsyncRead::poll_read(
+            std::pin::Pin::new(&mut this.reader),
+            cx,
+            buffer,
+        );
+        if matches!(&result, std::task::Poll::Ready(Ok(()))) && buffer.filled().len() > before {
+            this.arrivals.send(()).unwrap();
+        }
+        result
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn tcp_proxy_preserves_spacing_between_packets_already_in_flight() {
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
-    };
-    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let (address, proxy) = crate::transport_diagnostics::tcp_proxy_at(
-        upstream.local_addr().unwrap(),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
-    let mut source = TcpStream::connect(address).await.unwrap();
-    source.set_nodelay(true).unwrap();
-    // Wait out the modeled TCP connect RTT before separating the two writes.
-    let (mut target, _) = upstream.accept().await.unwrap();
-    let sender = tokio::spawn(async move {
-        source.write_all(b"a").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        source.write_all(b"b").await.unwrap();
-    });
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Exercise the TCP proxy's actual queued flight scheduler without making
+    // host CPU scheduling part of the assertion. The real-socket flood test
+    // below separately proves byte integrity and half-close forwarding.
+    let (mut source, reader) = tokio::io::duplex(1024);
+    let (writer, mut target) = tokio::io::duplex(1024);
+    let (arrivals, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let proxy = tokio::spawn(crate::transport_diagnostics::delayed_copy(
+        ObservedProxyInput { reader, arrivals },
+        writer,
+    ));
+    source.write_all(b"a").await.unwrap();
+    received.recv().await.unwrap();
+    tokio::time::advance(Duration::from_millis(20)).await;
+    source.write_all(b"b").await.unwrap();
+    received.recv().await.unwrap();
+    source.shutdown().await.unwrap();
     let mut byte = [0; 1];
-    let observed = tokio::time::timeout(Duration::from_secs(2), async {
+    let spacing = tokio::time::timeout(Duration::from_secs(2), async {
         target.read_exact(&mut byte).await.unwrap();
         assert_eq!(&byte, b"a");
         let first = tokio::time::Instant::now();
@@ -408,17 +430,10 @@ async fn tcp_proxy_preserves_spacing_between_packets_already_in_flight() {
         assert_eq!(&byte, b"b");
         first.elapsed()
     })
-    .await;
-    proxy.abort();
-    let _ = proxy.await;
-    sender.abort();
-    let _ = sender.await;
-    let spacing = observed.unwrap();
-    println!("tcp_proxy_spacing_us={}", spacing.as_micros());
-    assert!(
-        spacing < Duration::from_millis(100),
-        "the relay serialized independent packet flight times"
-    );
+    .await
+    .unwrap();
+    proxy.await.unwrap().unwrap();
+    assert_eq!(spacing, Duration::from_millis(20));
 }
 
 #[tokio::test]
