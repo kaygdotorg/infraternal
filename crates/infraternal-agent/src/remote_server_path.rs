@@ -358,24 +358,27 @@ async fn candidate(
     // every unanswered candidate would strand both-dead UDP until QUIC expiry.
     let mut alive = remote_quic::PeerFreshness::new(connection);
     loop {
-        let backed = *capabilities.borrow_and_update()
+        let mut backed = *capabilities.borrow_and_update()
             & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
             != 0;
-        let moved = tokio::select! {
-            changed = proposals.changed() => {
-                let _ = changed;
-                return Candidate::Refused;
-            }
-            () = async {
-                let mut negotiated = backed;
-                while capabilities.changed().await.is_ok() {
+        let proof = answered(connection, path, tokio::time::Instant::now(), true);
+        tokio::pin!(proof);
+        let moved = loop {
+            tokio::select! {
+                _ = proposals.changed() => return Candidate::Refused,
+                changed = capabilities.changed() => {
+                    if changed.is_err() {
+                        return Candidate::Refused;
+                    }
                     let next = *capabilities.borrow_and_update()
                         & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0;
-                    if negotiated && !next { return; }
-                    negotiated = next;
+                    if backed && !next {
+                        return Candidate::Refused;
+                    }
+                    backed = next;
                 }
-            } => return Candidate::Refused,
-            moved = answered(connection, path, tokio::time::Instant::now(), true) => moved,
+                moved = &mut proof => break moved,
+            }
         };
         if moved {
             return Candidate::Proven;
@@ -458,21 +461,18 @@ async fn steer(
                     };
                     retry_since = std::time::Instant::now();
                     not_before = tokio::time::Instant::now() + PROBE_TIMEOUT;
-                    if moved == Candidate::Unreachable {
-                        let returned = tokio::select! {
-                            _ = &mut active => return Steered::Ended,
-                            returned = to_enrolled(link, registry, *reason) => returned,
-                        };
-                        if !returned {
-                            return Steered::Ended;
-                        }
-                    } else {
-                        tokio::select! {
-                            biased;
-                            _ = &mut active => return Steered::Ended,
-                            _ = to_enrolled(link, registry, *reason) => {},
-                            () = retry_path(path, not_before, retry_since) => {},
-                        }
+                    // One return future owns the same replay/status/proof in
+                    // both cases. Only legacy refusal may stop waiting on a hint;
+                    // both-dead recovery must finish this proof before redialing.
+                    let returned = tokio::select! {
+                        biased;
+                        _ = &mut active => return Steered::Ended,
+                        returned = to_enrolled(link, registry, *reason) => returned,
+                        () = retry_path(path, not_before, retry_since),
+                            if moved != Candidate::Unreachable => true,
+                    };
+                    if moved == Candidate::Unreachable && !returned {
+                        return Steered::Ended;
                     }
                     if latest.is_none() {
                         path.forget_mesh();
