@@ -16,7 +16,7 @@ use crate::{
     terminal::Terminal,
 };
 use nix::{
-    poll::{PollFd, PollFlags, poll},
+    poll::PollFlags,
     sys::{
         signal::{SigSet, Signal},
         signalfd::{SfdFlags, SignalFd},
@@ -25,18 +25,12 @@ use nix::{
     },
     unistd::Uid,
 };
-use std::{
-    cell::RefCell,
-    panic::{AssertUnwindSafe, catch_unwind},
-};
+use std::cell::RefCell;
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
-    os::{
-        fd::AsFd,
-        unix::{net::UnixListener, process::ExitStatusExt},
-    },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    os::unix::{net::UnixListener, process::ExitStatusExt},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 const PREFIX_LIMIT: usize = 4096;
@@ -498,146 +492,28 @@ pub fn run_host(mut configs: Vec<Config>) -> io::Result<()> {
     for config in &mut configs {
         config.ring_capacity = config.ring_capacity.min(ring_budget);
     }
-    let mut sessions = configs
+    let sessions = configs
         .into_iter()
         .map(|config| Session::new(config, history))
         .collect::<io::Result<Vec<_>>>()?;
-    let mut failed = false;
-    let mut next_output = 0;
-    while !sessions.is_empty() {
-        for i in (0..sessions.len()).rev() {
-            match catch_unwind(AssertUnwindSafe(|| sessions[i].housekeeping())) {
-                Ok(Ok(false)) => {}
-                Ok(Ok(true)) => {
-                    sessions.remove(i);
-                }
-                _ => {
-                    failed = true;
-                    sessions.remove(i);
-                }
-            }
-        }
-        if sessions.is_empty() {
-            break;
-        }
-        let mut descriptors = vec![PollFd::new(signals.as_fd(), PollFlags::POLLIN)];
-        let mut layout = Vec::with_capacity(sessions.len());
-        for session in &sessions {
-            let start = descriptors.len();
-            descriptors.push(PollFd::new(session.listener.as_fd(), PollFlags::POLLIN));
-            let read = session.can_read();
-            let write = !session.input.is_empty();
-            // Omit drained/blocked masters: level-triggered HUP otherwise spins.
-            descriptors.push(PollFd::new(
-                if read || write {
-                    session.pty.master.as_fd()
-                } else {
-                    session.listener.as_fd()
-                },
-                if read {
-                    PollFlags::POLLIN
-                } else {
-                    PollFlags::empty()
-                } | if write {
-                    PollFlags::POLLOUT
-                } else {
-                    PollFlags::empty()
-                },
-            ));
-            for peer in &session.peers {
-                let mut flags = PollFlags::empty();
-                if peer.deferred.is_none() && peer.trailing.is_empty() {
-                    flags |= PollFlags::POLLIN;
-                }
-                if !peer.pending.is_empty() {
-                    flags |= PollFlags::POLLOUT;
-                }
-                descriptors.push(PollFd::new(peer.stream.as_fd(), flags));
-            }
-            layout.push((start, session.peers.len()));
-        }
-        let timeout = if sessions.iter().any(|s| s.exit.is_some() && s.can_read()) {
-            nix::poll::PollTimeout::ZERO
-        } else {
-            sessions.iter().filter_map(|s| s.deadline).min().map_or(
-                nix::poll::PollTimeout::NONE,
-                |d| {
-                    nix::poll::PollTimeout::try_from(
-                        d.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
-                    )
-                    .unwrap_or(nix::poll::PollTimeout::MAX)
-                },
-            )
-        };
-        match poll(&mut descriptors, timeout) {
-            Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => return Err(e.into()),
-        }
-        let ready: Vec<_> = descriptors
-            .iter()
-            .map(|fd| fd.revents().unwrap_or_else(PollFlags::empty))
-            .collect();
-        drop(descriptors);
-        if ready[0].contains(PollFlags::POLLIN) {
-            while signals.read_signal().map_err(io::Error::from)?.is_some() {}
-        }
-        let mut failures = vec![false; sessions.len()];
-        // All input/control progress precedes bulk work, even when the active
-        // session is last in the array. Do not remove sessions until both passes
-        // finish: poll indices refer to this iteration's immutable layout.
-        for (i, session) in sessions.iter_mut().enumerate() {
-            let (start, count) = layout[i];
-            failures[i] = catch_unwind(AssertUnwindSafe(|| {
-                session.step(
-                    ready[start],
-                    ready[start + 1] & PollFlags::POLLOUT,
-                    &ready[start + 2..start + 2 + count],
-                    false,
-                )
-            }))
-            .map_or(true, |result| result.is_err());
-        }
-        let mut progressed = 0;
-        let output_start = next_output;
-        for offset in 0..sessions.len() {
-            let i = (output_start + offset) % sessions.len();
-            let flags = ready[layout[i].0 + 1] & (PollFlags::POLLIN | PollFlags::POLLHUP);
-            if failures[i] || (flags.is_empty() && sessions[i].exit.is_none()) {
-                continue;
-            }
-            failures[i] = catch_unwind(AssertUnwindSafe(|| {
-                sessions[i].step(PollFlags::empty(), flags, &[], true)
-            }))
-            .map_or(true, |result| result.is_err());
-            progressed += 1;
-            next_output = (i + 1) % sessions.len();
-            if progressed == OUTPUTS_PER_ROUND {
-                break;
-            }
-        }
-        for i in (0..sessions.len()).rev() {
-            if failures[i] {
-                failed = true;
-                sessions.remove(i);
-            }
-        }
-        if !sessions.is_empty() {
-            next_output %= sessions.len();
-        }
-    }
-    if failed {
-        Err(io::Error::other("one or more hosted sessions failed"))
-    } else {
-        Ok(())
-    }
+    reactor::run(sessions, &signals)
 }
+
+#[path = "user_host_reactor.rs"]
+mod reactor;
 
 #[cfg(test)]
 mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
-    use std::{fs, path::PathBuf};
+    use nix::poll::{PollFd, poll};
+    use std::{
+        fs,
+        os::fd::AsFd,
+        panic::{AssertUnwindSafe, catch_unwind},
+        path::PathBuf,
+        time::Duration,
+    };
     fn assert_same_state(lazy: &LazyTerminal, eager: &Terminal) {
         lazy.materialize().unwrap();
         let state = lazy.state.borrow();
