@@ -183,8 +183,11 @@ impl Drop for Session {
     }
 }
 impl Session {
-    fn new(config: Config, history: usize) -> io::Result<Self> {
+    fn new(mut config: Config, history: usize) -> io::Result<Self> {
         let (listener, path) = socket(&config)?;
+        // The bound socket owns the complete pathname. Runtime geometry and
+        // wire handling never need a second copy of its startup directory.
+        config.state = None;
         let pty =
             Pty::spawn_with_readiness(config.uid, config.cols, config.rows, config.readiness)?;
         Ok(Self {
@@ -713,6 +716,31 @@ mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
 
+    #[test]
+    fn session_constructor_retains_only_the_bound_socket_path() {
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/p{}",
+            std::process::id()
+        ));
+        // Global locale initialization is fixed process ownership, not this
+        // session's constructor allocation.
+        drop(crate::session_locale_environment());
+        let (session, owned) = crate::heap_accounting::measure(|| {
+            let mut config = Config::new([13; 16], Uid::effective().as_raw());
+            config.state = Some(state.clone());
+            config.readiness = true;
+            Session::new(config, 65536).unwrap()
+        });
+        assert!(session.config.state.is_none());
+        assert!(session.path.0.starts_with(&state));
+        assert_eq!(
+            owned.bytes,
+            i64::try_from(session.path.0.capacity()).unwrap()
+        );
+        assert!(std::os::unix::net::UnixStream::connect(&session.path.0).is_ok());
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn bulk_turn_advances_sixteen_kib_and_yields_before_the_rest() {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
