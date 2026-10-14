@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import resource
 import select
+import shutil
 import signal
 import struct
 
@@ -85,7 +86,7 @@ def kernel(count):
 
 
 async def host_row(args, count, repeat):
-    root = args.evidence / f'n{count}r{repeat}'
+    root = args.runtime_root if args.runtime_root is not None else args.evidence / f'n{count:04}r{repeat:02}'
     receipt = args.evidence / f'n{count}r{repeat}-ownership.jsonl'
     host = Host(args.binary.resolve(), root, count, 0x2702050000, accounting=receipt)
     try:
@@ -123,11 +124,16 @@ async def host_row(args, count, repeat):
                                  if key.endswith('_bytes')},
                     idle_cpu_ticks=after['cpu_ticks'] - before['cpu_ticks'])
     finally:
-        await host.close()
+        try:
+            await host.close()
+        finally:
+            if args.runtime_root is not None:
+                shutil.rmtree(root)
 
 
 async def run(args):
     assert os.uname().nodename == 'infraternal-perf-test'
+    assert not (args.host_only and args.kernel_only)
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 16384), hard))
     args.evidence.mkdir(parents=True, exist_ok=False)
@@ -139,13 +145,15 @@ async def run(args):
             output.flush()
             print(json.dumps(row, sort_keys=True), flush=True)
         emit(dict(kind='environment', binary_sha256=hashlib.sha256(args.binary.read_bytes()).hexdigest(),
-                  driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()))
+                  driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                  runtime_root=str(args.runtime_root) if args.runtime_root is not None else None))
         if not args.kernel_only:
             for repeat in range(args.repeats):
                 for count in (1, 10, 100, 1000):
                     emit(await host_row(args, count, repeat))
-        for _ in range(args.repeats):
-            emit(kernel(2000))
+        if not args.host_only:
+            for _ in range(args.repeats):
+                emit(kernel(2000))
 
 
 if __name__ == '__main__':
@@ -154,4 +162,6 @@ if __name__ == '__main__':
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--kernel-only', action='store_true')
+    parser.add_argument('--host-only', action='store_true')
+    parser.add_argument('--runtime-root', type=Path, help='fresh private directory reused and removed after each row; keeps path size classes identical')
     asyncio.run(run(parser.parse_args()))
