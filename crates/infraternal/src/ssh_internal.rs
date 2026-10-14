@@ -14,17 +14,25 @@ pub(crate) fn run_if_requested() -> Option<ExitCode> {
     let command = first.to_str()?;
     // Public invocations keep their arguments with the public parser. Only a
     // recognized private helper needs an owned argument list.
-    if !matches!(command, "__ssh-connect" | "__ssh-session") {
+    if !recognizes(command) {
         return None;
     }
     let args: Vec<OsString> = arguments.collect();
     match command {
+        #[cfg(feature = "ssh")]
         "__ssh-connect" => Some(connect(&args).unwrap_or(ExitCode::from(2))),
         "__ssh-session" => Some(session(&args).unwrap_or(ExitCode::from(2))),
         _ => None,
     }
 }
 
+fn recognizes(command: &str) -> bool {
+    // The initiating executable supplies ProxyCommand. Uploaded session images
+    // never dial SSH, so they must not retain its resolver or descriptor handoff.
+    command == "__ssh-session" || (cfg!(feature = "ssh") && command == "__ssh-connect")
+}
+
+#[cfg(feature = "ssh")]
 fn connect(args: &[OsString]) -> Option<ExitCode> {
     let [host, port] = args else { return None };
     let host = host.to_str()?;
@@ -58,6 +66,14 @@ mod tests {
     }
 
     #[test]
+    fn connector_is_available_only_on_the_initiating_build() {
+        assert!(recognizes("__ssh-session"));
+        assert_eq!(recognizes("__ssh-connect"), cfg!(feature = "ssh"));
+        assert!(!recognizes("__ssh-connect-extra"));
+    }
+
+    #[test]
+    #[cfg(feature = "ssh")]
     fn connect_requires_exactly_a_host_and_numeric_port() {
         for invalid in [
             &[][..],
