@@ -1447,7 +1447,10 @@ fn run_remote_agent(
         if let AgentAction::Join { url, .. } = action {
             let mut invitation = Vec::with_capacity(8192);
             std::io::stdin().take(8193).read_to_end(&mut invitation)?;
-            runtime.block_on(remote::join(&url, &data, &invitation))?;
+            infraternal_agent::block_on_io(
+                &runtime,
+                Box::pin(remote::join(&url, &data, &invitation)),
+            )?;
             // SSH publishes staged state only after enrollment returns. Running
             // here would hold its transaction until the service was cancelled.
             if enroll_only {
