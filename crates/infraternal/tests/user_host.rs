@@ -21,6 +21,9 @@ struct Host {
 }
 impl Host {
     fn new() -> Self {
+        Self::with_accounting(false)
+    }
+    fn with_accounting(accounted: bool) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
             ".cache/codex-scratch/process-per-user/t{}-{serial}",
@@ -28,7 +31,8 @@ impl Host {
         ));
         let origin = (u128::from(std::process::id()) << 64) | (u128::from(serial) << 32);
         let ids = [format!("{origin:032x}"), format!("{:032x}", origin + 1)];
-        let child = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_infraternal"));
+        command
             .args([
                 "__shim",
                 "--session",
@@ -41,7 +45,17 @@ impl Host {
                 "128",
                 "--state",
             ])
-            .arg(&root)
+            .arg(&root);
+        if accounted {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&root)
+                .unwrap();
+            command.arg("--host-accounting").arg(root.join("ownership"));
+        }
+        let child = command
             .env(
                 "ZDOTDIR",
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/profile"),
@@ -113,6 +127,65 @@ fn writer_state(peer: &mut UnixStream) -> (u64, u64) {
             _ => panic!("unexpected writer-state frame kind"),
         }
     }
+}
+
+#[test]
+fn ownership_receipt_is_private_numeric_and_never_overwritten() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut host = Host::with_accounting(true);
+    let mut peer = host.connect(0);
+    assert!(matches!(read(&mut peer), Frame::Hello { .. }));
+    let path = host.state.join("ownership");
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(host.child.id()).unwrap()),
+        nix::sys::signal::Signal::SIGUSR2,
+    )
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    let content = loop {
+        let text = fs::read_to_string(&path).unwrap();
+        if text.lines().count() == 2 {
+            break text;
+        }
+        assert!(Instant::now() < until, "ownership receipt incomplete");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    for (index, line) in content.lines().enumerate() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let row = row.as_object().unwrap();
+        assert_eq!(row["kind"], "ownership");
+        assert_eq!(row["session"], index);
+        assert!(
+            row.iter()
+                .all(|(key, value)| key == "kind" || value.is_u64())
+        );
+        assert!(row["total_bytes"].as_u64().unwrap() > 0);
+    }
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args([
+            "__shim",
+            "--session",
+            &host.ids[0],
+            "--uid",
+            &nix::unistd::Uid::effective().as_raw().to_string(),
+            "--host-sessions",
+            "2",
+            "--state",
+        ])
+        .arg(&host.state)
+        .arg("--host-accounting")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!duplicate.status.success());
+    assert_eq!(fs::read_to_string(path).unwrap(), content);
+    assert!(host.child.try_wait().unwrap().is_none());
+    send(&mut peer, &Frame::Attach(SEQUENCED_INPUT));
+    assert_eq!(writer_state(&mut peer), (0, 0));
 }
 
 #[test]
