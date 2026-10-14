@@ -45,12 +45,13 @@ function fixture(rtt: number, streams: number) {
     get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
     stopForwarding() { forwarding = false; },
+    suspend(ms: number) { now += ms; },
     advance(ms: number) {
       const until = now + ms;
       for (;;) {
         const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
         if (!next) break;
-        now = next[1].at; timers.delete(next[0]); next[1].callback();
+        now = Math.max(now, next[1].at); timers.delete(next[0]); next[1].callback();
       }
       now = until;
     },
@@ -125,5 +126,15 @@ test("retransmitting an earlier input range cannot forget a later unacknowledged
     const probes = f.probes;
     f.advance(1000);
     expect(f.probes - probes).toBeGreaterThanOrEqual(39);
+  } finally { f.dispose(); }
+});
+
+test("a delayed first timer starts unknown-RTT grace when its first probe is issued", () => {
+  const f = fixture(1200, 1);
+  try {
+    f.suspend(1999);
+    f.advance(1600);
+    expect(f.disconnects).toBe(0);
+    expect(f.connection.isWelcomed).toBe(true);
   } finally { f.dispose(); }
 });

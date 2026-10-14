@@ -289,7 +289,7 @@ export class MuxConnection {
     const nonce = this.nextPingNonce;
     // A delayed local timer cannot prove peer loss before there is a probe to answer.
     // Start a deadline only when the fully answered route issues its next probe.
-    if (this.pendingPings.size === 0 && startedAt - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) this.lastPongAt = startedAt;
+    if (this.pendingPings.size === 0 && (this.livenessRtt === undefined || startedAt - this.lastPongAt >= this.livenessRtt + 50)) this.lastPongAt = startedAt;
     if (this.pendingPings.size >= 128) {
       const oldest = this.pendingPings.keys().next().value as bigint | undefined;
       if (oldest !== undefined) this.pendingPings.delete(oldest);
