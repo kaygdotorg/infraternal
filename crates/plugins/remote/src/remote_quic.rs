@@ -299,6 +299,30 @@ impl PeerFreshness {
         }
     }
 }
+/// Bounded public failure evidence for opt-in transport measurements only.
+#[cfg(feature = "test-support")]
+#[derive(Debug, serde::Serialize)]
+pub struct ProbeFailure {
+    /// Public counters and clocks distinguish missing physical replies from
+    /// authentication/driver progress. No packet or terminal contents survive.
+    pub mesh_reply_after_first_send: bool,
+    pub first_send_age_us: u128,
+    pub flush_age_us: u128,
+    pub authenticated_silence_us: u128,
+    pub authenticated_progress_not_observed: bool,
+    pub constructed_datagrams_before: u64,
+    pub constructed_datagrams_after: u64,
+    pub rtt_us: u128,
+}
+#[cfg(feature = "test-support")]
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+#[cfg(feature = "test-support")]
+impl std::error::Error for ProbeFailure {}
+
 /// Watch a path by asking for acknowledgements every `interval`. It is
 /// interrupted when a probe sees no newly authenticated frame within the
 /// current RTT plus `margin` (the server's ACK delay and scheduling jitter).
@@ -353,6 +377,21 @@ pub async fn path_interrupted(
                 // Authenticated enrolled copies preserve data but cannot prove
                 // the mesh. Require a response from its physical tuple too.
                 if !path.heard_since(sent.into_std()) || freshness.silence(connection) >= sent.elapsed() {
+                    #[cfg(feature = "test-support")]
+                    {
+                        let stats = connection.stats();
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, ProbeFailure {
+                            mesh_reply_after_first_send: path.heard_since(sent.into_std()),
+                            first_send_age_us: sent.elapsed().as_micros(),
+                            flush_age_us: pending.map_or(0, |(_, flushed)| flushed.elapsed().as_micros()),
+                            authenticated_silence_us: freshness.observed.elapsed().as_micros(),
+                            authenticated_progress_not_observed: authenticated_signature(stats.frame_rx) != freshness.frames,
+                            constructed_datagrams_before: datagrams_before,
+                            constructed_datagrams_after: stats.frame_tx.datagram,
+                            rtt_us: stats.path.rtt.as_micros(),
+                        }));
+                    }
+                    #[cfg(not(feature = "test-support"))]
                     return Err(io::ErrorKind::TimedOut.into());
                 }
                 pending = None;

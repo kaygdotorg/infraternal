@@ -36,7 +36,8 @@ fn finished_watchers(watchers: &mut Watchers) -> Vec<serde_json::Value> {
         finished.push(match result {
             Ok((index, result, elapsed, stats, mesh_batches)) => serde_json::json!({
                 "connection":index,
-                "result":result.map_or_else(|error| format!("{:?}", error.kind()), |()| "unexpected_success".into()),
+                "result":result.as_ref().map_or_else(|error| format!("{:?}", error.kind()), |()| "unexpected_success".into()),
+                "probe_failure":result.as_ref().err().and_then(|error|error.get_ref()).and_then(|error|error.downcast_ref::<remote_quic::ProbeFailure>()),
                 "lifetime_us":elapsed.as_micros(),
                 "rtt_us":stats.path.rtt.as_micros(),
                 "authenticated_rx_acks":stats.frame_rx.acks,
@@ -48,6 +49,54 @@ fn finished_watchers(watchers: &mut Watchers) -> Vec<serde_json::Value> {
         });
     }
     finished
+}
+
+/// Read only counters for sockets this cohort owns. Global UDP counters include
+/// unrelated services; per-socket drops establish whether this fixture lost
+/// packets locally without turning another service's traffic into evidence.
+fn owned_udp_drops(server: &[SocketAddr], clients: &[SocketAddr]) -> serde_json::Value {
+    let clients: std::collections::HashSet<_> = clients.iter().copied().collect();
+    let rows = std::fs::read_to_string("/proc/net/udp").unwrap();
+    let mut server_drops = 0_u64;
+    let mut client_drops = 0_u64;
+    let mut server_sockets = 0;
+    let mut client_sockets = 0;
+    for row in rows.lines().skip(1) {
+        let mut fields = row.split_ascii_whitespace();
+        let Some((ip, port)) = fields.nth(1).and_then(|field| field.split_once(':')) else {
+            continue;
+        };
+        let (Ok(ip), Ok(port)) = (u32::from_str_radix(ip, 16), u16::from_str_radix(port, 16))
+        else {
+            continue;
+        };
+        let address = SocketAddr::new(Ipv4Addr::from(ip.to_le_bytes()).into(), port);
+        let Some(drops) = fields.last().and_then(|field| field.parse::<u64>().ok()) else {
+            continue;
+        };
+        if server.contains(&address) {
+            server_sockets += 1;
+            server_drops += drops;
+        } else if clients.contains(&address) {
+            client_sockets += 1;
+            client_drops += drops;
+        }
+    }
+    serde_json::json!({"server_drops":server_drops,"client_drops":client_drops,"server_sockets":server_sockets,"client_sockets":client_sockets})
+}
+
+#[test]
+fn udp_drop_receipt_counts_only_owned_live_sockets() {
+    let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let client = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let receipt = owned_udp_drops(
+        &[server.local_addr().unwrap()],
+        &[client.local_addr().unwrap()],
+    );
+    assert_eq!(receipt["server_sockets"], 1);
+    assert_eq!(receipt["client_sockets"], 1);
+    assert_eq!(receipt["server_drops"], 0);
+    assert_eq!(receipt["client_drops"], 0);
 }
 
 fn watch(
@@ -369,7 +418,12 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
     assert_eq!(accepted.len(), CONNECTIONS);
     let mut reports = Vec::new();
     let mut healthy = true;
+    let client_addresses: Vec<_> = paths
+        .iter()
+        .map(|path| path.local_addr().unwrap())
+        .collect();
     for backup in [false, true] {
+        let udp_drops_before = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         for peer in &peers {
             peer.set_backup(backup);
         }
@@ -423,8 +477,10 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
         }
         let admission_elapsed = admission_started.elapsed();
         let ramp_interruptions = finished_watchers(&mut watchers);
+        let udp_drops_after_ramp = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         tokio::time::sleep(Duration::from_secs(1)).await;
         let warmup_interruptions = finished_watchers(&mut watchers);
+        let udp_drops_after_warmup = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         let steady_cohort_valid = proof_failures == 0
             && ramp_interruptions.is_empty()
             && warmup_interruptions.is_empty()
@@ -455,7 +511,7 @@ async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
             .filter(|connection| connection.close_reason().is_none())
             .count();
         healthy &= steady_cohort_valid && false_interruptions == 0 && live == CONNECTIONS;
-        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 20 } else { 0 },"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"startup":{"proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
+        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 20 } else { 0 },"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"owned_udp_drops":{"before":udp_drops_before,"after_ramp":udp_drops_after_ramp,"after_warmup":udp_drops_after_warmup,"after_windows":owned_udp_drops(&[enrolled,mesh],&client_addresses),"observation":"four_per_profile_outside_timed_windows"},"startup":{"proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
         watchers.abort_all();
         while watchers.join_next().await.is_some() {}
         for path in &paths {
