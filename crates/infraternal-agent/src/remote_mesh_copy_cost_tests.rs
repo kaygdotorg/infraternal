@@ -21,12 +21,22 @@ use std::{
     task::{Context, Poll},
 };
 
+#[path = "remote_mesh_copy_cost_tests/receive_diagnostic.rs"]
+mod receive_diagnostic;
+use receive_diagnostic::{DiagnosticWatch, ReceiveDiagnostic};
+
 const CONNECTIONS: usize = 1000;
 const WINDOWS: usize = 31;
 const WINDOW: Duration = Duration::from_millis(250);
 
-type Watchers =
-    tokio::task::JoinSet<(usize, io::Result<()>, Duration, quinn::ConnectionStats, u64)>;
+type Watchers = tokio::task::JoinSet<(
+    usize,
+    io::Result<()>,
+    Duration,
+    quinn::ConnectionStats,
+    u64,
+    Option<serde_json::Value>,
+)>;
 
 /// Keep the cold admission/warmup failures separate from sampling failures;
 /// an exited guard never silently reduces the claimed measured cohort.
@@ -34,7 +44,8 @@ fn finished_watchers(watchers: &mut Watchers) -> Vec<serde_json::Value> {
     let mut finished = Vec::new();
     while let Some(result) = watchers.try_join_next() {
         finished.push(match result {
-            Ok((index, result, elapsed, stats, mesh_batches)) => serde_json::json!({
+            Ok((index, result, elapsed, stats, mesh_batches, diagnostic)) => {
+                let mut receipt = serde_json::json!({
                 "connection":index,
                 "result":result.as_ref().map_or_else(|error| format!("{:?}", error.kind()), |()| "unexpected_success".into()),
                 "probe_failure":result.as_ref().err().and_then(|error|error.get_ref()).and_then(|error|error.downcast_ref::<remote_quic::ProbeFailure>()),
@@ -44,7 +55,12 @@ fn finished_watchers(watchers: &mut Watchers) -> Vec<serde_json::Value> {
                 "client_quinn_tx_datagrams":stats.udp_tx.datagrams,
                 "client_quinn_rx_datagrams":stats.udp_rx.datagrams,
                 "mesh_received_batches":mesh_batches,
-            }),
+                });
+                if let Some(diagnostic) = diagnostic {
+                    receipt["receive_diagnostic"] = diagnostic;
+                }
+                receipt
+            },
             Err(error) => serde_json::json!({"join_error":error.to_string()}),
         });
     }
@@ -106,6 +122,7 @@ fn watch(
     path: Arc<PathSocket>,
     interval: Duration,
     margin: Duration,
+    diagnostic: Option<DiagnosticWatch>,
 ) {
     watchers.spawn(async move {
         let started = tokio::time::Instant::now();
@@ -116,6 +133,7 @@ fn watch(
             started.elapsed(),
             connection.stats(),
             path.mesh_datagrams(),
+            diagnostic.map(DiagnosticWatch::failure),
         )
     });
 }
@@ -232,6 +250,19 @@ fn counted(
     })
 }
 
+fn counted_server(
+    socket: Arc<dyn AsyncUdpSocket>,
+    traffic: &Arc<Traffic>,
+    diagnostic: Option<&Arc<ReceiveDiagnostic>>,
+    index: usize,
+) -> Arc<dyn AsyncUdpSocket> {
+    let socket = counted(socket, traffic, false);
+    diagnostic.map_or_else(
+        || socket.clone(),
+        |diagnostic| diagnostic.wrap(socket.clone(), index),
+    )
+}
+
 fn system_unit(name: &str) -> u64 {
     std::str::from_utf8(
         &std::process::Command::new("getconf")
@@ -321,6 +352,7 @@ async fn fresh_copy_from_admission_at_one_thousand_transports() {
 /// fresh cohort without changing its connections, windows, or health criteria.
 #[allow(clippy::too_many_lines)]
 async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
+    let diagnostic = ReceiveDiagnostic::from_environment();
     let ca = root();
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
@@ -332,18 +364,23 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
     let primary = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let enrolled = primary.local_addr().unwrap();
     let mesh = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), enrolled.port());
-    let bindings = Bindings::new(counted(
+    if let Some(diagnostic) = &diagnostic {
+        diagnostic.server_addresses(&[enrolled, mesh]);
+    }
+    let bindings = Bindings::new(counted_server(
         quinn::TokioRuntime.wrap_udp_socket(primary).unwrap(),
         &server_traffic,
-        false,
+        diagnostic.as_ref(),
+        0,
     ));
     let lease = bindings
-        .lease(counted(
+        .lease(counted_server(
             quinn::TokioRuntime
                 .wrap_udp_socket(std::net::UdpSocket::bind(mesh).unwrap())
                 .unwrap(),
             &server_traffic,
-            false,
+            diagnostic.as_ref(),
+            1,
         ))
         .unwrap();
     let server = quinn::Endpoint::new_with_abstract_socket(
@@ -452,7 +489,13 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
         .iter()
         .map(|path| path.local_addr().unwrap())
         .collect();
+    if let Some(diagnostic) = &diagnostic {
+        diagnostic.sample_ports(&client_addresses);
+    }
     for &backup in profiles {
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.stage(backup, "before");
+        }
         // Observe the physical ramp separately: failed guards stop generating
         // probes before steady windows, hiding a startup transmission burst.
         let traffic_before = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
@@ -500,7 +543,18 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
                     proving.join_next().await.unwrap().unwrap();
                 proof_results.push(serde_json::json!({"connection":index,"proved":proved,"elapsed_us":elapsed.as_micros(),"rtt_us":connection.rtt().as_micros(),"mesh_received_batches":path.mesh_datagrams()}));
                 if proved {
-                    watch(&mut watchers, index, connection, path, interval, margin);
+                    let observation = diagnostic.as_ref().map(|diagnostic| {
+                        diagnostic.watch(index, path.local_addr().unwrap().port(), &accepted)
+                    });
+                    watch(
+                        &mut watchers,
+                        index,
+                        connection,
+                        path,
+                        interval,
+                        margin,
+                        observation,
+                    );
                 } else {
                     proof_failures += 1;
                 }
@@ -510,7 +564,18 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
             let (index, proved, elapsed, connection, path) = result.unwrap();
             proof_results.push(serde_json::json!({"connection":index,"proved":proved,"elapsed_us":elapsed.as_micros(),"rtt_us":connection.rtt().as_micros(),"mesh_received_batches":path.mesh_datagrams()}));
             if proved {
-                watch(&mut watchers, index, connection, path, interval, margin);
+                let observation = diagnostic.as_ref().map(|diagnostic| {
+                    diagnostic.watch(index, path.local_addr().unwrap().port(), &accepted)
+                });
+                watch(
+                    &mut watchers,
+                    index,
+                    connection,
+                    path,
+                    interval,
+                    margin,
+                    observation,
+                );
             } else {
                 proof_failures += 1;
             }
@@ -520,11 +585,17 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
         let traffic_after_ramp = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_after_ramp = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         let history_after_ramp = bindings.retained_history().unwrap();
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.stage(backup, "after_ramp");
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
         let warmup_interruptions = finished_watchers(&mut watchers);
         let traffic_after_warmup = serde_json::json!({"client":client_traffic.snapshot(),"server":server_traffic.snapshot(),"client_enrolled":client_traffic.enrolled_snapshot(),"server_enrolled":server_traffic.enrolled_snapshot()});
         let udp_drops_after_warmup = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         let history_after_warmup = bindings.retained_history().unwrap();
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.stage(backup, "after_warmup");
+        }
         let steady_cohort_valid = proof_failures == 0
             && ramp_interruptions.is_empty()
             && warmup_interruptions.is_empty()
@@ -547,6 +618,9 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
             let client_enrolled_after = client_traffic.enrolled_snapshot();
             let server_enrolled_after = server_traffic.enrolled_snapshot();
             let interruptions = finished_watchers(&mut watchers);
+            if let Some(diagnostic) = &diagnostic {
+                diagnostic.stage(backup, &format!("window_{window}"));
+            }
             false_interruptions += interruptions.len();
             samples.push(serde_json::json!({"window":window,"elapsed_us":elapsed.as_micros(),"cpu_ticks":after_ticks-before_ticks,"resident_bytes":pages*page_size,"resident_delta_bytes":pages.saturating_sub(baseline_pages)*page_size,"client_udp_payload_bytes":client_after.0-client_before.0,"client_udp_datagrams":client_after.1-client_before.1,"server_udp_payload_bytes":server_after.0-server_before.0,"server_udp_datagrams":server_after.1-server_before.1,"client_enrolled_udp_payload_bytes":client_enrolled_after.0-client_enrolled_before.0,"client_enrolled_udp_datagrams":client_enrolled_after.1-client_enrolled_before.1,"server_enrolled_udp_payload_bytes":server_enrolled_after.0-server_enrolled_before.0,"server_enrolled_udp_datagrams":server_enrolled_after.1-server_enrolled_before.1,"false_interruptions":interruptions,"watchers_remaining":watchers.len()}));
         }
@@ -580,6 +654,17 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
+    if let Some(diagnostic) = &diagnostic {
+        std::fs::write(
+            scratch.join(if fresh_copy {
+                "mesh-fresh-copy-receive-diagnostic.json"
+            } else {
+                "mesh-probe-copy-receive-diagnostic.json"
+            }),
+            serde_json::to_vec_pretty(&diagnostic.report()).unwrap(),
+        )
+        .unwrap();
+    }
     let startup: Vec<_> = report["profiles"].as_array().unwrap().iter().map(|profile| serde_json::json!({"profile":profile["profile"],"startup":profile["startup"],"steady_cohort_valid_at_start":profile["steady_cohort_valid_at_start"]})).collect();
     std::fs::write(
         scratch.join(if fresh_copy {
