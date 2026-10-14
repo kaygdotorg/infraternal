@@ -2,6 +2,7 @@
 """Time add-host against this lane's disposable Docker target; capabilities stay in pipes (#169)."""
 import argparse
 import base64
+import hashlib
 import ipaddress
 import os
 from pathlib import Path
@@ -39,12 +40,22 @@ def main():
     parser.add_argument("--fresh", action="store_true", help="recreate only this lane target before measuring")
     parser.add_argument("--test-binary", type=Path, required=True)
     parser.add_argument("--payload", type=Path, required=True)
+    parser.add_argument("--session-payload", type=Path, help="explicit trusted initial-session fixture image")
     parser.add_argument("--rtt", type=int, choices=[0, 150], default=0)
     parser.add_argument("--mode", choices=["rootless", "root"], default="rootless")
     parser.add_argument("--user", choices=["target", "root"], default="target")
     parser.add_argument("--case", choices=["clean", "tiny-disk", "readonly-home", "noexec-tmp", "foreign-base", "linger-off", "no-manager", "password-sudo", "no-sudo"], default="clean")
     parser.add_argument("--shell", choices=["bash", "zsh", "fish", "sh"], default="bash")
     args = parser.parse_args()
+    if "ADDHOST_INSTANT" in os.environ and args.session_payload is None:
+        parser.error("Instant-shell measurements require --session-payload; a full-image fallback is a different case")
+    if args.session_payload is not None:
+        try:
+            args.session_payload = args.session_payload.resolve(strict=True)
+            if not args.session_payload.is_file():
+                parser.error("The session fixture image must be a regular file")
+        except OSError:
+            parser.error("The session fixture image is unavailable")
     # Cargo feature removal can leave a valid test executable without this live
     # fixture. A zero-test success must never count as provisioning evidence.
     listing = subprocess.check_output([str(args.test_binary.resolve()), "--list"], text=True)
@@ -52,6 +63,13 @@ def main():
                   if line.endswith("breakit2_live_ssh_install_join_and_terminal: test")]
     if len(live_tests) != 1:
         raise RuntimeError("The controller must contain exactly one live host provisioning test; build with the remote feature")
+    with args.payload.open("rb") as image:
+        full_digest = hashlib.file_digest(image, "sha256").hexdigest()
+    print(f"ARTIFACT full_bytes={args.payload.stat().st_size} full_sha256={full_digest}", flush=True)
+    if args.session_payload is not None:
+        with args.session_payload.open("rb") as image:
+            session_digest = hashlib.file_digest(image, "sha256").hexdigest()
+        print(f"ARTIFACT session_bytes={args.session_payload.stat().st_size} session_sha256={session_digest}", flush=True)
     TARGET = args.container_name or args.container
     if not TARGET or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for char in TARGET):
         parser.error("--container-name must be a Docker fixture identifier")
@@ -157,6 +175,8 @@ def main():
                 docker("exec", TARGET, "tc", "qdisc", "add", "dev", device, "root", "netem", "delay", "75ms")
         print(f"ENVIRONMENT machine={os.uname().nodename} cores={os.cpu_count()} load={Path('/proc/loadavg').read_text().strip()} ssh_server={args.ssh_server} case={args.case} user={args.user} rtt_ms={args.rtt} mode={args.mode} shell={args.shell} payload_bytes={args.payload.stat().st_size}", flush=True)
         environment = dict(os.environ, INFRATERNAL_TEST_STATE_ROOT=str(scratch), INFRATERNAL_REMOTE_TEST_BINARY=str(args.payload.resolve()), BREAKIT2_TARGET=f"{args.user}@{ip}:22", BREAKIT2_MODE=args.mode, BREAKIT2_CONTROLLER_IP=str(args.controller_ip))
+        if args.session_payload is not None:
+            environment["INFRATERNAL_REMOTE_TEST_SESSION_BINARY"] = str(args.session_payload)
         if args.expect_failure:
             environment["BREAKIT2_EXPECT_FAILURE"] = "1"
         time.sleep(0.3)
@@ -178,6 +198,12 @@ def main():
                 sampler.join()
         else:
             result = subprocess.run(command, input=private, env=environment, cwd=ROOT)
+        if result.returncode == 0 and not args.expect_failure:
+            home = "/root" if args.user == "root" else "/home/target"
+            base = "/var/lib/infraternal" if args.mode == "root" else f"{home}/.local/share/infraternal"
+            installed = docker("exec", TARGET, "sha256sum", f"{base}/bin/live", capture_output=True, text=True)
+            assert installed.stdout.split()[0] == full_digest, "Installed executable differs from the full fixture image"
+            print(f"PROOF installed_full_sha256_matches=true full_sha256={full_digest}", flush=True)
         # Queue counters distinguish the requested delay from unintended fixture loss.
         if os.environ.get("ADDHOST_FAST_STEP_PROFILE") == "1":
             docker("exec", TARGET, "/bin/cat", "/run/addhost-fast-step-times")

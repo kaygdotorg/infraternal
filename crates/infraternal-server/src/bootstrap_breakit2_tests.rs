@@ -9,6 +9,39 @@ use std::{io::Read, path::PathBuf, time::Instant};
 mod instant;
 static FULLY_JOINED: Mutex<Option<Instant>> = Mutex::new(None);
 
+// Fixture images are explicit trusted inputs, independent of release HTTP/signing tests.
+struct FixturePayloads {
+    binaries: BinaryPaths,
+    session: Option<PathBuf>,
+}
+impl infraternal_plugin_ssh::install::PayloadSource for FixturePayloads {
+    fn get(&self, architecture: infraternal_plugin_ssh::probe::Architecture) -> Operation<'_, PathBuf> {
+        infraternal_plugin_ssh::install::PayloadSource::get(&self.binaries, architecture)
+    }
+    fn session(&self, _architecture: infraternal_plugin_ssh::probe::Architecture) -> Operation<'_, Option<PathBuf>> {
+        Box::pin(async { Ok(self.session.clone()) })
+    }
+}
+fn fixture_payload_source(
+    binaries: BinaryPaths,
+    session: Option<PathBuf>,
+) -> Arc<dyn infraternal_plugin_ssh::install::PayloadSource> {
+    Arc::new(FixturePayloads { binaries, session })
+}
+
+#[tokio::test]
+async fn live_fixture_keeps_the_full_image_and_selects_the_explicit_session_image() {
+    let full = PathBuf::from("full-fixture");
+    let session = PathBuf::from("session-fixture");
+    let binaries = BinaryPaths { x86_64: full.clone(), aarch64: full.clone() };
+    let legacy = fixture_payload_source(binaries.clone(), None);
+    assert_eq!(legacy.get(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap(), full);
+    assert!(legacy.session(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap().is_none());
+    let instant = fixture_payload_source(binaries, Some(session.clone()));
+    assert_eq!(instant.get(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap(), full);
+    assert_eq!(instant.session(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap(), Some(session));
+}
+
 /// The provisioning listener's socket admission is exercised directly below.
 fn enrollment_acceptor(
     config: axum_server::tls_openssl::OpenSSLConfig,
@@ -43,11 +76,11 @@ impl SshSession for TimedSession {
     fn session_bridge(&self) -> bool { std::env::var_os("ADDHOST_INSTANT").is_some() && self.inner.session_bridge() }
     fn stream<'a>(&'a self, script: &'a str) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
         if script.contains("setup_step upload") { UPLOAD_STARTED.store(true, Ordering::SeqCst); }
-        self.inner.stream(script)
+        Box::pin(measured("launch_channel_helper", self.inner.stream(script)))
     }
 
     fn check_stream<'a>(&'a self, script: &'a str) -> Operation<'a, (CommandOutput, Option<infraternal_plugin_ssh::install::Checked>)> {
-        self.inner.check_stream(script)
+        Box::pin(measured("check_and_retain_channel", self.inner.check_stream(script)))
     }
     fn setup_steps(&self) -> bool { self.inner.setup_steps() }
     fn authentication(&self) -> Option<infraternal_plugin_ssh::auth_order::Authentication> {
@@ -526,6 +559,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         }),
         private: Mutex::new(Some(Secret::new(private))),
     });
+    let binaries = BinaryPaths { x86_64: binary.clone(), aarch64: binary.clone() };
+    let session_image = std::env::var_os("INFRATERNAL_REMOTE_TEST_SESSION_BINARY").map(PathBuf::from);
     let runner = Bootstrap::new(
         transport.clone(),
         Arc::new(ObservedBackend(f.backend.clone(), None, None)),
@@ -533,7 +568,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             x86_64: binary.clone(),
             aarch64: binary,
         },
-    );
+    ).with_payload_source(fixture_payload_source(binaries, session_image));
     let prepared = Instant::now();
     runner.prepare_payloads().await;
     println!("METRIC payload_prepare startup_ms={:.3}", prepared.elapsed().as_secs_f64() * 1000.0);
