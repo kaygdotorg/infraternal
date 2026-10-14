@@ -25,7 +25,7 @@ struct Registration {
     key: u64,
     session: usize,
 }
-struct Registry {
+pub(super) struct Registry {
     epoll: Epoll,
     by_fd: HashMap<RawFd, Registration>,
     by_key: HashMap<u64, Registration>,
@@ -33,6 +33,14 @@ struct Registry {
     next_key: u64,
 }
 
+#[cfg(test)]
+pub(super) fn ownership_fixture(sessions: &[Session], signals: &SignalFd) -> io::Result<Registry> {
+    let mut registry = Registry::new(sessions.len(), signals)?;
+    for (index, session) in sessions.iter().enumerate() {
+        registry.sync(index, session)?;
+    }
+    Ok(registry)
+}
 impl Registry {
     fn new(count: usize, signals: &SignalFd) -> io::Result<Self> {
         let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?;

@@ -686,6 +686,78 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "perf VM only: per-session requested-byte ownership ledger at scale"]
+    fn idle_session_ownership_ledger() {
+        use crate::heap_accounting::measure;
+        assert_eq!(
+            fs::read_to_string("/proc/sys/kernel/hostname")
+                .unwrap()
+                .trim(),
+            "infraternal-perf-test"
+        );
+        let count: usize = std::env::var("PPU_ACCOUNT_SESSIONS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!([1, 10, 100, 1000].contains(&count));
+        let state = PathBuf::from(format!(
+            "/root/infraternal-bench/p3-l{}",
+            std::process::id()
+        ));
+        let (mut sessions, slots) = measure(|| Vec::with_capacity(count));
+        let mut constructors = 0;
+        let mut prefixes = 0;
+        let mut viewers = 0;
+        for index in 0..count {
+            let (mut session, construction) = measure(|| {
+                let mut config = Config::new(
+                    u128::try_from(index + 1).unwrap().to_be_bytes(),
+                    Uid::effective().as_raw(),
+                );
+                config.state = Some(state.clone());
+                config.readiness = true;
+                Session::new(config, 65536).unwrap()
+            });
+            constructors += construction.bytes;
+            let ((), prefix) = measure(|| {
+                session.terminal.process(&[b'p'; 38]).unwrap();
+                session.ring.append(&[b'p'; 38]).unwrap();
+            });
+            prefixes += prefix.bytes;
+            let ((), peer) = measure(|| {
+                let client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+                session
+                    .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+                    .unwrap();
+                drop(client);
+                session
+                    .step(
+                        PollFlags::empty(),
+                        PollFlags::empty(),
+                        &[PollFlags::POLLHUP],
+                        false,
+                    )
+                    .unwrap();
+            });
+            viewers += peer.bytes;
+            sessions.push(session);
+        }
+        let signals = SignalFd::with_flags(&SigSet::empty(), SfdFlags::SFD_CLOEXEC).unwrap();
+        let (registry, registration) =
+            measure(|| reactor::ownership_fixture(&sessions, &signals).unwrap());
+        println!(
+            "PPU_LEDGER count={count} session_struct={} peer_struct={} slot_bytes={} constructor_bytes={constructors} prefix_ring_bytes={prefixes} closed_viewer_bytes={viewers} registry_bytes={} total_requested_bytes={}",
+            std::mem::size_of::<Session>(),
+            std::mem::size_of::<Peer>(),
+            slots.bytes,
+            registration.bytes,
+            slots.bytes + constructors + prefixes + viewers + registration.bytes
+        );
+        drop(registry);
+        drop(sessions);
+        fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
     fn lazy_prefix_materializes_exactly_before_overflow_and_resize() {
         let bytes = b"prompt \x1b[31mred\x1b[0m\r\n";
         let mut lazy = LazyTerminal::new(80, 24, 65536);
