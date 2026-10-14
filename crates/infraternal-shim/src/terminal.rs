@@ -363,3 +363,7 @@ mod recovery_measurements;
 #[cfg(all(test, feature = "process-per-user"))]
 #[path = "../tests/unit/ppu_memory_bench.rs"]
 mod ppu_memory_bench;
+
+#[cfg(all(test, feature = "compact-history"))]
+#[path = "../tests/unit/compact_history.rs"]
+mod compact_history;
