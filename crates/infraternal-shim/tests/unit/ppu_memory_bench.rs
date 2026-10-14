@@ -1,6 +1,39 @@
 //! Perf-VM-only native allocation and resident warm-up accounting for shared terminals [D270].
 use super::*;
 
+#[test]
+#[ignore = "perf VM only: sparse history residency and native ownership"]
+fn small_history_does_not_retain_megabyte_page_quanta() {
+    assert_eq!(
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        "infraternal-perf-test"
+    );
+    let mut terminal = Terminal::with_history_budget(80, 24, 65536).unwrap();
+    terminal.process(b"\x1bcseed\r\n");
+    terminal.resize(81, 24).unwrap();
+    terminal.resize(80, 24).unwrap();
+    for round in 0..32 {
+        terminal.process(&b"light-history\r\n".repeat(256));
+        let (ordinary, pages, blocks) = terminal.engine.allocation_classes();
+        let (pss, anonymous) = resident();
+        println!(
+            "PPU_SPARSE lines={} ordinary_bytes={ordinary} page_bytes={pages} live_blocks={blocks} pss_kib={pss} anon_kib={anonymous} rows={}",
+            (round + 1) * 256,
+            terminal.engine.history_rows()
+        );
+    }
+    let (ordinary, pages, _) = terminal.engine.allocation_classes();
+    // The configured history is 64 KiB. Screen and allocator metadata add
+    // overhead, but native pooling must not multiply it into megabytes.
+    assert!(
+        ordinary + pages <= 512 * 1024,
+        "small history retained {} bytes",
+        ordinary + pages
+    );
+}
+
 fn resident() -> (usize, usize) {
     let text = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap();
     let value = |key: &str| {
