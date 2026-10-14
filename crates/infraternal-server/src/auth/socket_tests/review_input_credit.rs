@@ -123,6 +123,16 @@ async fn input_backend(mut peer: UnixStream, observed: tokio::sync::mpsc::Sender
     while let Some(wire) = read_leg_b_frame(&mut peer, &mut receive).await {
         let decoded = decode_muxed_frame(&wire).unwrap();
         match decoded.frame {
+            // Withhold only durable input acknowledgment. Transport liveness
+            // remains responsive while that input window is intentionally full.
+            Frame::Ping { nonce, sent_us } => {
+                leg_b_send(
+                    &mut peer,
+                    decoded.stream_id,
+                    &Frame::Pong { nonce, sent_us },
+                )
+                .await;
+            }
             Frame::AttachTerm { .. } => {
                 leg_b_send(
                     &mut peer,
