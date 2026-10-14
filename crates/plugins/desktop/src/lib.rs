@@ -18,9 +18,9 @@ mod protocol_tests;
 #[cfg(feature = "desktop")]
 pub mod socket;
 
-#[cfg(feature = "source")]
+#[cfg(any(feature = "source", feature = "server"))]
 pub mod datagram;
-#[cfg(feature = "source")]
+#[cfg(any(feature = "source", feature = "server"))]
 pub mod media;
 #[cfg(feature = "source")]
 pub mod source;
@@ -34,5 +34,20 @@ pub mod source_manifest;
 pub mod source_request;
 #[cfg(feature = "source")]
 mod source_worker;
-#[cfg(feature = "source")]
+#[cfg(any(feature = "source", feature = "server"))]
 pub mod wire;
+
+#[cfg(feature = "server")]
+pub mod delivery;
+#[cfg(feature = "server")]
+pub mod parameter_sets;
+#[cfg(feature = "server")]
+pub mod registry;
+#[cfg(feature = "server")]
+pub mod relay;
+#[cfg(feature = "server")]
+pub mod server;
+#[cfg(feature = "server")]
+pub mod server_manifest;
+#[cfg(feature = "server")]
+pub mod session;
