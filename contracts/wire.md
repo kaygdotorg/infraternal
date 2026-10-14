@@ -475,6 +475,12 @@ on leg B follows the selected shim writer's existing `InputStateRequest` fence;
 a daemon control reply alone never establishes session readiness. One shim
 fence may be in flight per data link and is discarded when that link is parked.
 
+A selected writer's state fence can also carry written-input progress
+(shim contract, capability bit 0). Forward newly advanced progress through the
+existing terminal Ack before its correlated Pong, including when output is
+parked. Unchanged fences remain Pong-only: they do not add repeated Ack frames
+or storage work. Merely accepted input is never acknowledged as written.
+
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
 Startup, pending input and recent link doubt keep browser probes pipelined
