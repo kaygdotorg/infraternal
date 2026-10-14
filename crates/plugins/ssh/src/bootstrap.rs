@@ -281,19 +281,34 @@ impl Bootstrap {
             self.cleanup_probe(&authority, host).await;
             self.backend
                 .record_failure(&saved.target, Some(host), Step::Install, failure);
-            let _ = self.setup.emit(
-                &authority.owner,
-                host,
-                setup_failure_stage(failure),
-                State::Failed,
-                Some(failure),
-            );
         }
+        self.finish_setup_attempt(&authority, host, &result);
+    }
+
+    /// Serialize failure publication with retry admission. A status watcher may
+    /// request retry on another worker as soon as it receives the failure.
+    fn finish_setup_attempt(
+        &self,
+        authority: &Authority,
+        host: uuid::Uuid,
+        result: &Result<(), Failure>,
+    ) {
         let mut pending = lock(&self.pending_setup);
         if result.is_ok() {
             pending.remove(&host);
-        } else if let Some(saved) = pending.get_mut(&host) {
-            saved.running = false;
+        } else {
+            if let Some(saved) = pending.get_mut(&host) {
+                saved.running = false;
+            }
+            if let Err(failure) = result {
+                let _ = self.setup.emit(
+                    &authority.owner,
+                    host,
+                    setup_failure_stage(failure),
+                    crate::setup::State::Failed,
+                    Some(failure),
+                );
+            }
         }
     }
 
@@ -643,14 +658,6 @@ impl Bootstrap {
                 && let Some(host) = resources.host
             {
                 self.cleanup_probe(&batch.authority, host).await;
-                let stage = setup_failure_stage(failure);
-                let _ = self.setup.emit(
-                    &batch.authority.owner,
-                    host,
-                    stage,
-                    crate::setup::State::Failed,
-                    Some(failure),
-                );
             }
             if !resources.published {
                 if let Some(host) = resources.host {
@@ -702,12 +709,7 @@ impl Bootstrap {
         // the final event from its predecessor.
         if resources.published {
             if let Some(host) = resources.host {
-                let mut pending = lock(&self.pending_setup);
-                if result.is_ok() {
-                    pending.remove(&host);
-                } else if let Some(saved) = pending.get_mut(&host) {
-                    saved.running = false;
-                }
+                self.finish_setup_attempt(&batch.authority, host, &result);
             }
             if resources.announced {
                 return;
