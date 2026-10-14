@@ -229,13 +229,35 @@ async fn saturated_native_control_queue_does_not_hide_primary_terminal_output() 
         )
         .await
         .unwrap();
-    let delivered = tokio::time::timeout(Duration::from_millis(100), output.recv()).await;
+    let delivered = tokio::time::timeout(Duration::from_millis(100), async {
+        loop {
+            match output.recv().await {
+                // Priming can publish an ordered route notice before the
+                // healthy primary's bytes. It is not terminal delivery and
+                // must not restart the original absolute deadline.
+                Some(TerminalOutput::Reconnecting) => {}
+                next => break next,
+            }
+        }
+    })
+    .await;
+    let outcome = match &delivered {
+        Err(_) => "deadline",
+        Ok(None) => "channel ended",
+        Ok(Some(TerminalOutput::Output { .. })) => "output",
+        Ok(Some(TerminalOutput::Snapshot { .. })) => "snapshot",
+        Ok(Some(TerminalOutput::Event { .. })) => "event",
+        Ok(Some(TerminalOutput::Ack { .. })) => "ack",
+        Ok(Some(TerminalOutput::Pong { .. })) => "pong",
+        Ok(Some(TerminalOutput::Reconnecting)) => "reconnecting",
+        Ok(Some(TerminalOutput::Closed { .. })) => "closed",
+    };
     // Abort ownership before asserting, so even an intended red cannot leave a
     // detached pending Call. Endpoints/listener own every other task/stream.
     drop(control_call);
     assert!(
         matches!(delivered, Ok(Some(TerminalOutput::Output { out_seq: 0, bytes })) if bytes.as_ref() == b"healthy!"),
-        "full control FIFO prevented healthy primary terminal delivery"
+        "full control FIFO prevented healthy primary terminal delivery: {outcome}"
     );
 }
 
