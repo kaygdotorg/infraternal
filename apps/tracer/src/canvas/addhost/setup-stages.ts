@@ -3,6 +3,9 @@
  * The setup that continues after a host's shell is up (D255, #189): the pure rules the machine pill's ring follows.
  * Nothing here touches the DOM, so specs pin it.
  *
+ * The real stream is `/v1/bootstrap/setup/ws` (contracts/host-setup.md); it also carries `session_id`, `window_id`,
+ * `attempt` and `sequence`, of which the UI needs only `sequence` (to resume). `setup-feed.ts` is its client.
+ *
  * Order of events for one host (D255): the wizard's socket reports `done` as soon as the shell is attachable (the
  * window opens with a live prompt). The infraternal agent then installs, joins and starts in the background. Each
  * background stage arrives as a *setup event*, keyed by the host's UUID, on whatever channel the server uses for the
@@ -28,8 +31,15 @@ export interface SetupEvent {
   stage: SetupStageId;
   state: "running" | "done" | "failed";
   failedStep?: FailedStep;
+  /** The server's per-host counter, used to resume a dropped subscription after the last event seen. */
+  sequence?: number;
   /** The server's own text. Shown in details only, never as the headline, and never matched on. */
   message?: string;
+}
+
+/** True for the server's `{ resync: true, host_id }` notice: the events that follow are the authoritative current stages. */
+export function isResync(value: unknown, hostId: string): boolean {
+  return isRecord(value) && value.resync === true && value.host_id === hostId;
 }
 
 /** What the ring and the popover draw for one host. */
@@ -54,6 +64,7 @@ export function parseSetupEvent(value: unknown): SetupEvent | undefined {
   if (!SETUP_STAGES.includes(body.stage as SetupStageId) || !["running", "done", "failed"].includes(String(body.state))) return undefined;
   const event: SetupEvent = { hostId: body.host_id, stage: body.stage as SetupStageId, state: body.state as SetupEvent["state"] };
   if (event.state === "failed" && STEPS.includes(String(body.failed_step))) event.failedStep = body.failed_step as FailedStep;
+  if (Number.isSafeInteger(body.sequence) && Number(body.sequence) >= 0) event.sequence = Number(body.sequence);
   if (typeof body.message === "string") event.message = body.message.slice(0, 500);
   return event;
 }

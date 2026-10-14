@@ -20,9 +20,17 @@
 import { createSetupRing, mountConfirmTip, mountSetupRing, type ConfirmTipController, type RingStageState, type SetupRing, type WindowCard } from "../../../../../packages/ui/src/index";
 import { failedIndex, foldSetup, freshSetup, setupGuide, SETUP_LABEL, SETUP_STAGES, type SetupEvent, type SetupView } from "./setup-stages";
 
+/** What a source tells besides events. */
+export interface SetupSignals {
+  /** The server resynchronised: the events that follow are the current stages, so the view starts again. */
+  reset?(): void;
+  /** The status is unavailable (no stream for this host, or the connection could not be kept). The ring goes quietly. */
+  lost?(): void;
+}
+
 /** Where setup events come from. A subscriber receives the host's events so far, in order, then the live ones. */
 export interface SetupSource {
-  subscribe(hostId: string, listener: (event: SetupEvent) => void): () => void;
+  subscribe(hostId: string, listener: (event: SetupEvent) => void, signals?: SetupSignals): () => void;
   /** Asks the server to run the failed stage again. Absent when the server cannot. */
   retry?(hostId: string): void;
 }
@@ -140,6 +148,17 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
       land();
       finish();
     }
+  }, {
+    reset() { if (alive) { view = freshSetup(); paint(); } },
+    lost() {
+      // No status to show: a failure already explained stays (it is news); a ring that can no longer learn anything fades out.
+      if (!alive || failedIndex(view) >= 0 || view.complete) return;
+      land();
+      ringPart.show(false);
+      delete card.root.dataset.setup;
+      delete card.pill.dataset.tip;
+      window.setTimeout(() => { if (alive) ringPart.dispose(); }, 240);
+    },
   });
 
   return {
@@ -170,3 +189,6 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
     },
   };
 }
+
+/** The real stream's client travels with the pill: both load only while a host is setting up. */
+export { createSetupFeed } from "./setup-feed";
