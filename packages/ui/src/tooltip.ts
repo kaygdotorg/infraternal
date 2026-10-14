@@ -39,6 +39,7 @@ let pos: HTMLDivElement, surface: HTMLDivElement, arrow: HTMLDivElement, measure
 let current: HTMLElement | null = null;
 let openTimer = 0, closeTimer = 0, pressTimer = 0, warmUntil = 0, shown = false;
 let swallowClick = false, press0: { x: number; y: number } | null = null;
+let pointAnchor: HTMLElement | null = null, pointLabel = "", pointRect: DOMRect | undefined;
 const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; timer: number }>();
 
 const STYLE = `
@@ -276,6 +277,7 @@ function buildStyleOnly(): void {
 }
 
 function labelOf(el: HTMLElement): string {
+  if (pointAnchor === el) return pointLabel;
   return el.dataset.tip || el.getAttribute("aria-label") || "";
 }
 
@@ -303,7 +305,7 @@ function place(el: HTMLElement, animateMove: boolean): number {
   const text = labelOf(el);
   measure.textContent = text;
   const w = Math.ceil(measure.getBoundingClientRect().width) + 22, h = 27;
-  const r = el.getBoundingClientRect();
+  const r = pointAnchor === el && pointRect ? pointRect : el.getBoundingClientRect();
   const side = sideOf(el, r, h);
   const cx = r.left + r.width / 2;
   const x = Math.min(Math.max(MARGIN, cx - w / 2), innerWidth - MARGIN - w);
@@ -337,6 +339,8 @@ function setLabel(text: string, dir: number) {
 function show(el: HTMLElement, how: "pop" | "instant") {
   if (!pos) build();
   clearTimeout(closeTimer); clearTimeout(openTimer);
+  // Point labels belong to one trigger; a later normal tooltip must not inherit the previous target or position.
+  if (pointAnchor && pointAnchor !== el) clearPointAnchor();
   const travelling = shown && current !== el;
   current = el;
   const dir = place(el, travelling);
@@ -355,8 +359,13 @@ function show(el: HTMLElement, how: "pop" | "instant") {
 
 function hide(instant = false) {
   clearTimeout(openTimer); clearTimeout(closeTimer);
-  if (!shown) { current = null; return; }
+  if (!shown) {
+    if (current === pointAnchor) clearPointAnchor();
+    current = null;
+    return;
+  }
   shown = false;
+  if (current === pointAnchor) clearPointAnchor();
   current = null;
   warmUntil = performance.now() + WARM;
   if (instant) { pos.style.visibility = "hidden"; return; }
@@ -419,6 +428,50 @@ export function peekTip(el: HTMLElement, duration = 2600): void {
   const mine = current;
   window.clearTimeout(closeTimer);
   closeTimer = window.setTimeout(() => { if (shown && current === mine) hide(); }, duration);
+}
+
+/** Shows the shared warm tooltip at a pointer position while it remains over `anchor`. */
+export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number): void {
+  pointAnchor = anchor;
+  pointLabel = text;
+  pointRect = new DOMRect(x, y, 0, 0);
+  if (warm()) {
+    byHover = true;
+    show(anchor, "instant");
+  } else {
+    clearTimeout(openTimer);
+    current = anchor;
+    openTimer = window.setTimeout(() => {
+      if (current !== anchor || !anchor.matches(":hover")) return;
+      byHover = true;
+      show(anchor, "pop");
+    }, DELAY);
+  }
+}
+
+/** Shows a shared tooltip at a pointer position for a short touch or click confirmation. */
+export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600): void {
+  pointAnchor = anchor;
+  pointLabel = text;
+  pointRect = new DOMRect(x, y, 0, 0);
+  byHover = false;
+  show(anchor, shown ? "instant" : "pop");
+  const mine = current;
+  window.clearTimeout(closeTimer);
+  closeTimer = window.setTimeout(() => { if (shown && current === mine) hide(); }, duration);
+}
+
+/** Closes the point-anchored tooltip only when the specified trigger owns it. */
+export function hideTipAt(anchor: HTMLElement): void {
+  if (current !== anchor && pointAnchor === anchor) clearPointAnchor();
+  if (current !== anchor) return;
+  hide(true);
+}
+
+function clearPointAnchor(): void {
+  pointAnchor = null;
+  pointLabel = "";
+  pointRect = undefined;
 }
 
 /** Installs the page-wide tooltip group. Call once; works for elements added later. */
