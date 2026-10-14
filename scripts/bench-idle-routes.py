@@ -3,7 +3,8 @@
 
 The private fixture persists only a hash of its in-memory browser capability.
 Scheduler activations are schedule-ins (schedstat field three), not hardware interrupts.
-No requests reach the server during the observation except correlated liveness replies.
+The default profile sends the browser’s 25 ms probes in both directions;
+responses-only remains available to identify the earlier incomplete fixture.
 """
 import argparse
 import asyncio
@@ -42,6 +43,29 @@ class Browser:
         self.reader, self.writer = reader, writer
         self.queue = asyncio.Queue(4096)
         self.task = asyncio.create_task(self.receive())
+        self.probe_task = None
+        self.pending = {}
+        self.probe_pongs = 0
+        self.last_pong = time.monotonic()
+        self.rtt = None
+
+    def start_probes(self):
+        """Match the shared browser connection cadence and correlated proof deadline."""
+        self.last_pong = time.monotonic()
+        self.probe_task = asyncio.create_task(self.probe())
+
+    async def probe(self):
+        nonce = 1 << 63
+        while True:
+            now = time.monotonic()
+            grace = 2 if self.rtt is None else self.rtt + .05
+            assert now - self.last_pong < grace, 'fixture client proof expired'
+            sent = round(now * 1_000_000)
+            self.pending[nonce] = (sent, now)
+            assert len(self.pending) <= 128, 'fixture pending proof bound'
+            await self.send(0, 8, struct.pack('<QQ', nonce, sent))
+            nonce += 1
+            await asyncio.sleep(.025)
 
     async def send(self, stream, kind, body=b''):
         wire = bytes(varint(stream) + varint(len(body) + 1)) + bytes([kind]) + body
@@ -83,6 +107,17 @@ class Browser:
                         offset += length
                         if kind == 8:
                             await self.send(stream, 9, body)
+                        elif kind == 9 and stream == 0 and len(body) == 16 and struct.unpack('<Q', body[:8])[0] >= 1 << 63:
+                            nonce, sent = struct.unpack('<QQ', body)
+                            pending = self.pending.get(nonce)
+                            if pending is not None and pending[0] == sent:
+                                now = time.monotonic()
+                                grace = 2 if self.rtt is None else self.rtt + .05
+                                assert now - self.last_pong < grace, 'fixture late client proof'
+                                self.rtt = max(.001, now - pending[1], (self.rtt or 0) * .95)
+                                self.last_pong = now
+                                self.probe_pongs += 1
+                                self.pending = {key: value for key, value in self.pending.items() if key > nonce}
                         else:
                             self.queue.put_nowait((stream, kind, body))
                 elif opcode == 8:
@@ -98,8 +133,10 @@ class Browser:
         return message
 
     async def close(self):
-        self.task.cancel()
-        await asyncio.gather(self.task, return_exceptions=True)
+        tasks = [self.task] + ([self.probe_task] if self.probe_task else [])
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self.writer.close()
         await self.writer.wait_closed()
 
@@ -218,6 +255,8 @@ async def run(args):
         for index in range(args.clients):
             browser = await Browser.connect(port, token)
             browsers.append(browser)
+            if not args.responses_only:
+                browser.start_probes()
             # Match the staging helper's 25-terminal chunks. Both specified
             # revisions admit at most 32 streams per browser socket.
             for offset, session in enumerate(sessions[index * 25:(index + 1) * 25]):
@@ -233,7 +272,7 @@ async def run(args):
                               server_pid=server_pid, seconds=args.settle)), flush=True)
         await asyncio.sleep(args.settle)
         result = await measure(server_pid, args.seconds)
-        assert all(not browser.task.done() for browser in browsers), 'idle browser retired'
+        assert all(not browser.task.done() and (browser.probe_task is None or not browser.probe_task.done()) for browser in browsers), 'idle browser retired'
         assert shim_pids(runtime) == pids, 'real shim identities changed'
         # Fresh correlated control replies establish that retained sockets survived the window.
         for browser in browsers:
@@ -244,7 +283,9 @@ async def run(args):
                 if stream == 0 and kind == 9 and reply == body:
                     break
         print(json.dumps(dict(revision=args.revision, sessions=len(sessions), clients=len(browsers),
-                              attached_sessions=min(len(sessions), args.clients * 25), **result)), flush=True)
+                              attached_sessions=min(len(sessions), args.clients * 25),
+                              profile='responses-only' if args.responses_only else 'full-duplex',
+                              client_probe_pongs=[browser.probe_pongs for browser in browsers], **result)), flush=True)
         if args.perf is not None:
             # Profile separately so sampling overhead cannot contaminate the table.
             # Frame-pointer callchains contain addresses, never raw stack dumps.
@@ -290,6 +331,7 @@ if __name__ == '__main__':
     parser.add_argument('--clients', type=int, choices=(0, 1, 6), required=True)
     parser.add_argument('--settle', type=float, default=60)
     parser.add_argument('--seconds', type=float, default=60)
+    parser.add_argument('--responses-only', action='store_true')
     parser.add_argument('--perf', type=Path)
     parser.add_argument('--profile', type=Path)
     options = parser.parse_args()
