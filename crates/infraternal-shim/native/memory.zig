@@ -8,7 +8,10 @@ const C = @import("terminal/lib.zig").alloc.Allocator;
 const marker = std.math.maxInt(usize);
 
 pub fn pageAllocator(allocator: std.mem.Allocator) std.mem.Allocator {
-    std.debug.assert(allocator.vtable == &C.zig_vtable);
+    // The public C API permits a null allocator, which selects the native
+    // default allocator. Keep that path unchanged; shared-host engines always
+    // supply the retained C allocator and therefore take the tagged path.
+    if (allocator.vtable != &C.zig_vtable) return std.heap.page_allocator;
     return .{ .ptr = allocator.ptr, .vtable = &vtable };
 }
 const vtable: std.mem.Allocator.VTable = .{
