@@ -574,57 +574,25 @@ async fn shipping_restart_reload_rollback_and_cold_start() {
     pool.close().await;
 }
 
-pub(crate) type Browser =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[path = "ca_handoff_browser_tests.rs"]
+mod browser_client;
+pub(crate) use browser_client::Browser;
+
 pub(crate) async fn wire_send(
     socket: &mut Browser,
     stream: u32,
     frame: &infraternal_protocol::Frame<'_>,
 ) {
-    use futures_util::SinkExt;
-    let mut bytes = Vec::new();
-    infraternal_protocol::encode_muxed_frame_into(stream, frame, &mut bytes).unwrap();
-    socket
-        .send(tokio_tungstenite::tungstenite::Message::Binary(
-            bytes.into(),
-        ))
-        .await
-        .unwrap();
+    socket.send(stream, frame).await;
 }
 pub(crate) async fn wire_read(socket: &mut Browser) -> bytes::Bytes {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-    loop {
-        match tokio::time::timeout(Duration::from_secs(15), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-        {
-            Message::Binary(bytes) => {
-                if let infraternal_protocol::Frame::Ping { nonce, sent_us } =
-                    infraternal_protocol::decode_muxed_frame(&bytes)
-                        .unwrap()
-                        .frame
-                {
-                    wire_send(
-                        socket,
-                        0,
-                        &infraternal_protocol::Frame::Pong { nonce, sent_us },
-                    )
-                    .await;
-                    continue;
-                }
-                return bytes;
-            }
-            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.unwrap(),
-            Message::Pong(_) | Message::Frame(_) => {}
-            _ => panic!("unexpected terminal message"),
-        }
-    }
+    socket.read().await
 }
-async fn browser(address: std::net::SocketAddr, token: &str, origin: &str) -> Browser {
-    use infraternal_protocol::{Frame, decode_muxed_frame};
+pub(crate) async fn connect_browser(
+    address: std::net::SocketAddr,
+    token: &str,
+    origin: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = format!("ws://{address}/v1/ws")
         .into_client_request()
@@ -636,7 +604,12 @@ async fn browser(address: std::net::SocketAddr, token: &str, origin: &str) -> Br
         "Cookie",
         format!("__Host-infraternal={token}").parse().unwrap(),
     );
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    socket
+}
+async fn browser(address: std::net::SocketAddr, token: &str, origin: &str) -> Browser {
+    use infraternal_protocol::{Frame, decode_muxed_frame};
+    let mut socket = Browser::new(connect_browser(address, token, origin).await);
     let hello = wire_read(&mut socket).await;
     assert!(matches!(
         decode_muxed_frame(&hello).unwrap().frame,
