@@ -112,3 +112,8 @@ opt-level = "s"
 
 [profile.release.package.infraternal-plugin-host-facts]
 opt-level = "s"
+
+# Keep host orchestration compact; transport, protocol, VT and cryptographic
+# crates retain their speed optimization [5,243].
+[profile.release.package.infraternal-agent]
+opt-level = "s"
