@@ -16,6 +16,10 @@ use std::sync::{
     Arc, Mutex as LeaseMutex,
     atomic::{AtomicU8, Ordering},
 };
+use std::{
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
+};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 // One attach plus its credit per admitted window. Payload admission also has a
@@ -141,20 +145,36 @@ impl Transport {
         // Keep one serialized WebSocket writer. The existing send timeout still
         // covers lock acquisition and flushing; no extra payload copy or queued
         // output is introduced by this adapter.
-        let sink = Box::pin(futures_util::sink::unfold(
+        let failure = Arc::new(LeaseMutex::new(None));
+        let write_failure = failure.clone();
+        let inner = Box::pin(futures_util::sink::unfold(
             context.clone(),
-            |context, message| async move {
-                let mut writer = context.writer.lock().await;
-                if context.ended.load(Ordering::Acquire) != 0 && !shutdown_message(&message) {
-                    return Err(axum::Error::new(std::io::Error::from(
-                        std::io::ErrorKind::ConnectionAborted,
-                    )));
+            move |context, message| {
+                let failure = write_failure.clone();
+                async move {
+                    let result = async {
+                        let mut writer = context.writer.lock().await;
+                        if context.ended.load(Ordering::Acquire) != 0 && !shutdown_message(&message)
+                        {
+                            return Err(axum::Error::new(std::io::Error::from(
+                                std::io::ErrorKind::ConnectionAborted,
+                            )));
+                        }
+                        writer.send(message).await
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        *failure
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                    }
+                    // Restore the state before reporting the error through the
+                    // adapter. Cleanup may send another frame after a failure.
+                    Ok::<_, axum::Error>(context)
                 }
-                writer.send(message).await?;
-                drop(writer);
-                Ok(context)
             },
         ));
+        let sink = SharedSink { inner, failure };
         (
             sink,
             Self {
@@ -193,6 +213,61 @@ impl Transport {
                 },
             }
         }
+    }
+}
+
+// A failed write must leave the adapter usable for best-effort stream cleanup.
+// The socket loop sends terminal Close frames after a failed application write;
+// a state-consuming sink loses its writer on error and panics on that cleanup.
+struct SharedSink<S> {
+    inner: S,
+    failure: Arc<LeaseMutex<Option<axum::Error>>>,
+}
+
+impl<S: Sink<Message, Error = axum::Error> + Unpin> SharedSink<S> {
+    fn report(&self, result: Poll<Result<(), axum::Error>>) -> Poll<Result<(), axum::Error>> {
+        match result {
+            Poll::Ready(Ok(())) => Poll::Ready(
+                self.failure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .map_or(Ok(()), Err),
+            ),
+            other => other,
+        }
+    }
+}
+
+impl<S: Sink<Message, Error = axum::Error> + Unpin> Sink<Message> for SharedSink<S> {
+    type Error = axum::Error;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        let result = Pin::new(&mut self.inner).poll_ready(cx);
+        self.report(result)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+        Pin::new(&mut self.inner).start_send(message)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        let result = Pin::new(&mut self.inner).poll_flush(cx);
+        self.report(result)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        let result = Pin::new(&mut self.inner).poll_close(cx);
+        self.report(result)
     }
 }
 
