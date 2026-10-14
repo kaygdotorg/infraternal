@@ -280,9 +280,10 @@ pub(super) async fn answered(
             } else {
                 path.enrolled_heard_since(since.into_std())
             };
-            // Quinn decrypts the datagram after the socket reports it; the
-            // frame signature changes on the endpoint driver's next pass.
-            if heard && freshness.silence(connection) < since.elapsed() {
+            // Quinn decrypts after the socket reports a datagram. Require an
+            // actual frame change: this observer starts after `since`, so its
+            // younger silence clock alone cannot prove authenticated progress.
+            if heard && freshness.observe_change(connection) {
                 return;
             }
             tokio::select! {

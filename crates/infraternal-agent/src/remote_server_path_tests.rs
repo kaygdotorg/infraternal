@@ -923,6 +923,70 @@ async fn backup_published_during_candidate_proof_keeps_enrolled_control_live() {
     assert_eq!(server.connections(), 1);
 }
 
+/// A raw tuple hint must not complete authenticated path proof. The single
+/// poll runs on one runtime thread, so no QUIC driver can change authenticated
+/// frame counters between answered's freshness snapshot and its first check.
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_mesh_hint_cannot_complete_fresh_path_proof() {
+    use quinn::AsyncUdpSocket as _;
+    use std::future::Future as _;
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let identity = identity(&ca, enrolled);
+    let link = connect(&identity, None, enrolled, ServerLinkKind::Fallback, false)
+        .await
+        .unwrap();
+    let Connected::Quic(connection) = &link.connected else {
+        panic!("fixture requires native QUIC")
+    };
+    let (send, receive) = connection.open_bi().await.unwrap();
+    let control = NativeChannel::control(send, receive).unwrap();
+    Transmit::default()
+        .send(&control, 0, &super::super::client_greeting(false))
+        .await
+        .unwrap();
+    assert!(matches!(
+        Receive::default().next(&control).await.unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    let _accepted = server.admitted_channel().await;
+    server
+        .dropping
+        .store(true, std::sync::atomic::Ordering::Release);
+    let mesh_socket = server.reserved.as_ref().unwrap().try_clone().unwrap();
+    mesh_socket.set_nonblocking(true).unwrap();
+    let mesh = tokio::net::UdpSocket::from_std(mesh_socket).unwrap();
+    let path = link.path.as_ref().unwrap();
+    path.use_mesh(mesh.local_addr().unwrap());
+    let since = tokio::time::Instant::now();
+    // This is the trusted candidate tuple, but its public payload cannot
+    // authenticate as a packet on the established connection.
+    mesh.send_to(BACKUP_MARKER, path.local_addr().unwrap())
+        .await
+        .unwrap();
+    path.mesh_heard(since.into_std()).await;
+    assert!(path.heard_since(since.into_std()));
+    // Separate caller since from the forthcoming freshness snapshot without
+    // an elapsed-wall-time assertion. Only the first answered poll is tested.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let mut proof = std::pin::pin!(answered(connection, path, since, true));
+    std::future::poll_fn(|cx| {
+        assert!(
+            proof.as_mut().poll(cx).is_pending(),
+            "raw mesh hint completed proof without an authenticated frame change"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(server.connections(), 1);
+}
+
 /// A recovered mesh is retried on the same connection after the cool-down.
 #[tokio::test]
 async fn interrupted_mesh_is_retried_on_the_same_connection() {

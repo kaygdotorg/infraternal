@@ -242,10 +242,8 @@ impl PeerFreshness {
         }
         self.observed.elapsed()
     }
-    /// Observe an authenticated signature change for sampled test diagnostics.
-    /// This uses the production observation, avoiding a timing threshold or a
-    /// second implementation of the post-decryption frame selection.
-    #[cfg(feature = "test-support")]
+    /// Observe an authenticated signature change since the previous observation.
+    /// Raw or duplicate UDP cannot satisfy a path proof through elapsed time.
     #[must_use]
     pub fn observe_change(&mut self, connection: &quinn::Connection) -> bool {
         let previous = self.frames;
