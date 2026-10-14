@@ -61,8 +61,8 @@ the disposal oracle's negative control. Keep their output outside the checkout.
 
 The final native gate can use `native-timing-runner.py` as Cargo's GNU test
 runner (`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="python3 <absolute-script>"`).
-It moves only the healthy mesh freshness and warm fallback temporal cases to
-the designated VM; their assertions and deadlines are unchanged. It verifies
+It moves the ten non-ignored real QUIC server-path cases to
+the designated VM under one short lock; their assertions and deadlines are unchanged. It verifies
 the copied executable's SHA-256, executes each exact case under the shared
 lock, requires one executed passing test and a successful child-exit sentinel,
 then executes every remaining case locally. Failure on either machine fails
