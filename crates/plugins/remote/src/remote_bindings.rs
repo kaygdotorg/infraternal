@@ -193,16 +193,12 @@ impl Bindings {
                     if fresh && (peer.physical != physical || peer.binding != lease) {
                         peer.physical = physical;
                         peer.binding = lease;
-                        if peer.backup {
-                            let (pending, at) = peer.recent.replay(physical != logical);
-                            if let Some(at) = at
-                                && let Ok(mut clock) = self.copies.lock()
-                            {
-                                clock.arm(at);
-                            }
-                            replay.push((logical, pending, false));
-                        } else {
-                            replay.push((logical, peer.recent.take(), true));
+                        if physical == logical {
+                            // Only mesh sends need fast enrolled recovery.
+                            // Consume that history once: replies sent while
+                            // enrolled are already on the retained live path,
+                            // and QUIC owns their ordinary stream recovery.
+                            replay.push((logical, peer.recent.take()));
                         }
                     }
                     if fresh {
@@ -216,7 +212,7 @@ impl Bindings {
                 }
             }
         }
-        for (logical, pending, retain) in replay {
+        for (logical, pending) in replay {
             self.learn(
                 lease,
                 &[RecvMeta {
@@ -227,16 +223,13 @@ impl Bindings {
             for sent in pending {
                 // A full socket buffer leaves recovery to QUIC; no detached
                 // worker or unbounded retransmission queue outlives the lease.
-                let _ = self.send_with_history(
-                    &Transmit {
-                        destination: logical,
-                        contents: &sent.contents,
-                        segment_size: sent.segment_size,
-                        ecn: sent.ecn,
-                        src_ip: None,
-                    },
-                    retain,
-                );
+                let _ = self.try_send(&Transmit {
+                    destination: logical,
+                    contents: &sent.contents,
+                    segment_size: sent.segment_size,
+                    ecn: sent.ecn,
+                    src_ip: None,
+                });
             }
         }
     }
@@ -348,7 +341,19 @@ impl Bindings {
             })
             .map(|lease| lease.socket.clone())
     }
-    fn send_with_history(&self, transmit: &Transmit<'_>, retain: bool) -> io::Result<()> {
+}
+
+impl AsyncUdpSocket for Bindings {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        Box::pin(Writable {
+            primary: self.primary.clone().create_io_poller(),
+            leases: Vec::new(),
+            generation: u64::MAX,
+            bindings: self,
+        })
+    }
+
+    fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
         let mut peers = (self.peer_count.load(Ordering::Acquire) != 0)
             .then(|| self.peers.lock().ok())
             .flatten();
@@ -401,32 +406,18 @@ impl Bindings {
                 ..*transmit
             }),
         };
-        if retain
-            && result.is_ok()
+        // Enrolled replies never become mesh recovery history, including
+        // replayed ciphertext. A return consumes the queue instead of making
+        // old packets eligible for another burst on a later upgrade.
+        if result.is_ok()
             && let Some(peer) = peer
-            && let Some(at) = peer
-                .recent
-                .keep_copying(transmit, peer.backup && peer.physical != peer.logical)
+            && peer.physical != peer.logical
+            && let Some(at) = peer.recent.keep_copying(transmit, peer.backup)
             && let Ok(mut clock) = self.copies.lock()
         {
             clock.arm(at);
         }
         result
-    }
-}
-
-impl AsyncUdpSocket for Bindings {
-    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        Box::pin(Writable {
-            primary: self.primary.clone().create_io_poller(),
-            leases: Vec::new(),
-            generation: u64::MAX,
-            bindings: self,
-        })
-    }
-
-    fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
-        self.send_with_history(transmit, true)
     }
 
     fn poll_recv(
@@ -911,70 +902,89 @@ mod tests {
 
     #[tokio::test]
     async fn alternating_fresh_hints_cannot_amplify_retained_ciphertext() {
-        let sends = Arc::new(AtomicU64::new(0));
-        let primary = Arc::new(InstallWhilePending {
-            inner: bound("127.0.0.1:0"),
-            install: Mutex::new(None),
-            sends: sends.clone(),
-        });
-        let bindings = Bindings::new(primary);
-        let mesh = Arc::new(InstallWhilePending {
-            inner: bound("127.0.0.2:0"),
-            install: Mutex::new(None),
-            sends: sends.clone(),
-        });
-        let lease = bindings.lease(mesh.clone()).unwrap();
-        let enrolled = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let alternate = std::net::UdpSocket::bind("127.0.0.2:0").unwrap();
-        let logical = enrolled.local_addr().unwrap();
-        let alternative = alternate.local_addr().unwrap();
-        let peer = bindings.route_peer(logical, alternative).unwrap();
-        peer.set_backup(true);
-        let mut writable = bindings.clone().create_io_poller();
-        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
-            .await
-            .unwrap();
-        for index in 0_u64..8 {
-            let mut ciphertext = [0_u8; 32];
-            ciphertext[24..].copy_from_slice(&index.to_le_bytes());
-            send(&bindings, logical, &ciphertext, None);
-        }
-        // Inject distinct public hints at the adapter boundary. Both real UDP
-        // sockets count successful physical writes; no receive timer is polled,
-        // so backup clocks cannot contaminate this functional replay bound.
-        for index in 0_u64..6 {
-            if index == 4 {
-                assert_eq!(
-                    sends.load(Ordering::Relaxed),
-                    24,
-                    "eight original packets may replay once on each path, never re-arm another history burst"
-                );
-                let mut new_packet = [0_u8; 32];
-                new_packet[24..].copy_from_slice(&8_u64.to_le_bytes());
-                send(&bindings, logical, &new_packet, None);
-            }
-            let on_mesh = index % 2 == 0;
-            let mut hint = [0_u8; 32];
-            hint[24..].copy_from_slice(&(100 + index).to_le_bytes());
-            let buffers = [IoSliceMut::new(&mut hint)];
+        for backup in [false, true] {
+            let sends = Arc::new(AtomicU64::new(0));
+            let primary = Arc::new(InstallWhilePending {
+                inner: bound("127.0.0.1:0"),
+                install: Mutex::new(None),
+                sends: sends.clone(),
+            });
+            let bindings = Bindings::new(primary);
+            let mesh = Arc::new(InstallWhilePending {
+                inner: bound("127.0.0.2:0"),
+                install: Mutex::new(None),
+                sends: sends.clone(),
+            });
+            let lease = bindings.lease(mesh.clone()).unwrap();
+            let enrolled = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let alternate = std::net::UdpSocket::bind("127.0.0.2:0").unwrap();
+            let logical = enrolled.local_addr().unwrap();
+            let alternative = alternate.local_addr().unwrap();
+            let peer = bindings.route_peer(logical, alternative).unwrap();
+            peer.set_backup(backup);
+            let mut writable = bindings.clone().create_io_poller();
+            std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+                .await
+                .unwrap();
+            send(&bindings, logical, b"cold enrolled ciphertext", None);
+            let mut initial = [0_u8; 32];
+            initial[24..].copy_from_slice(&99_u64.to_le_bytes());
+            let buffers = [IoSliceMut::new(&mut initial)];
             let mut metadata = [RecvMeta {
-                addr: if on_mesh { alternative } else { logical },
+                addr: alternative,
                 len: 32,
                 stride: 32,
-                dst_ip: Some(if on_mesh {
-                    mesh.local_addr().unwrap().ip()
-                } else {
-                    bindings.local_addr().unwrap().ip()
-                }),
+                dst_ip: Some(mesh.local_addr().unwrap().ip()),
                 ..RecvMeta::default()
             }];
-            bindings.receive_peer(on_mesh.then_some(lease.id), &buffers, &mut metadata);
+            bindings.receive_peer(Some(lease.id), &buffers, &mut metadata);
+            assert_eq!(
+                sends.load(Ordering::Relaxed),
+                1,
+                "an upgrade must not replay cold enrolled history"
+            );
+            for index in 0_u64..8 {
+                let mut ciphertext = [0_u8; 32];
+                ciphertext[24..].copy_from_slice(&index.to_le_bytes());
+                send(&bindings, logical, &ciphertext, None);
+            }
+            // Inject distinct public hints at the adapter boundary. Both real UDP
+            // sockets count successful physical writes; no receive timer is polled,
+            // so backup clocks cannot contaminate this functional replay bound.
+            for index in 0_u64..6 {
+                if index == 4 {
+                    assert_eq!(
+                        sends.load(Ordering::Relaxed),
+                        17,
+                        "mesh ciphertext replays once on return; upgrading needs no old enrolled burst"
+                    );
+                    let mut new_packet = [0_u8; 32];
+                    new_packet[24..].copy_from_slice(&8_u64.to_le_bytes());
+                    send(&bindings, logical, &new_packet, None);
+                }
+                let on_mesh = index % 2 != 0;
+                let mut hint = [0_u8; 32];
+                hint[24..].copy_from_slice(&(100 + index).to_le_bytes());
+                let buffers = [IoSliceMut::new(&mut hint)];
+                let mut metadata = [RecvMeta {
+                    addr: if on_mesh { alternative } else { logical },
+                    len: 32,
+                    stride: 32,
+                    dst_ip: Some(if on_mesh {
+                        mesh.local_addr().unwrap().ip()
+                    } else {
+                        bindings.local_addr().unwrap().ip()
+                    }),
+                    ..RecvMeta::default()
+                }];
+                bindings.receive_peer(on_mesh.then_some(lease.id), &buffers, &mut metadata);
+            }
+            assert_eq!(
+                sends.load(Ordering::Relaxed),
+                19,
+                "new mesh ciphertext remains eligible for fast enrolled return"
+            );
         }
-        assert_eq!(
-            sends.load(Ordering::Relaxed),
-            27,
-            "a new packet remains eligible for one replay on both paths"
-        );
     }
     #[tokio::test]
     async fn a_lease_added_while_waiting_is_polled_without_another_primary_datagram() {
