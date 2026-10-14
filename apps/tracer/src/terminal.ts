@@ -429,8 +429,7 @@ export class TerminalClient {
    */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
     const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
-    await loadFont(font);
-    await init();
+    await TerminalClient.prepare(font);
     const terminal = new Terminal({
       fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
@@ -453,6 +452,11 @@ export class TerminalClient {
     client.installCursorLayerHook();
     client.loadStyledFaces();
     return client;
+  }
+
+  /** Warm independent font and renderer resources while a remote session starts; no socket or terminal is created. */
+  static async prepare(font: MonoFont = fontById(DEFAULT_FONT_ID)!): Promise<void> {
+    await Promise.all([loadFont(font), init()]);
   }
 
   get isConnected(): boolean { return this.attachmentConfirmed; }
