@@ -222,6 +222,7 @@ class ByteQueue {
 
 /** The sole terminal session in the tracer; all network and renderer buffers are bounded. */
 export class TerminalClient {
+  private static rendererPreparation: Promise<void> | undefined;
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
@@ -456,7 +457,17 @@ export class TerminalClient {
 
   /** Warm independent font and renderer resources while a remote session starts; no socket or terminal is created. */
   static async prepare(font: MonoFont = fontById(DEFAULT_FONT_ID)!): Promise<void> {
-    await Promise.all([loadFont(font), init()]);
+    let renderer = TerminalClient.rendererPreparation;
+    if (!renderer) {
+      renderer = init();
+      TerminalClient.rendererPreparation = renderer;
+      // Concurrent opens/preparation must share one instance. A failed optional
+      // warm-up must not poison the later session's ordinary initialization.
+      void renderer.catch(() => {
+        if (TerminalClient.rendererPreparation === renderer) TerminalClient.rendererPreparation = undefined;
+      });
+    }
+    await Promise.all([loadFont(font), renderer]);
   }
 
   get isConnected(): boolean { return this.attachmentConfirmed; }
