@@ -240,6 +240,7 @@ impl Bootstrap {
     async fn resume_setup(&self, authority: Authority, host: uuid::Uuid, saved: SetupAttempt) {
         use crate::setup::{Stage, State};
         let mut enabled = self.enabled_changes();
+        let started = Instant::now();
         let work = async {
             self.setup
                 .emit(&authority.owner, host, Stage::Install, State::Running, None)?;
@@ -253,11 +254,13 @@ impl Bootstrap {
                     saved.installation.ssh_session(),
                 )
                 .await?;
-            let join = self.backend.reissue_invitation(&authority, host).await?;
-            saved
-                .installation
-                .restart_setup(&saved.binary, &join)
+            // A previous acquisition may have failed before a full image existed.
+            // Reverify it before renewing any enrollment authority for this retry.
+            let (binary, _) = self
+                .resolve_payload(saved.architecture, false, self.payload_budget(started))
                 .await?;
+            let join = self.backend.reissue_invitation(&authority, host).await?;
+            saved.installation.restart_setup(&binary, &join).await?;
             drop(join);
             for stage in [Stage::Install, Stage::Join, Stage::Start] {
                 self.setup
@@ -301,18 +304,28 @@ impl Bootstrap {
                 saved.running = false;
             }
             if let Err(failure) = result {
+                // Retained setup has six stable wire steps. Acquisition belongs
+                // to Install there; backend diagnostics keep its architecture step
+                // and the actionable sanitized reason remains unchanged.
+                let mut published = failure.clone();
+                if matches!(
+                    published.failed_step,
+                    Some(InstallStep::GetArm64Binary | InstallStep::GetX86_64Binary)
+                ) {
+                    published.failed_step = Some(InstallStep::Install);
+                }
                 let _ = self.setup.emit(
                     &authority.owner,
                     host,
-                    setup_failure_stage(failure),
+                    setup_failure_stage(&published),
                     crate::setup::State::Failed,
-                    Some(failure),
+                    Some(&published),
                 );
             }
         }
     }
 
-    /// Prepare configured public payloads without blocking HTTP admission.
+    /// Warm the admitted source images without blocking HTTP admission.
     /// Missing files/tools retain the existing actionable per-host refusal/raw path.
     pub async fn prepare_payloads(&self) {
         let Ok(_activity) = self.activity() else {
@@ -322,17 +335,35 @@ impl Bootstrap {
             crate::probe::Architecture::X86_64,
             crate::probe::Architecture::Aarch64,
         ] {
-            let full = self.binaries.get(architecture);
-            let session_binary = self.binaries.session_payload(architecture).ok();
-            for path in session_binary.as_deref().into_iter().chain(Some(full)) {
-                if crate::payload::digest(path).await.is_ok() {
-                    for codec in [
-                        crate::payload_encoding::Codec::Zstd,
-                        crate::payload_encoding::Codec::Gzip,
-                    ] {
-                        let _ = crate::payload_encoding::encoded(path, codec).await;
-                    }
+            // Encode the small first image before acquiring the full image, so
+            // a stalled full release cannot delay a verified prompt payload.
+            let budget = Duration::from_secs(60);
+            if let Ok((session, full)) = self.resolve_payload(architecture, true, budget).await {
+                Self::warm_payload(&session).await;
+                let full = if let Some(full) = full {
+                    Some(full)
+                } else {
+                    self.resolve_payload(architecture, false, budget)
+                        .await
+                        .ok()
+                        .map(|(path, _)| path)
+                };
+                if let Some(full) = full
+                    && full != session
+                {
+                    Self::warm_payload(&full).await;
                 }
+            }
+        }
+    }
+
+    async fn warm_payload(path: &std::path::Path) {
+        if crate::payload::digest(path).await.is_ok() {
+            for codec in [
+                crate::payload_encoding::Codec::Zstd,
+                crate::payload_encoding::Codec::Gzip,
+            ] {
+                let _ = crate::payload_encoding::encoded(path, codec).await;
             }
         }
     }
@@ -772,7 +803,8 @@ impl Bootstrap {
         Ok(resolved)
     }
 
-    /// Resolve before the transaction exists, so a failed trust check cannot upload.
+    /// Resolve the first trusted image before any installation writes. A full
+    /// fallback is retained so an older release does not repeat its acquisition.
     async fn payload(
         &self,
         batch: &BatchInner,
@@ -780,8 +812,9 @@ impl Bootstrap {
         attempt: u32,
         started: Instant,
         architecture: crate::probe::Architecture,
-    ) -> Result<std::path::PathBuf, Failure> {
-        if let Some(source) = &self.payloads {
+        early: bool,
+    ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), Failure> {
+        if self.payloads.is_some() {
             emit(
                 batch,
                 target,
@@ -794,24 +827,50 @@ impl Bootstrap {
                 started,
                 None,
             );
-            // Preserve the named step before the enclosing attempt deadline;
-            // stalled buckets must not become a generic installation failure.
-            let budget = self
-                .deadline
-                .saturating_sub(started.elapsed())
-                .saturating_sub(Duration::from_secs(1))
-                .min(Duration::from_secs(60));
+        }
+        self.resolve_payload(architecture, early, self.payload_budget(started))
+            .await
+    }
+
+    fn payload_budget(&self, started: Instant) -> Duration {
+        // End acquisition before the enclosing attempt deadline so its named
+        // failure survives instead of becoming a generic installation timeout.
+        self.deadline
+            .saturating_sub(started.elapsed())
+            .saturating_sub(Duration::from_secs(1))
+            .min(Duration::from_secs(60))
+    }
+
+    /// Source admission is authoritative for both images: session absence may
+    /// fall back only through that source's verified full-image acquisition.
+    async fn resolve_payload(
+        &self,
+        architecture: crate::probe::Architecture,
+        early: bool,
+        budget: Duration,
+    ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), Failure> {
+        if let Some(source) = &self.payloads {
             let step = match architecture {
-                crate::probe::Architecture::Aarch64 => crate::model::InstallStep::GetArm64Binary,
-                crate::probe::Architecture::X86_64 => crate::model::InstallStep::GetX86_64Binary,
+                crate::probe::Architecture::Aarch64 => InstallStep::GetArm64Binary,
+                crate::probe::Architecture::X86_64 => InstallStep::GetX86_64Binary,
             };
-            tokio::time::timeout(budget, source.get(architecture))
-                .await
-                .map_err(|_| {
-                    Failure::install("the builds host did not respond in time.").at(step)
-                })?
+            tokio::time::timeout(budget, async {
+                if early && let Some(session) = source.session(architecture).await? {
+                    return Ok((session, None));
+                }
+                let full = source.get(architecture).await?;
+                Ok((full.clone(), Some(full)))
+            })
+            .await
+            .map_err(|_| Failure::install("the builds host did not respond in time.").at(step))?
         } else {
-            Ok(self.binaries.get(architecture).to_owned())
+            let full = self.binaries.get(architecture).to_owned();
+            let first = if early {
+                self.binaries.session_payload(architecture)?
+            } else {
+                full.clone()
+            };
+            Ok((first, Some(full)))
         }
     }
 
@@ -911,9 +970,8 @@ impl Bootstrap {
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
                 metadata.host_id = Some(join.host);
             }
-            // Resolve through the trusted payload source before either early shell or setup.
-            let payload = self
-                .payload(batch, target, attempt, started, check.architecture)
+            let (session_binary, mut full_binary) = self
+                .payload(batch, target, attempt, started, check.architecture, early)
                 .await?;
             resources.installation = Some(Installation::new(session.clone(), target, &join)?);
             let transaction = resources
@@ -931,8 +989,6 @@ impl Bootstrap {
             );
             let setup = async {
                 if early {
-                    let full = self.binaries.get(check.architecture);
-                    let session_binary = self.binaries.session_payload(check.architecture)?;
                     let encoding = checked
                         .as_ref()
                         .and_then(crate::install::Checked::encoding)
@@ -956,7 +1012,7 @@ impl Bootstrap {
                             target: target.clone(),
                             session_id,
                             installation: transaction.clone(),
-                            binary: payload.clone(),
+                            architecture: check.architecture,
                             running: true,
                         },
                     );
@@ -984,20 +1040,29 @@ impl Bootstrap {
                         biased;
                         _ = self.backend.setup_cancelled(join.host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
                         result = async {
-                            if session_binary.as_path() == full {
+                            let full = if let Some(full) = &full_binary {
+                                full.clone()
+                            } else {
+                                let (full, _) = self.resolve_payload(
+                                    check.architecture,
+                                    false,
+                                    self.payload_budget(started),
+                                ).await?;
+                                full_binary = Some(full.clone());
+                                full
+                            };
+                            if session_binary == full {
                                 transaction.setup(&join).await
                             } else {
                                 // The already-proven retry path retires only the upload
                                 // journal, preserving the shim and host identity. It
                                 // never truncates the executable's running inode.
-                                transaction
-                                    .restart_setup_with(&payload, &join, encoding)
-                                    .await
+                                transaction.restart_setup_with(&full, &join, encoding).await
                             }
                         } => result,
                     }
                 } else {
-                    transaction.stage_and_setup(&payload, &join).await
+                    transaction.stage_and_setup(&session_binary, &join).await
                 }
             };
             let linger = setup.await.map_err(|mut error| {
@@ -1007,7 +1072,11 @@ impl Bootstrap {
                             crate::probe::Architecture::X86_64 => "x86_64",
                             crate::probe::Architecture::Aarch64 => "aarch64",
                         },
-                        path: payload.display().to_string(),
+                        path: full_binary
+                            .as_ref()
+                            .unwrap_or(&session_binary)
+                            .display()
+                            .to_string(),
                     }));
                 }
                 error
@@ -1395,7 +1464,7 @@ struct SetupAttempt {
     target: Target,
     session_id: uuid::Uuid,
     installation: Installation,
-    binary: std::path::PathBuf,
+    architecture: crate::probe::Architecture,
     running: bool,
 }
 fn setup_failure_stage(failure: &Failure) -> crate::setup::Stage {
