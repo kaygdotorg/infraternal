@@ -210,10 +210,7 @@ impl Session {
         })
     }
     fn peer_bytes(&self) -> usize {
-        self.peers
-            .iter()
-            .map(|p| p.decoder.allocated_bytes() + p.pending.capacity() + p.trailing.capacity())
-            .sum()
+        self.peers.iter().map(Peer::buffer_bytes).sum()
     }
     fn allocated_bytes(&self) -> usize {
         self.terminal.allocated_bytes()
@@ -259,6 +256,14 @@ impl Session {
                     p.pending.is_empty() && p.cursor.is_some_and(|s| s == self.ring.head())
                 }))
     }
+    fn can_write(&self, peer: &Peer) -> bool {
+        !peer.pending.is_empty()
+            || peer.input_reply.is_some()
+            || peer.request.is_some()
+            || peer.cursor.is_some_and(|seq| {
+                seq < self.ring.head() || (self.drained && self.exit.is_some() && !peer.exited_sent)
+            })
+    }
     #[allow(clippy::too_many_lines)]
     fn housekeeping(&mut self) -> io::Result<bool> {
         if self.exit.is_none()
@@ -285,7 +290,20 @@ impl Session {
         let oldest = self.peers.iter().filter_map(|p| p.deferred).min();
         let mut retired = Vec::new();
         for (i, p) in self.peers.iter_mut().enumerate() {
-            let before = p.decoder.allocated_bytes() + p.pending.capacity() + p.trailing.capacity();
+            let mut before = p.buffer_bytes();
+            // Healthy sockets need no writable-readiness round trip. Bound
+            // each peer's work, including a partially transmitted repaint.
+            let mut write_bytes = CHUNK * 2;
+            let mut write_attempts = 4;
+            if p.flush_bounded(&mut write_bytes, &mut write_attempts)
+                .is_err()
+            {
+                retired.push(i);
+                continue;
+            }
+            let current = p.buffer_bytes();
+            wire_bytes = wire_bytes - before + current;
+            before = current;
             if p.deferred.is_some() || !p.trailing.is_empty() {
                 let mut trailing = std::mem::take(&mut p.trailing);
                 match consume_peer(
@@ -315,6 +333,9 @@ impl Session {
             {
                 p.input_reply = Some(InputReply::Ack);
             }
+            let current = p.buffer_bytes();
+            wire_bytes = wire_bytes - before + current;
+            before = current;
             if p.pending.is_empty()
                 && let Some(reply) = p.input_reply.take()
             {
@@ -324,7 +345,21 @@ impl Session {
                     InputReply::State => Frame::InputState(state.written, state.accepted),
                     InputReply::Ack => Frame::InputAck(state.written),
                 })?;
+                if p.flush_bounded(&mut write_bytes, &mut write_attempts)
+                    .is_err()
+                {
+                    // Retirement happens after this scan. Keep any newly
+                    // allocated frame/decoder storage charged until then.
+                    wire_bytes = wire_bytes - before + p.buffer_bytes();
+                    retired.push(i);
+                    continue;
+                }
             }
+            // Include all current buffers before reserving a repaint, even
+            // when a preceding state frame completed without a new event.
+            let current = p.buffer_bytes();
+            wire_bytes = wire_bytes - before + current;
+            before = current;
             if p.pending.is_empty()
                 && let Some(request) = p.request.take()
             {
@@ -365,11 +400,16 @@ impl Session {
                     p.exited_sent = true;
                 }
             }
-            wire_bytes = wire_bytes - before
-                + p.decoder.allocated_bytes()
-                + p.pending.capacity()
-                + p.trailing.capacity();
+            if p.flush_bounded(&mut write_bytes, &mut write_attempts)
+                .is_err()
+            {
+                retired.push(i);
+            }
+            wire_bytes = wire_bytes - before + p.buffer_bytes();
         }
+        // Indices follow peer order. Decoder refusal and an immediate write
+        // failure can name the same peer; retire it only once.
+        retired.dedup();
         for i in retired.into_iter().rev() {
             self.peers.remove(i);
         }
@@ -494,9 +534,8 @@ impl Session {
             let retained = self.peer_bytes();
             let p = &mut self.peers[i];
             let mut disconnect = flags.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
-            if flags.contains(PollFlags::POLLOUT) && p.flush().is_err() {
-                disconnect = true;
-            }
+            // Settle already spends the bounded write budget before and after
+            // this step; writable readiness only schedules that continuation.
             if p.deferred.is_some() && flags.contains(PollFlags::POLLHUP) {
                 disconnect = true;
             }
@@ -616,6 +655,92 @@ mod reactor;
 mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
+
+    #[test]
+    fn malformed_closed_peer_is_retired_once_and_keeps_its_sibling() {
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/d{}",
+            std::process::id()
+        ));
+        let mut config = Config::new([10; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let bad = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        let good = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        let expected = std::os::fd::AsRawFd::as_raw_fd(&session.peers[1].stream);
+        let peer = &mut session.peers[0];
+        peer.attached = true;
+        peer.caps = SEQUENCED_INPUT;
+        peer.trailing = Frame::InputStateRequest.encode().unwrap();
+        peer.trailing
+            .extend(Frame::Attach(SEQUENCED_INPUT).encode().unwrap());
+        drop(bad);
+        session.housekeeping().unwrap();
+        assert_eq!(session.peers.len(), 1);
+        assert_eq!(
+            std::os::fd::AsRawFd::as_raw_fd(&session.peers[0].stream),
+            expected
+        );
+        drop(good);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn writable_peer_receives_state_and_output_before_another_readiness_turn() {
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/f{}",
+            std::process::id()
+        ));
+        let mut config = Config::new([8; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        client.set_nonblocking(true).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        let mut hello = [0; 63];
+        client.read_exact(&mut hello).unwrap();
+        assert_eq!(hello[4], 1);
+        session.ring.append(b"reply").unwrap();
+        for frame in [
+            Frame::Attach(SEQUENCED_INPUT),
+            Frame::ReadFrom(0),
+            Frame::InputStateRequest,
+        ] {
+            client.write_all(&frame.encode().unwrap()).unwrap();
+        }
+        session
+            .step(
+                PollFlags::empty(),
+                PollFlags::empty(),
+                &[PollFlags::POLLIN],
+                false,
+            )
+            .unwrap();
+        session.housekeeping().unwrap();
+        let mut expected = Frame::InputState(0, 0).encode().unwrap();
+        expected.extend(Frame::Output(0, b"reply".to_vec()).encode().unwrap());
+        let mut received = vec![0; expected.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, expected);
+        assert_eq!(session.peers[0].pending, [] as [u8; 0]);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
+
     use nix::poll::{PollFd, poll};
     use std::{
         fs,

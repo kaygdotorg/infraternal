@@ -80,7 +80,7 @@ impl Registry {
             if peer.deferred.is_none() && peer.trailing.is_empty() {
                 flags |= EpollFlags::EPOLLIN;
             }
-            if !peer.pending.is_empty() {
+            if session.can_write(peer) {
                 flags |= EpollFlags::EPOLLOUT;
             }
             descriptors.push((peer.stream.as_fd(), flags));
@@ -345,7 +345,9 @@ pub(super) fn run(
                     &peers,
                     false,
                 )?;
-                registry.sync(index, session)?;
+                // Acceptance precedes peer retirement inside step. No further
+                // accept occurs before the final settle, so
+                // publish readiness once after immediate writes have finished.
                 if incoming {
                     read_attempted.insert(index);
                     session.step(PollFlags::empty(), PollFlags::POLLIN, &[], true)?;
@@ -434,6 +436,54 @@ fn record_ownership(slots: &[Option<Session>], accounting: &mut Option<std::fs::
 mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
+    #[test]
+    fn replay_continues_after_its_frame_was_written_inline() {
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/c{}",
+            std::process::id()
+        ));
+        let mut config = crate::Config::new([9; 16], nix::unistd::Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        session.ring.append(&vec![b'r'; 65536]).unwrap();
+        for frame in [
+            crate::frame::Frame::Attach(0),
+            crate::frame::Frame::ReadFrom(0),
+        ] {
+            client.write_all(&frame.encode().unwrap()).unwrap();
+        }
+        session
+            .step(
+                PollFlags::empty(),
+                PollFlags::empty(),
+                &[PollFlags::POLLIN],
+                false,
+            )
+            .unwrap();
+        session.housekeeping().unwrap();
+        assert_eq!(session.peers[0].pending, [] as [u8; 0]);
+        assert!(session.peers[0].cursor.unwrap() < session.ring.head());
+        let signals = SignalFd::with_flags(
+            &nix::sys::signal::SigSet::empty(),
+            nix::sys::signalfd::SfdFlags::SFD_CLOEXEC,
+        )
+        .unwrap();
+        let registry = ownership_fixture(std::slice::from_ref(&session), &signals).unwrap();
+        let registration = &registry.by_fd[&session.peers[0].stream.as_raw_fd()];
+        assert!(
+            registration.flags.contains(EpollFlags::EPOLLOUT),
+            "unwritten replay lost its continuation"
+        );
+        drop(registry);
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn one_session_readiness_fits_240_requested_bytes() {
         let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(

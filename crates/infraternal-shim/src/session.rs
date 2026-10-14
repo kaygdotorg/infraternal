@@ -132,6 +132,10 @@ struct Peer {
     request: Option<Request>,
 }
 impl Peer {
+    #[cfg(feature = "process-per-user")]
+    fn buffer_bytes(&self) -> usize {
+        self.decoder.allocated_bytes() + self.pending.capacity() + self.trailing.capacity()
+    }
     /// Capacity cannot hide a malformed range. Shared requests reserve space
     /// before acceptance; neither geometry nor durable ownership changes here.
     fn input_waits(
@@ -255,17 +259,38 @@ impl Peer {
         Ok(true)
     }
     fn flush(&mut self) -> io::Result<()> {
-        while self.written < self.pending.len() {
-            match self.stream.write(&self.pending[self.written..]) {
+        let mut bytes = usize::MAX;
+        let mut attempts = usize::MAX;
+        self.flush_bounded(&mut bytes, &mut attempts)
+    }
+    /// Shared hosts spend one byte/syscall budget across state and output
+    /// frames. A partial write retains the original frame and cursor; only a
+    /// completed frame may release its storage or admit a following frame.
+    fn flush_bounded(&mut self, bytes: &mut usize, attempts: &mut usize) -> io::Result<()> {
+        while self.written < self.pending.len() && *bytes > 0 && *attempts > 0 {
+            let end = self.pending.len().min(self.written.saturating_add(*bytes));
+            *attempts -= 1;
+            match self.stream.write(&self.pending[self.written..end]) {
                 Ok(0) => return Err(io::ErrorKind::BrokenPipe.into()),
-                Ok(n) => self.written += n,
+                Ok(n) => {
+                    self.written += n;
+                    *bytes -= n;
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
         }
-        self.pending.clear();
-        self.written = 0;
+        if self.written == self.pending.len() {
+            self.pending.clear();
+            #[cfg(feature = "process-per-user")]
+            if self.pending.capacity() > CHUNK * 4 {
+                // Completion may be the last event before an indefinite idle
+                // wait. Release large repaint storage at that boundary.
+                self.pending = Vec::new();
+            }
+            self.written = 0;
+        }
         Ok(())
     }
 }
