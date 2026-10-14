@@ -30,6 +30,7 @@ struct Block {
     base: NonNull<u8>,
     layout: Layout,
     mapped: bool,
+    encoded: bool,
 }
 
 pub(super) struct Memory {
@@ -46,13 +47,20 @@ struct State {
     limit: usize,
     refused: bool,
     mapped_used: usize,
+    encoded_used: usize,
+    encoded_limit: usize,
     page_size: usize,
 }
 impl Memory {
     // Native allocator pointers borrow the ABI and context, so constructing
     // the final stable box here is required rather than moving a stack value.
     #[allow(clippy::unnecessary_box_returns)]
+    #[cfg(any(test, not(feature = "compact-history")))]
     pub(super) fn new(limit: usize) -> Box<Self> {
+        Self::with_history(limit, 0)
+    }
+    #[allow(clippy::unnecessary_box_returns)]
+    pub(super) fn with_history(limit: usize, encoded_limit: usize) -> Box<Self> {
         let mut memory = Box::new(Self {
             abi: Abi {
                 context: ptr::null_mut(),
@@ -65,6 +73,8 @@ impl Memory {
                 limit,
                 refused: false,
                 mapped_used: 0,
+                encoded_used: 0,
+                encoded_limit,
                 page_size: page_size(),
             }),
         });
@@ -87,7 +97,11 @@ impl Memory {
             block = unsafe { current.as_ref().next };
             count += 1;
         }
-        (state.used - state.mapped_used, state.mapped_used, count)
+        (
+            state.used - state.mapped_used - state.encoded_used,
+            state.mapped_used,
+            count,
+        )
     }
     /// Inspect only this terminal's private mappings; mincore never faults in
     /// their contents. Ordinary heap blocks share allocator pages and are
@@ -131,6 +145,23 @@ impl Memory {
         }
         Ok(resident)
     }
+    #[cfg(all(test, feature = "compact-history"))]
+    pub(super) fn mapped_blocks(&self) -> usize {
+        // SAFETY: copied list accounting between synchronous native calls.
+        let mut block = unsafe { (*self.state.get()).first };
+        let mut count = 0;
+        while let Some(current) = block {
+            let current = unsafe { current.as_ref() };
+            count += usize::from(current.mapped);
+            block = current.next;
+        }
+        count
+    }
+    #[cfg(all(test, feature = "compact-history"))]
+    pub(super) fn encoded_bytes(&self) -> usize {
+        // SAFETY: copied accounting between synchronous native calls.
+        unsafe { (*self.state.get()).encoded_used }
+    }
     #[cfg(test)]
     pub(super) fn refuse_new_allocations(&mut self) {
         let state = self.state.get_mut();
@@ -169,6 +200,7 @@ unsafe extern "C" fn allocate(
         return ptr::null_mut();
     };
     let mapped = return_address == usize::MAX;
+    let encoded = return_address == usize::MAX - 1;
     // The native adapter tags page-pool requests explicitly. Large untrusted
     // payloads cannot bypass the ordinary-data cap merely through their size.
     // Arena backing may request weaker alignment; stronger alignment is valid.
@@ -197,12 +229,18 @@ unsafe extern "C" fn allocate(
     let Some(layout) = size.and_then(|size| Layout::from_size_align(size, align).ok()) else {
         return ptr::null_mut();
     };
-    let ordinary = memory.used - memory.mapped_used;
+    let ordinary = memory.used - memory.mapped_used - memory.encoded_used;
     if layout.size() > memory.limit.saturating_sub(memory.used)
-        || (!mapped && layout.size() > (256 * 1024_usize).saturating_sub(ordinary))
+        || (!mapped && !encoded && layout.size() > (256 * 1024_usize).saturating_sub(ordinary))
+        || (encoded && layout.size() > memory.encoded_limit.saturating_sub(memory.encoded_used))
         || (mapped && align > memory.page_size)
     {
-        memory.refused = true;
+        // Encoded history is an optional copy of still-resident exact state.
+        // Refusing that optimization leaves the source page unchanged and
+        // must not taint the terminal's faithful-replay certificate.
+        if !encoded {
+            memory.refused = true;
+        }
         return ptr::null_mut();
     }
     let base = if mapped {
@@ -227,7 +265,9 @@ unsafe extern "C" fn allocate(
         unsafe { alloc(layout) }
     };
     let Some(base) = NonNull::new(base) else {
-        memory.refused = true;
+        if !encoded {
+            memory.refused = true;
+        }
         return ptr::null_mut();
     };
     // SAFETY: offset reserves aligned header space before the returned payload.
@@ -240,6 +280,7 @@ unsafe extern "C" fn allocate(
             base,
             layout,
             mapped,
+            encoded,
         });
     }
     if let Some(mut first) = memory.first {
@@ -252,6 +293,9 @@ unsafe extern "C" fn allocate(
     memory.used += layout.size();
     if mapped {
         memory.mapped_used += layout.size();
+    }
+    if encoded {
+        memory.encoded_used += layout.size();
     }
     memory.peak = memory.peak.max(memory.used);
     payload.cast()
@@ -301,6 +345,9 @@ unsafe extern "C" fn release(ctx: *mut c_void, payload: *mut c_void, _: usize, _
         }
     }
     memory.used -= block.layout.size();
+    if block.encoded {
+        memory.encoded_used -= block.layout.size();
+    }
     if block.mapped {
         memory.mapped_used -= block.layout.size();
         // SAFETY: base and length identify this context's entire owned mapping.
@@ -426,6 +473,38 @@ mod payload_tests {
             assert_eq!(memory.resident_pages().unwrap(), before + payload);
             release(ctx, pages, payload, 12, 0);
             assert_eq!(memory.resident_pages().unwrap(), 0);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "compact-history"))]
+mod history_tests {
+    //! Cold history cannot borrow the parser share or exceed its own limit.
+    use super::*;
+    #[test]
+    fn encoded_history_has_a_separate_enforced_allocation_share() {
+        let memory = Memory::with_history(2 * 1024 * 1024, 512 * 1024);
+        let ctx = memory.state.get().cast();
+        // SAFETY: callbacks borrow the stable test owner; drop releases all blocks.
+        unsafe {
+            let history = allocate(ctx, 400 * 1024, 3, usize::MAX - 1);
+            assert!(!history.is_null());
+            assert!(memory.encoded_bytes() > 400 * 1024);
+            let parser = allocate(ctx, 128 * 1024, 3, 0);
+            assert!(
+                !parser.is_null(),
+                "history must not consume parser capacity"
+            );
+            assert!(allocate(ctx, 128 * 1024, 3, usize::MAX - 1).is_null());
+            assert!(
+                !memory.stats().2,
+                "opportunistic compression refusal must not invalidate exact terminal state"
+            );
+            assert!(allocate(ctx, 256 * 1024, 3, 0).is_null());
+            release(ctx, history, 400 * 1024, 3, usize::MAX - 1);
+            assert_eq!(memory.encoded_bytes(), 0);
+            release(ctx, parser, 128 * 1024, 3, 0);
+            assert_eq!(memory.stats().0, 0);
         }
     }
 }

@@ -14,6 +14,25 @@ pub fn pageAllocator(allocator: std.mem.Allocator) std.mem.Allocator {
     if (allocator.vtable != &C.zig_vtable) return std.heap.page_allocator;
     return .{ .ptr = allocator.ptr, .vtable = &vtable };
 }
+
+/// Encoded cold history has its own retention share. It cannot consume the
+/// smaller parser/title/style budget merely because many pages are retained.
+pub fn historyAllocator(allocator: std.mem.Allocator) std.mem.Allocator {
+    if (allocator.vtable != &C.zig_vtable) return allocator;
+    return .{ .ptr = allocator.ptr, .vtable = &history_vtable };
+}
+const history_vtable: std.mem.Allocator.VTable = .{
+    .alloc = historyAlloc,
+    .resize = resize,
+    .remap = remap,
+    .free = historyFree,
+};
+fn historyAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    return C.zig_vtable.alloc(ctx, len, alignment, marker - 1);
+}
+fn historyFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, _: usize) void {
+    C.zig_vtable.free(ctx, memory, alignment, marker - 1);
+}
 const vtable: std.mem.Allocator.VTable = .{
     .alloc = alloc,
     .resize = resize,

@@ -33,6 +33,8 @@ unsafe extern "C" {
         len: usize,
         tail: usize,
     ) -> usize;
+    #[cfg(feature = "compact-history")]
+    fn infraternal_vt_compact(terminal: *mut c_void, full: bool);
 }
 // A failed resize can partially mutate Ghostty page ownership. None is a
 // permanent tombstone: even destruction would inspect invalid native state.
@@ -46,7 +48,13 @@ pub(super) struct Engine(
 impl Engine {
     #[cfg(feature = "process-per-user")]
     pub fn bounded(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
-        Self::build(cols, rows, bytes, 8 * 1024 * 1024)
+        #[cfg(not(feature = "compact-history"))]
+        let limit = 8 * 1024 * 1024;
+        // Cold pages retain virtual mappings for infallible exact restore.
+        // Their encoded allocations still obey the configured history share.
+        #[cfg(feature = "compact-history")]
+        let limit = 8 * 1024 * 1024 + bytes.saturating_mul(2);
+        Self::build(cols, rows, bytes, limit)
     }
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
         Self::build(
@@ -60,8 +68,10 @@ impl Engine {
         #[cfg(not(feature = "process-per-user"))]
         let _ = limit;
         let mut raw = std::ptr::null_mut();
-        #[cfg(feature = "process-per-user")]
+        #[cfg(all(feature = "process-per-user", not(feature = "compact-history")))]
         let memory = crate::terminal_memory::Memory::new(limit);
+        #[cfg(feature = "compact-history")]
+        let memory = crate::terminal_memory::Memory::with_history(limit, bytes);
         #[cfg(not(feature = "process-per-user"))]
         let allocator = std::ptr::null();
         #[cfg(feature = "process-per-user")]
@@ -113,11 +123,27 @@ impl Engine {
     pub fn resident_pages(&self) -> io::Result<usize> {
         self.1.as_ref().map_or(Ok(0), |m| m.resident_pages())
     }
+    #[cfg(all(test, feature = "compact-history"))]
+    pub(super) fn mapped_blocks(&self) -> usize {
+        self.1.as_ref().map_or(0, |m| m.mapped_blocks())
+    }
     pub fn process(&mut self, data: &[u8]) {
         let Some(handle) = self.0 else { return };
         // SAFETY: uniquely owned terminal; Ghostty consumes the borrowed slice
         // synchronously and retains parser state, never the input pointer.
         unsafe { ghostty_terminal_vt_write(handle.as_ptr(), data.as_ptr(), data.len()) }
+        #[cfg(feature = "compact-history")]
+        if !data.is_empty() {
+            self.compact(false);
+        }
+    }
+    #[cfg(feature = "compact-history")]
+    pub(super) fn compact(&self, full: bool) {
+        if let Some(handle) = self.0 {
+            // SAFETY: the reactor owns the terminal exclusively. Only its
+            // internal cold-page representation changes; no input is emitted.
+            unsafe { infraternal_vt_compact(handle.as_ptr(), full) }
+        }
     }
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         // SAFETY: uniquely owned live terminal; zero pixel dimensions are valid.

@@ -40,6 +40,7 @@ infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optiona
 [features]
 # Opt-in research host; production still launches one shim per session.
 process-per-user = ["infraternal-shim/process-per-user"]
+compact-history = ["process-per-user", "infraternal-shim/compact-history"]
 # Per-run test authority is compiled only into explicit staging images (#188 D1).
 staging-trust = ["plugin-server", "infraternal-server/staging-trust"]
 release = ["plugin-server", "infraternal-server/release", "dep:infraternal-plugin-release", "dep:sqlx"]

@@ -35,7 +35,8 @@ printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
 optimize=ReleaseSafe
 [[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
 shared_host=${CARGO_FEATURE_PROCESS_PER_USER:-}
-key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/crates/infraternal-shim/native/memory.zig" "$root/scripts/build-vt"; printf '%s %s %s %s\n' "$checksum" "$vt_target" "$optimize" "$shared_host"; } | sha256sum | cut -d ' ' -f1)"
+compact_history=${CARGO_FEATURE_COMPACT_HISTORY:-}
+key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/crates/infraternal-shim/native/memory.zig" "$root/scripts/build-vt"; [[ -z "$compact_history" ]] || sha256sum "$root/crates/infraternal-shim/native/history.zig"; printf '%s %s %s %s %s\n' "$checksum" "$vt_target" "$optimize" "$shared_host" "$compact_history"; } | sha256sum | cut -d ' ' -f1)"
 cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
 exec 9> "$cache_dir/lock"
@@ -97,6 +98,56 @@ after = 'pub const std_capacity: Capacity = .{\n    .cols = 80,\n    .rows = 32,
 assert source.count(before) == 1, 'native standard page capacity changed'
 page.write_text(source.replace(before, after))
 PY_PAGES
+fi
+if [[ -n "$compact_history" ]]; then
+    cp "$root/crates/infraternal-shim/native/history.zig" "$source_dir/src/infraternal_history.zig"
+    compressed_page=src/terminal/compress/Page.zig
+    tar -xOf "$archive" "ghostty-$version/$compressed_page" > "$source_dir/$compressed_page"
+    python3 - "$source_dir/$compressed_page" <<'PY_HISTORY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1]); source = path.read_text()
+source = source.replace('encoded: []u8,', 'encoded: []u8,\ntext_runs: bool = false,')
+start = source.index('    const encoded_len = lz4.compress(')
+end = source.index('\n    // requiredScratch already', start)
+fallback = source[start:end].replace('    const encoded_len = ', '        break :fallback ')
+source = source[:start] + '''    var text_runs = true;
+    const encoded_len = @import("../../infraternal_history.zig").encode(source, scratch[0..required], table) catch fallback: {
+        text_runs = false;
+''' + fallback + '''
+    };
+    const encoded_allocator = @import("../../infraternal_memory.zig").historyAllocator(alloc);
+''' + source[end:]
+source = source.replace('.encoded = try alloc.dupe(u8, scratch[0..encoded_len]),', '.encoded = try encoded_allocator.dupe(u8, scratch[0..encoded_len]),\n        .text_runs = text_runs,')
+source = source.replace('.alloc = alloc,', '.alloc = encoded_allocator,')
+before = '    _ = try lz4.decompress(self.encoded, result.memory);'
+assert source.count(before) == 2, 'native compressed restore boundaries changed'
+source = source.replace(before, '''    if (self.text_runs) {
+        @import("../../infraternal_history.zig").decode(self.encoded, &self.page, result.memory) catch return error.InvalidOffset;
+    } else {
+        _ = try lz4.decompress(self.encoded, result.memory);
+    }''')
+path.write_text(source)
+PY_HISTORY
+    cat > "$source_dir/src/infraternal_history_driver.zig" <<'ZIG_HISTORY'
+//! Drives bounded cold-page compression only during explicit terminal activity [D81/D270].
+const c = @import("terminal/c/terminal.zig");
+const lib = @import("terminal/lib.zig");
+pub fn compact(handle: c.Terminal, full: bool) callconv(lib.calling_conv) void {
+    const terminal = c.zigTerminal(handle) orelse return;
+    inline for (.{ .primary, .alternate }) |key| {
+        if (terminal.screens.get(key)) |screen| {
+            _ = screen.pages.compress(if (full) .full else .incremental);
+        }
+    }
+}
+ZIG_HISTORY
+    cat >> "$source_dir/src/lib_vt.zig" <<'ZIG_EXPORT_HISTORY'
+
+comptime {
+    @export(&@import("infraternal_history_driver.zig").compact, .{ .name = "infraternal_vt_compact" });
+}
+ZIG_EXPORT_HISTORY
 fi
 # Keep every upstream API in the archive, but let the final static link discard
 # APIs the shim never calls. One monolithic section otherwise retains input

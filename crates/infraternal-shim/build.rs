@@ -8,12 +8,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "build.rs",
         "native/snapshot.zig",
         "native/memory.zig",
+        "native/history.zig",
         "../../scripts/build-vt",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PROCESS_PER_USER");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_COMPACT_HISTORY");
     let status = Command::new(root.join("../../scripts/build-vt"))
         .arg(&output)
         .status()?;
