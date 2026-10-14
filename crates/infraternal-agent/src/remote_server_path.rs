@@ -357,13 +357,21 @@ async fn answered(
 
 /// Return in place to the enrolled address, resending bounded recent ciphertext.
 async fn to_enrolled(
-    connection: &quinn::Connection,
-    endpoint: &quinn::Endpoint,
-    path: &Arc<PathSocket>,
+    link: &Link,
+    registry: &crate::plugin_control::Registry,
+    reason: ServerLinkReason,
 ) -> bool {
+    let (Connected::Quic(connection), Some(endpoint), Some(path)) =
+        (&link.connected, link.endpoint.as_ref(), link.path.as_ref())
+    else {
+        return false;
+    };
     let since = tokio::time::Instant::now();
     path.use_enrolled();
     announce(endpoint, path);
+    // Status describes the selected physical path. Its proof continues on the
+    // same connection, without hiding the completed route change for another RTT.
+    report(registry, Some(link), reason);
     remote_quic::probe_liveness(connection);
     answered(connection, path, since, false).await
 }
@@ -442,8 +450,8 @@ async fn steer(
                 } else {
                     // An unanswered switch keeps the session: its datagrams are
                     // resent on the enrolled path and the move retries later.
-                    let _ = to_enrolled(connection, endpoint, path).await;
                     *reason = ServerLinkReason::MeshRefused;
+                    let _ = to_enrolled(link, registry, *reason).await;
                     not_before = tokio::time::Instant::now() + retry;
                     retry = (retry * 2).min(Duration::from_secs(30));
                 }
@@ -491,7 +499,7 @@ async fn steer(
                 }
                 let returned = tokio::select! {
                     _ = &mut active => return Steered::Ended,
-                    returned = to_enrolled(connection, endpoint, path) => returned,
+                    returned = to_enrolled(link, registry, *reason) => returned,
                 };
                 if proposed.is_none() {
                     path.forget_mesh();

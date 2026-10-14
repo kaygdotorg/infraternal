@@ -439,6 +439,50 @@ async fn a_future_mesh_lease_and_silent_cut_keep_their_port_reserved() {
     );
 }
 
+#[tokio::test]
+async fn returning_publishes_the_selected_path_before_its_proof_finishes() {
+    use std::future::Future as _;
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let registry = registry();
+    let link = connect(
+        &identity(&ca, enrolled),
+        None,
+        enrolled,
+        ServerLinkKind::Fallback,
+        false,
+    )
+    .await
+    .unwrap();
+    let path = link.path.as_ref().expect("fixture requires native QUIC");
+    path.use_mesh(mesh);
+    report(&registry, Some(&link), ServerLinkReason::MeshProven);
+    server
+        .dropping
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let returning = to_enrolled(&link, &registry, ServerLinkReason::MeshInterrupted);
+    tokio::pin!(returning);
+    // Check publication on the first poll, without any elapsed-time assertion.
+    std::future::poll_fn(|cx| {
+        let _ = returning.as_mut().poll(cx);
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let selected = status(&registry).await;
+    assert_eq!(
+        selected.kind,
+        ServerLinkKind::Fallback,
+        "the cached status still names the failed path"
+    );
+    assert_eq!(selected.endpoint, Some(enrolled));
+}
+
 /// The proposal moves the admitted connection itself; a silent cut returns it.
 #[tokio::test]
 async fn proposed_mesh_moves_the_live_connection_and_a_silent_cut_returns_it() {
