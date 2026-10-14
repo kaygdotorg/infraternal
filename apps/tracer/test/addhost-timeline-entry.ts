@@ -8,6 +8,9 @@ import { Terminal as RendererTerminal } from "../vendor/ghostty-web";
 const epoch = (): number => performance.timeOrigin + performance.now();
 const records: Array<{ step: string; epoch_ms: number; bytes?: number }> = [];
 const mark = (step: string, bytes?: number): void => { records.push({ step, epoch_ms: epoch(), ...(bytes === undefined ? {} : { bytes }) }); };
+// Fixed boundary names are safe to retain even if setup or rendering refuses;
+// request bodies, terminal contents and exception text never enter this list.
+Object.assign(window, { addhostTimelineRecords: () => records });
 const rendererOpen = RendererTerminal.prototype.open;
 RendererTerminal.prototype.open = function (parent: HTMLElement): void {
   mark("renderer_dom_open_started");
@@ -69,14 +72,14 @@ Object.assign(window, { addhostTimeline: async (address: string) => {
       }
     };
     wizard = new ProvisioningRun({ onEvent(event) {
-      if (event.step === "failed") { clearTimeout(timeout); reject(new Error("setup refused")); return; }
+      if (event.step === "failed") { mark("setup_refused"); clearTimeout(timeout); reject(new Error("setup refused")); return; }
       if (event.step !== "done" || !event.session_id || !event.host_id) return;
       mark("publication_received");
       setup = new WebSocket(`${location.origin.replace("https", "wss")}/v1/bootstrap/setup/ws`);
       setup.onopen = () => setup?.send(JSON.stringify({ action: "subscribe", host_id: event.host_id, window_id: "timeline", after: 0 }));
       setup.onmessage = (message) => {
         const value = JSON.parse(String(message.data)) as { setup?: { stage: string; state: string } };
-        if (value.setup?.state === "failed") { clearTimeout(timeout); reject(new Error("background setup refused")); }
+        if (value.setup?.state === "failed") { mark("background_setup_refused"); clearTimeout(timeout); reject(new Error("background setup refused")); }
         if (value.setup?.stage === "ready" && value.setup.state === "done") { ready = true; mark("fully_joined_received"); check(); }
       };
       void TerminalClient.open({ host, status, hostId: event.host_id, attachSessionId: event.session_id, connection, hooks: {

@@ -4,11 +4,13 @@ import { chromium } from "playwright";
 const input = await Bun.stdin.text();
 const { cookie, target } = JSON.parse(input);
 const browser = await chromium.launch({ headless: true, args: ["--host-resolver-rules=MAP addhost-breakit2.test 172.17.0.1", "--no-proxy-server"] });
+let timelinePage;
 try {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const origin = "https://addhost-breakit2.test:4929";
   await context.addCookies([{ name: "__Host-infraternal", value: cookie, url: origin, secure: true, httpOnly: true, sameSite: "Strict" }]);
   const page = await context.newPage();
+  timelinePage = page;
   const cdp = await context.newCDPSession(page);
   await cdp.send("Network.enable");
   // Record only URL paths, clock values and resource timing; never headers,
@@ -41,6 +43,8 @@ try {
   if (!click || !prompt || proof?.bytes !== 59) throw new Error("timeline integrity assertion");
   console.log(`METRIC addhost_browser click_to_prompt_ms=${(prompt.epoch_ms - click.epoch_ms).toFixed(3)} input_acked_bytes=${proof.bytes}`);
 } catch {
+  const retained = await timelinePage?.evaluate(() => window.addhostTimelineRecords?.()).catch(() => undefined);
+  for (const record of retained ?? []) console.log(JSON.stringify({ source: "browser", ...record }));
   // An exception may include a request or cookie: emit only a fixed refusal.
   console.error("Production-browser timeline failed; no private diagnostics emitted.");
   process.exitCode = 1;
