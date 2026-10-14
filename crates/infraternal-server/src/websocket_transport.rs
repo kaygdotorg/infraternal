@@ -86,17 +86,20 @@ impl Context {
     }
 
     async fn probe(&self) -> Result<(), ()> {
-        while_authorized(&self.state, &self.user, &self.token, true, async {
-            let mut writer = self.writer.lock().await;
-            let (nonce, sent_us) = self.lease.lock().map_err(|_| ())?.ping();
-            send_frame(
-                &mut *writer,
-                0,
-                &Frame::Ping { nonce, sent_us },
-                &mut Vec::new(),
-            )
-            .await
-        })
+        if self.ended.load(Ordering::Acquire) != 0 {
+            return Err(());
+        }
+        let mut writer = self.writer.lock().await;
+        if self.ended.load(Ordering::Acquire) != 0 {
+            return Err(());
+        }
+        let (nonce, sent_us) = self.lease.lock().map_err(|_| ())?.ping();
+        send_frame(
+            &mut *writer,
+            0,
+            &Frame::Ping { nonce, sent_us },
+            &mut Vec::new(),
+        )
         .await
     }
 }
@@ -373,6 +376,16 @@ async fn proofs(
     mut activity: watch::Receiver<bool>,
     mut replies: mpsc::Receiver<Reply>,
 ) {
+    let Ok(mut authority) = super::websocket::probe_authority::Lease::new(
+        &context.state,
+        &context.user,
+        &context.token,
+    )
+    .await
+    else {
+        context.retire(false);
+        return;
+    };
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut active = false;
@@ -392,7 +405,13 @@ async fn proofs(
             _ = ticks.tick(), if active => {
                 let expired = context.lease.lock().map_or(true, |lease| lease.expired());
                 if expired { break; }
-                context.probe().await
+                authority.run(&context.state, &context.user, &context.token, async {
+                    tokio::select! {
+                        biased;
+                        () = context.closed.notified() => Err(()),
+                        result = context.probe() => result,
+                    }
+                }).await
             }
         };
         if result.is_err() {

@@ -1593,6 +1593,34 @@ where
 }
 
 /// Deadline and revocation checks are event-driven; idle sockets do no repeated database work.
+#[path = "websocket_probe_authority.rs"]
+pub(super) mod probe_authority;
+
+/// Server-generated proofs reuse a non-renewing absolute deadline; SQL delay cannot extend it.
+pub(super) async fn probe_deadline(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+) -> Result<tokio::time::Instant, ()> {
+    let started = tokio::time::Instant::now();
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?;
+    let now = i64::try_from(wall.as_secs()).map_err(|_| ())?;
+    #[cfg(test)]
+    let read_timeout = state.authority_read_timeout;
+    #[cfg(not(test))]
+    let read_timeout = AUTHORITY_READ_TIMEOUT;
+    let expiry = tokio::time::timeout(read_timeout, state.auth.live_expiry(token, user, now))
+        .await
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
+    let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
+    started
+        .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
+        .ok_or(())
+}
+
 async fn socket_deadline(
     state: &WebSocketState,
     user_id: &str,
