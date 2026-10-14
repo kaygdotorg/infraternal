@@ -268,6 +268,9 @@ export class MuxConnection {
     this.lastPingAt = startedAt;
     this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
     const nonce = this.nextPingNonce;
+    // A delayed local timer cannot prove peer loss before there is a probe to answer.
+    // Start a deadline only when the fully answered route issues its next probe.
+    if (this.pendingPings.size === 0 && startedAt - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) this.lastPongAt = startedAt;
     if (this.pendingPings.size >= 128) {
       const oldest = this.pendingPings.keys().next().value as bigint | undefined;
       if (oldest !== undefined) this.pendingPings.delete(oldest);
@@ -283,7 +286,7 @@ export class MuxConnection {
     const now = performance.now();
     // A renderer can wake with an old reply queued ahead of its timer. Enforce the
     // existing lease first; suspension must not become an hours-long learned RTT.
-    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
+    if (this.pendingPings.size > 0 && now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
       this.retireUnresponsiveSocket();
       return;
     }
@@ -424,7 +427,7 @@ export class MuxConnection {
     this.livenessTimer = 0;
     if (!this.isWelcomed || this.closed) return;
     const now = performance.now();
-    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
+    if (this.pendingPings.size > 0 && now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
       this.retireUnresponsiveSocket();
       return;
     }
