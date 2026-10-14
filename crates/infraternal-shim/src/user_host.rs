@@ -369,6 +369,9 @@ impl Session {
         for i in retired.into_iter().rev() {
             self.peers.remove(i);
         }
+        if self.peers.is_empty() {
+            self.peers = Vec::new();
+        }
         if let Some(status) = self.exit
             && (self.deadline.is_some_and(|d| Instant::now() >= d)
                 || (self.drained
@@ -403,6 +406,9 @@ impl Session {
                 && self.peers.len() < MAX_PEERS
             {
                 stream.set_nonblocking(true)?;
+                // Most sessions have one viewer. Reserve exactly the next
+                // slot rather than four large Peer records on first attach.
+                self.peers.try_reserve_exact(1).map_err(io::Error::other)?;
                 let mut peer = Peer {
                     stream,
                     decoder: Decoder::default(),
@@ -536,6 +542,9 @@ impl Session {
                 self.peers.remove(i);
             }
         }
+        if self.peers.is_empty() {
+            self.peers = Vec::new();
+        }
         Ok(())
     }
 }
@@ -626,6 +635,56 @@ mod tests {
             _ => panic!("lazy/eager snapshot fidelity differs"),
         }
     }
+    #[test]
+    fn last_viewer_disconnect_releases_unused_peer_slots() {
+        const CASE: &str =
+            "session::user_host::tests::last_viewer_disconnect_releases_unused_peer_slots";
+        const FLAG: &str = "INFRATERNAL_PPU_VIEWER_FIXTURE";
+        // Concurrent fork/exec fixtures can briefly inherit this test's
+        // socket. Isolate the descriptor lifetime just as the fd-reuse test.
+        if std::env::var_os(FLAG).is_none() {
+            assert!(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", CASE, "--test-threads=1"])
+                    .env(FLAG, "1")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            return;
+        }
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/b{}",
+            std::process::id()
+        ));
+        let mut config = Config::new([8; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        assert_eq!(session.peers.len(), 1);
+        drop(client);
+        session
+            .step(
+                PollFlags::empty(),
+                PollFlags::empty(),
+                &[PollFlags::POLLHUP],
+                false,
+            )
+            .unwrap();
+        assert!(session.peers.is_empty());
+        assert_eq!(
+            session.peers.capacity(),
+            0,
+            "idle session retains vacant viewer slots"
+        );
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
+
     #[test]
     fn lazy_prefix_materializes_exactly_before_overflow_and_resize() {
         let bytes = b"prompt \x1b[31mred\x1b[0m\r\n";
