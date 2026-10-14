@@ -51,6 +51,9 @@ pub fn prepare_spawn(attributes: &mut nix::spawn::PosixSpawnAttr) -> nix::Result
 pub fn detach() -> std::io::Result<bool> {
     pty::detach()
 }
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/heap_accounting.rs"]
+mod heap_accounting;
 mod session;
 mod terminal;
 #[cfg(feature = "process-per-user")]
