@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { MuxConnection } from "./connection";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 
-test("a fully answered browser route survives a delayed next probe", () => {
+for (const attached of [false, true]) test(`a fully answered browser route survives a delayed next probe ${attached ? "with an attachment" : "before a terminal attaches"}`, () => {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance };
   let now = 0;
@@ -39,14 +39,15 @@ test("a fully answered browser route survives a delayed next probe", () => {
     globals.WebSocket = Socket;
     globals.performance = { now: () => now };
     connection = new MuxConnection();
-    connection.openStream({ onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() { disconnected++; }, hasSession: () => true, onStatus() {} });
+    connection.openStream({ onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() { disconnected++; }, hasSession: () => attached, onStatus() {} });
     sockets[0]!.onopen?.();
     sockets[0]!.receive(encodeMuxedFrame(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 }));
-    connection.streamAttached(true, 1);
+    if (attached) connection.streamAttached(true, 1);
     connection.sampleRoundTrip();
     expect(probes).toBe(1);
     expect(connection.isWelcomed).toBe(true);
 
+    // Before terminal attachment the server has no active-route probe timer.
     // No outstanding reply exists. Advance the clock without executing timers,
     // then deliver the delayed timer as a browser event loop would. This is a
     // deterministic scheduling oracle, never a host latency measurement.
