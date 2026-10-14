@@ -136,11 +136,11 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         id: "ssh.progress",
         schema: SchemaRef("ssh.event"),
     }],
-    streams: &[StreamDef {
-        id: "ssh.progress",
-        schema: SchemaRef("ssh.event"),
-        resumable: true,
-    }],
+    streams: &[StreamDef::json(
+        "ssh.progress",
+        SchemaRef("ssh.event"),
+        true,
+    )],
     settings: Some(SchemaRef("ssh.settings")),
     defaults: &[
         SettingDefault {

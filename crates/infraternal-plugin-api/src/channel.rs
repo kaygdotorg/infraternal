@@ -56,3 +56,6 @@ pub const REMOTE_PATH_BACKUP: u64 = 1 << 6;
 /// Both native peers support session-bound authenticated physical path responses
 /// independent of encrypted backups. This bit grants no host or writer authority.
 pub const REMOTE_PATH_PROOF: u64 = 1 << 7;
+
+/// Native plugin lanes cannot alias the reserved leg-B core capability bits0–5.
+pub const MIN_NATIVE_STREAM_CAPABILITY: u64 = 1 << 6;
