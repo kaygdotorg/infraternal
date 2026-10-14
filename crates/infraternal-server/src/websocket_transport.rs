@@ -1,17 +1,16 @@
 //! Keeps authenticated browser proofs responsive while application work awaits SQL or a host [D265, #199].
 
 use super::websocket::{
-    Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, WebSocketState, receive_wire, send_frame,
-    send_message,
+    Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, WebSocketState, receive_wire, send_messages,
 };
-use crate::liveness::{Liveness, TICK};
+use crate::liveness::Liveness;
 use axum::extract::ws::{Message, WebSocket};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures_util::{
     Sink, SinkExt,
     stream::{SplitSink, SplitStream},
 };
-use infraternal_protocol::{Frame, decode_muxed_frame};
+use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use std::sync::{
     Arc, Mutex as LeaseMutex,
     atomic::{AtomicU8, Ordering},
@@ -26,6 +25,11 @@ use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 // byte bound: a client cannot turn these small-frame slots into 64 full-size frames.
 const INPUT_SLOTS: usize = MAX_ATTACHMENTS * 2;
 const CONTROL_SLOTS: usize = 128;
+// Ready replies plus one probe remain below the framing buffer and yield after a bounded turn.
+const PROOF_BATCH: usize = 64;
+// Application progress keeps the first-tick cadence briefly. Content-free
+// proofs bypass this window, and its expiry creates no separate timer.
+const FAST_PROBE_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
 type Writer = Arc<Mutex<SplitSink<WebSocket, Message>>>;
 
 struct Queued {
@@ -44,10 +48,12 @@ struct Context {
     token: String,
     writer: Writer,
     lease: LeaseMutex<Liveness>,
+    fast_until: LeaseMutex<tokio::time::Instant>,
     // 0 is usable, 1 is an ordinary end, 2 is a protocol failure. The first end
     // wins so teardown cannot turn malformed input into an ordinary disconnect.
     ended: AtomicU8,
     closed: Notify,
+    proof_changed: Notify,
 }
 
 impl Context {
@@ -62,33 +68,31 @@ impl Context {
     }
 
     fn reset(&self) -> Result<(), ()> {
-        *self.lease.lock().map_err(|_| ())? = Liveness::new();
+        self.lease.lock().map_err(|_| ())?.restart();
+        self.note_activity()
+    }
+
+    fn note_activity(&self) -> Result<(), ()> {
+        *self.fast_until.lock().map_err(|_| ())? = tokio::time::Instant::now() + FAST_PROBE_WINDOW;
+        self.proof_changed.notify_one();
         Ok(())
     }
 
-    async fn reply(&self, reply: Reply) -> Result<(), ()> {
-        if self.ended.load(Ordering::Acquire) != 0 {
-            return Err(());
-        }
-        let mut writer = self.writer.lock().await;
-        if self.ended.load(Ordering::Acquire) != 0 {
-            return Err(());
-        }
-        match reply {
-            Reply::Wire { nonce, sent_us } => {
-                send_frame(
-                    &mut *writer,
-                    0,
-                    &Frame::Pong { nonce, sent_us },
-                    &mut Vec::new(),
-                )
-                .await
-            }
-            Reply::Transport(bytes) => send_message(&mut *writer, Message::Pong(bytes)).await,
-        }
+    fn fast_active(&self) -> Result<bool, ()> {
+        self.fast_until
+            .lock()
+            .map(|until| tokio::time::Instant::now() < *until)
+            .map_err(|_| ())
     }
 
-    async fn probe(&self) -> Result<(), ()> {
+    async fn transmit(
+        &self,
+        mut first: Option<Reply>,
+        replies: &mut mpsc::Receiver<Reply>,
+        active: bool,
+        messages: &mut Vec<Message>,
+        encoded: &mut Vec<u8>,
+    ) -> Result<(), ()> {
         if self.ended.load(Ordering::Acquire) != 0 {
             return Err(());
         }
@@ -96,14 +100,43 @@ impl Context {
         if self.ended.load(Ordering::Acquire) != 0 {
             return Err(());
         }
-        let (nonce, sent_us) = self.lease.lock().map_err(|_| ())?.ping();
-        send_frame(
-            &mut *writer,
-            0,
-            &Frame::Ping { nonce, sent_us },
-            &mut Vec::new(),
-        )
-        .await
+        messages.clear();
+        // Drain only replies that are ready now, preserving queue and message
+        // boundaries. The cap also leaves revocation and activity changes a turn.
+        for _ in 0..PROOF_BATCH {
+            let Some(reply) = first.take().or_else(|| replies.try_recv().ok()) else {
+                break;
+            };
+            let message = match reply {
+                Reply::Wire { nonce, sent_us } => {
+                    encode_muxed_frame_into(0, &Frame::Pong { nonce, sent_us }, encoded)
+                        .map_err(|_| ())?;
+                    Message::Binary(Bytes::copy_from_slice(encoded))
+                }
+                Reply::Transport(bytes) => Message::Pong(bytes),
+            };
+            messages.push(message);
+        }
+        let fast = self.fast_active()?;
+        let probe = {
+            let mut lease = self.lease.lock().map_err(|_| ())?;
+            if active && lease.expired() {
+                return Err(());
+            }
+            let due = lease
+                .next_probe_due(fast)
+                .is_some_and(|at| at <= tokio::time::Instant::now());
+            (active && (due || (!messages.is_empty() && lease.can_piggyback())))
+                .then(|| lease.ping())
+        };
+        if let Some((nonce, sent_us)) = probe {
+            encode_muxed_frame_into(0, &Frame::Ping { nonce, sent_us }, encoded).map_err(|_| ())?;
+            messages.push(Message::Binary(Bytes::copy_from_slice(encoded)));
+        }
+        if messages.is_empty() {
+            return Ok(());
+        }
+        send_messages(&mut *writer, messages.drain(..)).await
     }
 }
 
@@ -139,9 +172,11 @@ impl Transport {
             user,
             token,
             writer,
-            lease: LeaseMutex::new(Liveness::new()),
+            lease: LeaseMutex::new(Liveness::answer_paced()),
+            fast_until: LeaseMutex::new(tokio::time::Instant::now() + FAST_PROBE_WINDOW),
             ended: AtomicU8::new(0),
             closed: Notify::new(),
+            proof_changed: Notify::new(),
         });
         let (send, input) = mpsc::channel(INPUT_SLOTS);
         let (reply, replies) = mpsc::channel(CONTROL_SLOTS);
@@ -167,7 +202,15 @@ impl Transport {
                                 std::io::ErrorKind::ConnectionAborted,
                             )));
                         }
-                        writer.send(message).await
+                        writer.send(message).await?;
+                        if context.ended.load(Ordering::Acquire) == 0 {
+                            context.note_activity().map_err(|()| {
+                                axum::Error::new(std::io::Error::other(
+                                    "proof activity state unavailable",
+                                ))
+                            })?;
+                        }
+                        Ok(())
                     }
                     .await;
                     if let Err(error) = result {
@@ -330,9 +373,13 @@ async fn read(
                                 .lease
                                 .lock()
                                 .map(|mut lease| lease.pong(nonce, sent_us));
-                            if updated.is_err() {
-                                context.retire(true);
-                                break;
+                            match updated {
+                                Ok(true) => context.proof_changed.notify_one(),
+                                Ok(false) => {}
+                                Err(_) => {
+                                    context.retire(true);
+                                    break;
+                                }
                             }
                             continue;
                         }
@@ -381,11 +428,25 @@ async fn proofs(
     mut replies: mpsc::Receiver<Reply>,
     mut authority: super::websocket::probe_authority::Lease,
 ) {
-    let mut ticks = tokio::time::interval(TICK);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut active = false;
+    let mut messages = Vec::new();
+    let mut encoded = Vec::new();
     loop {
-        let result = tokio::select! {
+        // Another ready branch may win beside the retirement notification.
+        if context.ended.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        let Ok(fast) = context.fast_active() else {
+            break;
+        };
+        let Ok((next_probe, response_deadline)) = context
+            .lease
+            .lock()
+            .map(|lease| (lease.next_probe_due(fast), lease.response_deadline()))
+        else {
+            break;
+        };
+        let first = tokio::select! {
             () = context.closed.notified() => break,
             changed = activity.changed() => {
                 if changed.is_err() { break; }
@@ -393,31 +454,56 @@ async fn proofs(
                 if context.reset().is_err() { break; }
                 continue;
             }
+            () = context.proof_changed.notified() => None,
+            () = wait_deadline(next_probe), if active => None,
+            () = wait_deadline(response_deadline), if active => None,
             reply = replies.recv() => {
                 let Some(reply) = reply else { break; };
-                authority.run(&context.state, &context.user, &context.token, async {
-                    tokio::select! {
-                        biased;
-                        () = context.closed.notified() => Err(()),
-                        result = context.reply(reply) => result,
-                    }
-                }).await
-            }
-            _ = ticks.tick(), if active => {
-                let expired = context.lease.lock().map_or(true, |lease| lease.expired());
-                if expired { break; }
-                authority.run(&context.state, &context.user, &context.token, async {
-                    tokio::select! {
-                        biased;
-                        () = context.closed.notified() => Err(()),
-                        result = context.probe() => result,
-                    }
-                }).await
+                Some(reply)
             }
         };
+        let active = *activity.borrow();
+        if first.is_none() && replies.is_empty() {
+            let Ok(fast) = context.fast_active() else {
+                break;
+            };
+            let Ok(idle) = context.lease.lock().map(|lease| {
+                !active
+                    || (!lease.expired()
+                        && lease
+                            .next_probe_due(fast)
+                            .is_none_or(|at| at > tokio::time::Instant::now()))
+            }) else {
+                break;
+            };
+            // An answer only changes scheduling; it does not need a writer or
+            // an authority operation. Rearm deadlines on the next loop turn.
+            if idle {
+                continue;
+            }
+        }
+        // Collect already-runnable replies without a timed coalescing wait.
+        // Fallback and response margins still sum to measured RTT + 50ms.
+        tokio::task::yield_now().await;
+        let active = *activity.borrow();
+        let result = authority.run(&context.state, &context.user, &context.token, async {
+            tokio::select! {
+                biased;
+                () = context.closed.notified() => Err(()),
+                result = context.transmit(first, &mut replies, active, &mut messages, &mut encoded) => result,
+            }
+        }).await;
         if result.is_err() {
             break;
         }
     }
     context.retire(false);
+}
+
+/// An absent deadline parks without creating a timer [D81].
+async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
