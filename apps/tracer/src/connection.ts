@@ -283,13 +283,19 @@ export class MuxConnection {
       this.fastProbeUntil = startedAt + 250;
       this.scheduleLiveness();
     }
-    if (startedAt < this.nextProbeAt()) return;
+    const dueAt = this.nextProbeAt();
+    if (startedAt < dueAt) return;
     this.lastPingAt = startedAt;
     this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
     const nonce = this.nextPingNonce;
     // A delayed local timer cannot prove peer loss before there is a probe to answer.
     // Start a deadline only when the fully answered route issues its next probe.
-    if (this.pendingPings.size === 0 && (this.livenessRtt === undefined || startedAt - this.lastPongAt >= this.livenessRtt + 50)) this.lastPongAt = startedAt;
+    if (this.pendingPings.size === 0) {
+      // Preserve the scheduled response allowance after a late local callback.
+      // A fresh answer can arrive after the old send cadence became due; it
+      // cannot move the answer clock into the future. Outstanding leases never move.
+      this.lastPongAt = this.livenessRtt === undefined ? startedAt : this.lastPongAt + Math.max(0, startedAt - Math.max(dueAt, this.lastPongAt));
+    }
     if (this.pendingPings.size >= 128) {
       const oldest = this.pendingPings.keys().next().value as bigint | undefined;
       if (oldest !== undefined) this.pendingPings.delete(oldest);

@@ -151,3 +151,22 @@ for (const streams of [1, 28]) test(`a healthy idle route tolerates a 20ms RTT s
     expect(f.connection.isWelcomed).toBe(true);
   } finally { f.dispose(); }
 });
+
+for (const streams of [1, 28]) test(`a late timer on a fully answered route preserves its reply allowance across ${streams} streams`, () => {
+  const f = fixture(1, streams);
+  try {
+    f.advance(1001);
+    f.setRoundTrip(20);
+    // No outstanding probe exists. The next local callback arrives 11ms late,
+    // before the former answer's silence budget ends; the peer still needs time
+    // to answer the request that has only just been issued.
+    f.suspend(35);
+    f.advance(21);
+    expect(f.disconnects).toBe(0);
+    expect(f.connection.isWelcomed).toBe(true);
+    f.stopForwarding();
+    f.advance(20);
+    f.advance(70);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
