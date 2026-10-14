@@ -30,7 +30,6 @@ fn errno(error: nix::errno::Errno) -> io::Error {
 /// The shared reactor uses this hint to read short interactive replies before
 /// bulk output. Read readiness remains authoritative if the hint changes.
 #[cfg(feature = "process-per-user")]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn available_output(master: &File) -> io::Result<usize> {
     let mut count: nix::libc::c_int = 0;
     // SAFETY: FIONREAD synchronously writes one c_int through this valid

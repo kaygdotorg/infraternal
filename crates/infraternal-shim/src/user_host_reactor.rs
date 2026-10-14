@@ -194,10 +194,12 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
     let mut failed = false;
     let mut bulk = VecDeque::new();
     let mut queued = HashSet::new();
+    let mut read_attempted = HashSet::new();
     // All ordinary PTYs/listeners fit this batch at the requested 1000-session
     // scale; control readiness is not hidden behind many small bulk-only waits.
     let mut events = vec![EpollEvent::empty(); 2048];
     while live > 0 {
+        read_attempted.clear();
         while timers
             .peek()
             .is_some_and(|Reverse((_, index))| slots[*index].is_none())
@@ -256,6 +258,7 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
             }
         }
         let mut controls = Vec::new();
+        let mut small_reads = Vec::new();
         for (&index, ready) in &work {
             let Some(session) = slots[index].as_ref() else {
                 continue;
@@ -273,13 +276,24 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
             if control || child_exit || session.exit.is_some() {
                 controls.push(index);
             }
-            if (!ready
+            if ready
                 .flags(session.pty.master.as_raw_fd(), &registry)
-                .is_empty()
-                || session.exit.is_some())
-                && queued.insert(index)
+                .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
+                || session.exit.is_some()
             {
-                bulk.push_back(index);
+                // Readiness alone cannot distinguish a shell's short reply
+                // from a producer filling its PTY. Only connected consumers
+                // can observe reply latency; detached output needs no ioctl
+                // classification on every turn of the rotating bulk queue.
+                if !session.peers.is_empty()
+                    && crate::pty::available_output(&session.pty.master)
+                        .is_ok_and(|bytes| bytes <= 1024)
+                {
+                    small_reads.push(index);
+                    queued.remove(&index);
+                } else if queued.insert(index) {
+                    bulk.push_back(index);
+                }
             }
         }
         // Service all input/control before the rotating bounded bulk quantum.
@@ -308,6 +322,7 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
                 )?;
                 registry.sync(index, session)?;
                 if incoming {
+                    read_attempted.insert(index);
                     session.step(PollFlags::empty(), PollFlags::POLLIN, &[], true)?;
                 }
                 settle(index, &mut slots, &mut registry, &mut timers)?;
@@ -330,9 +345,18 @@ pub(super) fn run(sessions: Vec<Session>, signals: &SignalFd) -> io::Result<()> 
                 live -= 1;
             }
         }
+        // A promoted session may already have an older bulk entry. Remove it
+        // before selecting the quantum so it cannot spend two read budgets.
+        bulk.retain(|index| queued.contains(index));
         for _ in 0..OUTPUTS_PER_ROUND {
             let Some(index) = bulk.pop_front() else { break };
             queued.remove(&index);
+            small_reads.push(index);
+        }
+        for index in small_reads {
+            if !read_attempted.insert(index) {
+                continue;
+            }
             if slots[index].is_none() {
                 continue;
             }
