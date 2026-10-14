@@ -19,6 +19,7 @@ pub(super) struct Datagram {
     pub ecn: Option<EcnCodepoint>,
     source: Option<IpAddr>,
     copy_at: Option<tokio::time::Instant>,
+    replayed_to: u8,
 }
 
 #[derive(Default)]
@@ -55,6 +56,7 @@ impl Recent {
             ecn: transmit.ecn,
             source: transmit.src_ip,
             copy_at,
+            replayed_to: 0,
         });
         copy_at
     }
@@ -92,6 +94,32 @@ impl Recent {
         for sent in &mut self.datagrams {
             sent.copy_at = None;
         }
+    }
+    /// Replaying a packet does not make it a fresh packet or fresh history.
+    /// Each original ciphertext may replay once per destination; alternating
+    /// hints cannot repeatedly amplify old ACKs into new copy batches. QUIC
+    /// loss recovery emits new packet numbers, which remain independently eligible.
+    pub fn replay(
+        &mut self,
+        alternate: bool,
+    ) -> (VecDeque<Datagram>, Option<tokio::time::Instant>) {
+        let bit = if alternate { 1 } else { 2 };
+        let copy_at = alternate.then(|| tokio::time::Instant::now() + COPY_DELAY);
+        if !alternate {
+            self.cancel_copies();
+        }
+        let mut pending = VecDeque::new();
+        for sent in &mut self.datagrams {
+            if sent.replayed_to & bit == 0 {
+                sent.replayed_to |= bit;
+                sent.copy_at = copy_at;
+                pending.push_back(sent.clone());
+            }
+        }
+        (
+            pending,
+            self.datagrams.iter().filter_map(|sent| sent.copy_at).min(),
+        )
     }
     pub fn clear(&mut self) {
         self.bytes = 0;
