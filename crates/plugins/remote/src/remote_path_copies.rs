@@ -8,6 +8,8 @@ use std::{
 /// Overlap loss detection and the enrolled-path round trip without waiting for
 /// QUIC's loss timer. This delay is measured as part of path acceptance.
 pub(crate) const COPY_DELAY: Duration = Duration::from_millis(20);
+/// Bound send work between receive polls, shared by every peer on an endpoint.
+pub(crate) const COPY_BATCH: usize = 32;
 
 /// One clock per endpoint socket, not one task or clock per leased peer.
 #[derive(Default)]

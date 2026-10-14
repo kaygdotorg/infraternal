@@ -419,11 +419,13 @@ impl AsyncUdpSocket for PathSocket {
         let due = self.on_mesh.load(Ordering::Acquire)
             && self.backup.load(Ordering::Acquire)
             && self.copies.lock().is_ok_and(|mut clock| clock.poll(cx));
+        let mut copy_budget = crate::remote_path_copies::COPY_BATCH;
         if due
             && let Ok(mut paths) = self.paths.lock()
-            && let Some(at) = paths
-                .resend
-                .copies(self.socket.as_ref(), self.logical, true)
+            && let Some(at) =
+                paths
+                    .resend
+                    .copies(self.socket.as_ref(), self.logical, true, &mut copy_budget)
             && let Ok(mut clock) = self.copies.lock()
         {
             clock.arm(at);

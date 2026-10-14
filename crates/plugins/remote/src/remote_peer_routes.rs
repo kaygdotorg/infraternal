@@ -1,5 +1,5 @@
 //! Leases trusted alternative peer tuples and bounded encrypted replay below the existing QUIC endpoint [198,215,263], #201.
-use crate::remote_path_copies::COPY_DELAY;
+use crate::remote_path_copies::{COPY_BATCH, COPY_DELAY};
 use quinn::{
     AsyncUdpSocket,
     udp::{EcnCodepoint, Transmit},
@@ -57,19 +57,25 @@ impl Recent {
         });
         copy_at
     }
-    /// At the socket's earliest copy deadline, send the bounded pending batch.
+    /// At the socket's earliest copy deadline, send up to the shared poll budget.
     /// Include younger entries: sustained output can evict older entries before
     /// their deadline, and must not starve backup transmission indefinitely.
+    /// Exhaustion retains unsent entries and requests the next poll immediately.
     /// A full socket defers a copy; other errors leave recovery to QUIC.
     pub fn copies(
         &mut self,
         socket: &dyn AsyncUdpSocket,
         destination: SocketAddr,
         bound: bool,
+        remaining: &mut usize,
     ) -> Option<tokio::time::Instant> {
         let now = tokio::time::Instant::now();
         for sent in &mut self.datagrams {
             if sent.copy_at.is_some() {
+                if *remaining == 0 {
+                    return Some(now);
+                }
+                *remaining -= 1;
                 let result = socket.try_send(&Transmit {
                     destination,
                     contents: &sent.contents,
@@ -161,8 +167,41 @@ pub(super) struct Peers {
     slots: Vec<Option<Peer>>,
     free: Vec<usize>,
     count: usize,
+    /// Resume after the last serviced slot so a busy peer cannot own the batch.
+    copy_cursor: usize,
 }
 impl Peers {
+    /// Interleave bounded backup batches with the endpoint's receive work.
+    pub fn copies(
+        &mut self,
+        socket: &dyn AsyncUdpSocket,
+        bound: bool,
+    ) -> Option<tokio::time::Instant> {
+        let len = self.slots.len();
+        if len == 0 {
+            return None;
+        }
+        let start = self.copy_cursor % len;
+        let (before, after) = self.slots.split_at_mut(start);
+        let mut remaining = COPY_BATCH;
+        let mut deadline = None;
+        for (index, slot) in after.iter_mut().chain(before.iter_mut()).enumerate() {
+            if let Some(peer) = slot
+                && let Some(at) = peer
+                    .recent
+                    .copies(socket, peer.logical, bound, &mut remaining)
+            {
+                deadline = Some(deadline.map_or(at, |old: tokio::time::Instant| old.min(at)));
+            }
+            if remaining == 0 {
+                self.copy_cursor = (start + index + 1) % len;
+                // Remaining slots may have due copies. The same owned clock
+                // schedules the next batch, after sockets get a receive poll.
+                return Some(tokio::time::Instant::now());
+            }
+        }
+        deadline
+    }
     pub fn len(&self) -> usize {
         self.count
     }
@@ -295,7 +334,12 @@ mod tests {
         }
         // The clock's oldest scheduled entry has been evicted. Firing that
         // clock must flush the retained batch even when its entries are younger.
-        assert!(recent.copies(socket.as_ref(), destination, true).is_none());
+        let mut copy_budget = COPY_BATCH;
+        assert!(
+            recent
+                .copies(socket.as_ref(), destination, true, &mut copy_budget)
+                .is_none()
+        );
         let mut bytes = vec![0; MAX_BYTES];
         let mut index = 16_u32;
         while index < 32 {
@@ -316,7 +360,11 @@ mod tests {
             }
         }
         assert_eq!(index, 32);
-        assert!(recent.copies(socket.as_ref(), destination, true).is_none());
+        assert!(
+            recent
+                .copies(socket.as_ref(), destination, true, &mut copy_budget)
+                .is_none()
+        );
         assert!(recent.datagrams.iter().all(|sent| sent.copy_at.is_none()));
         assert_eq!(recent.bytes, MAX_BYTES);
     }

@@ -428,16 +428,12 @@ impl AsyncUdpSocket for Bindings {
     ) -> Poll<io::Result<usize>> {
         let due = self.peer_count.load(Ordering::Acquire) != 0
             && self.copies.lock().is_ok_and(|mut clock| clock.poll(cx));
-        if due && let Ok(mut peers) = self.peers.lock() {
-            for peer in peers.iter_mut() {
-                if let Some(at) =
-                    peer.recent
-                        .copies(self.primary.as_ref(), peer.logical, self.primary_bound)
-                    && let Ok(mut clock) = self.copies.lock()
-                {
-                    clock.arm(at);
-                }
-            }
+        if due
+            && let Ok(mut peers) = self.peers.lock()
+            && let Some(at) = peers.copies(self.primary.as_ref(), self.primary_bound)
+            && let Ok(mut clock) = self.copies.lock()
+        {
+            clock.arm(at);
         }
         let generation = self.generation.load(Ordering::Acquire);
         let leases = self.snapshot();
@@ -851,6 +847,104 @@ mod tests {
         }
         fn local_addr(&self) -> io::Result<SocketAddr> {
             self.inner.local_addr()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_copy_poll_bounds_work_before_servicing_receive() {
+        let sends = Arc::new(AtomicU64::new(0));
+        let primary = Arc::new(InstallWhilePending {
+            inner: bound("127.0.0.1:0"),
+            install: Mutex::new(None),
+            sends: sends.clone(),
+        });
+        let bindings = Bindings::new(primary);
+        let mut owned = Vec::new();
+        for port in 40000..40100 {
+            let logical = SocketAddr::new("127.0.0.2".parse().unwrap(), port);
+            let alternate = SocketAddr::new("127.0.0.3".parse().unwrap(), port);
+            owned.push(bindings.route_peer(logical, alternate).unwrap());
+            bindings
+                .peers
+                .lock()
+                .unwrap()
+                .get_mut(logical)
+                .unwrap()
+                .recent
+                .keep_copying(
+                    &Transmit {
+                        destination: logical,
+                        contents: b"ciphertext",
+                        ecn: None,
+                        segment_size: None,
+                        src_ip: None,
+                    },
+                    true,
+                );
+        }
+        // Make the owned copy clock ready without measuring elapsed time.
+        bindings
+            .copies
+            .lock()
+            .unwrap()
+            .arm(tokio::time::Instant::now() - std::time::Duration::from_secs(1));
+        // Let Tokio's timer driver publish readiness; no duration is asserted.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let mut bytes = [0; 64];
+        let mut buffers = [IoSliceMut::new(&mut bytes)];
+        let mut metadata = [RecvMeta::default()];
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let _ = bindings.poll_recv(&mut cx, &mut buffers, &mut metadata);
+        assert!(
+            sends.load(Ordering::Relaxed) <= 32,
+            "one receive poll emitted the whole peer cohort before reading its sockets: {} sends",
+            sends.load(Ordering::Relaxed)
+        );
+        assert!(
+            sends.load(Ordering::Relaxed) > 0,
+            "copy clock was not ready"
+        );
+        let busy = SocketAddr::new("127.0.0.2".parse().unwrap(), 40000);
+        for _ in 0..4 {
+            // A continuously refilled first slot cannot monopolize the batch.
+            for _ in 0..32 {
+                bindings
+                    .peers
+                    .lock()
+                    .unwrap()
+                    .get_mut(busy)
+                    .unwrap()
+                    .recent
+                    .keep_copying(
+                        &Transmit {
+                            destination: busy,
+                            contents: b"busy-ciphertext",
+                            ecn: None,
+                            segment_size: None,
+                            src_ip: None,
+                        },
+                        true,
+                    );
+            }
+            let before = sends.load(Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let _ = bindings.poll_recv(&mut cx, &mut buffers, &mut metadata);
+            assert!(sends.load(Ordering::Relaxed) - before <= 32);
+        }
+        for peer in bindings
+            .peers
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|peer| peer.logical != busy)
+        {
+            assert!(
+                peer.recent
+                    .copies(bindings.primary.as_ref(), peer.logical, true, &mut 0)
+                    .is_none(),
+                "an idle peer's original copy was starved by the busy slot"
+            );
         }
     }
 
