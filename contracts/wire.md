@@ -375,8 +375,12 @@ fence may be in flight per data link and is discarded when that link is parked.
 
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
-Probes are pipelined with bounded state, so detecting a broken direction does
-not first wait for another full request/response cycle. The initial RTT is
+Startup, pending input and recent link doubt keep browser probes pipelined
+with bounded state. A healthy idle browser may keep one probe in flight and
+pace its next sample from the correlated answer, preserving scheduling margin
+within the existing measured-RTT + 50ms expiry. Waiting or issuing a request
+never renews an outstanding deadline. Detecting a broken direction does not
+first wait for another full request/response cycle. The initial RTT is
 unknown; after sampling, expiry follows the measured RTT with a small scheduling
 allowance. Liveness traffic must not drive the latency pill or terminal painter
 at the probe frequency. Initial unpainted windows remain connecting; previously
