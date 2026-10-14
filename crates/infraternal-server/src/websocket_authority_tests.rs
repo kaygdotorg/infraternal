@@ -36,6 +36,20 @@ enum Completion {
     Held,
 }
 
+// Handshakes return owned identities: denial must dispose of the value even
+// when its operation completed before the outstanding authority check.
+#[derive(Debug)]
+struct CompletionValue {
+    marker: [u8; 16],
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for CompletionValue {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
 async fn held_authority_operation(completion: Completion) -> Result<(), ()> {
     let _clock = FrozenSocketTime::new().await;
     let (pool, user, _) = database().await;
@@ -64,6 +78,11 @@ async fn held_authority_operation(completion: Completion) -> Result<(), ()> {
     let (release, released) = tokio::sync::oneshot::channel();
     let owner_polled = Arc::new(AtomicBool::new(false));
     let observed = owner_polled.clone();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let value = CompletionValue {
+        marker: [7; 16],
+        dropped: dropped.clone(),
+    };
     let operation = async move {
         let mut transaction = pool.begin().await.map_err(|_| ())?;
         held.send(()).unwrap();
@@ -90,9 +109,9 @@ async fn held_authority_operation(completion: Completion) -> Result<(), ()> {
         } else {
             transaction.rollback().await.map_err(|_| ())?;
         }
-        Ok(())
+        Ok(value)
     };
-    let guarded = while_authorized_operation(&state, &user, token, false, operation.boxed());
+    let guarded = while_authorized(&state, &user, token, false, operation);
     tokio::pin!(guarded);
     tokio::select! {
         result = &mut acquired => result.unwrap(),
@@ -110,7 +129,8 @@ async fn held_authority_operation(completion: Completion) -> Result<(), ()> {
         tokio::time::advance(AUTHORITY_READ_TIMEOUT).await;
         let result = guarded.await;
         assert!(!owner_polled.load(Ordering::SeqCst));
-        return result;
+        assert!(dropped.load(Ordering::SeqCst));
+        return result.map(|_| ());
     }
     release.send(()).unwrap();
     let completed = guarded.as_mut().now_or_never();
@@ -118,10 +138,17 @@ async fn held_authority_operation(completion: Completion) -> Result<(), ()> {
         owner_polled.load(Ordering::SeqCst),
         "periodic authority read stopped polling the operation that owns its only database connection"
     );
-    match completed {
+    let result = match completed {
         Some(result) => result,
         None => guarded.await,
-    }
+    };
+    let result = result.map(|value| {
+        assert_eq!(value.marker, [7; 16]);
+        assert!(!dropped.load(Ordering::SeqCst));
+        drop(value);
+    });
+    assert!(dropped.load(Ordering::SeqCst));
+    result
 }
 
 #[tokio::test(start_paused = true)]
