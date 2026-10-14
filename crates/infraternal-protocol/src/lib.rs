@@ -2,6 +2,10 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+#[cfg(any(test, feature = "desktop"))]
+pub mod desktop;
+#[cfg(test)]
+mod desktop_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
@@ -23,6 +27,9 @@ const MAX_VARINT_BYTES: usize = 5;
 /// A decoded frame borrows its variable-sized fields from the input buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame<'a> {
+    /// Negotiated desktop extension, owned by the desktop plugin.
+    #[cfg(any(test, feature = "desktop"))]
+    Desktop(desktop::Message<'a>),
     /// Connection greeting, sent by both sides on stream zero.
     Hello {
         /// Protocol version.
@@ -680,6 +687,8 @@ fn decode_body(frame_type: u8, body: &[u8]) -> Result<Frame<'_>, DecodeError> {
         0x00 | 0x01 | 0x02 | 0x08 | 0x09 | 0x0f => decode_connection_body(frame_type, body),
         0x10..=0x16 => decode_terminal_body(frame_type, body),
         0x30..=0x33 => decode_control_body(frame_type, body),
+        #[cfg(any(test, feature = "desktop"))]
+        0x40..=0x45 => desktop::decode(frame_type, body).map(Frame::Desktop),
         _ => Err(DecodeError::UnknownType(frame_type)),
     }
 }
@@ -922,6 +931,8 @@ fn ensure_end(frame_type: u8, body: &[u8], expected_len: usize) -> Result<(), De
 
 fn body_len(frame: &Frame<'_>) -> Result<usize, EncodeError> {
     match frame {
+        #[cfg(any(test, feature = "desktop"))]
+        Frame::Desktop(message) => message.len(),
         Frame::Hello { client_info, .. } => string_field_len(client_info)?
             .checked_add(10)
             .ok_or(EncodeError::LengthOverflow),
@@ -985,8 +996,12 @@ fn append_frame(
     append_frame_body(frame, output)
 }
 
-fn frame_type(frame: &Frame<'_>) -> u8 {
+/// Returns the frozen type byte used by compiled plugin direction declarations.
+#[must_use]
+pub fn frame_type(frame: &Frame<'_>) -> u8 {
     match frame {
+        #[cfg(any(test, feature = "desktop"))]
+        Frame::Desktop(message) => message.tag(),
         Frame::Hello { .. } => 0x00,
         Frame::Welcome { .. } => 0x01,
         Frame::Resume { .. } => 0x02,
@@ -1009,6 +1024,11 @@ fn frame_type(frame: &Frame<'_>) -> u8 {
 
 fn append_frame_body(frame: &Frame<'_>, output: &mut Vec<u8>) -> Result<(), EncodeError> {
     match frame {
+        #[cfg(any(test, feature = "desktop"))]
+        Frame::Desktop(message) => {
+            message.append(output);
+            Ok(())
+        }
         Frame::Hello { .. }
         | Frame::Welcome { .. }
         | Frame::Resume { .. }

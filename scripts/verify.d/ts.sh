@@ -24,7 +24,7 @@ ts_verify_fast() {
     # The Rust/TS differential test runs the Rust stream oracle. Build it first, so
     # the test measures decoding and never times out on a cold compile.
     printf '\n==> Rust stream oracle (for the differential test)\n'
-    (cd -- "$protocol_dir/../.." && cargo build --quiet -p infraternal-protocol --example stream_oracle) || return $?
+    (cd -- "$protocol_dir/../.." && cargo build --quiet -p infraternal-protocol --features desktop --example stream_oracle) || return $?
 
     printf '\n==> TypeScript protocol tests\n'
     (cd -- "$protocol_dir" && bun test --timeout 30000)

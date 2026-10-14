@@ -1,6 +1,8 @@
 /** Compares both incremental mux decoders with direct decoding under identical chunk schedules. */
 import { expect, test } from "bun:test";
-import { WebSocketFrameDecoder, decodeFrame, decodeMuxedFrame, encodeMuxedFrame, MAX_FRAME_LEN } from "./codec";
+import { WebSocketFrameDecoder, encodeFrame, decodeFrame, decodeMuxedFrame, encodeMuxedFrame, MAX_FRAME_LEN } from "./codec";
+
+import { desktopCases } from "./desktop-fixtures";
 
 function normalize(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value, (_key, field: unknown) =>
@@ -18,9 +20,10 @@ test("Rust and TypeScript preserve every frame at all boundaries and random mult
   const root = new URL("../../../", import.meta.url);
   const manifestUrl = new URL("contracts/vectors/wire/manifest.json", root);
   const manifest: { vectors: { file: string }[] } = JSON.parse(await Bun.file(manifestUrl).text());
-  const raw = await Promise.all(manifest.vectors.map(async ({ file }) =>
+  const raw: Uint8Array[] = await Promise.all(manifest.vectors.map(async ({ file }) =>
     new Uint8Array(await Bun.file(new URL(file, manifestUrl)).arrayBuffer())));
   raw.push(new Uint8Array([3, 15, 0, 0]), new Uint8Array([5, 20, 1, 0, 0, 0]));
+  raw.push(...desktopCases.map(message => encodeFrame({type:"Desktop",message})));
   const streams: Uint8Array[] = [];
   for (const id of [0, 127, 128, 16384, 2097152, 268435456, 0xffffffff]) {
     for (const bytes of raw) {
@@ -73,7 +76,7 @@ test("Rust and TypeScript preserve every frame at all boundaries and random mult
       cases++;
     }
   }
-  const bridge = Bun.spawnSync(["cargo", "run", "--quiet", "-p", "infraternal-protocol", "--example", "stream_oracle"], {
+  const bridge = Bun.spawnSync(["cargo", "run", "--quiet", "-p", "infraternal-protocol", "--features", "desktop", "--example", "stream_oracle"], {
     cwd: root.pathname, stdin: new TextEncoder().encode(requests.join("\n") + "\n"), maxBuffer: 128 * 1024 * 1024,
   });
   if (bridge.exitCode !== 0) throw new Error(new TextDecoder().decode(bridge.stderr));
