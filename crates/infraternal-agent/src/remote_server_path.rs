@@ -74,26 +74,17 @@ impl Link {
     }
 }
 
-fn current(
+/// Validate one renewal snapshot; otherwise borrow the original credentials.
+/// Root trust, the enrolled address and SAN always belong to the caller.
+fn current_credentials(
     identity: &RemoteIdentity,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
-    address: SocketAddr,
-) -> io::Result<RemoteIdentity> {
-    let credentials = match renewal {
-        Some(renewal) => renewal.current()?,
-        None => remote_tls::Identity {
-            certificate: identity.identity.certificate.clone(),
-            key: identity.identity.key.clone(),
-        },
-    };
-    crate::remote_renewal::require_current(&credentials)?;
-    Ok(RemoteIdentity {
-        identity: credentials,
-        roots: identity.roots.clone(),
-        endpoint: address,
-        server_name: identity.server_name.clone(),
-        execution_uid: identity.execution_uid,
-    })
+) -> io::Result<Option<remote_tls::Identity>> {
+    let refreshed = renewal
+        .map(crate::remote_renewal::RenewalIdentity::current)
+        .transpose()?;
+    crate::remote_renewal::require_current(refreshed.as_ref().unwrap_or(&identity.identity))?;
+    Ok(refreshed)
 }
 
 /// Dial the enrolled server address. A mesh dial sends the same connection's
@@ -105,7 +96,8 @@ async fn connect(
     kind: ServerLinkKind,
     prove: bool,
 ) -> io::Result<Link> {
-    let identity = current(identity, renewal, identity.endpoint)?;
+    let refreshed = current_credentials(identity, renewal)?;
+    let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
     let driver = DialRuntime::new();
     let path = PathSocket::new(
         driver.runtime().wrap_udp_socket(std::net::UdpSocket::bind(
@@ -126,18 +118,15 @@ async fn connect(
         path.clone(),
         driver.runtime(),
     )?;
-    endpoint.set_default_client_config(remote_quic::client_config(
-        &identity.identity,
-        &identity.roots,
-    )?);
+    endpoint.set_default_client_config(remote_quic::client_config(credentials, &identity.roots)?);
     let connected = if kind == ServerLinkKind::Mesh {
         // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
         // proof below completes before any Hello can replace the server actor.
         // The shared dial already owns the five-second handshake deadline.
-        Connected::Quic(super::quic_connect(&endpoint, &identity).await?)
+        Connected::Quic(super::quic_connect(&endpoint, identity).await?)
     } else {
-        let tls = remote_tls::client_config(&identity.identity, &identity.roots)?;
-        dial_preferred(&endpoint, &identity, &tls).await?
+        let tls = remote_tls::client_config(credentials, &identity.roots)?;
+        dial_preferred(&endpoint, identity, &tls).await?
     };
     let (endpoint, driver, path) = if matches!(&connected, Connected::Tcp(_)) {
         drop(endpoint);
@@ -668,7 +657,7 @@ pub(super) async fn run(
                     if error.kind() == io::ErrorKind::Interrupted {
                         continue;
                     }
-                    current(identity, renewal, identity.endpoint)?;
+                    current_credentials(identity, renewal)?;
                     if backoff == Duration::from_millis(200) {
                         eprintln!(
                             "Infraternal agent server unavailable ({:?}); retrying with bounded backoff",
