@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the pinned C wrapper's exact D244 argument policy for both musl targets."""
+"""Exercise the pinned C wrappers' D244 and D264 policies for both musl targets."""
 
 import os
 from pathlib import Path
@@ -32,3 +32,42 @@ with tempfile.TemporaryDirectory(prefix='wrapper-test-', dir=SCRATCH) as directo
         )
         assert result.returncode != 0 and not result.stdout, target
         print(f'{target}: exact define removed; other arguments preserved; override refused')
+
+    source = Path(directory) / 'openssl-source'
+    assembly = source / 'crypto/modes/asm/aes-gcm-avx512.pl'
+    include = source / 'providers/implementations/ciphers/cipher_aes_gcm_hw_aesni.inc'
+    assembly.parent.mkdir(parents=True)
+    assembly.write_text('# pinned source marker\n')
+    include.parent.mkdir(parents=True)
+    include.write_text(
+        '#include "cipher_aes_gcm_hw_vaes_avx512.inc"\n'
+        'const PROV_GCM_HW *ossl_prov_aes_hw_gcm(size_t keybits);\n'
+    )
+    environment = dict(
+        os.environ,
+        CARGO_TARGET_DIR=directory,
+        TARGET='x86_64-unknown-linux-musl',
+    )
+    arguments = [
+        '--target=x86_64-unknown-linux-musl',
+        '-DOPENSSL_NO_SECURE_MEMORY',
+        '-O3',
+        'cipher_aes_gcm_hw.c',
+    ]
+    for _ in range(2):
+        result = subprocess.run(
+            [str(ROOT / '.cargo/musl-cc-avx512.sh'), *arguments],
+            cwd=source,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout.splitlines() == [
+            'cc', '-target', 'x86_64-linux-musl', '-O3', 'cipher_aes_gcm_hw.c',
+        ]
+    patched = include.read_text()
+    assert '#include "cipher_aes_gcm_hw_vaes_avx512.inc"' not in patched
+    assert patched.count('D264: retain AES-NI and generic AES-GCM') == 1
+    assert (source / '.infraternal-d264-avx512-gcm').read_text() == 'D264\n'
+    print('x86_64 OpenSSL source: AVX-512 GCM dispatch removed idempotently')
