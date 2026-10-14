@@ -48,25 +48,42 @@ class Browser:
         self.probe_pongs = 0
         self.last_pong = time.monotonic()
         self.rtt = None
+        self.last_ping = float('-inf')
+        self.next_nonce = 1 << 63
 
     def start_probes(self):
         """Match the shared browser connection cadence and correlated proof deadline."""
         self.last_pong = time.monotonic()
         self.probe_task = asyncio.create_task(self.probe())
 
+    async def sample_probe(self):
+        """Share one cadence between timer callbacks and incoming server probes."""
+        now = time.monotonic()
+        if now - self.last_ping < .025:
+            return
+        # Publish the sample before yielding: receive and timer must not double-send.
+        self.last_ping = now
+        nonce = self.next_nonce
+        self.next_nonce += 1
+        if len(self.pending) >= 128:
+            del self.pending[next(iter(self.pending))]
+        sent = round(now * 1_000_000)
+        self.pending[nonce] = (sent, now)
+        await self.send(0, 8, struct.pack('<QQ', nonce, sent))
+
     async def probe(self):
-        nonce = 1 << 63
+        # The browser's first timer fires one tick after Welcome.
+        await asyncio.sleep(.025)
         while True:
             now = time.monotonic()
             grace = 2 if self.rtt is None else self.rtt + .05
             assert now - self.last_pong < grace, 'fixture client proof expired'
-            sent = round(now * 1_000_000)
-            self.pending[nonce] = (sent, now)
-            assert len(self.pending) <= 128, 'fixture pending proof bound'
-            await self.send(0, 8, struct.pack('<QQ', nonce, sent))
-            nonce += 1
-            # Schedule from probe start, matching the browser after a slow write.
-            await asyncio.sleep(max(0, .025 - (time.monotonic() - now)))
+            await self.sample_probe()
+            clock = time.monotonic()
+            grace = 2 if self.rtt is None else self.rtt + .05
+            next_probe = self.last_ping + .025 - clock
+            remaining = self.last_pong + grace - clock
+            await asyncio.sleep(max(.001, min(next_probe, remaining)))
 
     async def send(self, stream, kind, body=b''):
         wire = bytes(varint(stream) + varint(len(body) + 1)) + bytes([kind]) + body
@@ -108,6 +125,8 @@ class Browser:
                         offset += length
                         if kind == 8:
                             await self.send(stream, 9, body)
+                            if self.probe_task is not None:
+                                await self.sample_probe()
                         elif kind == 9 and stream == 0 and len(body) == 16 and struct.unpack('<Q', body[:8])[0] >= 1 << 63:
                             nonce, sent = struct.unpack('<QQ', body)
                             pending = self.pending.get(nonce)

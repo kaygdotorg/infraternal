@@ -1,4 +1,4 @@
-"""Check ownership-safe idle fixture peer inspection across long Unix socket paths [81], #199."""
+"""Check idle fixture ownership, worker accounting and shared browser probe cadence [81], #199."""
 import importlib.util
 import os
 from pathlib import Path
@@ -33,6 +33,19 @@ class PeerInspection(unittest.TestCase):
 
 
 class SampleAccounting(unittest.IsolatedAsyncioTestCase):
+    async def test_incoming_and_timer_samples_share_one_probe_cadence(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.last_ping = float('-inf')
+        browser.next_nonce = 1 << 63
+        browser.pending = {}
+        browser.send = AsyncMock()
+        with patch.object(fixture.time, 'monotonic', side_effect=[10, 10.001, 10.026]):
+            await browser.sample_probe()
+            await browser.sample_probe()
+            await browser.sample_probe()
+        self.assertEqual(browser.send.await_count, 2)
+        self.assertEqual(len(browser.pending), 2)
+
     async def test_exited_thread_invalidates_sample(self):
         # Dropping a worker must not turn its accumulated CPU into apparent idle.
         with patch.object(fixture, 'snapshot', side_effect=[{1: (100, 0, 2), 2: (500, 0, 7)}, {1: (110, 0, 3)}]), patch.object(fixture.asyncio, 'sleep', new=AsyncMock()), patch.object(Path, 'read_text', return_value='worker'):
