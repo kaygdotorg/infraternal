@@ -14,6 +14,9 @@ use tokio::{
 /// One dedicated sleeping worker owns synchronous plugin calls; terminal dispatch never enters kernel work.
 #[derive(Clone)]
 pub(crate) struct Registry {
+    // Dynamic fixture identity is explicit, never inferred from worker failure.
+    #[cfg(test)]
+    empty: bool,
     sender: mpsc::Sender<Job>,
     events: tokio::sync::broadcast::Sender<Vec<u8>>,
     pending: std::sync::Arc<std::sync::Mutex<Option<PendingWorker>>>,
@@ -69,12 +72,12 @@ fn publish_paths(
 impl Registry {
     #[cfg(test)]
     pub(crate) fn new(registry: PluginRegistry) -> Self {
-        Self::from_factory(Box::new(move || Ok(registry)))
+        Self::from_factory(Some(Box::new(move || Ok(registry))))
     }
     /// Exercise startup failure through the real lazy worker/channel lifecycle.
     #[cfg(all(test, feature = "remote"))]
     pub(crate) fn unavailable() -> Self {
-        Self::from_factory(Box::new(|| Err(PluginError::Rejected)))
+        Self::from_factory(Some(Box::new(|| Err(PluginError::Rejected))))
     }
     fn for_mode(
         state: PathBuf,
@@ -83,11 +86,17 @@ impl Registry {
     ) -> Self {
         #[cfg(test)]
         if let Ok(factory) = TEST_FACTORY.try_with(std::sync::Arc::clone) {
-            return Self::from_factory(Box::new(move || factory()));
+            return Self::from_factory(Some(Box::new(move || factory())));
         }
-        let registry = Self::from_factory(Box::new(move || {
-            crate::plugins::registry_at(mode, Some(&state), installation.as_ref())
-        }));
+        // The compiled catalog is constant. An absent provider needs no erased
+        // factory or retained state; dynamic test fixtures still supply a factory.
+        let registry = Self::from_factory(if crate::plugins::descriptors().is_empty() {
+            None
+        } else {
+            Some(Box::new(move || {
+                crate::plugins::registry_at(mode, Some(&state), installation.as_ref())
+            }))
+        });
         if matches!(mode, crate::plugins::ExecutionMode::Embedded) {
             registry.set_server_link(infraternal_plugin_api::server_path::ServerLink {
                 kind: infraternal_plugin_api::server_path::ServerLinkKind::Local,
@@ -98,18 +107,34 @@ impl Registry {
         }
         registry
     }
-    fn from_factory(factory: Factory) -> Self {
+    fn from_factory(factory: Option<Factory>) -> Self {
+        #[cfg(test)]
+        let empty = factory.is_none();
         let (sender, incoming) = mpsc::channel::<Job>(8);
         let (events, _) = tokio::sync::broadcast::channel(8);
         Self {
+            #[cfg(test)]
+            empty,
             sender,
             events,
             paths: tokio::sync::watch::channel(None).0,
             link: std::sync::Arc::default(),
-            pending: std::sync::Arc::new(std::sync::Mutex::new(Some(PendingWorker {
-                factory,
-                incoming,
-            }))),
+            pending: std::sync::Arc::new(std::sync::Mutex::new(
+                factory.map(|factory| PendingWorker { factory, incoming }),
+            )),
+        }
+    }
+    // Production identity is the compiled catalog constant. Test registries
+    // may contain dynamic providers even when that catalog is empty.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    const fn is_empty(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.empty
+        }
+        #[cfg(not(test))]
+        {
+            crate::plugins::descriptors().is_empty()
         }
     }
     /// Receiver closure fences replacement: no old callback can still execute.
@@ -118,6 +143,9 @@ impl Registry {
         self.sender.is_closed()
     }
     fn start(&self) -> Result<(), PluginError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         // An inactive control surface needs no thread or its resident startup
         // code. Serialize the first call so concurrent local/server callers
         // share exactly one sleeping worker for the process lifetime.
@@ -198,6 +226,10 @@ impl Registry {
         context: infraternal_plugin_api::admission::NodeContext,
     ) -> Result<(), infraternal_plugin_api::admission::OpenRefusal> {
         use infraternal_plugin_api::admission::OpenRefusal;
+        if self.is_empty() {
+            // Equivalent to admission through an empty PluginRegistry.
+            return Ok(());
+        }
         self.start().map_err(|_| OpenRefusal::ResourceUnavailable)?;
         let (result, receive) = tokio::sync::oneshot::channel();
         self.sender
@@ -215,6 +247,9 @@ impl Registry {
     /// Resolve retained component intent before dialing, without inventing a plugin action.
     #[cfg(any(test, feature = "remote"))]
     pub(crate) async fn initialize_paths(&self) -> Result<(), PluginError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         self.start()?;
         let (result, receive) = tokio::sync::oneshot::channel();
         self.sender
@@ -260,6 +295,9 @@ impl Registry {
     ) -> Result<infraternal_plugin_api::ActionReply, PluginError> {
         if input.len() > MAX_ACTION_BYTES || action.len() > 128 {
             return Err(PluginError::MessageTooLarge);
+        }
+        if self.is_empty() {
+            return Err(PluginError::UnknownAction);
         }
         self.start()?;
         let (result, receive) = tokio::sync::oneshot::channel();
@@ -789,6 +827,89 @@ mod tests {
         paths.changed().await.unwrap();
         assert!(paths.borrow_and_update().is_none());
     }
+    /// Compile-out builds admit terminals without creating a worker for an empty catalog.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn empty_catalog_preserves_control_contract_without_an_os_worker() {
+        // This case belongs to the no-default-features build; populated catalogs
+        // retain the generic policy worker and its independent fixture coverage.
+        if !crate::plugins::descriptors().is_empty() {
+            return;
+        }
+        let worker_threads = || {
+            std::fs::read_dir("/proc/self/task")
+                .unwrap()
+                .filter_map(|entry| {
+                    let entry = entry.unwrap();
+                    match std::fs::read_to_string(entry.path().join("comm")) {
+                        Ok(name) if name.trim() == "node-plugins" => Some(entry.file_name()),
+                        Ok(_) => None,
+                        // A previously dropped fixture worker may finish while
+                        // enumerating. Its disappearance cannot create a new id.
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                        Err(error) => panic!("could not observe plugin worker ownership: {error}"),
+                    }
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = worker_threads();
+        let registry = Registry::for_mode(
+            PathBuf::from("unused-empty-catalog-state"),
+            crate::plugins::ExecutionMode::Remote,
+            None,
+        );
+        let mut events = registry.subscribe();
+        assert_eq!(
+            registry
+                .admit(
+                    "terminal.open",
+                    infraternal_plugin_api::admission::NodeContext::default(),
+                )
+                .await,
+            Ok(())
+        );
+        for public in [false, true] {
+            assert!(matches!(
+                registry
+                    .execute(public, "unknown.read".into(), b"{}".to_vec(), None)
+                    .await,
+                Err(PluginError::UnknownAction)
+            ));
+        }
+        assert!(matches!(
+            registry
+                .execute(
+                    false,
+                    "unknown.read".into(),
+                    vec![0; MAX_ACTION_BYTES + 1],
+                    None
+                )
+                .await,
+            Err(PluginError::MessageTooLarge)
+        ));
+        assert!(matches!(
+            registry
+                .execute(false, "x".repeat(129), b"{}".to_vec(), None)
+                .await,
+            Err(PluginError::MessageTooLarge)
+        ));
+        registry.initialize_paths().await.unwrap();
+        assert!(registry.server_paths().borrow().is_none());
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "an empty catalog retains an open, silent event channel"
+        );
+        let after = worker_threads();
+        assert!(
+            after.is_subset(&before),
+            "an empty catalog started a node-plugins OS worker: {:?}",
+            after.difference(&before).collect::<Vec<_>>()
+        );
+    }
+
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {

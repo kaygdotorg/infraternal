@@ -26,7 +26,7 @@ pub enum ExecutionMode {
 
 /// Descriptors compiled into this infraternal agent binary, for server-side authorization.
 #[must_use]
-pub fn descriptors() -> &'static [&'static PluginDescriptor] {
+pub const fn descriptors() -> &'static [&'static PluginDescriptor] {
     DESCRIPTORS
 }
 
