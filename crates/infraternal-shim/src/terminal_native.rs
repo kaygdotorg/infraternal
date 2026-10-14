@@ -36,17 +36,41 @@ unsafe extern "C" {
 }
 // A failed resize can partially mutate Ghostty page ownership. None is a
 // permanent tombstone: even destruction would inspect invalid native state.
-// Retired allocations remain held until shim exit pending transactional resize
-// upstream (#37); recreating the engine must never revive this handle.
-pub(super) struct Engine(Option<NonNull<c_void>>);
+// Default builds retain retired allocations until shim exit (#37). The
+// shared host owns a separate allocation list and reclaims that list without
+// traversing the retired graph; neither path revives an invalid handle.
+pub(super) struct Engine(
+    Option<NonNull<c_void>>,
+    #[cfg(feature = "process-per-user")] Option<Box<crate::terminal_memory::Memory>>,
+);
 impl Engine {
+    #[cfg(feature = "process-per-user")]
+    pub fn bounded(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
+        Self::build(cols, rows, bytes, 8 * 1024 * 1024)
+    }
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
+        Self::build(
+            cols,
+            rows,
+            bytes,
+            8 * 1024 * 1024 + bytes.saturating_mul(2) + usize::from(cols) * usize::from(rows) * 32,
+        )
+    }
+    fn build(cols: u16, rows: u16, bytes: usize, limit: usize) -> io::Result<Self> {
+        #[cfg(not(feature = "process-per-user"))]
+        let _ = limit;
         let mut raw = std::ptr::null_mut();
+        #[cfg(feature = "process-per-user")]
+        let memory = crate::terminal_memory::Memory::new(limit);
+        #[cfg(not(feature = "process-per-user"))]
+        let allocator = std::ptr::null();
+        #[cfg(feature = "process-per-user")]
+        let allocator = memory.abi();
         // SAFETY: null selects Ghostty's allocator. Options matches its C ABI;
         // out is writable and a successful call transfers unique ownership.
         let result = unsafe {
             ghostty_terminal_new(
-                std::ptr::null(),
+                allocator,
                 &raw mut raw,
                 Options {
                     cols,
@@ -66,8 +90,18 @@ impl Engine {
             ));
         }
         NonNull::new(raw)
-            .map(|handle| Self(Some(handle)))
+            .map(|handle| {
+                Self(
+                    Some(handle),
+                    #[cfg(feature = "process-per-user")]
+                    Some(memory),
+                )
+            })
             .ok_or_else(|| io::Error::other("Ghostty returned a null terminal"))
+    }
+    #[cfg(feature = "process-per-user")]
+    pub fn memory(&self) -> (usize, usize, bool) {
+        self.1.as_ref().map_or((0, 0, false), |m| m.stats())
     }
     pub fn process(&mut self, data: &[u8]) {
         let Some(handle) = self.0 else { return };
@@ -87,6 +121,10 @@ impl Engine {
             Ok(())
         } else {
             self.0 = None;
+            #[cfg(feature = "process-per-user")]
+            {
+                self.1 = None;
+            }
             Err(io::Error::new(
                 if result == -2 {
                     io::ErrorKind::InvalidInput
@@ -167,3 +205,21 @@ impl Drop for Engine {
 #[cfg(test)]
 #[path = "../tests/unit/allocation.rs"]
 pub(crate) mod allocation;
+
+#[cfg(all(test, feature = "process-per-user"))]
+mod owned_memory_tests {
+    //! Resize refusal releases the allocation owner without traversing damaged state.
+    use super::*;
+    #[test]
+    fn refused_resize_reclaims_every_owned_native_allocation() {
+        let mut engine = Engine::new(80, 24, 65536).unwrap();
+        engine.process(allocation::PREFIX);
+        assert!(engine.memory().0 > 0);
+        engine.1.as_mut().unwrap().refuse_new_allocations();
+        assert!(engine.resize(20_000, 2).is_err());
+        assert!(engine.0.is_none());
+        assert!(engine.1.is_none());
+        assert_eq!(engine.memory().0, 0);
+        engine.process(b"later output");
+    }
+}

@@ -34,7 +34,8 @@ printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
 # prevents two Cargo invocations from observing a partly installed archive.
 optimize=ReleaseSafe
 [[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
-key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/scripts/build-vt"; printf '%s %s %s\n' "$checksum" "$vt_target" "$optimize"; } | sha256sum | cut -d ' ' -f1)"
+shared_host=${CARGO_FEATURE_PROCESS_PER_USER:-}
+key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/crates/infraternal-shim/native/memory.zig" "$root/scripts/build-vt"; printf '%s %s %s %s\n' "$checksum" "$vt_target" "$optimize" "$shared_host"; } | sha256sum | cut -d ' ' -f1)"
 cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
 exec 9> "$cache_dir/lock"
@@ -60,6 +61,22 @@ comptime {
     @export(&@import("infraternal_snapshot.zig").compare, .{ .name = "infraternal_vt_compare" });
 }
 ZIG
+# Shared hosts must account screen pools through the same per-terminal C
+# allocator as parser/style data. It supplies zero-filled page-aligned mappings.
+# The default artifact retains the pinned upstream page allocator unchanged.
+if [[ -n "$shared_host" ]]; then
+    cp "$root/crates/infraternal-shim/native/memory.zig" "$source_dir/src/infraternal_memory.zig"
+    page_list=src/terminal/PageList.zig
+    tar -xOf "$archive" "ghostty-$version/$page_list" > "$source_dir/$page_list"
+    python3 - "$source_dir/$page_list" <<'PY_LIMIT'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+source = path.read_text()
+assert source.count('        pageAllocator(),') == 2, 'native page-pool boundaries changed'
+path.write_text(source.replace('        pageAllocator(),', '        @import("../infraternal_memory.zig").pageAllocator(alloc),'))
+PY_LIMIT
+fi
 # Keep every upstream API in the archive, but let the final static link discard
 # APIs the shim never calls. One monolithic section otherwise retains input
 # encoders, formatters and render-state helpers with the terminal engine [243].

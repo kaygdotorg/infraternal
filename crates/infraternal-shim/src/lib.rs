@@ -53,6 +53,10 @@ pub fn detach() -> std::io::Result<bool> {
 }
 mod session;
 mod terminal;
+#[cfg(feature = "process-per-user")]
+mod terminal_limits;
+#[cfg(feature = "process-per-user")]
+mod terminal_memory;
 mod terminal_native;
 pub use session::{Config, run, run_with_retention};
 

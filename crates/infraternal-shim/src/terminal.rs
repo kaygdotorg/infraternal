@@ -43,6 +43,10 @@ pub struct Terminal {
     engine: Engine,
     #[cfg(feature = "process-per-user")]
     history_budget: usize,
+    #[cfg(feature = "process-per-user")]
+    bounded: bool,
+    #[cfg(feature = "process-per-user")]
+    limits: crate::terminal_limits::Limits,
     observer: Observer,
     parser: vte::Parser,
     pending: Vec<u8>,
@@ -70,14 +74,32 @@ impl Terminal {
     }
 
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
-        Self::with_history_budget(cols, rows, SCROLLBACK_BYTES)
+        Self::build(cols, rows, SCROLLBACK_BYTES, false)
     }
     /// Reuse the selected VT engine with an explicit research retention budget.
     pub(super) fn with_history_budget(cols: u16, rows: u16, history: usize) -> io::Result<Self> {
+        Self::build(cols, rows, history, true)
+    }
+    fn build(cols: u16, rows: u16, history: usize, bounded: bool) -> io::Result<Self> {
+        #[cfg(feature = "process-per-user")]
+        let engine = if bounded {
+            Engine::bounded(cols, rows, history)?
+        } else {
+            Engine::new(cols, rows, history)?
+        };
+        #[cfg(not(feature = "process-per-user"))]
+        let engine = {
+            let _ = bounded;
+            Engine::new(cols, rows, history)?
+        };
         Ok(Self {
-            engine: Engine::new(cols, rows, history)?,
+            engine,
             #[cfg(feature = "process-per-user")]
             history_budget: history,
+            #[cfg(feature = "process-per-user")]
+            bounded,
+            #[cfg(feature = "process-per-user")]
+            limits: crate::terminal_limits::Limits::default(),
             observer: Observer::default(),
             parser: vte::Parser::new(),
             pending: Vec::with_capacity(4096),
@@ -88,6 +110,34 @@ impl Terminal {
         })
     }
     pub fn process(&mut self, bytes: &[u8]) {
+        #[cfg(feature = "process-per-user")]
+        if self.bounded {
+            use crate::terminal_limits::Action;
+            let mut limits = std::mem::take(&mut self.limits);
+            let mut start = 0;
+            for (index, &byte) in bytes.iter().enumerate() {
+                match limits.byte(byte) {
+                    Action::Keep => {}
+                    action => {
+                        self.process_unbounded(&bytes[start..index]);
+                        match action {
+                            Action::Restart => self.process_unbounded(&[0x1b, byte]),
+                            Action::Start(introducer) => {
+                                self.process_unbounded(&[0x1b, introducer]);
+                            }
+                            Action::Drop | Action::Keep => {}
+                        }
+                        start = index + 1;
+                    }
+                }
+            }
+            self.process_unbounded(&bytes[start..]);
+            self.limits = limits;
+            return;
+        }
+        self.process_unbounded(bytes);
+    }
+    fn process_unbounded(&mut self, bytes: &[u8]) {
         // A persistent allocation refusal must not stop PTY/ring progress.
         // Retry fresh ownership on later output; until then, touch no handle.
         if self.recovery_pending && self.recover(None).is_err() {
@@ -111,7 +161,14 @@ impl Terminal {
                 self.carry_overflow = false;
             }
             if !self.pending.is_empty() || byte == 0x1b || byte >= 0xc0 {
-                if self.pending.len() < MAX_FRAME - 9 {
+                let carry_limit = MAX_FRAME - 9;
+                #[cfg(feature = "process-per-user")]
+                let carry_limit = if self.bounded {
+                    crate::terminal_limits::STRING_BYTES
+                } else {
+                    carry_limit
+                };
+                if self.pending.len() < carry_limit {
                     self.pending.push(byte);
                 } else {
                     self.carry_overflow = true;
@@ -162,8 +219,12 @@ impl Terminal {
     }
     fn recover(&mut self, ring: Option<&Ring>) -> io::Result<()> {
         #[cfg(feature = "process-per-user")]
-        let mut restored =
-            Self::with_history_budget(self.dimensions.0, self.dimensions.1, self.history_budget)?;
+        let mut restored = Self::build(
+            self.dimensions.0,
+            self.dimensions.1,
+            self.history_budget,
+            self.bounded,
+        )?;
         #[cfg(not(feature = "process-per-user"))]
         let mut restored = Self::new(self.dimensions.0, self.dimensions.1)?;
         let complete = ring.filter(|ring| ring.start() == 0 && self.recovery == Recovery::Exact);
@@ -185,7 +246,20 @@ impl Terminal {
     /// A clean or still-pending rebuild cannot certify faithful state. Keep
     /// this provenance across peer replacement and further output/resizes.
     pub fn requires_approximation(&self) -> bool {
+        #[cfg(feature = "process-per-user")]
+        if self.engine.memory().2 {
+            return true;
+        }
         self.recovery == Recovery::Approximate || self.recovery_pending
+    }
+    // A discarded ESC at the frame boundary still belongs to the unfinished
+    // string and must be reproduced before the next live byte arrives.
+    fn carry_suffix(&self) -> &'static [u8] {
+        #[cfg(feature = "process-per-user")]
+        if self.bounded {
+            return self.limits.carry_suffix();
+        }
+        b""
     }
     /// Bounded visible fallback; fidelity gaps and clipping are explicitly
     /// announced by the negotiated frame, never substituted for a faithful VT.
@@ -194,12 +268,13 @@ impl Terminal {
         let budget = MAX_FRAME - 10;
         // Preserve unfinished syntax only when the entire carry and a useful
         // repaint fit. Never trim a control string or UTF-8 scalar in half.
-        let carry = if !self.carry_overflow && self.pending.len() <= budget - 256 {
+        let extra = self.carry_suffix();
+        let carry = if !self.carry_overflow && self.pending.len() + extra.len() <= budget - 256 {
             self.pending.as_slice()
         } else {
             &[]
         };
-        let mut out = vec![0; budget - carry.len()];
+        let mut out = vec![0; budget - carry.len() - extra.len()];
         let len = self.engine.approximate_snapshot(&mut out);
         out.truncate(len);
         if out.is_empty() {
@@ -208,6 +283,7 @@ impl Terminal {
             out.extend_from_slice(b"\x1bc");
         }
         out.extend_from_slice(carry);
+        out.extend_from_slice(extra);
         out
     }
     pub fn snapshot(&self) -> io::Result<Vec<u8>> {
@@ -222,7 +298,8 @@ impl Terminal {
                 "unfinished VT sequence exceeds frozen frame limit",
             ));
         }
-        let mut out = vec![0; MAX_FRAME - 9 - self.pending.len()];
+        let extra = self.carry_suffix();
+        let mut out = vec![0; MAX_FRAME - 9 - self.pending.len() - extra.len()];
         // Retry only when the bounded frame cannot fit the tail. The visible
         // screens are mandatory; Error(1) remains the session's response if
         // even those exceed the frozen 1 MiB frame limit.
@@ -231,6 +308,7 @@ impl Terminal {
             if let Some(len) = self.engine.try_snapshot(&mut out, tail)? {
                 out.truncate(len);
                 out.extend_from_slice(&self.pending);
+                out.extend_from_slice(extra);
                 return Ok(out);
             }
             if tail == 0 {
