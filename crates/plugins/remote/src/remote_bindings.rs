@@ -1082,6 +1082,85 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn an_enrolled_copy_first_replays_history_and_leaves_its_mesh_duplicate_non_authoritative()
+     {
+        let sends = Arc::new(AtomicU64::new(0));
+        let primary = Arc::new(InstallWhilePending {
+            inner: bound("127.0.0.1:0"),
+            install: Mutex::new(None),
+            sends: sends.clone(),
+        });
+        let bindings = Bindings::new(primary);
+        let mesh = Arc::new(InstallWhilePending {
+            inner: bound("127.0.0.2:0"),
+            install: Mutex::new(None),
+            sends: sends.clone(),
+        });
+        let lease = bindings.lease(mesh.clone()).unwrap();
+        let enrolled = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let alternate = std::net::UdpSocket::bind("127.0.0.2:0").unwrap();
+        let logical = enrolled.local_addr().unwrap();
+        let alternative = alternate.local_addr().unwrap();
+        let peer = bindings.route_peer(logical, alternative).unwrap();
+        peer.set_backup(true);
+        let mut writable = bindings.clone().create_io_poller();
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        // Inject the physical receive ordering directly. Neither the copy clock
+        // nor elapsed time decides this fixture, and raw hints prove no identity.
+        let hint = |value: u64, on_mesh: bool| {
+            let mut ciphertext = [0_u8; 32];
+            ciphertext[24..].copy_from_slice(&value.to_le_bytes());
+            let buffers = [IoSliceMut::new(&mut ciphertext)];
+            let mut metadata = [RecvMeta {
+                addr: if on_mesh { alternative } else { logical },
+                len: 32,
+                stride: 32,
+                dst_ip: Some(if on_mesh {
+                    mesh.local_addr().unwrap().ip()
+                } else {
+                    bindings.local_addr().unwrap().ip()
+                }),
+                ..RecvMeta::default()
+            }];
+            bindings.receive_peer(on_mesh.then_some(lease.id), &buffers, &mut metadata);
+            assert_eq!(metadata[0].addr, logical);
+        };
+        hint(1000, true);
+        for value in 0_u64..64 {
+            let mut ciphertext = [0_u8; 32];
+            ciphertext[24..].copy_from_slice(&value.to_le_bytes());
+            send(&bindings, logical, &ciphertext, None);
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 64);
+        hint(1001, false);
+        assert_eq!(
+            sends.load(Ordering::Relaxed),
+            128,
+            "one fresh enrolled hint synchronously replays all 64 retained mesh sends"
+        );
+        hint(1001, true);
+        assert_eq!(sends.load(Ordering::Relaxed), 128);
+        {
+            let peers = bindings.peers.lock().unwrap();
+            let routed = peers.get(logical).unwrap();
+            assert_eq!(routed.physical, logical);
+            assert_eq!(routed.binding, None);
+        }
+        // The delayed original cannot safely become a fresh hint: that would
+        // also let an arbitrary delayed duplicate move a proven return route.
+        // A new mesh transmission can supply a routing hint; authenticated path
+        // proof remains the caller's responsibility above this adapter.
+        hint(1002, true);
+        assert_eq!(sends.load(Ordering::Relaxed), 128);
+        let peers = bindings.peers.lock().unwrap();
+        let routed = peers.get(logical).unwrap();
+        assert_eq!(routed.physical, alternative);
+        assert_eq!(routed.binding, Some(lease.id));
+    }
+
+    #[tokio::test]
     async fn a_lease_added_while_waiting_is_polled_without_another_primary_datagram() {
         let bindings = Bindings::new(bound("127.0.0.1:0"));
         let waiting = tokio::spawn({
