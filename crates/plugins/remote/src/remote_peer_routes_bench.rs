@@ -2,6 +2,52 @@
 use super::*;
 use std::{hint::black_box, time::Instant};
 
+/// Compare equivalent complete tag representations without changing routing.
+#[test]
+#[ignore = "Measure only on the perf VM under its benchmark lock."]
+fn complete_tag_lookup_at_1000_peers() {
+    let mut bytes = vec![Vec::<[u8; 16]>::new(); 1000];
+    let mut integers = vec![Vec::<u128>::new(); 1000];
+    for (tags, packed) in bytes.iter_mut().zip(&mut integers) {
+        for value in 0_u128..256 {
+            tags.push(value.to_le_bytes());
+            packed.push(value);
+        }
+    }
+    let load = std::fs::read_to_string("/proc/loadavg").unwrap();
+    let mut arrays = Vec::new();
+    let mut packed = Vec::new();
+    for batch in 0..31_u128 {
+        let started = Instant::now();
+        for index in 0..20000_usize {
+            let tag = black_box((256 + batch * 20000 + index as u128).to_le_bytes());
+            assert!(!black_box(&bytes[index % 1000]).contains(&tag));
+            assert!(black_box(&bytes[index % 1000]).contains(&black_box(255_u128.to_le_bytes())));
+        }
+        arrays.push(started.elapsed().as_nanos());
+        let started = Instant::now();
+        for index in 0..20000_usize {
+            let tag = black_box(256 + batch * 20000 + index as u128);
+            assert!(!black_box(&integers[index % 1000]).contains(&tag));
+            assert!(black_box(&integers[index % 1000]).contains(&black_box(255_u128)));
+        }
+        packed.push(started.elapsed().as_nanos());
+    }
+    arrays.sort_unstable();
+    packed.sort_unstable();
+    println!(
+        "complete_tag_lookup peers=1000 batches=31 pairs_per_batch=20000 array_p50_ns={} array_p99_ns={} u128_p50_ns={} u128_p99_ns={} retained_tag_bytes=4096000 scope=equivalent_full_128bit_tags_fixed_arrays_no_crypto_or_udp machine={} load={}",
+        arrays[15],
+        arrays[30],
+        packed[15],
+        packed[30],
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        load.trim()
+    );
+}
+
 // These are the prior peer fields, before the shared slot gained its logical
 // tuple. Keep that layout only in this opt-in comparison, never in transport.
 type PriorPeer = (
