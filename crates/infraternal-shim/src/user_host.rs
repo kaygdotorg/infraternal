@@ -265,8 +265,7 @@ impl Session {
                 seq < self.ring.head() || (self.drained && self.exit.is_some() && !peer.exited_sent)
             })
     }
-    #[allow(clippy::too_many_lines)]
-    fn housekeeping(&mut self) -> io::Result<bool> {
+    fn observe_exit(&mut self) -> io::Result<()> {
         if self.exit.is_none()
             && let Some(status) = self.pty.child.try_wait()?
         {
@@ -276,6 +275,13 @@ impl Session {
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
             self.deadline = Some(Instant::now() + crate::ended::MAX_RETENTION);
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_lines)]
+    fn housekeeping(&mut self) -> io::Result<bool> {
+        if self.drained {
+            self.observe_exit()?;
         }
         if self.allocated_bytes()
             > SESSION_BYTES + self.terminal.history * 2 + self.config.ring_capacity
@@ -682,6 +688,10 @@ pub fn run_host_accounted(
 
 #[path = "user_host_reactor.rs"]
 mod reactor;
+
+#[cfg(test)]
+#[path = "../tests/unit/ppu_children.rs"]
+mod child_checks;
 
 #[cfg(test)]
 mod tests {

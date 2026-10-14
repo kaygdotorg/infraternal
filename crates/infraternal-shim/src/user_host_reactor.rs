@@ -265,11 +265,18 @@ pub(super) fn run(
             }
         }
         if child_exit {
-            // SIGCHLD coalesces, so this single event reconciles every child.
-            // No other event scans idle sessions or calls waitpid on them.
-            for (index, slot) in slots.iter().enumerate() {
-                if slot.is_some() {
-                    work.entry(index).or_default();
+            // SIGCHLD coalesces, so this single event reconciles every owned
+            // child. Ordinary output/input turns never poll live children.
+            for (index, slot) in slots.iter_mut().enumerate() {
+                if let Some(session) = slot {
+                    if session.observe_exit().is_err() {
+                        *slot = None;
+                        registry.retire(index);
+                        live -= 1;
+                        failed = true;
+                    } else {
+                        work.entry(index).or_default();
+                    }
                 }
             }
         }
