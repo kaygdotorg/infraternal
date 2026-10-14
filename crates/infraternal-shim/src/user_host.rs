@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn vt_panic_retires_one_real_pty_and_sibling_keeps_its_output() {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/process-per-user/panic{}",
+            ".cache/codex-scratch/process-per-user/p{}",
             std::process::id()
         ));
         let mut config = Config::new([1; 16], Uid::effective().as_raw());
