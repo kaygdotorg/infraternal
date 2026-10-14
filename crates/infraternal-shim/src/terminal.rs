@@ -77,6 +77,7 @@ impl Terminal {
         Self::build(cols, rows, SCROLLBACK_BYTES, false)
     }
     /// Reuse the selected VT engine with an explicit research retention budget.
+    #[cfg(feature = "process-per-user")]
     pub(super) fn with_history_budget(cols: u16, rows: u16, history: usize) -> io::Result<Self> {
         Self::build(cols, rows, history, true)
     }
@@ -258,6 +259,9 @@ impl Terminal {
     }
     // A discarded ESC at the frame boundary still belongs to the unfinished
     // string and must be reproduced before the next live byte arrives.
+    // Snapshot uses one interface across feature builds; the default has no
+    // extra carry state beyond its existing parser prefix.
+    #[cfg_attr(not(feature = "process-per-user"), allow(clippy::unused_self))]
     fn carry_suffix(&self) -> &'static [u8] {
         #[cfg(feature = "process-per-user")]
         if self.bounded {
