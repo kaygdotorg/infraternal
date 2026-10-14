@@ -328,6 +328,12 @@ async fn answered(
         deadline.max(Duration::from_secs(1))
     };
     tokio::time::timeout(deadline, async {
+        // A candidate's first encrypted packet can precede the leased listener
+        // or be lost during the kernel handshake. DATAGRAM probes are fresh,
+        // ack-eliciting traffic; they do not wait for QUIC's loss timer and do
+        // not replay application input. The clock is owned by this proof only.
+        let mut probes = tokio::time::interval(BACKUP_PROBE_INTERVAL);
+        probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let heard = if mesh {
                 path.heard_since(since.into_std())
@@ -339,15 +345,10 @@ async fn answered(
             if heard && freshness.silence(connection) < since.elapsed() {
                 return;
             }
-            if heard || !mesh {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            } else {
-                let notified = path.mesh_heard();
-                tokio::pin!(notified);
-                tokio::select! {
-                    () = notified => {}
-                    () = tokio::time::sleep(Duration::from_millis(5)) => {}
-                }
+            tokio::select! {
+                _ = probes.tick() => remote_quic::probe_liveness(connection),
+                () = path.mesh_heard(), if mesh && !heard => {},
+                () = tokio::time::sleep(Duration::from_millis(if heard || !mesh { 1 } else { 5 })) => {},
             }
         }
     })

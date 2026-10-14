@@ -604,6 +604,44 @@ async fn interrupted_mesh_is_retried_on_the_same_connection() {
     let _ = supervisor.await;
 }
 
+/// A lost initial announcement must not leave candidate proof waiting only
+/// for QUIC's loss timer. Count fresh ack-eliciting probes, not elapsed time.
+#[tokio::test]
+async fn candidate_proof_keeps_probing_after_its_first_packet_is_lost() {
+    let ca = root();
+    let roots = std::slice::from_ref(&ca.certificate);
+    let server = Server::new(&leaf(&ca, true), roots, "127.0.0.1:0".parse().unwrap());
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let link = connect(
+        &identity(&ca, enrolled),
+        None,
+        enrolled,
+        ServerLinkKind::Fallback,
+        true,
+    )
+    .await
+    .unwrap();
+    let Connected::Quic(connection) = &link.connected else {
+        panic!("expected QUIC");
+    };
+    let path = link.path.as_ref().unwrap();
+    // The reserved alternative tuple remains unread, so every candidate
+    // datagram is silently lost without ICMP or a transport close.
+    let mesh = SocketAddr::new("127.0.0.2".parse().unwrap(), enrolled.port());
+    let initial = connection.stats().frame_tx.datagram;
+    let since = tokio::time::Instant::now();
+    path.use_mesh(mesh);
+    announce(link.endpoint.as_ref().unwrap(), path);
+    remote_quic::probe_liveness(connection);
+    assert!(!answered(connection, path, since, true).await);
+    assert!(
+        connection.stats().frame_tx.datagram >= initial + 3,
+        "candidate sent only its initial probe and waited for the loss timer"
+    );
+    assert!(connection.close_reason().is_none());
+    assert_eq!(server.connections(), 1);
+}
+
 /// No answer from the proposed address: the live connection stays put and works.
 #[tokio::test]
 async fn unanswered_mesh_address_keeps_the_live_connection() {
