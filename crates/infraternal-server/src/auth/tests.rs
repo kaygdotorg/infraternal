@@ -1432,6 +1432,7 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
         Frame::Ack { in_seq_acked: 8 }
     ));
     client_ws_send(&mut resumed, 1, &Frame::Credit { bytes: 1024 }).await;
+    let remaining = read_terminal_output(&mut resumed).await;
     client_ws_send(
         &mut resumed,
         1,
@@ -1441,7 +1442,33 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
         },
     )
     .await;
-    let remaining = read_terminal_output(&mut resumed).await;
+    // A duplicate below the durable input cursor is discarded without another
+    // Ack. A control reply orders its processing before the at-most-once check;
+    // any already queued cursor confirmation is still pre-logout traffic.
+    client_ws_send(
+        &mut resumed,
+        0,
+        &Frame::Ping {
+            nonce: 7,
+            sent_us: 0,
+        },
+    )
+    .await;
+    loop {
+        let wire = read_client_frame(&mut resumed).await;
+        let decoded = decode_muxed_frame(&wire).unwrap();
+        match (decoded.stream_id, decoded.frame) {
+            (
+                0,
+                Frame::Pong {
+                    nonce: 7,
+                    sent_us: 0,
+                },
+            ) => break,
+            (1, Frame::Ack { in_seq_acked: 8 }) => {}
+            _ => panic!("unexpected replay control response"),
+        }
+    }
     let mut complete_output = first_output;
     complete_output.extend_from_slice(&remaining);
     assert_eq!(complete_output, b"echo hi\r\nhi\r\n");
@@ -1479,17 +1506,12 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
             .status(),
         axum::http::StatusCode::OK
     );
-    let ended = tokio::time::timeout(Duration::from_millis(1500), resumed.next()).await;
-    assert!(
-        ended.is_ok(),
-        "logout did not invalidate live terminal socket"
-    );
-    if let Some(Ok(Message::Binary(bytes))) = ended.unwrap() {
-        assert!(matches!(
-            decode_muxed_frame(&bytes).unwrap().frame,
-            Frame::Close { .. }
-        ));
-    }
+    tokio::time::timeout(
+        Duration::from_millis(1500),
+        assert_socket_closed(&mut resumed),
+    )
+    .await
+    .expect("logout did not invalidate live terminal socket");
 
     drop(resumed);
     server.abort();
@@ -1754,13 +1776,40 @@ where
             match socket.next().await {
                 // RFC Pong is transport housekeeping, never authority-bearing output.
                 Some(Ok(Message::Pong(_))) => {}
+                // A protocol heartbeat already in flight cannot prove closure.
+                // Continue to actual WebSocket closure; every data/reply frame
+                // remains a failure, including an undrained input acknowledgment.
+                Some(Ok(Message::Binary(bytes)))
+                    if decode_muxed_frame(&bytes).is_ok_and(|decoded| {
+                        matches!(decoded.frame, Frame::Ping { .. } | Frame::Pong { .. })
+                    }) => {}
                 next => break next,
             }
         }
     })
     .await
     .expect("socket must close");
-    assert!(matches!(next, None | Some(Ok(Message::Close(_)) | Err(_))));
+    let diagnostic = match &next {
+        Some(Ok(Message::Binary(bytes))) => decode_muxed_frame(bytes).ok().map(|decoded| {
+            (
+                decoded.stream_id,
+                bytes.get(5).copied().unwrap_or_default(),
+                match decoded.frame {
+                    Frame::Ack { in_seq_acked } => Some(in_seq_acked),
+                    _ => None,
+                },
+                match decoded.frame {
+                    Frame::Close { code, .. } => Some(code),
+                    _ => None,
+                },
+            )
+        }),
+        _ => None,
+    };
+    assert!(
+        matches!(next, None | Some(Ok(Message::Close(_)) | Err(_))),
+        "unexpected frame while awaiting WebSocket closure (stream,type,ack,close): {diagnostic:?}"
+    );
 }
 
 async fn read_partial_terminal<S>(socket: &mut S) -> (Vec<u8>, bool)
@@ -1940,6 +1989,11 @@ async fn test_leg_b_agent(
             Frame::Close { .. } if terminal_stream == Some(stream_id) => {
                 terminal_stream = None;
                 credit = 0;
+            }
+            // The echo fixture models a live transport even when host scheduling
+            // makes setup/replay take longer than a heartbeat interval.
+            Frame::Ping { nonce, sent_us } => {
+                leg_b_send(&mut socket, stream_id, &Frame::Pong { nonce, sent_us }).await;
             }
             _ => {}
         }
