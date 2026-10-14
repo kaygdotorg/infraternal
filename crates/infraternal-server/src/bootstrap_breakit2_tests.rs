@@ -7,6 +7,8 @@ use std::{io::Read, path::PathBuf, time::Instant};
 
 #[path = "bootstrap_instant_tests.rs"]
 mod instant;
+#[path = "bootstrap_browser_tests.rs"]
+mod browser;
 static FULLY_JOINED: Mutex<Option<Instant>> = Mutex::new(None);
 
 // Fixture images are explicit trusted inputs, independent of release HTTP/signing tests.
@@ -57,10 +59,19 @@ async fn provisioning_https_uses_production_tcp_admission() {
 static FIRST_INSTALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static UPLOAD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+fn timeline(step: &'static str, state: &'static str) {
+    if std::env::var_os("ADDHOST_BROWSER_TIMELINE").is_some() {
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        println!("TIMELINE source=server step={step} state={state} epoch_ms={:.3}", epoch.as_secs_f64() * 1000.0);
+    }
+}
+
 /// Time only the delegated production operation; emit no arguments or payload.
 async fn measured<T>(step: &'static str, operation: Operation<'_, T>) -> Result<T, Failure> {
     let started = Instant::now();
+    timeline(step, "start");
     let result = operation.await;
+    timeline(step, "end");
     println!(
         "METRIC breakit2 step={step} elapsed_ms={:.3} ok={}",
         started.elapsed().as_secs_f64() * 1000.0,
@@ -182,7 +193,9 @@ impl SshTransport for TimedTransport {
                 "key_sign_in"
             };
             let started = Instant::now();
+            timeline(step, "start");
             let result = self.adapter.open(destination, credentials, mesh).await;
+            timeline(step, "end");
             println!(
                 "METRIC breakit2 step={step} elapsed_ms={:.3} ok={}",
                 started.elapsed().as_secs_f64() * 1000.0,
@@ -261,7 +274,7 @@ pub(super) struct ObservedBackend(
 impl Backend for ObservedBackend {
     fn early_terminal(&self) -> bool { std::env::var_os("ADDHOST_INSTANT").is_some() && self.0.early_terminal() }
     fn publish_terminal<'a>(&'a self, a: &'a Authority, h: Uuid, id: Uuid, channel: infraternal_plugin_ssh::duplex::Duplex, session: Arc<dyn SshSession>) -> Operation<'a, ()> {
-        self.0.publish_terminal(a, h, id, channel, session)
+        Box::pin(measured("publish_terminal", self.0.publish_terminal(a, h, id, channel, session)))
     }
     fn authority_cancelled<'a>(&'a self, a: &'a Authority) -> Operation<'a, ()> { self.0.authority_cancelled(a) }
     fn setup_cancelled(&self, h: Uuid) -> Operation<'_, ()> { self.0.setup_cancelled(h) }
@@ -527,17 +540,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         &identity.key.private_key_to_der().unwrap(),
     )
     .unwrap();
-    let server = tokio::spawn(
-        axum_server::bind(std::net::SocketAddr::new(controller_ip, 4929))
-            .acceptor(enrollment_acceptor(http_tls))
-            .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
-    );
     f.backend = Arc::new(RemoteBackend {
         base: PendingRemoteRuntime {
             auth: Some(auth.clone()),
             key: Arc::new(crate::ssh_key::UnavailableSshKey),
         },
-        issuer: InvitationIssuer::new(auth, f.pool.clone(), store, service),
+        issuer: InvitationIssuer::new(auth.clone(), f.pool.clone(), store, service),
         hosts,
         attempts: Mutex::default(),
         sessions_changed: Mutex::default(),
@@ -572,6 +580,16 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let prepared = Instant::now();
     runner.prepare_payloads().await;
     println!("METRIC payload_prepare startup_ms={:.3}", prepared.elapsed().as_secs_f64() * 1000.0);
+    if std::env::var_os("ADDHOST_BROWSER_TIMELINE").is_some() {
+        browser::run(&f, auth, runner, http, http_tls, controller_ip, &address).await;
+        drop(listeners);
+        return;
+    }
+    let server = tokio::spawn(
+        axum_server::bind(std::net::SocketAddr::new(controller_ip, 4929))
+        .acceptor(enrollment_acceptor(http_tls))
+        .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
+    );
     let started = Instant::now();
     *FULLY_JOINED.lock().unwrap() = None;
     let batch = runner
