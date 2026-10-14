@@ -2653,3 +2653,64 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        + 50 ms** (TCP, TLS, upgrade, then the first-message resume token
        of D265), replacing D265's three. Reusable links keep one round trip
        + 50 ms; the last screen still returns within one frame.
+268. **Flood, memory and OpenSSL size decisions (owner, 2026-10-14,
+     Q19–Q21):**
+     - **Q19 (#197):** ship the reviewed server-side flow control now
+       (keystrokes ahead of bulk output; native echo p99 4.5/156/328 ms at
+       LAN/150/300 ms against ~600 ms before) and start the browser fix as
+       its own lane: background windows' terminal output is decoded off the
+       main thread (a worker), so it never delays the window being typed
+       in. The owner also asks the orchestrator to look actively for user
+       experience gaps of this kind.
+     - **Q20 (#205):** reduce relocation-dirtied memory now by shrinking
+       pointer tables (no security trade; ASLR stays), and start work on one
+       process per user hosting that user's sessions, measured against
+       isolation, D240 per-person logins, restart survival (D128) and
+       upgrades. Goal from the owner: "really crush idle, average and worst
+       case usage."
+     - **Q21 (D264):** measure the assembler-capability override in the
+       pinned compiler wrapper (OpenSSL then emits its own stubs instead of
+       the AVX-512 AES-GCM code) — bytes saved, OpenSSL known-answer tests,
+       and a gate check that fails if a future OpenSSL brings the code back —
+       before adopting it.
+269. **Mac mesh node now, for our own traffic (owner, 2026-10-14; amends
+     D227's order):** "i would loooove if we were able to do it via our mesh
+     data plane so it would be a double bonus: measure our own data plane
+     throughput, measure our app windows feature." The macOS userspace node
+     (GotaTun with our own adapter, D169) moves ahead of NAT traversal and
+     SSH over the mesh, in the no-root mode of D228 M5: infraternal's own
+     traffic (agent ↔ server, terminals, app-window streams) rides the
+     mesh; no system tunnel, no root, no setting changed on the Mac. The
+     first underlay may be the existing NetBird addresses. App-window
+     end-to-end measurements and mesh throughput measurements run over it.
+270. **One process per user becomes the target design (owner, 2026-10-14;
+     extends D268 Q20):** "would love if we could make the one process per
+     user design reaaaaly optimised and stable." Work on it is no longer only
+     a prototype to measure: it is the design we harden, with optimisation
+     and stability as the goals (idle, average and worst-case memory and
+     CPU; crash containment; restart and upgrade survival per D128;
+     per-person logins per D240). Switching the default still waits for
+     measured gates — soak, fault injection and the head-to-head numbers on
+     #205 — and the owner's go.
+271. **Program status and connection state in the window pill (owner,
+     2026-10-14; Q22, #209, #212 gap 3):**
+     - **Q22a:** a program's own message (OSC 7501) is never written in the
+       pill. The pill shows only the status mark; the words appear on
+       hover, in the toast and in the Inbox.
+     - **Q22b:** no toast when the window that changed state is the
+       focused one; the person is already looking at it.
+     - **Connection state per window (mostly approved):** the pill's dot
+       becomes the shared connection indicator (connected, slow,
+       reconnecting, offline). Keys typed while the link is down are shown
+       by a small amber **key** on the glyph — the owner asked for the
+       thing itself instead of an amber dot — and are sent when the link
+       is back. One status dot per pill, never two.
+272. **Adopt the assembler-capability override (owner, 2026-10-14; settles
+     D264 and D268 Q21, #175):** "approved!" The pinned compiler wrapper
+     makes OpenSSL's assembler probe report no AVX-512/VAES support, so
+     OpenSSL emits its own fallback stubs for the AVX-512 AES-GCM path.
+     Measured: x86_64 −784,736 B (−3.5%); AES-GCM known-answer tests and
+     the D244 key-memory gate pass; AES-GCM, TLS and QUIC speed unchanged
+     within noise on hardware without AVX-512. A gate check fails the build
+     if a future OpenSSL brings the AVX-512 AES-GCM code back. It merges
+     after the switch-over, once its review's P2 fixes pass.
