@@ -212,6 +212,180 @@ async fn ipv6_wildcard_listener_reuses_binding_and_preserves_ipv4_discovery() {
     wildcard_binding("[::]:0".parse().unwrap()).await;
 }
 
+/// Real leased TCP/mTLS uses the current ledger and actor, releases its listen
+/// sockets on drop, and cannot retire the primary listener's TLS configuration.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usable() {
+    let (server, node, root, _) = identities();
+    let (store, _pool, host_id, fingerprint) =
+        super::revocation::admitted_store(&node, &root).await;
+    let hosts = RemoteHosts::default();
+    let primary = RemoteListeners::start(
+        "127.0.0.1:0".parse().unwrap(),
+        &server,
+        std::slice::from_ref(&root),
+        store.clone(),
+        hosts.clone(),
+    )
+    .await
+    .unwrap();
+    let additional = hosts
+        .listen("127.0.0.3".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let leased = additional.local_addr().unwrap();
+    let mut lease = Some(additional);
+    let mut peers = Vec::new();
+    // Both addresses must complete actual TLS, Hello and an actor request. The
+    // existing peer fixture checks that terminal.open carries the enrolled uid.
+    for (address, retire_lease) in [(leased, false), (primary.local_addr().unwrap(), true)] {
+        if retire_lease {
+            drop(lease.take());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            assert!(
+                tokio::net::TcpStream::connect(leased).await.is_err(),
+                "retired lease still accepts TCP connections"
+            );
+            drop(
+                std::net::UdpSocket::bind(leased).expect("retired lease retained its UDP binding"),
+            );
+            let peer: tokio::task::JoinHandle<()> = peers.pop().unwrap();
+            peer.abort();
+            assert!(peer.await.unwrap_err().is_cancelled());
+            // An ordinary disconnect retains the durable actor. Wait until
+            // its first transport retires so the next open must use primary.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while hosts.online(host_id).await {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let config = remote_tls::client_config(&node, std::slice::from_ref(&root)).unwrap();
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        peers.push(tokio::spawn(async move {
+            let connection = remote_tls::dial(address, "localhost", &config)
+                .await
+                .unwrap();
+            respond(&connection.channel).await;
+            // Online means an authenticated session census is available, not
+            // merely that TLS/Hello registered an actor. The existing response
+            // fixture does not publish that separate control event.
+            let census = serde_json::json!({
+                "type": "terminal.sessions.snapshot",
+                "session_ids": [Uuid::from_u128(7)],
+            })
+            .to_string();
+            Transmit::default()
+                .send(
+                    &connection.channel,
+                    0,
+                    &Frame::Event {
+                        sub_id: 0,
+                        event_json: census.as_bytes(),
+                    },
+                )
+                .await
+                .unwrap();
+            completed.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        let actor = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(actor) = hosts.actor(host_id).await {
+                    break actor;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let session = tokio::time::timeout(
+            Duration::from_secs(3),
+            actor.open(crate::embedded::TerminalSize {
+                cols: 80,
+                rows: 24,
+                px_w: 0,
+                px_h: 0,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(session, *Uuid::from_u128(7).as_bytes());
+        tokio::time::timeout(Duration::from_secs(3), completion)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !hosts.online(host_id).await {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("authenticated session census never became available");
+    }
+
+    // The certificate retains the same TLS settings after durable revocation,
+    // but it must never receive an application Hello or register an actor.
+    let additional = hosts
+        .listen("127.0.0.3".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let leased = additional.local_addr().unwrap();
+    store
+        .revoke("owner", host_id, now().unwrap())
+        .await
+        .unwrap();
+    assert!(store.admit(&fingerprint, now().unwrap()).await.is_err());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while hosts.actor(host_id).await.is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let config = remote_tls::client_config(&node, std::slice::from_ref(&root)).unwrap();
+    if let Ok(connection) = remote_tls::dial(leased, "localhost", &config).await {
+        let sent = Transmit::default()
+            .send(
+                &connection.channel,
+                0,
+                &Frame::Hello {
+                    version: 1,
+                    caps: remote_quic::REMOTE_WRITER_BINDING,
+                    client_info: "fixture",
+                },
+            )
+            .await;
+        if sent.is_ok() {
+            let mut receive = Receive::default();
+            let denied =
+                tokio::time::timeout(Duration::from_secs(3), receive.next(&connection.channel))
+                    .await
+                    .expect("revoked identity's leased TLS channel was not retired");
+            assert!(
+                denied.is_err(),
+                "revoked certificate received application bytes on leased TLS"
+            );
+        }
+    }
+    assert!(
+        hosts.actor(host_id).await.is_none(),
+        "revoked certificate registered a new actor"
+    );
+    drop(additional);
+    for peer in peers {
+        peer.abort();
+        assert!(peer.await.unwrap_err().is_cancelled());
+    }
+    drop(primary);
+}
+
 /// Round-trips one control Ping on the admitted connection.
 async fn ping(channel: &NativeChannel, receive: &mut Receive, nonce: u64) {
     Transmit::default()
