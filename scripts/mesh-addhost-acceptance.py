@@ -125,6 +125,8 @@ def lifecycle(args, venue, index):
             for device in ("eth0", "ifb0"):
                 docker("exec", target, "tc", "qdisc", "add", "dev", device, "root", "netem", "delay", "75ms")
         environment = dict(os.environ, ACCEPTANCE_COUNTER_ADDR=node_ip + ":4931")
+        if args.acceptance_mode == "standing-switch":
+            environment["ACCEPTANCE_COUNTER_PIPE"] = str(scratch / "counter.sock")
         counter = subprocess.Popen(["nsenter", "-t", node_pid, "-n", str(args.fixture), "mesh_acceptance_node_counters", "--ignored", "--nocapture", "--test-threads=1"], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         environment.update(INFRATERNAL_TEST_STATE_ROOT=str(scratch), INFRATERNAL_REMOTE_TEST_BINARY=str(args.payload),
                            INFRATERNAL_MESH_PROOF_SCRATCH=str(scratch), BREAKIT2_CONTROLLER_IP=server_ip,
@@ -175,6 +177,12 @@ def lifecycle(args, venue, index):
             assert report.get("acceptance_mode") == "fenced-canary", "fixture does not implement requested fenced profile"
             assert report["first_fenced_canary_output_path_proven"]
             assert report["node_handshake_to_first_fenced_canary_output_us"] >= 0
+        if args.acceptance_mode == "standing-switch":
+            assert report["controlled_standing_session_switch"]
+            assert report["standing_first_output_path_proven"]
+            assert not report["terminal_opened_after_initial_mesh_join"]
+            assert not report["ordinary_latency_acceptance"]
+            assert report["node_handshake_to_standing_first_mesh_output_us"] >= 0
         print(json.dumps(dict(label=args.label, venue=venue, sample=index, receipt=str(evidence), terminal_byte_integrity=report["terminal_byte_integrity"], baseline_observation_only=args.transport_expectation == "baseline")), flush=True)
         return report
     finally:
@@ -194,7 +202,7 @@ def main():
     parser.add_argument("--label", required=True, help="unique before/after provenance label")
     parser.add_argument("--profile", choices=("debug", "release"), default="debug")
     parser.add_argument("--transport-expectation", choices=("preserved", "baseline"), default="preserved")
-    parser.add_argument("--acceptance-mode", choices=("unrestricted", "fenced-canary"), default="unrestricted")
+    parser.add_argument("--acceptance-mode", choices=("unrestricted", "fenced-canary", "standing-switch"), default="unrestricted")
     parser.add_argument("--diagnostics", choices=("none", "canary-return"), default="none",
                         help="bounded post-canary public queries; diagnostic completion includes their overhead")
     parser.add_argument("--samples", type=int, default=31)
