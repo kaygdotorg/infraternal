@@ -61,6 +61,7 @@ def lifecycle(args, venue, index):
     scratch = Path("/root/infraternal-bench/mesh-autoswitch/s") / nonce
     scratch.mkdir(mode=0o700, parents=True)
     sshd = counter = None
+    captures, capture_files = [], []
     try:
         docker("run", "-d", "--name", controller, "--privileged", "--ulimit", "memlock=8388608:8388608", "--entrypoint", "/bin/sleep", args.image, "600", stdout=subprocess.DEVNULL)
         docker("run", "-d", "--name", target, "--privileged", "--ulimit", "memlock=8388608:8388608", "--cgroupns=private", "--tmpfs", "/run", "--tmpfs", "/run/lock", "--tmpfs", "/tmp", args.image, stdout=subprocess.DEVNULL)
@@ -125,6 +126,16 @@ def lifecycle(args, venue, index):
             for device in ("eth0", "ifb0"):
                 docker("exec", target, "tc", "qdisc", "add", "dev", device, "root", "netem", "delay", "75ms")
         environment = dict(os.environ, ACCEPTANCE_COUNTER_ADDR=node_ip + ":4931")
+        if args.packet_diagnostics:
+            # Header summaries only: never capture payloads, netlink messages
+            # or identity material. Both processes belong to this lifecycle.
+            for name, pid in (("node", node_pid), ("server", server_pid)):
+                capture = (evidence / (name + "-udp-headers.log")).open("w")
+                capture_files.append(capture)
+                captures.append(subprocess.Popen([
+                    "nsenter", "-t", pid, "-n", "tcpdump", "-i", "any", "-nn", "-tt", "-l", "-q",
+                    "-c", "20000", "udp", "and", "port", "4930",
+                ], stdout=capture, stderr=subprocess.DEVNULL))
         if args.acceptance_mode == "standing-switch":
             environment["ACCEPTANCE_COUNTER_PIPE"] = str(scratch / "counter.sock")
         counter = subprocess.Popen(["nsenter", "-t", node_pid, "-n", str(args.fixture), "mesh_acceptance_node_counters", "--ignored", "--nocapture", "--test-threads=1"], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -137,6 +148,12 @@ def lifecycle(args, venue, index):
         # only the owned controller network namespace is entered.
         with (evidence / "run.log").open("w") as output:
             result = subprocess.run(["unshare", "-m", "nsenter", "-t", server_pid, "-n", str(args.fixture), "mesh_acceptance_real_addhost", "--ignored", "--nocapture", "--test-threads=1"], input=private, env=environment, stdout=output, stderr=subprocess.STDOUT, timeout=360)
+        for capture in captures:
+            stop(capture)
+            assert capture.returncode in (0, -15), "owned packet observer failed"
+        for capture in capture_files:
+            capture.flush()
+            assert Path(capture.name).stat().st_size, "owned packet observer recorded no UDP headers"
         (evidence / "exit").write_text(str(result.returncode))
         metadata_source = "import json; from pathlib import Path; paths=['/var/lib/infraternal/state','/var/lib/infraternal/sessions']; print(json.dumps({p:dict(uid=Path(p).stat().st_uid,mode=oct(Path(p).stat().st_mode & 0o777)) for p in paths if Path(p).exists()}))"
         metadata = subprocess.check_output(["docker", "exec", target, "python3", "-c", metadata_source])
@@ -147,6 +164,9 @@ def lifecycle(args, venue, index):
         if result.returncode:
             raise RuntimeError("acceptance lifecycle failed; keep its receipt and stop")
         report = json.loads((evidence / "acceptance.json").read_text())
+        if args.packet_diagnostics:
+            report.update(packet_diagnostic_observer=True, ordinary_latency_acceptance=False)
+            (evidence / "acceptance.json").write_text(json.dumps(report, indent=2))
         if args.diagnostics == "canary-return":
             assert report.get("diagnostic_profile") == "canary-return", "fixture does not implement requested diagnostics"
             assert not report["ordinary_latency_acceptance"]
@@ -186,6 +206,10 @@ def lifecycle(args, venue, index):
         print(json.dumps(dict(label=args.label, venue=venue, sample=index, receipt=str(evidence), terminal_byte_integrity=report["terminal_byte_integrity"], baseline_observation_only=args.transport_expectation == "baseline")), flush=True)
         return report
     finally:
+        for capture in captures:
+            stop(capture)
+        for capture in capture_files:
+            capture.close()
         stop(counter)
         stop(sshd)
         for name in (target, controller):
@@ -202,6 +226,7 @@ def main():
     parser.add_argument("--label", required=True, help="unique before/after provenance label")
     parser.add_argument("--profile", choices=("debug", "release"), default="debug")
     parser.add_argument("--transport-expectation", choices=("preserved", "baseline"), default="preserved")
+    parser.add_argument("--packet-diagnostics", action="store_true", help="Record bounded UDP header summaries; diagnostic runs are not ordinary latency acceptance")
     parser.add_argument("--acceptance-mode", choices=("unrestricted", "fenced-canary", "standing-switch"), default="unrestricted")
     parser.add_argument("--diagnostics", choices=("none", "canary-return"), default="none",
                         help="bounded post-canary public queries; diagnostic completion includes their overhead")
@@ -231,7 +256,8 @@ def main():
                   "samples_per_venue":args.samples,"venues":args.venues,"machine":os.uname().nodename,
                   "cores":os.cpu_count(),"load_start":Path("/proc/loadavg").read_text().strip(),
                   "profile":args.profile,"acceptance_mode":args.acceptance_mode,"transport_expectation":args.transport_expectation,
-                  "diagnostic_profile":args.diagnostics,"ordinary_latency_acceptance":args.profile == "release" and args.diagnostics == "none","debug_numbers_are_acceptance":False,
+                  "diagnostic_profile":args.diagnostics,"packet_diagnostic_observer":args.packet_diagnostics,
+                  "ordinary_latency_acceptance":args.profile == "release" and args.diagnostics == "none" and args.acceptance_mode != "standing-switch" and not args.packet_diagnostics,"debug_numbers_are_acceptance":False,
                   "unrestricted_exact_first_mesh_byte_claimed":False}
     (destination / "provenance.json").write_text(json.dumps(provenance, indent=2))
     for venue in args.venues:
