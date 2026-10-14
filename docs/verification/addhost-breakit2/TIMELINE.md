@@ -41,9 +41,11 @@ local overhead, so compare matched fixtures rather than treating an instrumented
 trace as the uninstrumented acceptance result.
 
 `target-packet-headers.txt` captures the owned container's network namespace,
-in addition to the bridge and browser loopback captures. This distinguishes
-actual target TCP receipt from packets still crossing the configured one-way
-delay. It stops after the three TCP handshake packets, before payload transfer;
+in addition to the bridge and browser loopback captures. Its ingress timestamp
+precedes the fixture's incoming delay. `target-delivery-headers.txt` observes
+the first SYN on `ifb0` after that delay (on `eth0` for undelayed LAN cases).
+Label these observation points separately from target SSH application reads.
+The full target capture stops after the three TCP handshake packets, before payload transfer;
 the bridge capture and target SSH/shell clocks cover the remaining traffic.
 Enter only that container's network namespace; no target filesystem or
 unrelated process is selected.

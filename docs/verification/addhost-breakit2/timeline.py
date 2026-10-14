@@ -76,7 +76,13 @@ def measured(command, *args, **kwargs):
         pid = original(["sudo", "-n", "docker", "inspect", "--format", "{{.State.Pid}}", name], capture_output=True, text=True, check=True).stdout.strip()
         if not pid.isdecimal() or int(pid) <= 0:
             raise RuntimeError("Owned target network namespace is unavailable")
-        with captured_headers("packet-headers.txt", ["tcpdump", "-i", "docker0", "-nn", "-tt", "-l", f"host {target} and tcp"]), captured_headers("browser-packet-headers.txt", ["tcpdump", "-i", "lo", "-nn", "-tt", "-l", "tcp port 4929"]), captured_headers("target-packet-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "3", "-i", "eth0", "-nn", "-tt", "-l", "tcp port 22"]):
+        # eth0 ingress is observed before the fixture's incoming netem delay.
+        # The redirected interface observes delivery after that queue. Stop
+        # this observer at the first SYN, well before image transfer begins.
+        delayed = original(["sudo", "-n", "docker", "exec", name, "ip", "link", "show", "dev", "ifb0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        delivery = "ifb0" if delayed else "eth0"
+        with captured_headers("packet-headers.txt", ["tcpdump", "-i", "docker0", "-nn", "-tt", "-l", f"host {target} and tcp"]), captured_headers("browser-packet-headers.txt", ["tcpdump", "-i", "lo", "-nn", "-tt", "-l", "tcp port 4929"]), captured_headers("target-packet-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "3", "-i", "eth0", "-nn", "-tt", "-l", "tcp port 22"]), captured_headers("target-delivery-headers.txt", ["nsenter", "--target", pid, "--net", "tcpdump", "-c", "1", "-i", delivery, "-nn", "-tt", "-l", "tcp port 22 and tcp[tcpflags] & tcp-syn != 0"]):
+            print(f"TIMELINE source=collector step=target_delivery_capture interface={delivery}", flush=True)
             print(f"TIMELINE source=collector step=begin epoch_ms={time.time()*1000:.3f}", flush=True)
             result = original(command, *args, **kwargs, stdout=subprocess.PIPE)
             transcript = result.stdout.decode()
