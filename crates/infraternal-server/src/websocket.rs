@@ -67,6 +67,10 @@ const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
 // Cap a fragmented input frame before the decoder retains more bytes.
 pub(super) const MAX_SOCKET_BUFFER: usize = MAX_FRAME_LEN + 10;
+// Framing initializes this window before every I/O poll, including small idle
+// proofs. A 32KiB chunk bounds that work and fits a 16KiB input plus its envelope;
+// larger messages still assemble incrementally within the existing frame limit.
+const SOCKET_READ_CHUNK: usize = 32 * 1024;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
 
 type PendingPluginCall = (u32, Result<Vec<u8>, AgentError>);
@@ -323,7 +327,8 @@ async fn upgrade(
     let Some(user_permit) = state.user_permit(&session.user_id) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    ws.max_message_size(MAX_SOCKET_BUFFER)
+    ws.read_buffer_size(SOCKET_READ_CHUNK)
+        .max_message_size(MAX_SOCKET_BUFFER)
         .max_frame_size(MAX_SOCKET_BUFFER)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
