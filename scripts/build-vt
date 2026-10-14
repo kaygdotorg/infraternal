@@ -76,6 +76,27 @@ source = path.read_text()
 assert source.count('        pageAllocator(),') == 2, 'native page-pool boundaries changed'
 path.write_text(source.replace('        pageAllocator(),', '        @import("../infraternal_memory.zig").pageAllocator(alloc),'))
 PY_LIMIT
+    # Standard pages otherwise hold 46,225 cells. The engine needs at least
+    # two such pages irrespective of a small history share, and slow output
+    # gradually makes that minimum resident. A smaller quantum keeps the
+    # existing page/reflow algorithms and exact cells with bounded overhead.
+    # One preheated item avoids reserving four unused pages on each screen.
+    tar -xOf "$archive" "ghostty-$version/src/terminal/page.zig" > "$source_dir/src/terminal/page.zig"
+    python3 - "$source_dir" <<'PY_PAGES'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+pages = root / 'src/terminal/PageList.zig'
+source = pages.read_text()
+assert source.count('const page_preheat = 4;') == 1, 'native pool preheat changed'
+pages.write_text(source.replace('const page_preheat = 4;', 'const page_preheat = 1;'))
+page = root / 'src/terminal/page.zig'
+source = page.read_text()
+before = 'pub const std_capacity: Capacity = .{\n    .cols = 215,\n    .rows = 215,'
+after = 'pub const std_capacity: Capacity = .{\n    .cols = 80,\n    .rows = 32,'
+assert source.count(before) == 1, 'native standard page capacity changed'
+page.write_text(source.replace(before, after))
+PY_PAGES
 fi
 # Keep every upstream API in the archive, but let the final static link discard
 # APIs the shim never calls. One monolithic section otherwise retains input

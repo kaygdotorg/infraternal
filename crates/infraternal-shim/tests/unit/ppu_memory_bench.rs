@@ -34,6 +34,49 @@ fn small_history_does_not_retain_megabyte_page_quanta() {
     );
 }
 
+#[test]
+#[ignore = "perf VM only: sparse resize ownership at 900 quiet sessions"]
+fn quiet_resize_churn_does_not_keep_new_resident_pools() {
+    assert_eq!(
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        "infraternal-perf-test"
+    );
+    let mut terminals: Vec<_> = (0..900)
+        .map(|_| Terminal::with_history_budget(80, 24, 65536).unwrap())
+        .collect();
+    for terminal in &mut terminals {
+        terminal.process(b"init-quiet\r\n");
+        terminal.resize(81, 24).unwrap();
+        terminal.resize(80, 24).unwrap();
+    }
+    let mut rng = 270_205_u64;
+    let mut settled = 0;
+    for event in 0..2400 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        let terminal = &mut terminals[usize::try_from(rng % 900).unwrap()];
+        terminal.resize(80 + event % 2, 24).unwrap();
+        terminal.process(format!("churn-{event}\r\n").as_bytes());
+        if (event + 1) % 200 == 0 {
+            let reserved: usize = terminals.iter().map(|t| t.memory().0).sum();
+            let (pss, anon) = resident();
+            println!(
+                "PPU_CHURN events={} reserved_bytes={reserved} pss_kib={pss} anon_kib={anon}",
+                event + 1
+            );
+            if event == 199 {
+                settled = pss;
+            }
+            if event == 2399 {
+                assert!(pss <= settled + 1024, "quiet native pools did not settle");
+            }
+        }
+    }
+}
+
 fn resident() -> (usize, usize) {
     let text = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap();
     let value = |key: &str| {
