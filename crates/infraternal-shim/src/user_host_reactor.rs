@@ -1,5 +1,5 @@
 //! Index ready sessions without idle scans; only child-exit readiness reconciles all owned children [D81/D268].
-use super::{OUTPUTS_PER_ROUND, Session};
+use super::{BULK_READ_BYTES, INTERACTIVE_READ_BYTES, OUTPUTS_PER_ROUND, Session};
 use nix::{
     poll::PollFlags,
     sys::{
@@ -314,7 +314,7 @@ pub(super) fn run(
                     && crate::pty::available_output(&session.pty.master)
                         .is_ok_and(|bytes| bytes <= 1024)
                 {
-                    small_reads.push(index);
+                    small_reads.push((index, INTERACTIVE_READ_BYTES));
                     queued.remove(&index);
                 } else if queued.insert(index) {
                     bulk.push_back(index);
@@ -350,7 +350,12 @@ pub(super) fn run(
                 // publish readiness once after immediate writes have finished.
                 if incoming {
                     read_attempted.insert(index);
-                    session.step(PollFlags::empty(), PollFlags::POLLIN, &[], true)?;
+                    session.step_budget(
+                        PollFlags::empty(),
+                        PollFlags::POLLIN,
+                        &[],
+                        INTERACTIVE_READ_BYTES,
+                    )?;
                 }
                 settle(index, &mut slots, &mut registry, &mut timers)?;
                 Ok(())
@@ -378,9 +383,9 @@ pub(super) fn run(
         for _ in 0..OUTPUTS_PER_ROUND {
             let Some(index) = bulk.pop_front() else { break };
             queued.remove(&index);
-            small_reads.push(index);
+            small_reads.push((index, BULK_READ_BYTES));
         }
-        for index in small_reads {
+        for (index, read_budget) in small_reads {
             if !read_attempted.insert(index) {
                 continue;
             }
@@ -394,7 +399,7 @@ pub(super) fn run(
                 let session = slots[index]
                     .as_mut()
                     .ok_or_else(|| io::Error::other("host session disappeared"))?;
-                session.step(PollFlags::empty(), PollFlags::POLLIN, &[], true)?;
+                session.step_budget(PollFlags::empty(), PollFlags::POLLIN, &[], read_budget)?;
                 settle(index, &mut slots, &mut registry, &mut timers)?;
                 Ok(())
             }));

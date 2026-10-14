@@ -36,7 +36,8 @@ use std::{
 const PREFIX_LIMIT: usize = 4096;
 // A global output quantum keeps one thousand ready PTYs from postponing input.
 const OUTPUTS_PER_ROUND: usize = 1;
-const OUTPUT_BYTES_PER_READ: usize = 4096;
+const INTERACTIVE_READ_BYTES: usize = 4096;
+const BULK_READ_BYTES: usize = 16 * 1024;
 // Aggregate history is bounded at scale rather than multiplying defaults by 1000.
 const HOST_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 const PEER_BYTES: usize = 4 * 1024 * 1024;
@@ -442,6 +443,21 @@ impl Session {
         peers: &[PollFlags],
         read_pty: bool,
     ) -> io::Result<()> {
+        self.step_budget(
+            listener,
+            master,
+            peers,
+            if read_pty { BULK_READ_BYTES } else { 0 },
+        )
+    }
+    #[allow(clippy::too_many_lines)]
+    fn step_budget(
+        &mut self,
+        listener: PollFlags,
+        master: PollFlags,
+        peers: &[PollFlags],
+        read_budget: usize,
+    ) -> io::Result<()> {
         if listener.contains(PollFlags::POLLIN)
             && let Ok((stream, _)) = self.listener.accept()
         {
@@ -505,27 +521,43 @@ impl Session {
                 Err(e) => return Err(e),
             }
         }
-        if read_pty
+        if read_budget > 0
             && self.can_read()
             && (master.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) || self.exit.is_some())
         {
-            let mut bytes = [0; OUTPUT_BYTES_PER_READ];
-            match self
-                .pty
-                .master
-                .read(&mut bytes[..OUTPUT_BYTES_PER_READ.min(self.config.ring_capacity)])
-            {
-                Ok(0) => self.drained = true,
-                Ok(n) => {
-                    self.terminal.process(&bytes[..n])?;
-                    self.ring.append(&bytes[..n])?;
+            let mut bytes = [0; BULK_READ_BYTES];
+            let limit = read_budget.min(bytes.len()).min(self.config.ring_capacity);
+            let mut used = 0;
+            // One rotating bulk turn may amortize four short kernel reads.
+            // Input and promoted small replies keep the smaller byte quantum;
+            // no producer can turn this drain into an unbounded read loop.
+            for _ in 0..4 {
+                if used == limit {
+                    break;
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.drained = self.exit.is_some();
+                match self.pty.master.read(&mut bytes[used..limit]) {
+                    Ok(0) => {
+                        self.drained = true;
+                        break;
+                    }
+                    Ok(n) => used += n,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        self.drained = self.exit.is_some();
+                        break;
+                    }
+                    Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => {
+                        self.drained = true;
+                        break;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
                 }
-                Err(e) if e.raw_os_error() == Some(nix::libc::EIO) => self.drained = true,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+            }
+            // One parser/ring append per bounded batch also amortizes native
+            // ownership walks and cold-page work, preserving byte order.
+            if used > 0 {
+                self.terminal.process(&bytes[..used])?;
+                self.ring.append(&bytes[..used])?;
             }
         }
         let oldest = self.peers.iter().filter_map(|p| p.deferred).min();
@@ -656,6 +688,41 @@ mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
 
+    #[test]
+    fn bulk_turn_advances_sixteen_kib_and_yields_before_the_rest() {
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/b{}",
+            std::process::id()
+        ));
+        let mut config = Config::new([7; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        // A ready byte stream makes the byte quantum deterministic. Real PTY
+        // chunking and input latency are checked by the locked flood driver.
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.write_all(&vec![b'q'; 65536]).unwrap();
+        drop(writer);
+        session.pty.master = std::fs::File::from(std::os::fd::OwnedFd::from(reader));
+        session
+            .step(PollFlags::empty(), PollFlags::POLLIN, &[], true)
+            .unwrap();
+        assert_eq!(session.ring.head(), 16384, "bulk read yielded too early");
+        assert!(!session.drained, "unread output was mistaken for EOF");
+        for _ in 0..3 {
+            session
+                .step(PollFlags::empty(), PollFlags::POLLIN, &[], true)
+                .unwrap();
+        }
+        assert_eq!(session.ring.head(), 65536);
+        session
+            .step(PollFlags::empty(), PollFlags::POLLIN, &[], true)
+            .unwrap();
+        assert!(session.drained);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn malformed_closed_peer_is_retired_once_and_keeps_its_sibling() {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
