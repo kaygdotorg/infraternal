@@ -115,3 +115,6 @@ impl Browser {
         }
     }
 }
+
+#[path = "ca_handoff_browser_loop_tests.rs"]
+mod tests;

@@ -131,6 +131,7 @@ printf 'STAGING machine='; uname -n
 printf 'STAGING kernel='; uname -r
 printf 'STAGING load_before='; cut -d' ' -f1-3 /proc/loadavg
 INFRATERNAL_DEPLOY_TEST_ROOT={remote} INFRATERNAL_CA_TEST_ROOT={remote}/f TRACER_TEST_PORT={env['TRACER_TEST_PORT']} {remote}/lib/loader --library-path {remote}/lib {remote}/server-tests --ignored --exact auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::signed_deploy_preserves_passkey_ca_and_live_sessions --nocapture --test-threads=1
+INFRATERNAL_DEPLOY_TEST_ROOT={remote} INFRATERNAL_CA_TEST_ROOT={remote}/f INFRATERNAL_TEST_BINARY={remote}/bin/infraternal TRACER_TEST_PORT={env['TRACER_TEST_PORT']} {remote}/lib/loader --library-path {remote}/lib {remote}/server-tests --ignored --exact auth::tests::ca_administration_tests::shipping_cli_tests::deploy_staging::staging_browser_services_probes_between_commands --nocapture --test-threads=1
 printf 'STAGING load_after='; cut -d' ' -f1-3 /proc/loadavg
 """
         script = f'''set -eu

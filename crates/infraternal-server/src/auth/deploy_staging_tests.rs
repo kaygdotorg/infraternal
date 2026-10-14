@@ -334,6 +334,42 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
             echoed += 1;
         }
     }
+    // This test only runs under the exclusive perf-VM lock. Include the steady
+    // server cost at the same 128 live-session scale as the handoff acceptance.
+    let ticks = || {
+        let counters = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let fields: Vec<_> = counters
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+    };
+    let frequency = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
+        .unwrap()
+        .unwrap();
+    let before = ticks();
+    let sampled = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let cpu = f64::from(u32::try_from(ticks() - before).unwrap())
+        / f64::from(u32::try_from(frequency).unwrap())
+        / sampled.elapsed().as_secs_f64()
+        * 100.0;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let rss = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap()
+        * 1024;
+    println!(
+        "METRIC name=signed_deploy_idle server_cpu_percent_one_core={cpu:.3} server_rss_bytes={rss} real_pty_sessions=128 browser_connections=6 sample_seconds=5"
+    );
     gaps.sort_by(f64::total_cmp);
     intervals.sort_by(f64::total_cmp);
     println!(
@@ -345,6 +381,192 @@ async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
         pids.len(),
         echoed
     );
+    attached.clear();
+    drop(unit);
+    f.auth.auth.pool.close().await;
+}
+
+/// Owns only the local proof's private runtime; declared before its unit so the
+/// unit stops its shim processes before this directory is removed on any panic.
+struct LocalRuntime(PathBuf);
+impl Drop for LocalRuntime {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn local_browser_fixture() -> (UnlockFixture, LocalRuntime, Unit, SocketAddr) {
+    assert!(nix::unistd::Uid::effective().is_root());
+    let f = shipping_auth_fixture().await;
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reservation.local_addr().unwrap();
+    drop(reservation);
+    let runtime = f.root.parent().unwrap().join("r");
+    std::fs::create_dir(&runtime).unwrap();
+    let owned_runtime = LocalRuntime(runtime.clone());
+    let profile = f.root.join("profile");
+    std::fs::create_dir(&profile).unwrap();
+    std::fs::write(
+        profile.join(".zshrc"),
+        include_bytes!("../../../infraternal/tests/profile/.zshrc"),
+    )
+    .unwrap();
+    let binary = std::env::var_os("INFRATERNAL_TEST_BINARY").unwrap();
+    let unit = Unit(format!(
+        "infraternal-deploy-local-{}",
+        Uuid::new_v4().simple()
+    ));
+    let output = Command::new("systemd-run")
+        .args([
+            "--quiet",
+            "--collect",
+            "--unit",
+            &unit.0,
+            "--property=KillMode=control-group",
+            "--property=StandardOutput=null",
+            "--property=StandardError=null",
+        ])
+        .arg(format!("--property=BindPaths={}:/run", runtime.display()))
+        .arg(format!("--setenv=ZDOTDIR={}", profile.display()))
+        .arg(binary)
+        .args([
+            "server",
+            "--listen",
+            &address.to_string(),
+            "--public-origin",
+            ORIGIN,
+            "--behind-proxy",
+            "--trusted-proxy",
+            "127.0.0.1",
+            "--data",
+        ])
+        .arg(f.root.join("db"))
+        .env("XDG_DATA_HOME", f.root.join("xdg-data"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "local staging unit failed to start"
+    );
+    println!("STAGING local_unit={}", unit.0);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while tokio::net::TcpStream::connect(address).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    (f, owned_runtime, unit, address)
+}
+
+/// Reads the actual Close from an unattended client without attempting stale Pong writes.
+async fn unattended_browser_close(address: SocketAddr, token: &str, session: &[u8; 16]) {
+    use futures_util::{SinkExt, StreamExt};
+    use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
+    use tokio_tungstenite::tungstenite::Message;
+    let mut socket =
+        crate::ca_handoff::shipping_tests::connect_browser(address, token, ORIGIN).await;
+    assert!(matches!(socket.next().await, Some(Ok(Message::Binary(_)))));
+    let mut encoded = Vec::new();
+    encode_muxed_frame_into(
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "unattended-fixture",
+        },
+        &mut encoded,
+    )
+    .unwrap();
+    socket
+        .send(Message::Binary(bytes::Bytes::copy_from_slice(&encoded)))
+        .await
+        .unwrap();
+    assert!(matches!(socket.next().await, Some(Ok(Message::Binary(_)))));
+    encode_muxed_frame_into(
+        1,
+        &Frame::AttachTerm {
+            session_id: session,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+        &mut encoded,
+    )
+    .unwrap();
+    socket.send(Message::Binary(encoded.into())).await.unwrap();
+    loop {
+        let Message::Binary(bytes) = socket.next().await.unwrap().unwrap() else {
+            panic!("unattended attach refused");
+        };
+        if matches!(decode_muxed_frame(&bytes).unwrap().frame, Frame::Ack { .. }) {
+            break;
+        }
+    }
+    // Model the old pull-based fixture: no event loop answers while the caller
+    // works elsewhere. Ignore queued probes on read so a stale write cannot
+    // obscure the server's actual Close with an incidental BrokenPipe.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Close(frame) => {
+                    println!(
+                        "STAGING unattended_terminal_message=Close code={:?} handoffs=0",
+                        frame.map(|frame| frame.code)
+                    );
+                    break;
+                }
+                Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+                _ => panic!("unexpected unattended browser message type"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Functional local control: the staging browser must answer probes while its caller is idle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "root shipping binary functional proof; requires INFRATERNAL_TEST_BINARY and private CA test root"]
+async fn staging_browser_services_probes_between_commands() {
+    let (f, _runtime, unit, address) = local_browser_fixture().await;
+    let sessions = terminals(address, &f.auth.session, ORIGIN).await;
+    println!("STAGING local_sessions={}", sessions.len());
+    unattended_browser_close(address, &f.auth.session, &sessions[0]).await;
+    let mut attached = attach_all(address, &f.auth.session, &sessions, ORIGIN).await;
+    // This models the actual staging caller doing deployment work without polling
+    // the sockets. A browser's event loop continues to answer during that work.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    for socket in &mut attached {
+        wire_send(
+            socket,
+            0,
+            &infraternal_protocol::Frame::Ping {
+                nonce: 999,
+                sent_us: 999,
+            },
+        )
+        .await;
+        loop {
+            let bytes = wire_read(socket).await;
+            if matches!(
+                infraternal_protocol::decode_muxed_frame(&bytes)
+                    .unwrap()
+                    .frame,
+                infraternal_protocol::Frame::Pong {
+                    nonce: 999,
+                    sent_us: 999
+                }
+            ) {
+                break;
+            }
+        }
+    }
+    println!("STAGING local_clients_responsive={}", attached.len());
     attached.clear();
     drop(unit);
     f.auth.auth.pool.close().await;
