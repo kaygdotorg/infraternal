@@ -322,11 +322,11 @@ mod authority_tests {
         let (requests, receiver) = mpsc::channel(1);
         let (outbound, mut answers) = mpsc::channel(1);
         outbound
-            .send(infraternal_plugin_api::PluginReply {
-                plugin_id: DESCRIPTOR.id,
-                epoch: 1,
-                wire: Bytes::new(),
-            })
+            .send(infraternal_plugin_api::PluginReply::new(
+                DESCRIPTOR.id,
+                1,
+                Bytes::new(),
+            ))
             .await
             .unwrap();
         let reply = ReplySender::new(outbound, DESCRIPTOR.id, 1);

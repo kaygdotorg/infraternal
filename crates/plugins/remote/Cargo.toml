@@ -6,11 +6,13 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Unreliable plugin media routing is opt-in; QUIC terminal streams stay in transport.
+native-streams = ["transport", "infraternal-plugin-api/native-streams"]
 default = []
-transport = ["dep:ring", "dep:zeroize", "dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
+transport = ["infraternal-plugin-api/native-wire", "dep:ring", "dep:zeroize", "dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
 agent = ["transport", "dep:infraternal-shim", "dep:nix", "nix/net"]
 server = ["transport", "infraternal-plugin-api/socket-host"]
-test-support = ["transport"]
+test-support = ["transport", "native-streams"]
 
 [dependencies]
 ring = { workspace = true, optional = true }
@@ -31,6 +33,10 @@ serde_json = { workspace = true, optional = true }
 [dev-dependencies]
 # Virtual clocks test probe scheduling without measuring host wall time.
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Existing managed-service uninstall speaks to the Linux terminal shim only.
+infraternal-shim = { workspace = true, optional = true }
 
 [lints]
 workspace = true
