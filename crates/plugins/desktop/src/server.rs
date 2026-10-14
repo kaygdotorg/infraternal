@@ -435,7 +435,9 @@ impl Plugin for DesktopServer {
                                     if viewers.contains_key(&stream) || viewers.len() >= WIRE.max_streams { break; }
                                     match server.attach(session_id, host.as_ref()) {
                                         Ok(viewer) => {
-                                            let (tx, rx) = mpsc::channel(8);
+                                            // At most 32 small commands (64 bytes each) buffer one socket
+                                            // ingress burst plus independent control, never media/RPC bodies.
+                                            let (tx, rx) = mpsc::channel(32);
                                             let (stop, stopped) = watch::channel(false);
                                             let replies = replies.clone();
                                             let task = workers.spawn(async move {
@@ -454,7 +456,8 @@ impl Plugin for DesktopServer {
                                 } else if matches!(decoded.frame, Frame::Close { .. }) {
                                     viewers.remove(&stream);
                                 } else if let Some(sender) = viewers.get(&stream) {
-                                    if sender.requests.try_send(ViewerCommand::Wire(wire.clone())).is_err() { viewers.remove(&stream); }
+                                    if wire.len() > 64 || !matches!(decoded.frame, Frame::Desktop(Message::Input(_) | Message::Size { .. } | Message::Repair { .. }))
+                                        || sender.requests.try_send(ViewerCommand::Wire(wire.clone())).is_err() { viewers.remove(&stream); }
                                 } else { send_viewer_close(&replies, stream).await; }
                                 continue;
                             }
@@ -770,7 +773,10 @@ async fn viewer_loop(
                     Some(ViewerCommand::Wire(wire)) => {
                         let decoded = decode_muxed_frame(&wire).map_err(|_| ())?;
                         match decoded.frame {
-                            Frame::Desktop(Message::Input(input)) => viewer.input(input).map_err(|_| ())?,
+                            Frame::Desktop(Message::Input(input)) => tokio::select! { biased;
+                                _ = stopped.changed() => return Ok(()),
+                                result = viewer.input_wait(input) => result.map_err(|_| ())?,
+                            },
                             Frame::Desktop(Message::Size { width, height, density_milli }) => viewer.resize(width, height, density_milli).map_err(|_| ())?,
                             Frame::Desktop(Message::Repair { .. }) => viewer.request_keyframe().map_err(|_| ())?,
                             _ => return Err(()),
@@ -829,6 +835,45 @@ mod viewer_tests {
         }
         fn may_control(&self, user: &str, _: &str, owner: &str) -> bool {
             user == owner
+        }
+    }
+    #[tokio::test]
+    async fn waiting_input_cannot_cross_a_controller_handover() {
+        use infraternal_protocol::desktop::Input;
+        use std::{future::Future, task::Poll};
+        let (session, mut commands) =
+            Session::new([1; 16], "node".into(), "owner".into(), Arc::new(Owner));
+        let first = session.attach("owner".into()).unwrap();
+        let second = session.attach("owner".into()).unwrap();
+        commands.recv().await.unwrap();
+        first.take_control().unwrap();
+        commands.recv().await.unwrap();
+        for _ in 0..8 {
+            first
+                .input(Input::Text {
+                    scalar: u32::from('a'),
+                })
+                .unwrap();
+        }
+        let pending = first.input_wait(Input::Text {
+            scalar: u32::from('b'),
+        });
+        tokio::pin!(pending);
+        // Poll once against a full real host queue, then change control before
+        // the waiting sender can publish its reserved slot. No scheduler sleep.
+        std::future::poll_fn(|cx| {
+            assert!(pending.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        commands.recv().await.unwrap();
+        commands.recv().await.unwrap();
+        second.take_control().unwrap();
+        assert_eq!(pending.await, Err(Error::Forbidden));
+        while let Ok(command) = commands.try_recv() {
+            assert!(
+                !matches!(command, crate::session::HostCommand::Input { input: Input::Text { scalar }, .. } if scalar == u32::from('b'))
+            );
         }
     }
     #[tokio::test]
@@ -1495,5 +1540,108 @@ mod slow_action_tests {
             ),
             "remote inventory blocked viewer retirement and held-input release"
         );
+    }
+
+    /// A finite browser text burst can arrive in one socket read. It must keep
+    /// the existing attachment usable after bounded command forwarding [D208].
+    #[tokio::test]
+    async fn finite_text_burst_preserves_viewer_control() {
+        let server = DesktopServer::new(1);
+        server.configure(true);
+        let (session, mut host_commands) =
+            Session::new([146; 16], "node".into(), "owner".into(), Arc::new(Owner));
+        server.registry.insert(session).unwrap();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_cancel, cancelled) = watch::channel(false);
+        let (_, requests, mut replies, worker) =
+            counted_socket(&server, &active, &started, &cancelled);
+        send(
+            &requests,
+            1,
+            &Frame::Desktop(Message::Attach {
+                session_id: &[146; 16],
+                delivery: Delivery::Reliable,
+            }),
+        )
+        .await;
+        host_commands.recv().await.unwrap();
+        send(
+            &requests,
+            0,
+            &Frame::Call {
+                call_id: 1,
+                action_id: "desktop.session.control",
+                input_json: br#"{"stream_id":1}"#,
+            },
+        )
+        .await;
+        let acquired = replies.recv().await.unwrap();
+        assert!(matches!(
+            decode_muxed_frame(&acquired.wire).unwrap().frame,
+            Frame::Result { ok: true, .. }
+        ));
+        drop(acquired);
+        host_commands.recv().await.unwrap();
+        // Drain the real host queue independently. The burst fits the socket's
+        // finite ingress queue, without sleeps or any artificial CPU load.
+        let drain = tokio::spawn(async move {
+            let mut texts = 0;
+            while let Some(command) = host_commands.recv().await {
+                texts += usize::from(matches!(
+                    command,
+                    crate::session::HostCommand::Input {
+                        input: infraternal_protocol::desktop::Input::Text { .. },
+                        ..
+                    }
+                ));
+            }
+            texts
+        });
+        // Sixteen scalars fit the existing ingress queue exactly. Populate it
+        // before yielding, matching a coalesced browser/socket delivery.
+        for scalar in "ordinary text 🐈!".chars() {
+            let mut wire = Vec::new();
+            encode_muxed_frame_into(
+                1,
+                &Frame::Desktop(Message::Input(infraternal_protocol::desktop::Input::Text {
+                    scalar: u32::from(scalar),
+                })),
+                &mut wire,
+            )
+            .unwrap();
+            requests.try_send(Bytes::from(wire)).unwrap();
+        }
+        send(
+            &requests,
+            0,
+            &Frame::Call {
+                call_id: 2,
+                action_id: "desktop.session.control",
+                input_json: br#"{"stream_id":1}"#,
+            },
+        )
+        .await;
+        let retained = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let reply = replies.recv().await.unwrap();
+                if let Frame::Result { call_id: 2, ok, .. } =
+                    decode_muxed_frame(&reply.wire).unwrap().frame
+                {
+                    break ok;
+                }
+            }
+        })
+        .await;
+        drop(requests);
+        worker.await.unwrap();
+        server.configure(false);
+        drop(server);
+        let texts = drain.await.unwrap();
+        assert!(
+            matches!(retained, Ok(true)),
+            "finite text burst retired its viewer (forwarded_texts={texts})"
+        );
+        assert_eq!(texts, "ordinary text 🐈!".chars().count());
     }
 }

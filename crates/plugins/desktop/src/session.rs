@@ -556,6 +556,29 @@ impl Viewer {
     /// # Errors
     /// Refuses invalid input, revoked grants, another controller or queue overload.
     pub fn input(&self, input: Input) -> Result<(), Error> {
+        self.session
+            .commands
+            .try_send(self.input_command(input)?)
+            .map_err(|_| Error::Busy)
+    }
+    /// Wait for bounded host capacity under the original controller lease.
+    /// # Errors
+    /// Refuses invalid input, retirement, a changed controller or a stalled host.
+    pub async fn input_wait(&self, input: Input) -> Result<(), Error> {
+        let command = self.input_command(input)?;
+        // Authority cancellation and the forwarding fence keep queued input from
+        // inheriting a later controller, including a quick handover back.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.session.command_authorized(
+                command,
+                Box::pin(async { self.session.commands.send(command).await.map_err(|_| ()) }),
+            ),
+        )
+        .await
+        .map_err(|_| Error::Busy)?
+    }
+    fn input_command(&self, input: Input) -> Result<HostCommand, Error> {
         // Only the server lease transition owns the Mac's visible control state.
         if matches!(input, Input::Control { .. }) {
             return Err(Error::Forbidden);
@@ -569,14 +592,11 @@ impl Viewer {
         if state.closed || state.controller != Some(self.id) {
             return Err(Error::Forbidden);
         }
-        self.session
-            .commands
-            .try_send(HostCommand::Input {
-                viewer: self.id,
-                lease: state.controller_lease,
-                input,
-            })
-            .map_err(|_| Error::Busy)
+        Ok(HostCommand::Input {
+            viewer: self.id,
+            lease: state.controller_lease,
+            input,
+        })
     }
     /// The controlling viewer's actual pixel needs drive the single encoder.
     /// # Errors
