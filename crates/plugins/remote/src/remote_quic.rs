@@ -320,29 +320,33 @@ pub async fn path_interrupted(
     // The endpoint may queue a probe while its socket is not writable. Only
     // a successful encrypted socket send starts the network-response clock.
     let mut queued: Option<crate::remote_path_socket::MeshTransmission<'_>> = None;
-    let mut pending: Option<tokio::time::Instant> = None;
+    let mut datagrams_before = 0;
+    let mut pending: Option<(tokio::time::Instant, tokio::time::Instant)> = None;
     loop {
-        let deadline = pending.map(|sent| sent + connection.rtt() + margin);
+        let deadline = pending.map(|(_, flushed)| flushed + connection.rtt() + margin);
         tokio::select! {
             _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
             _ = ticks.tick() => {
-                let silence = freshness.silence(connection);
-                if pending.is_some_and(|sent| path.heard_since(sent.into_std()) && silence < sent.elapsed()) {
+                let stats = connection.stats();
+                let silence = freshness.recorded_silence(authenticated_signature(stats.frame_rx));
+                if pending.is_some_and(|(sent, _)| path.heard_since(sent.into_std()) && silence < sent.elapsed()) {
                     pending = None;
                 }
                 if pending.is_none() && queued.is_none() {
+                    datagrams_before = stats.frame_tx.datagram;
                     queued = Some(path.mesh_transmitted_after(std::time::Instant::now())?);
                 }
                 probe_liveness(connection);
             }
             sent = async {
-                queued.as_ref().ok_or(io::ErrorKind::Interrupted)?.sent().await
+                queued.as_ref().ok_or(io::ErrorKind::Interrupted)?.probe_sent(connection, datagrams_before).await
             }, if queued.is_some() => {
-                pending = Some(sent?.into());
+                let (first, flushed) = sent?;
+                pending = Some((first.into(), flushed.into()));
                 queued = None;
             }
             () = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
-                let Some(sent) = pending else { continue };
+                let Some((sent, _)) = pending else { continue };
                 // Let an already-ready endpoint receive authenticate its ACK
                 // before deciding a timer that became ready in the same pass.
                 tokio::task::yield_now().await;

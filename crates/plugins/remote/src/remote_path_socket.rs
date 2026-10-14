@@ -41,7 +41,8 @@ struct Paths {
     mesh: Option<SocketAddr>,
     resend: Recent,
     mesh_heard: Option<Instant>,
-    mesh_sent: Option<Instant>,
+    /// First receive boundary and most recent successful physical emission.
+    mesh_sent: Option<(Instant, Instant)>,
     probe_generation: u64,
     probe_queued: Option<(u64, Instant)>,
     enrolled_heard: Option<Instant>,
@@ -55,6 +56,9 @@ pub struct PathSocket {
     paths: Mutex<Paths>,
     /// Datagrams received from the mesh address, for proof and liveness.
     mesh_datagrams: AtomicU64,
+    /// Successful connection transmits, excluding replay/copies beneath QUIC.
+    /// The dedicated client endpoint owns exactly one connection.
+    transmits: AtomicU64,
     heard: tokio::sync::Notify,
     sent: tokio::sync::Notify,
     backup: AtomicBool,
@@ -85,6 +89,44 @@ pub struct MeshTransmission<'a> {
     generation: u64,
 }
 impl MeshTransmission<'_> {
+    /// Confirm a newly constructed ack-eliciting DATAGRAM has left the socket.
+    /// Quinn counts transmits when constructed, including one buffered behind
+    /// socket backpressure. Comparing that count with physical completions
+    /// prevents an older ACK-only transmit from starting the response deadline.
+    /// Connection statistics must be read here, outside the socket callback:
+    /// Quinn holds its connection mutex while calling `try_send`.
+    pub(crate) async fn probe_sent(
+        &self,
+        connection: &quinn::Connection,
+        datagrams_before: u64,
+    ) -> io::Result<(Instant, Instant)> {
+        loop {
+            let notified = self.path.sent.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let stats = connection.stats();
+            let (emitted, transmits) = {
+                let paths = self.path.paths.lock().map_err(|_| io::ErrorKind::Other)?;
+                if paths
+                    .probe_queued
+                    .is_none_or(|(generation, _)| generation != self.generation)
+                {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                (paths.mesh_sent, self.path.transmits.load(Ordering::Acquire))
+            };
+            if let Some(emitted) = emitted
+                && stats.frame_tx.datagram != datagrams_before
+                && transmits >= stats.udp_tx.ios
+            {
+                // Responses may already have arrived while this waiter was
+                // unscheduled. Keep their original receive boundary separate
+                // from the physical flush clock; waiter delay adds no budget.
+                return Ok(emitted);
+            }
+            notified.await;
+        }
+    }
     /// Wait for the first successful send after arming this request. A delayed
     /// waiter must not adopt a later ACK-only packet as its response clock.
     ///
@@ -103,7 +145,7 @@ impl MeshTransmission<'_> {
                 {
                     return Err(io::ErrorKind::Interrupted.into());
                 }
-                paths.mesh_sent
+                paths.mesh_sent.map(|(first, _)| first)
             };
             if let Some(sent) = sent {
                 return Ok(sent);
@@ -145,6 +187,7 @@ impl PathSocket {
                 enrolled_heard: None,
             }),
             mesh_datagrams: AtomicU64::new(0),
+            transmits: AtomicU64::new(0),
             heard: tokio::sync::Notify::new(),
             sent: tokio::sync::Notify::new(),
             backup: AtomicBool::new(false),
@@ -317,10 +360,9 @@ impl PathSocket {
             {
                 clock.arm(at);
             }
-            if paths.mesh_sent.is_none()
-                && paths.probe_queued.is_some_and(|(_, queued)| now >= queued)
-            {
-                paths.mesh_sent = Some(now);
+            if paths.probe_queued.is_some_and(|(_, queued)| now >= queued) {
+                let first = paths.mesh_sent.map_or(now, |(first, _)| first);
+                paths.mesh_sent = Some((first, now));
             }
         }
     }
@@ -333,7 +375,12 @@ impl AsyncUdpSocket for PathSocket {
 
     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
         if transmit.destination != self.logical || !self.on_mesh.load(Ordering::Acquire) {
-            return self.socket.try_send(transmit);
+            self.socket.try_send(transmit)?;
+            if transmit.destination == self.logical {
+                self.transmits.fetch_add(1, Ordering::Release);
+                self.sent.notify_waiters();
+            }
+            return Ok(());
         }
         let Some(mesh) = self.paths.lock().ok().and_then(|paths| paths.mesh) else {
             return self.socket.try_send(transmit);
@@ -346,6 +393,9 @@ impl AsyncUdpSocket for PathSocket {
             src_ip: transmit.src_ip,
         })?;
         self.keep(transmit);
+        // Publish completion after its clock: an observed count can never
+        // pair the newly flushed probe with an older ACK-only timestamp.
+        self.transmits.fetch_add(1, Ordering::Release);
         self.sent.notify_waiters();
         Ok(())
     }
@@ -482,6 +532,335 @@ mod tests {
         }
     }
 
+    /// Hold an already-built transmit, then release exactly one physical send.
+    /// Frame counters are inspected by the test outside Quinn's driver lock.
+    #[derive(Debug, Default)]
+    struct SendGate {
+        remaining: Option<u64>,
+        blocked_polls: u64,
+        waker: Option<std::task::Waker>,
+    }
+    impl SendGate {
+        fn limit(gate: &Mutex<Self>, remaining: Option<u64>) {
+            let mut state = gate.lock().unwrap();
+            state.remaining = remaining;
+            let waker = state.waker.take();
+            drop(state);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+    #[derive(Debug)]
+    struct GatedSocket {
+        inner: Arc<CountedSocket>,
+        gate: Arc<Mutex<SendGate>>,
+    }
+    #[derive(Debug)]
+    struct GatedPoller {
+        inner: Pin<Box<dyn UdpPoller>>,
+        gate: Arc<Mutex<SendGate>>,
+    }
+    impl UdpPoller for GatedPoller {
+        fn poll_writable(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let mut state = this.gate.lock().unwrap();
+            if state.remaining == Some(0) {
+                state.blocked_polls += 1;
+                state.waker = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+            drop(state);
+            this.inner.as_mut().poll_writable(cx)
+        }
+    }
+    impl AsyncUdpSocket for GatedSocket {
+        fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+            Box::pin(GatedPoller {
+                inner: self.inner.clone().create_io_poller(),
+                gate: self.gate.clone(),
+            })
+        }
+        fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+            let mut state = self.gate.lock().unwrap();
+            if state.remaining == Some(0) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.inner.try_send(transmit)?;
+            if let Some(remaining) = &mut state.remaining {
+                *remaining -= 1;
+            }
+            Ok(())
+        }
+        fn poll_recv(
+            &self,
+            cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+            meta: &mut [RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            self.inner.poll_recv(cx, bufs, meta)
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
+    #[tokio::test]
+    async fn send_gate_releases_only_one_successful_transmission() {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let gate = Arc::new(Mutex::new(SendGate::default()));
+        let sent = Arc::new(AtomicU64::new(0));
+        let socket = Arc::new(GatedSocket {
+            inner: Arc::new(CountedSocket {
+                inner: quinn::TokioRuntime
+                    .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                    .unwrap(),
+                sent: sent.clone(),
+                blocked: Arc::default(),
+            }),
+            gate: gate.clone(),
+        });
+        let transmit = Transmit {
+            destination: peer.local_addr().unwrap(),
+            contents: b"unchanged",
+            ecn: None,
+            segment_size: None,
+            src_ip: None,
+        };
+        let mut writable = socket.clone().create_io_poller();
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        SendGate::limit(&gate, Some(0));
+        assert!(writable.as_mut().poll_writable(&mut context).is_pending());
+        assert_eq!(
+            socket.try_send(&transmit).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(sent.load(Ordering::Acquire), 0);
+        SendGate::limit(&gate, Some(1));
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        socket.try_send(&transmit).unwrap();
+        assert_eq!(arrival(&peer).await, b"unchanged");
+        assert_eq!(sent.load(Ordering::Acquire), 1);
+        assert!(writable.as_mut().poll_writable(&mut context).is_pending());
+        assert_eq!(
+            socket.try_send(&transmit).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(sent.load(Ordering::Acquire), 1);
+        SendGate::limit(&gate, None);
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        socket.try_send(&transmit).unwrap();
+        assert_eq!(arrival(&peer).await, b"unchanged");
+        assert_eq!(sent.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "timed watchdog ordering proof; run under the perf VM benchmark lock"]
+    async fn an_old_ack_only_send_does_not_start_a_backpressured_probe_deadline() {
+        old_ack_only_before_probe(true).await;
+    }
+
+    #[tokio::test]
+    async fn an_old_ack_only_send_cannot_complete_probe_emission() {
+        old_ack_only_before_probe(false).await;
+    }
+
+    /// Exercise the same retained ACK-only transmit with a functional emission
+    /// assertion or the additional deadline assertion on the measurement VM.
+    #[allow(clippy::too_many_lines)]
+    async fn old_ack_only_before_probe(timed: bool) {
+        use crate::remote_tls::tests::{leaf, root};
+        let ca = root();
+        let mut transport = quinn::TransportConfig::default();
+        transport.mtu_discovery_config(None);
+        transport.datagram_receive_buffer_size(Some(64));
+        transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        let transport = Arc::new(transport);
+        let mut config = crate::remote_quic::server_config(
+            &leaf(&ca, true),
+            std::slice::from_ref(&ca.certificate),
+        )
+        .unwrap();
+        config.transport_config(transport.clone());
+        let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let physical = server.local_addr().unwrap();
+        let logical = SocketAddr::new("127.0.0.2".parse().unwrap(), physical.port());
+        let sent = Arc::new(AtomicU64::new(0));
+        let gate = Arc::new(Mutex::new(SendGate::default()));
+        let path = PathSocket::new(
+            Arc::new(GatedSocket {
+                inner: Arc::new(CountedSocket {
+                    inner: quinn::TokioRuntime
+                        .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                        .unwrap(),
+                    sent: sent.clone(),
+                    blocked: Arc::default(),
+                }),
+                gate: gate.clone(),
+            }),
+            logical,
+        );
+        path.use_mesh(physical);
+        let mut client = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            path.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .unwrap();
+        let mut config =
+            crate::remote_quic::client_config(&leaf(&ca, false), &[ca.certificate]).unwrap();
+        config.transport_config(transport);
+        client.set_default_client_config(config);
+        let (dial, accept) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+            server.accept().await.unwrap().await
+        });
+        let dial = dial.unwrap();
+        let accept = accept.unwrap();
+        dial.send_datagram(bytes::Bytes::from_static(b"before"))
+            .unwrap();
+        assert_eq!(accept.read_datagram().await.unwrap().as_ref(), b"before");
+
+        // Close only once all already-built handshake traffic has physically
+        // left. This adapter permits one UDP segment and has no backup copies,
+        // so protocol I/O count equals the counted successful physical sends.
+        let before = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                SendGate::limit(&gate, Some(0));
+                let stats = dial.stats();
+                if stats.udp_tx.ios == sent.load(Ordering::Acquire) {
+                    break stats.frame_tx;
+                }
+                SendGate::limit(&gate, None);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let physical_before = sent.load(Ordering::Acquire);
+        let blocked_before = gate.lock().unwrap().blocked_polls;
+        accept
+            .send_datagram(bytes::Bytes::from_static(b"ready"))
+            .unwrap();
+        assert_eq!(dial.read_datagram().await.unwrap().as_ref(), b"ready");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if dial.stats().frame_tx.acks > before.acks
+                    && gate.lock().unwrap().blocked_polls > blocked_before
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut buffered = dial.stats().frame_tx;
+        buffered.acks = before.acks;
+        assert_eq!(format!("{buffered:?}"), format!("{before:?}"));
+        assert_eq!(sent.load(Ordering::Acquire), physical_before);
+
+        // Poll the production watcher: its immediate tick arms the request
+        // and queues a fresh DATAGRAM behind Quinn's retained ACK-only transmit.
+        let mut watcher = std::pin::pin!(crate::remote_quic::path_interrupted(
+            &dial,
+            &path,
+            Duration::from_millis(15),
+            Duration::from_millis(30),
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                assert!(
+                    std::future::poll_fn(|cx| Poll::Ready(
+                        std::future::Future::poll(watcher.as_mut(), cx).is_pending()
+                    ))
+                    .await
+                );
+                if path.paths.lock().unwrap().probe_queued.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(path.paths.lock().unwrap().mesh_sent.is_none());
+        assert_eq!(dial.stats().frame_tx.datagram, before.datagram);
+        let blocked_before = gate.lock().unwrap().blocked_polls;
+        SendGate::limit(&gate, Some(1));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if sent.load(Ordering::Acquire) == physical_before + 1
+                    && dial.stats().frame_tx.datagram > before.datagram
+                    && gate.lock().unwrap().blocked_polls > blocked_before
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Only the previously classified ACK-only packet reached the socket.
+        // The fresh ack-eliciting packet exists, but remains behind backpressure.
+        assert!(path.paths.lock().unwrap().mesh_sent.is_some());
+        assert_eq!(gate.lock().unwrap().remaining, Some(0));
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(
+                std::future::Future::poll(watcher.as_mut(), cx).is_pending()
+            ))
+            .await
+        );
+        assert!(
+            path.paths.lock().unwrap().probe_queued.is_some(),
+            "ACK-only transmission completed the fresh probe's emission waiter"
+        );
+        let interrupted = if timed {
+            Some(tokio::time::timeout(Duration::from_secs(3), watcher.as_mut()).await)
+        } else {
+            None
+        };
+        assert_eq!(sent.load(Ordering::Acquire), physical_before + 1);
+        if let Some(Ok(result)) = &interrupted {
+            assert_eq!(result.as_ref().unwrap_err().kind(), io::ErrorKind::TimedOut);
+        }
+        assert!(dial.close_reason().is_none());
+        assert!(accept.close_reason().is_none());
+
+        // Prove the same authenticated connection still works after releasing
+        // local backpressure; no route, listener, or peer was interrupted.
+        SendGate::limit(&gate, None);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), accept.read_datagram())
+                .await
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            &[0]
+        );
+        accept
+            .send_datagram(bytes::Bytes::from_static(b"still-live"))
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), dial.read_datagram())
+                .await
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            b"still-live"
+        );
+        client.close(0u32.into(), b"");
+        server.close(0u32.into(), b"");
+        assert!(
+            interrupted.as_ref().is_none_or(Result::is_err),
+            "watcher completed while only an old ACK-only packet was transmitted: {interrupted:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_delayed_probe_waiter_keeps_first_send_clock_after_ack_only_traffic() {
         use crate::remote_tls::tests::{leaf, root};
@@ -542,7 +921,7 @@ mod tests {
         dial.send_datagram(bytes::Bytes::from_static(b"probe"))
             .unwrap();
         assert_eq!(accept.read_datagram().await.unwrap().as_ref(), b"probe");
-        let first = path.paths.lock().unwrap().mesh_sent.unwrap();
+        let first = path.paths.lock().unwrap().mesh_sent.unwrap().0;
         let before = dial.stats().frame_tx;
         let sends = sent.load(Ordering::Acquire);
         accept
@@ -598,7 +977,7 @@ mod tests {
         let request = path.mesh_transmitted_after(Instant::now()).unwrap();
         send(&path, logical, b"first").await;
         assert_eq!(arrival(&mesh).await, b"first");
-        let first = path.paths.lock().unwrap().mesh_sent.unwrap();
+        let first = path.paths.lock().unwrap().mesh_sent.unwrap().0;
         send(&path, logical, b"later").await;
         assert_eq!(arrival(&mesh).await, b"later");
         assert_eq!(request.sent().await.unwrap(), first);
