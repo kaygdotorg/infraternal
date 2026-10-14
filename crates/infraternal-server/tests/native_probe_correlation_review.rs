@@ -7,7 +7,6 @@ mod liveness;
 use std::time::Duration;
 
 #[tokio::test(start_paused = true)]
-#[ignore = "known independent-review correlation failure; run explicitly with --ignored"]
 async fn unissued_native_probe_reply_cannot_extend_readiness() {
     let mut route = liveness::Liveness::new();
     let (nonce, stamp) = route.ping();

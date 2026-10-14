@@ -1,6 +1,6 @@
 //! Constant-space, pipelined Ping/Pong deadlines shared by browser and infraternal agent routes [D265, #199].
 
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 use tokio::time::Instant;
 
 /// A short scheduling allowance keeps failure detection near one measured RTT.
@@ -13,6 +13,7 @@ pub(crate) struct Liveness {
     sent: u64,
     acked: u64,
     budget: Duration,
+    issued: VecDeque<u64>,
 }
 
 impl Liveness {
@@ -23,6 +24,7 @@ impl Liveness {
             answered: now,
             sent: 0,
             acked: 0,
+            issued: VecDeque::new(),
             // Before the first sample, allow greeting/replay and an unknown link RTT.
             budget: Duration::from_secs(2),
         }
@@ -38,13 +40,23 @@ impl Liveness {
         self.sent = u64::try_from(self.origin.elapsed().as_micros())
             .unwrap_or(u64::MAX)
             .max(self.sent.saturating_add(1));
+        // The startup grace admits at most 80 ticks; bound retained correlation
+        // even if a caller pipelines faster. Eviction cannot renew readiness.
+        if self.issued.len() == 128 {
+            self.issued.pop_front();
+        }
+        self.issued.push_back(self.sent);
         (self.sent, self.sent)
     }
 
     pub(crate) fn pong(&mut self, nonce: u64, sent_us: u64) {
         // Only a new reply to this route's issued probes renews its lease.
         // Delayed/duplicate replies, ordinary traffic and another stream cannot do so.
-        if nonce != sent_us || nonce <= self.acked || nonce > self.sent || self.expired() {
+        if nonce != sent_us
+            || nonce <= self.acked
+            || !self.issued.contains(&nonce)
+            || self.expired()
+        {
             return;
         }
         let now = Instant::now();
@@ -52,6 +64,9 @@ impl Liveness {
             .duration_since(self.origin)
             .saturating_sub(Duration::from_micros(sent_us));
         self.acked = nonce;
+        while self.issued.front().is_some_and(|issued| *issued <= nonce) {
+            self.issued.pop_front();
+        }
         self.answered = now;
         self.budget = (rtt + TICK).max(TICK * 2);
     }
