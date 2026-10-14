@@ -46,8 +46,8 @@ struct Link {
     /// QUIC links only: where the connection's datagrams physically go.
     path: Option<Arc<PathSocket>>,
     address: SocketAddr,
-    kind: ServerLinkKind,
-    proof: tokio::sync::Mutex<Option<super::ProvedControl>>,
+    /// Dialing creates this once; the owning run loop moves it into the session.
+    proof: Option<super::ProvedControl>,
     standby: tokio::sync::watch::Sender<u64>,
 }
 impl Drop for Link {
@@ -68,7 +68,8 @@ impl Link {
         match self.path.as_ref().map(|path| (path.path(), path.logical())) {
             Some((Path::Mesh(address), _)) => (ServerLinkKind::Mesh, address),
             Some((Path::Enrolled, logical)) => (ServerLinkKind::Fallback, logical),
-            None => (self.kind, self.address),
+            // Only the enrolled dial can return TCP; mesh dials require QUIC.
+            None => (ServerLinkKind::Fallback, self.address),
         }
     }
 }
@@ -148,14 +149,13 @@ async fn connect(
     } else {
         (Some(endpoint), Some(driver), Some(path))
     };
-    let link = Link {
+    let mut link = Link {
         connected,
         endpoint,
         driver,
         path,
         address,
-        kind,
-        proof: tokio::sync::Mutex::new(None),
+        proof: None,
         standby: tokio::sync::watch::channel(0).0,
     };
     if prove {
@@ -173,7 +173,7 @@ async fn connect(
         })
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-        *link.proof.lock().await = Some(proof);
+        link.proof = Some(proof);
     }
     Ok(link)
 }
@@ -226,10 +226,10 @@ async fn session(
     state: PathBuf,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     registry: crate::plugin_control::Registry,
+    proof: Option<super::ProvedControl>,
 ) -> io::Result<()> {
     match &link.connected {
         Connected::Quic(connection) => {
-            let proof = link.proof.lock().await.take();
             quic_session_on(
                 connection.clone(),
                 identity,
@@ -536,7 +536,19 @@ async fn replace_tcp(
 }
 
 /// A component down retains its meaning when transport closure wins its race.
-fn interruption_reason(registry: &crate::plugin_control::Registry) -> ServerLinkReason {
+fn interruption_reason(
+    registry: &crate::plugin_control::Registry,
+    was: ServerLinkKind,
+    reason: ServerLinkReason,
+) -> ServerLinkReason {
+    if was != ServerLinkKind::Mesh
+        && !matches!(
+            reason,
+            ServerLinkReason::MeshInterrupted | ServerLinkReason::MeshDisabled
+        )
+    {
+        return ServerLinkReason::Connecting;
+    }
     if registry.server_paths().borrow().is_none() {
         ServerLinkReason::MeshDisabled
     } else {
@@ -616,13 +628,13 @@ pub(super) async fn run(
         let attempt_started = tokio::time::Instant::now();
         // Reconnection itself never waits for a failed mesh probe. Once the
         // fallback is healthy, moves run on the live connection itself.
-        let link = if let Some(link) = live.take() {
+        let mut link = if let Some(link) = live.take() {
             link
         } else {
             match available(identity, renewal, &registry, force_fallback).await {
                 Ok(link) => {
                     force_fallback = false;
-                    if link.kind == ServerLinkKind::Mesh {
+                    if link.current().0 == ServerLinkKind::Mesh {
                         reason = ServerLinkReason::MeshProven;
                     }
                     link
@@ -654,7 +666,18 @@ pub(super) async fn run(
         // allocation. This scope drops it before the old Link retires; a
         // cancelled partial write is safe only while that Link closes channel.
         let steered = {
-            let active = session(&link, identity, state.clone(), renewal, registry.clone());
+            // This loop exclusively owns the Link. Transfer the dial proof
+            // before borrowing it for concurrent session and path futures;
+            // neither future can consume the control stream a second time.
+            let proof = link.proof.take();
+            let active = session(
+                &link,
+                identity,
+                state.clone(),
+                renewal,
+                registry.clone(),
+                proof,
+            );
             tokio::pin!(active);
             if link.path.is_some() {
                 steer(
@@ -689,15 +712,7 @@ pub(super) async fn run(
             Steered::Ended => {
                 // A transport close can race a component down; the current
                 // applied preference owns the reason.
-                reason = if was == ServerLinkKind::Mesh
-                    || matches!(
-                        reason,
-                        ServerLinkReason::MeshInterrupted | ServerLinkReason::MeshDisabled
-                    ) {
-                    interruption_reason(&registry)
-                } else {
-                    ServerLinkReason::Connecting
-                };
+                reason = interruption_reason(&registry, was, reason);
                 cooling = reason == ServerLinkReason::MeshInterrupted;
                 force_fallback = cooling;
                 report(&registry, None, reason);
