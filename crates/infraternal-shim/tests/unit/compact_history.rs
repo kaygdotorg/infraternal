@@ -1,5 +1,6 @@
 //! Exact retained history and perf-VM memory proof for the experimental codec [D270].
 use super::*;
+use std::io::{Read, Write};
 
 struct Prints(String);
 impl vte::Perform for Prints {
@@ -9,10 +10,15 @@ impl vte::Perform for Prints {
 }
 
 fn filled() -> Terminal {
+    filled_with_body(&"x".repeat(65))
+}
+
+fn filled_with_body(body: &str) -> Terminal {
+    assert_eq!(body.len(), 65);
     let mut terminal = Terminal::with_history_budget(80, 24, 17 * 1024 * 1024).unwrap();
     terminal.process(b"\x1bc");
     for number in 1..=10_000 {
-        let line = format!("{number:06} {}\r\n", "x".repeat(65));
+        let line = format!("{number:06} {body}\r\n");
         assert_eq!(line.len(), 74);
         terminal.process(line.as_bytes());
     }
@@ -22,7 +28,16 @@ fn filled() -> Terminal {
 
 #[test]
 fn all_numbered_lines_survive_compression_and_full_replay() {
-    let terminal = filled();
+    assert_numbered_replay(&"x".repeat(65));
+}
+
+#[test]
+fn all_decimal_lines_survive_compression_and_full_replay() {
+    assert_numbered_replay(&("0123456789".repeat(6) + "01234"));
+}
+
+fn assert_numbered_replay(body: &str) {
+    let mut terminal = filled_with_body(body);
     assert!(terminal.engine.history_rows() >= 9977);
     assert!(
         terminal.engine.encoded_bytes() > 0,
@@ -43,7 +58,7 @@ fn all_numbered_lines_survive_compression_and_full_replay() {
     let mut parser = vte::Parser::new();
     let mut prints = Prints(String::new());
     parser.advance(&mut prints, &snapshot);
-    let line = |number| format!("{number:06} {}", "x".repeat(65));
+    let line = |number| format!("{number:06} {body}");
     let mut end = 0;
     for number in 1..=10_000 {
         let found = prints.0[end..]
@@ -83,6 +98,9 @@ fn all_numbered_lines_survive_compression_and_full_replay() {
     replayed.resize(40, 24).unwrap();
     replayed.resize(80, 24).unwrap();
     replayed.engine.compact(true);
+    terminal.resize(40, 24).unwrap();
+    terminal.resize(80, 24).unwrap();
+    assert_eq!(terminal.research_state_difference(&replayed), 0);
     assert!(replayed.engine.history_rows() >= 9977);
 }
 
@@ -98,6 +116,59 @@ fn decimal_history_resident_increment() {
     measured_history_increment(&("0123456789".repeat(6) + "01234"), "decimal");
 }
 
+#[test]
+#[ignore = "perf VM only: distinguish fixed code residency from history slope at scale"]
+fn decimal_history_resident_slope() {
+    assert_eq!(
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        "infraternal-perf-test"
+    );
+    // All empty terminals exist before any fill. Subsequent increments charge
+    // only added history; the first row still exposes cold image/stack faults.
+    let mut terminals: Vec<_> = (0..50)
+        .map(|_| {
+            let mut terminal = Terminal::with_history_budget(80, 24, 17 * 1024 * 1024).unwrap();
+            terminal.process(b"\x1bcseed\r\n");
+            terminal
+        })
+        .collect();
+    let body = "0123456789".repeat(6) + "01234";
+    let mut previous = pss();
+    let mut filled = 0;
+    for count in [1, 10, 50] {
+        for terminal in &mut terminals[filled..count] {
+            for number in 1..=10_000 {
+                terminal.process(format!("{number:06} {body}\r\n").as_bytes());
+            }
+            terminal.engine.compact(true);
+            // The unchanged seed row precedes the 10,000 numbered rows.
+            assert_eq!(terminal.retained_history_rows(), 9978);
+            assert!(!terminal.memory().2);
+        }
+        let resident = pss();
+        let ordinary: usize = terminals
+            .iter()
+            .map(|t| t.engine.allocation_classes().0)
+            .sum();
+        let mapped: usize = terminals
+            .iter()
+            .map(|t| t.engine.resident_pages().unwrap())
+            .sum();
+        let encoded: usize = terminals.iter().map(|t| t.engine.encoded_bytes()).sum();
+        let huge = memory_kib("AnonHugePages:");
+        println!(
+            "COMPACT_HISTORY_SLOPE filled={count} empty={} pss_kib={resident} increment_kib={} added={} ordinary_bytes={ordinary} mapped_resident_bytes={mapped} encoded_bytes={encoded} anon_huge_kib={huge} columns=72 lines=10000 body=decimal",
+            50 - count,
+            resident.saturating_sub(previous),
+            count - filled
+        );
+        previous = resident;
+        filled = count;
+    }
+}
+
 fn measured_history_increment(body: &str, label: &str) {
     assert_eq!(
         std::fs::read_to_string("/proc/sys/kernel/hostname")
@@ -106,30 +177,55 @@ fn measured_history_increment(body: &str, label: &str) {
         "infraternal-perf-test"
     );
     assert_eq!(body.len(), 65);
+    history_fence(label, "ready");
     // Use the same terminal instance and geometry for both measurements.
     let mut terminal = Terminal::with_history_budget(80, 24, 17 * 1024 * 1024).unwrap();
     terminal.process(b"\x1bcseed\r\n");
     terminal.engine.compact(true);
-    let empty = pss();
+    let (empty_ordinary, _, _) = terminal.engine.allocation_classes();
     let empty_pages = terminal.engine.resident_pages().unwrap();
     let empty_encoded = terminal.engine.encoded_bytes();
     let empty_mappings = terminal.engine.mapped_blocks();
+    // Fault in only the measurement code before the baseline. This does not
+    // fill history or warm the codec, so cold engine costs remain charged.
+    let _ = pss();
+    let empty = pss();
+    history_fence(label, "empty");
     for number in 1..=10_000 {
         terminal.process(format!("{number:06} {body}\r\n").as_bytes());
     }
     terminal.engine.compact(true);
+    history_fence(label, "full");
     let full = pss();
     let (ordinary, reserved, blocks) = terminal.engine.allocation_classes();
     let resident = terminal.engine.resident_pages().unwrap();
     let encoded = terminal.engine.encoded_bytes();
     let mappings = terminal.engine.mapped_blocks();
     println!(
-        "COMPACT_HISTORY body={label} lines=10000 columns=72 empty_pss_kib={empty} filled_pss_kib={full} increment_pss_kib={} empty_mapped_resident_bytes={empty_pages} mapped_resident_bytes={resident} empty_encoded_bytes={empty_encoded} encoded_bytes={encoded} empty_mappings={empty_mappings} mappings={mappings} ordinary_bytes={ordinary} reserved_bytes={reserved} blocks={blocks} reference_kib=407 ratio={:.6}",
+        "COMPACT_HISTORY body={label} lines=10000 columns=72 empty_pss_kib={empty} filled_pss_kib={full} increment_pss_kib={} empty_mapped_resident_bytes={empty_pages} mapped_resident_bytes={resident} empty_encoded_bytes={empty_encoded} encoded_bytes={encoded} empty_mappings={empty_mappings} mappings={mappings} empty_ordinary_bytes={empty_ordinary} ordinary_bytes={ordinary} reserved_bytes={reserved} blocks={blocks} reference_kib=407 ratio={:.6}",
         full.saturating_sub(empty),
         f64::from(u32::try_from(full.saturating_sub(empty)).unwrap()) / 407.0
     );
     assert!(!terminal.memory().2);
     assert!(terminal.engine.history_rows() >= 9977);
+}
+
+/// An external observer can classify resident mappings without allocating a
+/// smaps parser inside the measured process. The address is an IPC-only hint;
+/// the driver removes it from receipts and never reads memory through it.
+#[inline(never)]
+fn history_fence(body: &str, phase: &str) {
+    if std::env::var_os("PPU_HISTORY_FENCE").is_none() {
+        return;
+    }
+    let marker = 0_u8;
+    println!(
+        "HISTORY_FENCE body={body} phase={phase} pid={} stack={:x}",
+        std::process::id(),
+        (&raw const marker) as usize
+    );
+    std::io::stdout().flush().unwrap();
+    std::io::stdin().read_exact(&mut [0]).unwrap();
 }
 
 #[test]
@@ -166,10 +262,13 @@ fn ownership_receipt_accounts_encoded_history_separately() {
 }
 
 fn pss() -> usize {
+    memory_kib("Pss:")
+}
+fn memory_kib(key: &str) -> usize {
     std::fs::read_to_string("/proc/self/smaps_rollup")
         .unwrap()
         .lines()
-        .find_map(|line| line.strip_prefix("Pss:"))
+        .find_map(|line| line.strip_prefix(key))
         .unwrap()
         .split_whitespace()
         .next()
