@@ -386,6 +386,15 @@ allowance. Liveness traffic must not drive the latency pill or terminal painter
 at the probe frequency. Initial unpainted windows remain connecting; previously
 confirmed windows are monitored continuously through reconnect and replay.
 
+The server's sampled browser-control route may likewise keep one probe in
+flight. Its idle fallback gap and response scheduling margin together remain
+at most 50 ms, in addition to the measured RTT. An already-ready control reply
+may carry the next eligible probe in the same write, retaining separate frame
+boundaries. Application progress may briefly retain the faster cadence;
+content-free proofs cannot keep that activity window alive. An answered route
+has no response deadline until another probe is actually issued. Restarting
+monitoring on the same socket must not reuse an earlier probe identifier.
+
 A stalled session attachment is rebound on the server while retaining its
 browser stream and durable writer. It retains acknowledged and unacknowledged
 input; ordinary retirement still closes only that terminal stream. A stalled
