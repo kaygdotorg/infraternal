@@ -246,7 +246,7 @@ async fn link(actor: &EmbeddedAgent) -> Option<ServerLink> {
     let value: serde_json::Value = serde_json::from_slice(&result).ok()?;
     serde_json::from_value(value["server_link"].clone()).ok()
 }
-async fn wait_link(actor: &EmbeddedAgent, kind: ServerLinkKind) -> ServerLink {
+pub(crate) async fn wait_link(actor: &EmbeddedAgent, kind: ServerLinkKind) -> ServerLink {
     let result = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             if let Some(link) = link(actor).await
@@ -273,7 +273,7 @@ async fn wait_link(actor: &EmbeddedAgent, kind: ServerLinkKind) -> ServerLink {
 }
 
 /// Drain continuously so a path move cannot be disguised by receiver backpressure.
-struct Echo {
+pub(crate) struct Echo {
     input: AttachmentHandle,
     bytes: Arc<Mutex<Vec<u8>>>,
     changed: Arc<tokio::sync::Notify>,
@@ -288,7 +288,7 @@ impl Drop for Echo {
     }
 }
 impl Echo {
-    async fn start(actor: &EmbeddedAgent, session: Uuid) -> Self {
+    pub(crate) async fn start(actor: &EmbeddedAgent, session: Uuid) -> Self {
         let (input, mut output) = actor
             .attach(session.into_bytes(), 0, 0, 2)
             .await
@@ -378,38 +378,50 @@ impl Echo {
         echo.ready.store(true, std::sync::atomic::Ordering::Release);
         echo
     }
-    async fn send(&mut self, bytes: &[u8]) {
+    pub(crate) async fn send(&mut self, bytes: &[u8]) {
+        self.send_result(bytes)
+            .await
+            .expect("terminal input unavailable");
+    }
+    /// Preserve a closed baseline writer as a failed receipt, never a replacement.
+    pub(crate) async fn send_result(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
         self.input
             .send_frame(wire(&Frame::Input {
                 in_seq: self.sequence,
                 bytes,
             }))
             .await
-            .unwrap();
+            .map_err(|_| "terminal input unavailable")?;
         self.sequence += bytes.len() as u64;
+        Ok(())
     }
-    async fn wait(&self, expected: &[u8]) {
+    pub(crate) async fn wait(&self, expected: &[u8]) {
+        self.wait_result(expected)
+            .await
+            .expect("terminal integrity failed");
+    }
+    /// Baseline receipts retain a failed byte proof instead of treating a
+    /// repaint/snapshot as equivalent to an intact raw terminal stream.
+    pub(crate) async fn wait_result(&self, expected: &[u8]) -> Result<(), &'static str> {
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let notified = self.changed.notified();
-                assert!(
-                    !self.fault.load(std::sync::atomic::Ordering::Acquire),
-                    "terminal retired or required an approximate repaint"
-                );
+                if self.fault.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("terminal retired or required an approximate repaint");
+                }
                 let received = self.bytes.lock().await;
-                assert!(
-                    expected.starts_with(&received),
-                    "terminal byte ordering issue"
-                );
+                if !expected.starts_with(&received) {
+                    return Err("terminal byte ordering issue");
+                }
                 if received.len() == expected.len() {
-                    break;
+                    return Ok(());
                 }
                 drop(received);
                 notified.await;
             }
         })
         .await
-        .unwrap();
+        .map_err(|_| "terminal echo timed out")?
     }
     async fn samples(&mut self, expected: &mut Vec<u8>, tag: u8) -> Vec<u128> {
         let mut samples = Vec::new();
@@ -426,7 +438,7 @@ impl Echo {
     }
 }
 
-fn root_fixture_home(scratch: &Path) {
+pub(crate) fn root_fixture_home(scratch: &Path) {
     // Private mount propagation is mandatory before binding public login-account fixtures.
     command("mount", &["--make-rprivate", "/"]);
     let home = scratch.join("h");
@@ -454,7 +466,14 @@ fn root_fixture_home(scratch: &Path) {
     }
 }
 
-fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
+/// Share the proof-only physical route resolver without exposing listener fields.
+pub(crate) fn proof_routes(
+    listeners: &RemoteListeners,
+) -> Arc<infraternal_plugin_remote::remote_bindings::Bindings> {
+    listeners.bindings.clone()
+}
+
+pub(crate) fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
     let (socket, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
     nix::fcntl::fcntl(
         &inherited,
@@ -488,7 +507,7 @@ fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
 // discard its connection before ownership reaches the caller; the last
 // in-memory connection would then erase the schema, unrelated to transaction
 // cancellation. Each namespace lifecycle owns a fresh file outside the repo.
-async fn namespace_pool(options: sqlx::sqlite::SqlitePoolOptions) -> sqlx::SqlitePool {
+pub(crate) async fn namespace_pool(options: sqlx::sqlite::SqlitePoolOptions) -> sqlx::SqlitePool {
     let scratch = proof_scratch();
     std::fs::create_dir_all(&scratch).unwrap();
     let database = scratch.join(format!("namespace-{}.sqlite", Uuid::new_v4()));

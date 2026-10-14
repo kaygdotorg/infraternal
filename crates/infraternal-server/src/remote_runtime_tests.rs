@@ -393,7 +393,7 @@ mod additional_listeners;
 
 #[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
 #[path = "remote_mesh_namespace_tests.rs"]
-mod mesh_namespace;
+pub(crate) mod mesh_namespace;
 
 // Shared native fixtures prove replacement identity and cancelled delivery.
 async fn adapter_connect_control(
