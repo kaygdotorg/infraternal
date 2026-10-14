@@ -4,7 +4,6 @@ use crate::embedded::{
     AgentError, AttachmentHandle, EmbeddedAgent, SessionInventoryState, TerminalOutput,
     TerminalSize,
 };
-use crate::liveness::{Liveness, TICK};
 use crate::{
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
@@ -443,8 +442,6 @@ async fn run_socket(
     );
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
-    let mut ticks = tokio::time::interval(TICK);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut loop_result = Ok(());
     let mut expiry = socket_deadline(&state, &user_id, &session_token)
         .await
@@ -452,40 +449,6 @@ async fn run_socket(
     loop {
         transport.active(!attachments.is_empty());
         tokio::select! {
-            _ = ticks.tick(), if !attachments.is_empty() => {
-                // Rebind stalled session routes on the server; the healthy browser socket,
-                // sibling streams and durable input writer remain usable.
-                let expired_streams: Vec<u32> = attachments.iter()
-                    .filter_map(|(&id, a)| (!a.awaiting_ack && a.liveness.expired()).then_some(id)).collect();
-                for stream_id in expired_streams {
-                    let reconnect = attachments.get(&stream_id).filter(|a|
-                        matches!(*a.inventory.borrow(), SessionInventoryState::Available(_)))
-                        .map(|a| a.handle.clone());
-                    if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
-                        &state, &user_id, &session_token, &connection_id, stream_id,
-                        TerminalOutput::Reconnecting, &mut attachments, &mut ended, &mut sink, &mut encode,
-                    )).await.is_err() { loop_result = Err(()); break; }
-                    if let Some(handle) = reconnect
-                        && while_authorized(&state, &user_id, &session_token, true,
-                            async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() {
-                            loop_result = Err(()); break;
-                        }
-                }
-                if loop_result.is_err() { break; }
-                // Internal proofs carry no input or browser data, just as their
-                // Pong fast path below carries no authority. Browser probes and
-                // all reconnect/data operations retain the authority watchdog.
-                let probes = async {
-                    for (&stream_id, attachment) in &mut attachments {
-                        if attachment.awaiting_ack { continue; }
-                        let (nonce, sent_us) = attachment.liveness.ping();
-                        encode_muxed_frame_into(stream_id, &Frame::Ping { nonce, sent_us }, &mut encode).map_err(|_| ())?;
-                        attachment.handle.send_frame(Bytes::copy_from_slice(&encode)).await.map_err(|_| ())?;
-                    }
-                    Ok::<(), ()>(())
-                };
-                if probes.await.is_err() { break; }
-            }
             Some(reply) = plugins.recv() => {
                 let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
                 if while_authorized(&state, &user_id, &session_token, true,
@@ -598,19 +561,18 @@ async fn run_socket(
                     output_open = false;
                     continue;
                 };
-                // An internal route proof adds no terminal authority and sends no browser data.
-                // Authorizing every probe would make idle work scale with sessions × probe rate;
-                // revocation and every actual terminal frame retain their existing authority gates.
-                if let TerminalOutput::Pong { nonce, sent_us } = output {
-                    if let Some(attachment) = attachments.get_mut(&stream_id) {
-                        attachment.liveness.pong(nonce, sent_us);
-                    }
-                    continue;
-                }
+                // Proof replies stay in the host actor. A failed route returns here
+                // for two authority gates: the browser notice, then backend rebind.
+                let reconnect = matches!(output, TerminalOutput::RouteExpired)
+                    .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
                 if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
                     &mut attachments, &mut ended, &mut sink, &mut encode,
                 )).await.is_err() { break; }
+                if let Some(handle) = reconnect
+                    && while_authorized(&state, &user_id, &session_token, true,
+                        async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() { break; }
+
             }
             plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
                 let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
@@ -938,13 +900,8 @@ where
             .await
             .is_ok()
         }
-        TerminalOutput::Pong { nonce, sent_us } => {
-            attachment.liveness.pong(nonce, sent_us);
-            return Ok(());
-        }
-        TerminalOutput::Reconnecting => {
+        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired => {
             attachment.awaiting_ack = true;
-            attachment.liveness = Liveness::new();
             let notice = serde_json::to_vec(&json!({
                 "type": "terminal.reconnecting",
                 "session_id": uuid::Uuid::from_bytes(attachment.session_id).to_string(),
@@ -967,9 +924,6 @@ where
                 || (!attachment.awaiting_ack && in_seq_acked > attachment.input_sent_end)
             {
                 return Err(());
-            }
-            if attachment.awaiting_ack {
-                attachment.liveness = Liveness::new();
             }
             attachment.awaiting_ack = false;
             attachment.input_sent_end = attachment.input_sent_end.max(in_seq_acked);
@@ -1503,7 +1457,7 @@ where
             .await?;
             let attachment = tokio::time::timeout(
                 BACKEND_TIMEOUT,
-                agent.attach(session, last_out_seq, input_acked, writer_stream),
+                agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
             )
             .await
             .map_err(|_| ())?
@@ -1529,8 +1483,6 @@ where
                     credit: 0,
                     awaiting_ack: true,
                     needs_snapshot: false,
-                    liveness: Liveness::new(),
-                    inventory: agent.session_inventory(),
                 },
             );
             let sender = output_tx.clone();
@@ -1702,8 +1654,6 @@ struct ClientAttachment {
     credit: u64,
     awaiting_ack: bool,
     needs_snapshot: bool,
-    liveness: Liveness,
-    inventory: tokio::sync::watch::Receiver<SessionInventoryState>,
 }
 
 /// Browser plugin action adapter; dimensions arrive in the attachment's Resize.

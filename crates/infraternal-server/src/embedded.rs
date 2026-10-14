@@ -90,10 +90,10 @@ pub(crate) enum TerminalOutput {
     Event { event_json: Bytes },
     /// Highest input sequence written to the PTY.
     Ack { in_seq_acked: u64 },
-    /// The shim answered an ordered state fence for this terminal route.
-    Pong { nonce: u64, sent_us: u64 },
     /// The shared host link is rebinding; keep this stream and its input writer.
     Reconnecting,
+    /// A route expired; only an authenticated browser consumer may request rebind.
+    RouteExpired,
     /// The agent retired one terminal stream.
     Closed { code: u16 },
 }
@@ -146,8 +146,7 @@ impl AttachmentHandle {
             .await
             .map_err(|_| AgentError::Unavailable)
     }
-
-    /// Rebind a stalled route without changing its browser stream or shim writer.
+    /// Rebind only after the browser consumer admits the transition under its authority gate.
     pub async fn reconnect(&self) -> Result<(), AgentError> {
         self.0
             .commands
@@ -373,6 +372,30 @@ impl EmbeddedAgent {
         last_in_seq: u64,
         stream_id: u32,
     ) -> Result<TerminalAttachment, AgentError> {
+        self.attach_with_proofs(session_id, last_out_seq, last_in_seq, stream_id, false)
+            .await
+    }
+
+    /// Attach a browser route whose shim proofs are owned by the shared host actor.
+    pub async fn attach_monitored(
+        &self,
+        session_id: [u8; 16],
+        last_out_seq: u64,
+        last_in_seq: u64,
+        stream_id: u32,
+    ) -> Result<TerminalAttachment, AgentError> {
+        self.attach_with_proofs(session_id, last_out_seq, last_in_seq, stream_id, true)
+            .await
+    }
+
+    async fn attach_with_proofs(
+        &self,
+        session_id: [u8; 16],
+        last_out_seq: u64,
+        last_in_seq: u64,
+        stream_id: u32,
+        monitored: bool,
+    ) -> Result<TerminalAttachment, AgentError> {
         let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
         let (input_credit, input_acked) = watch::channel(last_in_seq);
@@ -390,6 +413,7 @@ impl EmbeddedAgent {
                 last_in_seq,
                 output: output_tx,
                 input_credit,
+                monitored,
                 reply,
             })
             .await
@@ -464,6 +488,7 @@ enum Command {
         last_in_seq: u64,
         output: mpsc::Sender<TerminalOutput>,
         input_credit: watch::Sender<u64>,
+        monitored: bool,
         reply: oneshot::Sender<Result<(u64, u32), AgentError>>,
     },
     Input {
@@ -492,6 +517,10 @@ struct AttachmentState {
     awaiting_ack: bool,
     // Initial attachment stays cut-through; only replacement orders replay behind an Ack.
     replaying: bool,
+    // Browser-only monitoring leaves parked native writers' existing lifecycle intact.
+    // The same actor tick owns the lease; a Pong never needs a payload forwarder.
+    route: Option<Liveness>,
+    proof_rebind_pending: bool,
     output: mpsc::Sender<TerminalOutput>,
 }
 
@@ -784,6 +813,7 @@ async fn run_actor(
     let mut hot = ();
     #[cfg(not(feature = "remote"))]
     let mut writes = ();
+    let mut probe_queue = std::collections::VecDeque::new();
     let mut liveness = Liveness::new();
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -825,6 +855,7 @@ async fn run_actor(
             continue;
         }
         if connection.is_none() {
+            probe_queue.clear();
             if source.closed() {
                 return;
             }
@@ -871,6 +902,17 @@ async fn run_actor(
             remote.control_read_ready(control_ready);
         }
         tokio::select! {
+            () = std::future::ready(()), if !probe_queue.is_empty() => {
+                // One remote proof per turn preserves incoming/priming/command interleaving.
+                let Some(id) = probe_queue.pop_front() else { continue; };
+                if !route_proofs::probe(link, &mut attachments, id).await
+                    && let Some(old) = connection.take() {
+                    #[cfg(feature = "remote")]
+                    writes.stop().await;
+                    connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                    probe_queue.clear();
+                }
+            }
             (stream, success) = next_writes(&mut writes) => {
                 #[cfg(not(feature = "remote"))]
                 let _ = (stream, success);
@@ -898,7 +940,9 @@ async fn run_actor(
             }
             _ = ticks.tick(), if !attachments.is_empty() => {
                 let (nonce, sent_us) = liveness.ping();
-                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await)
+                let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
+                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
+                    || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
                         writes.stop().await;
@@ -1478,6 +1522,7 @@ async fn process_command(
             last_in_seq,
             output,
             input_credit,
+            monitored,
             reply,
         } => {
             #[cfg(feature = "remote")]
@@ -1522,6 +1567,8 @@ async fn process_command(
                     credit: 0,
                     awaiting_ack: true,
                     replaying: false,
+                    route: monitored.then(Liveness::new),
+                    proof_rebind_pending: false,
                     output,
                 },
             );
@@ -1533,7 +1580,9 @@ async fn process_command(
                 return true;
             };
             // A shared-link replacement already replays this attachment once.
-            if attachment.awaiting_ack {
+            if attachment.awaiting_ack
+                || (attachment.route.is_some() && !attachment.proof_rebind_pending)
+            {
                 return true;
             }
             if !write_frame(
@@ -2035,6 +2084,10 @@ async fn process_incoming(
             // The backend may have accepted input whose Ack died with the old browser.
             // Its first reattach Ack is authoritative for this same durable writer.
             let replay = attachment.replaying;
+            if attachment.awaiting_ack && attachment.route.is_some() {
+                attachment.route = Some(Liveness::new());
+                attachment.proof_rebind_pending = false;
+            }
             attachment.replaying = false;
             let acknowledged = usize::try_from(in_seq_acked - attachment.last_in_seq)
                 .unwrap_or(usize::MAX)
@@ -2112,19 +2165,27 @@ async fn process_incoming(
             nonce,
             sent_us,
         } => {
-            let Some(attachment) = routes.get(&stream_id).and_then(|id| attachments.get(id)) else {
+            let Some(attachment) = routes
+                .get(&stream_id)
+                .and_then(|id| attachments.get_mut(id))
+            else {
                 return true;
             };
-            // A full consumer is already retired by ordinary output. Never block siblings for a probe.
-            let _ = attachment
-                .output
-                .try_send(TerminalOutput::Pong { nonce, sent_us });
+            if let Some(route) = &mut attachment.route {
+                route.pong(nonce, sent_us);
+                return true;
+            }
+            // Unmonitored native consumers never use a shim proof as payload.
+            // An unsolicited or stale proof cannot wake or renew such a route.
             true
         }
         Incoming::ControlEvent | Incoming::SessionInventory(_) => true,
         Incoming::Disconnected | Incoming::Hello { .. } => false,
     }
 }
+
+#[path = "embedded_route_proofs.rs"]
+mod route_proofs;
 
 /// A full reader or an invalid input producer retires only its attachment. The PTY/ring remain
 /// in the shim; reconnect can catch up from the browser's last delivered offset.

@@ -820,6 +820,8 @@ mod tests {
                 credit: 1024,
                 awaiting_ack: false,
                 replaying: false,
+                route: None,
+                proof_rebind_pending: false,
                 output,
             },
             receiver,
