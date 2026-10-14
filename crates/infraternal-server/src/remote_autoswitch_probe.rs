@@ -126,6 +126,21 @@ impl Capture {
         assert!(!events.overflow, "transport milestone recorder overflowed");
         events.first.values().cloned().collect()
     }
+    /// Begin a fresh terminal witness after draining earlier expected bytes.
+    /// Retain cumulative admission/control and global output callback counts.
+    /// Retire terminal peer counters too, preserving the recorder's key bound.
+    pub(crate) fn clear_terminal_milestones(&self) {
+        let mut events = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        events
+            .first
+            .retain(|(kind, _, _), _| *kind != Kind::TerminalByte);
+        events
+            .peer_counts
+            .retain(|(kind, _), _| *kind != Kind::TerminalByte);
+    }
 }
 impl Drop for Capture {
     fn drop(&mut self) {
@@ -191,6 +206,14 @@ mod tests {
         assert_eq!(capture.events()[1].wall, first[1].wall);
         record(Kind::TerminalByte, peer, 4);
         assert_eq!(capture.events().len(), 3);
+        capture.clear_terminal_milestones();
+        assert_eq!(capture.events().len(), 1);
+        assert_eq!(capture.count(Kind::TerminalByte), 3);
+        assert_eq!(capture.count_peer(Kind::TerminalByte, peer), 0);
+        record(Kind::TerminalByte, peer, 2);
+        assert_eq!(capture.events().len(), 2);
+        assert_eq!(capture.count(Kind::TerminalByte), 4);
+        assert_eq!(capture.count_peer(Kind::TerminalByte, peer), 1);
         drop(capture);
         record(Kind::TerminalByte, peer, 6);
         assert!(
