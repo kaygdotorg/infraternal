@@ -181,6 +181,7 @@ def run(args):
                 shell = int(child)
                 shells[shell] = birth(shell)
         assert len(shells) == args.sessions
+        emit(phase="fixture-pids", host_pids=host_pids, shell_pids=list(shells))
         time.sleep(1)
         sample('idle')
         before_cpu = sum(cpu(pid) for pid in host_pids)
@@ -227,7 +228,7 @@ def run(args):
         sample('flood')
         # Capture a short sample while the other PTYs still flood; scope timeout
         # caps the whole run and guarantees the two-minute burst ceiling.
-        latency("flood", min(args.samples, 31))
+        latency("flood", min(args.samples, 3 if args.sessions >= 1000 else 31))
         for i in range(args.sessions):
             peer, _ = connect(i)
             send(peer, 2, struct.pack('<Q',0))
@@ -239,6 +240,9 @@ def run(args):
         time.sleep(1)
         latency("settled", args.samples)
     finally:
+        # A wrapper may forward the same interrupt twice. Finish fixture-owned
+        # cleanup atomically instead of leaving output generators behind.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         for peer in peers: peer.close()
         # Sessions may have started after an interrupted startup: discover only
         # immediate children of our own still-live fixture hosts before cleanup.
