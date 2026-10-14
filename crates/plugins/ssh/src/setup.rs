@@ -37,6 +37,8 @@ pub struct Event {
     pub sequence: u64,
     pub stage: Stage,
     pub state: State,
+    /// Attempt eligibility; current authority and worker admission still apply.
+    pub retry_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<InstallStep>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +122,7 @@ impl Status {
             sequence: entry.sequence,
             stage,
             state: outcome,
+            retry_available: outcome == State::Failed && entry.attempt < 8,
             failed_step: failure.and_then(|failure| failure.failed_step),
             message: failure.map(|failure| failure.message),
         };
@@ -222,5 +225,30 @@ mod tests {
         assert_eq!(events[0].attempt, 2);
         assert_eq!(events[0].sequence, 66);
         assert!(status.events("foreign", host, 0).is_err());
+    }
+
+    #[test]
+    fn exhausted_setup_failure_retains_reason_without_offering_retry() {
+        let status = Status::default();
+        let host = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let failure = Failure::install("The host could not join. Try again.").at(InstallStep::Join);
+        for attempt in 1..=8 {
+            status.begin("owner", host, session).unwrap();
+            status
+                .emit("owner", host, Stage::Join, State::Failed, Some(&failure))
+                .unwrap();
+            let event = status
+                .events("owner", host, attempt - 1)
+                .unwrap()
+                .1
+                .pop()
+                .unwrap();
+            assert_eq!(event.retry_available, attempt < 8);
+            assert_eq!(event.message, Some(failure.message));
+            assert!(matches!(event.failed_step, Some(InstallStep::Join)));
+            assert_eq!(event.session_id, session);
+        }
+        assert!(status.begin("owner", host, session).is_err());
     }
 }
