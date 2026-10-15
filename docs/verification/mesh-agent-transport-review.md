@@ -43,8 +43,9 @@
   capability withdrawal cancels alternatives, and component removal or lease
   retirement prevents pending work from selecting a replacement socket. Alternative replies add no
   connection, writer, stream or admission authority. Real authenticated-stream
-  copy-first and shutdown regressions cover the implementation; release
-  acceptance remains pending. Unused timers cancel without removing a live
+  copy-first and shutdown regressions cover the implementation. Standing
+  acceptance and natural joining have separate issue receipts. Unused timers
+  cancel without removing a live
   endpoint's receive registration or pending enrolled recovery.
 - Successful scheduled enrolled backups consume their originals too, so a
   later route hint cannot replay a second burst of already-copied ciphertext.
@@ -109,8 +110,18 @@
   omit unavailable traffic fields. None disables production path freshness or
   send-boundary observations. Failed proof/ramp/warmup cohorts cannot claim
   healthy steady cost just because surviving watchers stop failing later.
-- Release acceptance, both static size ceilings and the complete fast gate are
-  recorded on #201. This checklist does not assert outstanding measurements pass.
-  The dual reply has no accepted healthy-1000-transport or 31-sample
-  per-venue release result claimed here; those measurements, its regressions
-  and the final gates remain required.
+- The first terminal Output witness is qualified by its writer ID. Another
+  writer's Output cannot satisfy the surviving attachment's latency claim.
+  Standing before/after cohorts, natural joining attempts and failed bootstrap
+  operations remain separate issue receipts. A conditional latency percentile
+  never removes a failed operation from its reported attempt denominator.
+- Explicit scale diagnostics compare the same probe cadence with copies off,
+  separate reactor ownership within the same worker budget, and direct mesh
+  TLS without server aliases. The last control changes the connection's birth
+  path and cannot establish switch acceptance. Failed controls do not justify
+  weaker freshness guards or an accepted healthy-cohort CPU/RSS claim.
+- Release acceptance, exact static size ceilings and full gate transcripts live
+  on #201. Standing-session release cohorts meet their per-venue byte budgets;
+  this does not establish the earliest byte of natural joining, the original
+  SSH-shell handoff, healthy scale cost or a clean gate on a subsequent head.
+  Each remains independently reviewable and outstanding failures stay recorded.
