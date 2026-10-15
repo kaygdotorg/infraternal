@@ -1943,6 +1943,10 @@ where
     }
 }
 
+#[cfg(test)]
+#[path = "websocket_receive_tests.rs"]
+mod receive_tests;
+
 pub(super) async fn receive_wire<S>(
     source: &mut S,
     receive: &mut BytesMut,
@@ -1952,6 +1956,9 @@ where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
 {
     loop {
+        // Buffered frames and transport controls can remain ready without I/O.
+        // Bound their turn so an independent proof future can run in this task.
+        tokio::task::consume_budget().await;
         match decode_muxed_frame(receive) {
             Ok(decoded) => {
                 let wire_len = decoded.wire_len;
