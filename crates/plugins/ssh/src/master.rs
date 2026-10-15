@@ -79,7 +79,7 @@ impl Master {
             complete: false,
         }));
         let progress = Arc::new(tokio::sync::Notify::new());
-        let reading = tokio::spawn(read_diagnostics(
+        let reading = crate::tasks::spawn(read_diagnostics(
             stderr,
             diagnostics.clone(),
             progress.clone(),
