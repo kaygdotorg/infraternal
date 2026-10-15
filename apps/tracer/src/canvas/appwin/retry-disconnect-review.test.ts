@@ -70,8 +70,11 @@ test("retry after a decoder failure while disconnected stops both native session
     stream.retry(css); await settled();
     // Only the reconnect timer remains after detach clears this viewer's timers.
     expect(timers.size).toBe(1);
+    expect(starts).toHaveLength(1);
+    expect(stops).toEqual([]);
     [...timers.values()][0]!(); sockets[1]!.welcome(); await settled();
     expect(starts).toHaveLength(2);
+    expect(stops).toEqual([starts[0]!]);
     stream.dispose(); await settled();
     expect(stops).toContain(starts[0]!);
     expect(stops).toContain(starts[1]!);

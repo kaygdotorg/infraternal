@@ -117,6 +117,10 @@ export class AppStream {
   private lastInputAt = -Infinity;
   private pausedTimer = 0;
   private statsWaiters: Array<(stats: WorkerStats) => void> = [];
+  /** Native sessions whose Stop was queued while the shared socket could not carry it. */
+  private pendingStops: Set<string> | undefined;
+  private stopTask: Promise<boolean> | undefined;
+  private stopWelcomeOff: (() => void) | undefined;
 
   constructor(private readonly o: StreamOptions) {}
 
@@ -149,6 +153,12 @@ export class AppStream {
     for (let attempt = 0; attempt < MAX_START_TRIES; attempt++) {
       await this.welcomed();
       if (generation !== this.generation || this.disposed) return;
+      // A disconnected retry retains the old session ID until Stop is acknowledged (or refused). Starting first
+      // would leave both native captures alive when the socket comes back.
+      if (this.pendingStops?.size) {
+        if (!(await this.flushStops())) continue;
+        if (!this.o.connection.isWelcomed) continue;
+      }
       if (await this.start(generation, attempt === MAX_START_TRIES - 1)) return;
     }
   }
@@ -450,9 +460,54 @@ export class AppStream {
     void this.open(css);
   }
 
-  private async stopSession(id: string | undefined): Promise<void> {
+  private stopSession(id: string | undefined): void {
     if (!id) return;
-    try { await this.o.connection.call("desktop.session.stop", { session_id: id }); } catch { /* the machine ends it when the connection goes */ }
+    (this.pendingStops ??= new Set()).add(id);
+    if (!this.stopWelcomeOff) this.stopWelcomeOff = this.o.connection.onWelcome(() => { void this.flushStops(); });
+    void this.flushStops();
+  }
+
+  /** Drain native Stop requests serially and retain them across a lost socket. */
+  private flushStops(): Promise<boolean> {
+    if (this.stopTask) return this.stopTask;
+    const pendingStops = this.pendingStops;
+    if (!pendingStops || pendingStops.size === 0) {
+      this.stopWelcomeOff?.();
+      this.stopWelcomeOff = undefined;
+      return Promise.resolve(true);
+    }
+    if (!this.o.connection.isWelcomed) return Promise.resolve(false);
+
+    const task = (async (): Promise<boolean> => {
+      while (pendingStops.size > 0 && this.o.connection.isWelcomed) {
+        const id = pendingStops.values().next().value as string;
+        try {
+          await this.o.connection.call("desktop.session.stop", { session_id: id });
+          pendingStops.delete(id);
+        } catch (error) {
+          if (error instanceof Error && error.message === "connection lost") return false;
+          // A refusal or unreadable result is a completed response; retry only when the transport itself was lost.
+          pendingStops.delete(id);
+        }
+      }
+      return pendingStops.size === 0;
+    })();
+    this.stopTask = task;
+    void task.then(() => {
+      if (this.stopTask !== task) return;
+      this.stopTask = undefined;
+      if (pendingStops.size === 0) {
+        if (this.pendingStops === pendingStops) this.pendingStops = undefined;
+        this.stopWelcomeOff?.();
+        this.stopWelcomeOff = undefined;
+      } else if (this.o.connection.isWelcomed) {
+        // A reconnect may welcome while the previous socket's rejected call is settling, or another Stop may arrive as the queue drains.
+        queueMicrotask(() => { void this.flushStops(); });
+      }
+    }, () => {
+      if (this.stopTask === task) this.stopTask = undefined;
+    });
+    return task;
   }
 
   /** The window closed: the viewer detaches, the worker ends and the machine stops the stream (its window goes back to its own size). */
