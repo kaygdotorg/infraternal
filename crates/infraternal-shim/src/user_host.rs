@@ -230,6 +230,17 @@ impl Drop for Session {
         }
     }
 }
+/// A wholly logical data Ack may wait for output; real wire work and state
+/// fences retain writable interest even while a PTY turn is queued.
+fn may_coalesce_data_ack(peer: &Peer, head: u64, live: bool) -> bool {
+    live && peer.pending.is_empty()
+        && matches!(peer.input_reply, Some(InputReply::Ack))
+        && peer.cursor == Some(head)
+        && peer.request.is_none()
+        && peer.deferred.is_none()
+        && peer.trailing.is_empty()
+}
+
 impl Session {
     fn new(mut config: Config, history: usize) -> io::Result<Self> {
         let (listener, path) = socket(&config)?;
@@ -332,6 +343,12 @@ impl Session {
                 seq < self.ring.head() || (self.drained && self.exit.is_some() && !peer.exited_sent)
             })
     }
+    /// Queued PTY service supplies the fallback for a logical Ack. Keeping
+    /// that Ack writable would revisit it on every turn before the read.
+    fn can_write_while_read_pending(&self, peer: &Peer) -> bool {
+        self.can_write(peer)
+            && !may_coalesce_data_ack(peer, self.ring.head(), !self.drained && self.exit.is_none())
+    }
     fn observe_exit(&mut self) -> io::Result<()> {
         if self.exit.is_none()
             && let Some(status) = self.pty.child.try_wait()?
@@ -349,8 +366,9 @@ impl Session {
         self.housekeeping_coalesced(false)
     }
     /// Keep an ordinary data Ack logical while its caller prepares a read.
-    /// The caller must retain writable interest and settle without deferral
-    /// when no PTY data is ready; explicit state and input-only links are immediate.
+    /// The caller must retain writable interest or guarantee queued PTY service.
+    /// Settle without deferral after that service, including an empty read;
+    /// explicit state and input-only links are immediate.
     #[allow(clippy::too_many_lines)]
     fn housekeeping_coalesced(&mut self, coalesce_ack: bool) -> io::Result<bool> {
         #[cfg(feature = "host-diagnostics")]
@@ -423,13 +441,7 @@ impl Session {
             // fresh Ack with its next read. State fences, replay/snapshot
             // requests, deferred input and ended sessions retain prompt replies.
             let defer_ack = coalesce_ack
-                && !self.drained
-                && self.exit.is_none()
-                && matches!(p.input_reply, Some(InputReply::Ack))
-                && p.cursor == Some(self.ring.head())
-                && p.request.is_none()
-                && p.deferred.is_none()
-                && p.trailing.is_empty();
+                && may_coalesce_data_ack(p, self.ring.head(), !self.drained && self.exit.is_none());
             if p.pending.is_empty()
                 && !defer_ack
                 && let Some(reply) = p.input_reply.take()
@@ -886,7 +898,7 @@ mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
 
-    fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
+    pub(super) fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
             ".cache/codex-scratch/process-per-user/a{tag:x}{}",
             std::process::id()
@@ -960,6 +972,7 @@ mod tests {
                 session.peers[0].cursor = None;
                 Frame::InputAck(0).encode().unwrap()
             };
+            assert!(session.can_write_while_read_pending(&session.peers[0]));
             session.housekeeping_coalesced(true).unwrap();
             let mut received = vec![0; expected.len()];
             client.read_exact(&mut received).unwrap();

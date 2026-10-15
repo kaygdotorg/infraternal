@@ -38,7 +38,7 @@ pub(super) struct Registry {
 pub(super) fn ownership_fixture(sessions: &[Session], signals: &SignalFd) -> io::Result<Registry> {
     let mut registry = Registry::new(sessions.len(), signals)?;
     for (index, session) in sessions.iter().enumerate() {
-        registry.sync(index, session)?;
+        registry.sync(index, session, false)?;
     }
     Ok(registry)
 }
@@ -80,7 +80,7 @@ impl Registry {
         let fd = RawFd::try_from(key & u64::from(u32::MAX)).ok()?;
         self.by_fd.get(&fd).filter(|entry| entry.key == key)
     }
-    fn sync(&mut self, index: usize, session: &Session) -> io::Result<()> {
+    fn sync(&mut self, index: usize, session: &Session, read_pending: bool) -> io::Result<()> {
         // Peer admission already caps this array. Steady interest changes
         // borrow a small stack list rather than allocate on every settle.
         let mut storage: [Option<(BorrowedFd<'_>, EpollFlags)>; MAX_PEERS + 2] =
@@ -103,7 +103,12 @@ impl Registry {
             if peer.deferred.is_none() && peer.trailing.is_empty() {
                 flags |= EpollFlags::EPOLLIN;
             }
-            if session.can_write(peer) {
+            let writable = if read_pending {
+                session.can_write_while_read_pending(peer)
+            } else {
+                session.can_write(peer)
+            };
+            if writable {
                 flags |= EpollFlags::EPOLLOUT;
             }
             storage[descriptor_count] = Some((peer.stream.as_fd(), flags));
@@ -372,6 +377,26 @@ fn next_output(
     None
 }
 
+/// Fresh Acks retain the silent-program writable fallback. `QueuedRead` relies
+/// on an already queued PTY attempt and must not add a writable polling loop.
+#[derive(Clone, Copy)]
+enum AckMode {
+    Immediate,
+    Fresh,
+    QueuedRead,
+}
+impl AckMode {
+    fn for_control(incoming: bool, writable: bool, read_pending: bool) -> Self {
+        if read_pending {
+            Self::QueuedRead
+        } else if incoming && !writable {
+            Self::Fresh
+        } else {
+            Self::Immediate
+        }
+    }
+}
+
 /// Settle queues and lifetimes only for a ready session. Registration happens
 /// both before and after acceptance so a closed/reused fd cannot inherit a key.
 fn settle(
@@ -381,23 +406,23 @@ fn settle(
     timers: &mut BinaryHeap<Reverse<(Instant, usize)>>,
     marks: &mut ReadyMarks,
 ) -> io::Result<bool> {
-    settle_coalesced(index, slots, registry, timers, marks, false)
+    settle_with_ack_mode(index, slots, registry, timers, marks, AckMode::Immediate)
 }
-fn settle_coalesced(
+fn settle_with_ack_mode(
     index: usize,
     slots: &mut [Option<Session>],
     registry: &mut Registry,
     timers: &mut BinaryHeap<Reverse<(Instant, usize)>>,
     marks: &mut ReadyMarks,
-    coalesce_ack: bool,
+    ack_mode: AckMode,
 ) -> io::Result<bool> {
     let Some(session) = slots[index].as_mut() else {
         return Ok(false);
     };
-    let finished = if coalesce_ack {
-        session.housekeeping_coalesced(true)?
-    } else {
+    let finished = if matches!(ack_mode, AckMode::Immediate) {
         session.housekeeping()?
+    } else {
+        session.housekeeping_coalesced(true)?
     };
     if finished {
         slots[index] = None;
@@ -411,7 +436,7 @@ fn settle_coalesced(
     {
         timers.push(Reverse((deadline, index)));
     }
-    registry.sync(index, session)?;
+    registry.sync(index, session, matches!(ack_mode, AckMode::QueuedRead))?;
     Ok(true)
 }
 fn retire_failed(index: usize, slots: &mut [Option<Session>], registry: &mut Registry) {
@@ -430,7 +455,7 @@ pub(super) fn run(
     let mut timers: BinaryHeap<Reverse<(Instant, usize)>> = BinaryHeap::new();
     for (index, session) in slots.iter().enumerate() {
         if let Some(session) = session {
-            registry.sync(index, session)?;
+            registry.sync(index, session, false)?;
         }
     }
     let mut live = slots.len();
@@ -704,15 +729,18 @@ pub(super) fn run(
                         .flags(peer.stream.as_raw_fd(), &registry)
                         .contains(PollFlags::POLLOUT)
                 });
-                let coalesce_ack =
-                    (incoming && !writable) || (readable && marks.read[index] != marks.round);
-                settle_coalesced(
+                let ack_mode = AckMode::for_control(
+                    incoming,
+                    writable,
+                    readable && marks.read[index] != marks.round,
+                );
+                settle_with_ack_mode(
                     index,
                     &mut slots,
                     &mut registry,
                     &mut timers,
                     &mut marks,
-                    coalesce_ack,
+                    ack_mode,
                 )?;
                 Ok(())
             }));
@@ -761,13 +789,13 @@ pub(super) fn run(
             let result = catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
                 // The next bounded PTY read can share an ordered Ack/output
                 // batch. Its final settle always sends even when that read is empty.
-                if !settle_coalesced(
+                if !settle_with_ack_mode(
                     index,
                     &mut slots,
                     &mut registry,
                     &mut timers,
                     &mut marks,
-                    true,
+                    AckMode::QueuedRead,
                 )? {
                     return Ok(());
                 }
@@ -1091,6 +1119,81 @@ mod tests {
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
+    fn queued_data_ack_needs_no_writable_poll_before_pty_service() {
+        use std::io::Read as _;
+        for output in [false, true] {
+            let (mut session, mut client, state) =
+                super::super::tests::ack_fixture(34 + u8::from(output));
+            let signals = SignalFd::new(&nix::sys::signal::SigSet::empty()).unwrap();
+            let mut registry = Registry::new(9, &signals).unwrap();
+            let mut marks = ReadyMarks::new(9);
+            for index in 0..8 {
+                assert!(marks.read_interactive(index));
+            }
+            assert!(!marks.read_interactive(8));
+            let mut bulk = VecDeque::new();
+            assert!(marks.queue(8));
+            bulk.push_back(8);
+            session.housekeeping_coalesced(true).unwrap();
+            let fresh = AckMode::for_control(true, false, false);
+            registry
+                .sync(8, &session, matches!(fresh, AckMode::QueuedRead))
+                .unwrap();
+            let fd = session.peers[0].stream.as_raw_fd();
+            let fresh_write = registry.by_fd[&fd].flags.contains(EpollFlags::EPOLLOUT);
+            // A queued read guarantees service without a second writable poll.
+            let waiting = AckMode::for_control(false, true, true);
+            registry
+                .sync(8, &session, matches!(waiting, AckMode::QueuedRead))
+                .unwrap();
+            let waiting_write = registry.by_fd[&fd].flags.contains(EpollFlags::EPOLLOUT);
+            let mut events = [EpollEvent::empty(); 8];
+            let count = registry
+                .epoll
+                .wait(&mut events, EpollTimeout::ZERO)
+                .unwrap();
+            let polled_write = events[..count].iter().any(|event| {
+                event.data() & u64::from(u32::MAX) == u64::try_from(fd).unwrap()
+                    && event.events().contains(EpollFlags::EPOLLOUT)
+            });
+            let mut outputs = 0;
+            let chosen = next_output(&mut std::iter::empty(), &mut bulk, &mut marks, &mut outputs);
+            let granted = marks.read_once(8);
+            let mut expected = super::super::super::Frame::InputAck(0).encode().unwrap();
+            if output {
+                session.ring.append(b"reply").unwrap();
+                expected.extend(
+                    super::super::super::Frame::Output(0, b"reply".to_vec())
+                        .encode()
+                        .unwrap(),
+                );
+            }
+            // The final settle acknowledges even an empty read attempt.
+            session.housekeeping().unwrap();
+            registry.sync(8, &session, false).unwrap();
+            let mut received = vec![0; expected.len()];
+            let delivered = client.read_exact(&mut received);
+            drop(registry);
+            drop(client);
+            drop(session);
+            std::fs::remove_dir_all(state).unwrap();
+            assert!(fresh_write, "fresh Acks retain the silent-program fallback");
+            assert!(
+                !waiting_write,
+                "a queued PTY turn must not rearm logical Ack writability"
+            );
+            assert!(
+                !polled_write,
+                "the kernel must not return the held logical Ack as writable"
+            );
+            assert_eq!(chosen, Some((8, BULK_READ_BYTES)));
+            assert!(granted);
+            delivered.expect("queued service must finish the Ack, including an empty read");
+            assert_eq!(received, expected);
+        }
+    }
+
+    #[test]
     fn inline_and_extra_descriptor_flags_merge_without_losing_generations() {
         let mut ready = Ready::default();
         ready.insert(7, EpollFlags::EPOLLIN);
@@ -1140,7 +1243,8 @@ mod tests {
         )
         .unwrap();
         let mut registry = ownership_fixture(std::slice::from_ref(&session), &signals).unwrap();
-        let ((), delta) = crate::heap_accounting::measure(|| registry.sync(0, &session).unwrap());
+        let ((), delta) =
+            crate::heap_accounting::measure(|| registry.sync(0, &session, false).unwrap());
         assert_eq!(delta.allocations, 0);
         drop(registry);
         drop(session);
@@ -1409,23 +1513,23 @@ mod tests {
         )
         .unwrap();
         let mut registry = Registry::new(1, &signals).unwrap();
-        registry.sync(0, &session).unwrap();
+        registry.sync(0, &session, false).unwrap();
         let peer = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
         session
             .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
             .unwrap();
-        registry.sync(0, &session).unwrap();
+        registry.sync(0, &session, false).unwrap();
         let fd = session.peers[0].stream.as_raw_fd();
         let key = registry.by_fd[&fd].key;
         session.peers.clear();
-        registry.sync(0, &session).unwrap();
+        registry.sync(0, &session, false).unwrap();
         assert!(registry.registration(key).is_none());
         drop(peer);
         let peer = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
         session
             .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
             .unwrap();
-        registry.sync(0, &session).unwrap();
+        registry.sync(0, &session, false).unwrap();
         assert_eq!(session.peers[0].stream.as_raw_fd(), fd);
         let replacement = registry.by_fd[&fd].key;
         assert_ne!(key, replacement);
