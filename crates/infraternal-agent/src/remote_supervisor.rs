@@ -5,6 +5,12 @@ use tokio::sync::watch;
 const OFFLINE_LIMIT: Duration = Duration::from_mins(5);
 pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Exercise real worker/filesystem ordering without a five-minute wall wait.
+    pub(crate) static TEST_OFFLINE_LIMIT: Duration;
+}
+
 /// Failed work consumes the interval; only its remaining wait gains jitter.
 pub(super) fn retry_delay(backoff: Duration, elapsed: Duration) -> Duration {
     let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
@@ -21,8 +27,11 @@ async fn offline(mut connected: watch::Receiver<bool>) {
                 return;
             }
         } else {
+            let limit = OFFLINE_LIMIT;
+            #[cfg(test)]
+            let limit = TEST_OFFLINE_LIMIT.try_with(|value| *value).unwrap_or(limit);
             tokio::select! {
-                () = tokio::time::sleep(OFFLINE_LIMIT) => return,
+                () = tokio::time::sleep(limit) => return,
                 changed = connected.changed() => {
                     if changed.is_err() { return; }
                 }
