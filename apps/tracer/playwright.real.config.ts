@@ -5,6 +5,10 @@
 import { defineConfig, devices } from "playwright/test";
 import { tracerEvidencePath } from "./test/evidence-path";
 
+// The owner demo binds to a private interface while retaining a DNS name for passkey setup.
+const demoHost = process.env.TERMINAL_LINKS_DEMO_HOST;
+const demoAddress = process.env.TERMINAL_LINKS_DEMO_ADDRESS;
+
 export default defineConfig({
   testDir: "./real",
   testMatch: "*.spec.ts",
@@ -14,5 +18,16 @@ export default defineConfig({
   reporter: "list",
   timeout: 120_000,
   outputDir: tracerEvidencePath("playwright-real"),
-  use: { ...devices["Desktop Chrome"], ignoreHTTPSErrors: true, trace: "off", screenshot: "off", launchOptions: { args: ["--disable-renderer-backgrounding"] } },
+  use: {
+    ...devices["Desktop Chrome"],
+    ignoreHTTPSErrors: true,
+    trace: "off",
+    screenshot: "off",
+    launchOptions: {
+      args: [
+        "--disable-renderer-backgrounding",
+        ...(demoHost && demoAddress ? [`--host-resolver-rules=MAP ${demoHost} ${demoAddress}`] : []),
+      ],
+    },
+  },
 });
