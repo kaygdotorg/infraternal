@@ -116,6 +116,9 @@ async def run(args):
             peer = DirectPeer(master)
             peers.append(peer)
             await peer.echo(f'init-{index}'.encode(), b"stty -echo; PS1=''; ")
+            if (index + 1) % 100 == 0:
+                print(json.dumps(dict(kind='setup', ready_shells=index + 1)), flush=True)
+        print(json.dumps(dict(kind='workload-start', sessions=args.sessions)), flush=True)
         active = peers[-max(1, args.sessions // 10):]
         start = time.monotonic()
         async def workload():
