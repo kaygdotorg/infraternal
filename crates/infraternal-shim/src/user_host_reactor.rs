@@ -276,6 +276,9 @@ struct ReadyMarks {
     round: u32,
 }
 impl ReadyMarks {
+    const BULK_MASK: u8 = 3;
+    const TIMER: u8 = 4;
+
     fn new(count: usize) -> Self {
         Self {
             queued: vec![0; count],
@@ -294,17 +297,34 @@ impl ReadyMarks {
         }
     }
     fn queue(&mut self, index: usize) -> bool {
-        // 0 has no deque entry; 1 is bulk; 2 is cancelled by promotion.
-        // Revive a cancelled entry in place rather than inserting a duplicate.
-        std::mem::replace(&mut self.queued[index], 1) == 0
+        // Low bits: 0 has no deque entry, 1 is bulk, 2 is cancelled.
+        // The timer bit survives every bulk transition. A cancelled entry
+        // revives in place rather than inserting a duplicate deque entry.
+        let state = &mut self.queued[index];
+        let prior = *state & Self::BULK_MASK;
+        *state = (*state & !Self::BULK_MASK) | 1;
+        prior == 0
     }
     fn promote(&mut self, index: usize) {
-        if self.queued[index] != 0 {
-            self.queued[index] = 2;
+        let state = &mut self.queued[index];
+        if *state & Self::BULK_MASK != 0 {
+            *state = (*state & !Self::BULK_MASK) | 2;
         }
     }
     fn take_bulk(&mut self, index: usize) -> bool {
-        std::mem::replace(&mut self.queued[index], 0) == 1
+        let state = &mut self.queued[index];
+        let prior = *state & Self::BULK_MASK;
+        *state &= !Self::BULK_MASK;
+        prior == 1
+    }
+    fn queue_timer(&mut self, index: usize) -> bool {
+        let state = &mut self.queued[index];
+        let prior = *state & Self::TIMER;
+        *state |= Self::TIMER;
+        prior == 0
+    }
+    fn retire_timer(&mut self, index: usize) {
+        self.queued[index] &= !Self::TIMER;
     }
     fn read_once(&mut self, index: usize) -> bool {
         if self.read[index] == self.round {
@@ -322,18 +342,20 @@ fn settle(
     slots: &mut [Option<Session>],
     registry: &mut Registry,
     timers: &mut BinaryHeap<Reverse<(Instant, usize)>>,
+    marks: &mut ReadyMarks,
 ) -> io::Result<bool> {
     let Some(session) = slots[index].as_mut() else {
         return Ok(false);
     };
-    let prior = session.deadline;
     if session.housekeeping()? {
         slots[index] = None;
         registry.retire(index);
         return Ok(false);
     }
-    if prior.is_none()
-        && let Some(deadline) = session.deadline
+    // Exit readiness can establish this before housekeeping. Membership,
+    // not the timing of that assignment, authorizes exactly one heap entry.
+    if let Some(deadline) = session.deadline
+        && marks.queue_timer(index)
     {
         timers.push(Reverse((deadline, index)));
     }
@@ -379,7 +401,9 @@ pub(super) fn run(
             .peek()
             .is_some_and(|Reverse((_, index))| slots[*index].is_none())
         {
-            timers.pop();
+            if let Some(Reverse((_, index))) = timers.pop() {
+                marks.retire_timer(index);
+            }
         }
         let timeout = if bulk.is_empty() {
             timers
@@ -480,6 +504,7 @@ pub(super) fn run(
                 break;
             }
             timers.pop();
+            marks.retire_timer(index);
             if slots[index].is_some() {
                 work.entry(index);
             }
@@ -569,7 +594,7 @@ pub(super) fn run(
                 if slots[index]
                     .as_ref()
                     .is_some_and(|session| session.deadline.is_some_and(|d| Instant::now() >= d))
-                    && !settle(index, &mut slots, &mut registry, &mut timers)?
+                    && !settle(index, &mut slots, &mut registry, &mut timers, &mut marks)?
                 {
                     return Ok(());
                 }
@@ -594,7 +619,7 @@ pub(super) fn run(
                         INTERACTIVE_READ_BYTES,
                     )?;
                 }
-                settle(index, &mut slots, &mut registry, &mut timers)?;
+                settle(index, &mut slots, &mut registry, &mut timers, &mut marks)?;
                 Ok(())
             }));
             if result.map_or(true, |result| result.is_err()) {
@@ -632,14 +657,14 @@ pub(super) fn run(
                 continue;
             }
             let result = catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
-                if !settle(index, &mut slots, &mut registry, &mut timers)? {
+                if !settle(index, &mut slots, &mut registry, &mut timers, &mut marks)? {
                     return Ok(());
                 }
                 let session = slots[index]
                     .as_mut()
                     .ok_or_else(|| io::Error::other("host session disappeared"))?;
                 session.step_budget(PollFlags::empty(), PollFlags::POLLIN, &[], read_budget)?;
-                settle(index, &mut slots, &mut registry, &mut timers)?;
+                settle(index, &mut slots, &mut registry, &mut timers, &mut marks)?;
                 Ok(())
             }));
             if result.map_or(true, |result| result.is_err()) {
@@ -687,6 +712,53 @@ fn record_ownership(
 mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
+    #[test]
+    fn exit_observed_before_settle_still_queues_one_retention_deadline() {
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/rt{}",
+            std::process::id()
+        ));
+        let mut config = crate::Config::new([19; 16], nix::unistd::Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.peers[0]
+            .attach(crate::frame::SESSION_OWNER)
+            .unwrap();
+        session.pty.master.write_all(b"finish\n").unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while session.exit.is_none() {
+            session.observe_exit().unwrap();
+            assert!(Instant::now() < until, "owned shell did not exit");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let deadline = session.deadline.unwrap();
+        let signals = SignalFd::with_flags(
+            &nix::sys::signal::SigSet::empty(),
+            nix::sys::signalfd::SfdFlags::SFD_CLOEXEC,
+        )
+        .unwrap();
+        let mut registry = ownership_fixture(std::slice::from_ref(&session), &signals).unwrap();
+        let mut slots = vec![Some(session)];
+        let mut timers = BinaryHeap::new();
+        let mut marks = ReadyMarks::new(1);
+        assert!(settle(0, &mut slots, &mut registry, &mut timers, &mut marks).unwrap());
+        assert_eq!(
+            timers.peek().map(|Reverse(entry)| *entry),
+            Some((deadline, 0)),
+            "the signal path established the deadline before housekeeping"
+        );
+        assert!(settle(0, &mut slots, &mut registry, &mut timers, &mut marks).unwrap());
+        assert_eq!(timers.len(), 1, "repeat work must not duplicate timers");
+        drop(client);
+        drop(slots);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
     #[test]
     fn ownership_receipt_separates_session_components_and_shared_capacities() {
         let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
@@ -751,6 +823,29 @@ mod tests {
         drop(receipt);
         drop(sessions);
         std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn timer_membership_survives_bulk_promotion_cancellation_and_round_wrap() {
+        let mut marks = ReadyMarks::new(1);
+        assert!(marks.queue_timer(0));
+        assert!(marks.queue(0));
+        marks.promote(0);
+        assert!(!marks.queue_timer(0));
+        assert!(!marks.queue(0));
+        assert!(marks.take_bulk(0));
+        assert!(!marks.queue_timer(0));
+        assert!(marks.queue(0));
+        marks.promote(0);
+        assert!(!marks.take_bulk(0));
+        marks.round = u32::MAX;
+        marks.next_round();
+        assert!(!marks.queue_timer(0));
+        marks.retire_timer(0);
+        assert!(marks.queue_timer(0));
+        assert!(marks.queue(0));
+        marks.retire_timer(0);
+        assert!(marks.take_bulk(0));
     }
 
     #[test]
