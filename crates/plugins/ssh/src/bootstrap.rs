@@ -229,7 +229,7 @@ impl Bootstrap {
             session: Some(session),
         };
         let runner = self.clone();
-        tokio::spawn(async move {
+        crate::tasks::spawn(async move {
             let _activity = activity;
             let _permit = permit;
             runner.resume_setup(authority, host, saved).await;
@@ -372,7 +372,7 @@ impl Bootstrap {
     pub fn warm_payloads(&self) {
         let bootstrap = self.clone();
         let mut enabled = self.enabled_changes();
-        tokio::spawn(async move {
+        crate::tasks::spawn(async move {
             tokio::select! {
                 () = bootstrap.prepare_payloads() => {},
                 _ = enabled.changed() => {},
@@ -604,7 +604,7 @@ impl Bootstrap {
             },
         );
         let runner = self.clone();
-        tokio::spawn(async move {
+        crate::tasks::spawn(async move {
             let _activity = activity;
             runner.attempt(batch, target, attempt, auth_once).await;
         });

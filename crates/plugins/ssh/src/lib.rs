@@ -28,6 +28,7 @@ pub mod process;
 mod prompt;
 mod prompt_image;
 pub mod socket_connector;
+mod tasks;
 pub mod transport;
 pub mod trust;
 
