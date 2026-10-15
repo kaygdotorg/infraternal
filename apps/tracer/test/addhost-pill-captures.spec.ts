@@ -1,6 +1,6 @@
 /**
  * Captures of the setup ring in the machine pill (#189, D255) for the TASTE review: key frames and short videos at
- * 1440x900, 393x852 and 375x667 in ink and paper, written to `captures/addhost-pill/`. Run on request:
+ * 1440x900, 393x852 and 375x667 in ink and paper, written outside the checkout through the shared evidence helper. Run on request:
  * `ADDHOST_PILL_CAPTURE=1 TRACER_TEST_PORT=4989 bun x playwright test test/addhost-pill-captures.spec.ts`.
  *
  * Key frames per size and theme: the status in the wizard, mid-flight (taken from a screencast, because a 280 ms
@@ -9,8 +9,9 @@
  */
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { test, type Browser, type Page } from "playwright/test";
+import { tracerEvidencePath } from "./evidence-path";
 
-const OUT = "captures/addhost-pill";
+const OUT = tracerEvidencePath("addhost-pill");
 const SIZES = [{ name: "1440x900", width: 1440, height: 900, touch: false }, { name: "393x852", width: 393, height: 852, touch: true }, { name: "375x667", width: 375, height: 667, touch: true }];
 const THEMES = ["ink", "paper"];
 const url = (theme: string, extra = ""): string => `/?mock=1&proto=clusters&scene=3&bg=none&theme=${theme}&addhost-demo=pill${extra}`;
