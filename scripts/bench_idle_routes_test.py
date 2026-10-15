@@ -34,6 +34,20 @@ class PeerInspection(unittest.TestCase):
 
 
 class SampleAccounting(unittest.IsolatedAsyncioTestCase):
+    async def test_reconnecting_terminal_invalidates_a_retained_socket_sample(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.queue = asyncio.Queue()
+        browser.queue.put_nowait((1, 0x33, bytes(4) + b'{"type":"terminal.reconnecting"}'))
+        with self.assertRaisesRegex(AssertionError, 'terminal route reconnecting'):
+            await browser.read()
+
+    async def test_healthy_terminal_metadata_is_preserved(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.queue = asyncio.Queue()
+        event = (1, 0x33, bytes(4) + b'{"type":"terminal.title","title":"Idle"}')
+        browser.queue.put_nowait(event)
+        self.assertEqual(await browser.read(), event)
+
     async def test_terminal_close_invalidates_a_retained_socket_sample(self):
         browser = fixture.Browser.__new__(fixture.Browser)
         browser.queue = asyncio.Queue()
