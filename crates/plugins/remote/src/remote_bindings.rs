@@ -572,6 +572,10 @@ impl UdpPoller for Writable {
     }
 }
 
+#[cfg(all(test, feature = "test-support"))]
+#[path = "remote_receive_cost_tests.rs"]
+mod receive_cost_tests;
+
 #[cfg(test)]
 mod tests {
     //! Real UDP sockets: replies follow the address a peer was last heard on.
