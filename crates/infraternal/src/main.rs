@@ -18,6 +18,8 @@ mod remote;
 #[cfg(feature = "plugin-server")]
 mod remote_server;
 #[cfg(feature = "remote")]
+mod remote_service;
+#[cfg(feature = "remote")]
 mod restart;
 #[cfg(feature = "remote")]
 mod restart_binary;
@@ -1463,7 +1465,16 @@ fn run_remote_agent(
                 "Keep this process running to maintain the connection.",
             );
         }
-        runtime.block_on(remote::run(&data, state))
+        let result = runtime.block_on(async move {
+            // Isolate link panics so they reach the same bounded shutdown path
+            // as a returned error, rather than waiting in Runtime::drop.
+            tokio::spawn(async move { remote::run(&data, state).await })
+                .await
+                .map_err(|_| {
+                    std::io::Error::other("Infraternal agent server link task ended unexpectedly")
+                })?
+        });
+        remote_service::stopped(runtime, result)
     })();
     if result.is_ok() {
         if enroll_only {
