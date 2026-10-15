@@ -459,12 +459,12 @@ fn runtime_configuration_trial_at_one_thousand_transports() {
     let mode = std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME").unwrap();
     let mut builder = match mode.as_str() {
         "current_thread" => tokio::runtime::Builder::new_current_thread(),
-        "split_server" | "split_server_fair" => {
+        "split_server" | "split_server_fair" | "split_direct_mesh_no_aliases" => {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             builder.worker_threads(3);
             builder
         }
-        "four_workers_default" | "four_workers_fair" => {
+        "four_workers_default" | "four_workers_fair" | "direct_mesh_no_aliases" => {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             builder.worker_threads(4);
             builder
@@ -593,6 +593,17 @@ async fn measure_mesh_probe_and_copy_cost(
     fresh_copy: bool,
     socket_trial: Option<SocketTrial>,
 ) {
+    let direct_mesh_control = socket_trial.is_some()
+        && std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME").is_ok_and(|mode| {
+            matches!(
+                mode.as_str(),
+                "direct_mesh_no_aliases" | "split_direct_mesh_no_aliases"
+            )
+        });
+    assert!(
+        !direct_mesh_control || profiles == [false],
+        "direct control cannot enable server copies"
+    );
     let diagnostic = ReceiveDiagnostic::from_environment();
     let record_sends = socket_trial.is_none_or(|trial| trial.record_sends);
     let ca = root();
@@ -658,8 +669,12 @@ async fn measure_mesh_probe_and_copy_cost(
         (bindings, lease, server, accepting)
     };
     let separate_server = socket_trial.is_some()
-        && std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME")
-            .is_ok_and(|mode| matches!(mode.as_str(), "split_server" | "split_server_fair"));
+        && std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME").is_ok_and(|mode| {
+            matches!(
+                mode.as_str(),
+                "split_server" | "split_server_fair" | "split_direct_mesh_no_aliases"
+            )
+        });
     let (_server_runtime, resources) = if separate_server {
         let (owner, resources) = OwnedServerRuntime::start(make_server).await;
         (Some(owner), resources)
@@ -690,6 +705,11 @@ async fn measure_mesh_probe_and_copy_cost(
         } else {
             PathSocket::from_udp(socket, enrolled, &runtime).unwrap()
         };
+        if direct_mesh_control {
+            // Begin on this one physical path during TLS. This control does
+            // not test migration or use the server's peer-alias/history layer.
+            path.use_mesh(mesh);
+        }
         let mut client = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             None,
@@ -699,7 +719,7 @@ async fn measure_mesh_probe_and_copy_cost(
         .unwrap();
         client.set_default_client_config(config.clone());
         let pending = client.connect(enrolled, "localhost").unwrap();
-        if !fresh_copy {
+        if !fresh_copy && !direct_mesh_control {
             peers.push(
                 bindings
                     .route_peer(
@@ -729,7 +749,7 @@ async fn measure_mesh_probe_and_copy_cost(
         .map(|(_, connection)| connection)
         .collect();
     assert_eq!(accepted.len(), CONNECTIONS);
-    if fresh_copy {
+    if fresh_copy && !direct_mesh_control {
         // All mutual TLS handshakes have completed. Create each fresh alias and
         // enable its existing negotiated-copy flag synchronously before any
         // mesh selection or probe can populate its retained history.
@@ -909,8 +929,10 @@ async fn measure_mesh_probe_and_copy_cost(
             peer.set_backup(false);
         }
     }
-    let mut report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":if fresh_copy && profiles == [false] { "fresh_no_copy_only_new_cohort" } else if fresh_copy { "fresh_copy_only_new_cohort" } else { "no_copy_then_copy_same_retained_cohort" },"fresh_copy_cohort":fresh_copy && profiles.contains(&true),"fresh_alias_cohort":fresh_copy,"explicit_fresh_no_copy_control":fresh_copy && profiles == [false],"peer_binding_birth":if fresh_copy { "after_all_mutual_TLS_before_any_mesh_selection_backup_enabled_immediately" } else { "before_TLS_with_profile_flags_later" },"limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh",if fresh_copy { "correlated_windows_of_one_fresh_cohort_no_previous_profile" } else { "correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations" },"CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
+    let mut report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":if fresh_copy && profiles == [false] { "fresh_no_copy_only_new_cohort" } else if fresh_copy { "fresh_copy_only_new_cohort" } else { "no_copy_then_copy_same_retained_cohort" },"fresh_copy_cohort":fresh_copy && profiles.contains(&true),"fresh_alias_cohort":fresh_copy && !direct_mesh_control,"explicit_fresh_no_copy_control":fresh_copy && profiles == [false],"peer_binding_birth":if direct_mesh_control { "none; direct mesh TLS only, not migration or switch acceptance" } else if fresh_copy { "after_all_mutual_TLS_before_any_mesh_selection_backup_enabled_immediately" } else { "before_TLS_with_profile_flags_later" },"limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh",if fresh_copy { "correlated_windows_of_one_fresh_cohort_no_previous_profile" } else { "correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations" },"CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
     report["physical_send_counters_enabled"] = serde_json::json!(record_sends);
+    report["direct_mesh_handshake_control"] = serde_json::json!(direct_mesh_control);
+    report["server_peer_aliases_enabled"] = serde_json::json!(!direct_mesh_control);
     let client_workers = if separate_server {
         3
     } else if std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME").as_deref() == Ok("current_thread") {
