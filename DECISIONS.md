@@ -2872,6 +2872,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        opens a VM's console as a VNC window locally, with no API token and
        no setup by the person. Containers open as terminal windows. The
        Proxmox API path is only for nodes without our agent.
+     - **Our own VNC client, written from scratch (owner, 2026-10-15, #223):**
+       no third-party RFB library. Writing it ourselves takes longer, but
+       lets us measure and tune it for the product, choose where to cut
+       corners, and keep it small, lean and very fast, without the
+       compromises a library brings. The experience to match is Screens 5
+       on macOS: that seamlessness, brought to everything that speaks VNC.
+       The owner's annoyances with noVNC (the Proxmox console client) are
+       to be designed out.
 283. **The person's card (owner, 2026-10-15; Q1 to be refined after the
      mockup):**
      - **Fields (Q1, mockup first):** name; username; email; picture
