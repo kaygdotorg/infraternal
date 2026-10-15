@@ -45,3 +45,13 @@ through the real monitor path; it does not simulate physical hardware timing.
 the pointer using a tagged remote move, posts left/right/other untagged releases,
 and checks rejection at0/1.75s and acceptance at2.25s. It first failed with
 accepted=true immediately after release, before the event masks were fixed.
+
+`responsibility-test.swift` compiles with `native/ResponsibleLaunch.swift` on
+macOS. Launch the resulting executable through a parent pipe, write its original
+PID followed by a newline to stdin, then close stdin and wait. It verifies the
+system-reported responsible PID equals the companion PID and that the launch
+retained the original PID and inherited pipes. It needs no capture permissions.
+Compile the complete native companion with `native/Permissions.swift` too; its
+`--check-permissions` mode must return exactly two JSON boolean fields and exit.
+For a real permission check, use the installed signed bundle and the same local
+companion path as production; do not request permissions from this fixture.

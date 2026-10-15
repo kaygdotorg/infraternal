@@ -153,3 +153,33 @@ Only server lease transitions may originate it; browser input is refused.
 Taking control clears old held input and shows the indicator before any event;
 source reconnect restores a still-authorized lease without replaying input.
 Retirement hides it. Ordinary held-input release/blur preserves the indicator.
+
+## Native responsibility and permission diagnostics (#146)
+
+Before framework access, the native companion establishes its own macOS
+responsibility using the system `responsibility_spawnattrs_setdisclaim` hook
+and `posix_spawn` with `POSIX_SPAWN_SETEXEC`. The replacement retains the PID,
+process group and inherited stdio, so cancellation and EOF cleanup still address
+the owned companion. The hook is system SPI, not a public SDK guarantee; resolve
+it dynamically and refuse startup when it is unavailable or returns an error.
+The responsibility/PID/pipe fixture is verified on macOS 27.0.1 with SDK 27.0.
+
+`--check-permissions` follows that same native launch path, prints one JSON
+object with boolean `screen_recording` and `device_control` keys from
+`CGPreflightScreenCaptureAccess()` and `AXIsProcessTrusted()`, then exits before
+AppKit setup. It never requests permissions, creates capture or injects input.
+
+A local supervisor may set `INFRATERNAL_DESKTOP_COMPANION` to the absolute
+executable path inside its installed signed companion bundle. It must be an
+owned regular executable without shared write permissions; symlinks are refused.
+Remote action bodies cannot set it. This preserves the signed bundle's installed
+identity instead of extracting another copy into a runtime directory. The Rust
+helper's diagnostic mode requires this explicit path and forwards the native
+JSON; normal operation otherwise retains its embedded-companion fallback.
+The bundle identifier remains `com.infraternal.desktop.helper`. Signing and
+permission approval remain installation prerequisites, never automated privacy
+or trust changes.
+
+Sources: [Apple responsibility model](https://developer.apple.com/documentation/security/applying-launch-environment-and-library-constraints),
+[spawn descriptor semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/posix_spawn.2.html),
+and [system-hook usage](https://raw.githubusercontent.com/chromium/chromium/main/base/process/launch_mac.cc).
