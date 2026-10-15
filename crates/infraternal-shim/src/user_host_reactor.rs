@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Short output is latency-sensitive too, but an entire ready cohort must not
+// postpone the next input poll. Bulk retains its independent rotating turn.
+const INTERACTIVE_READS_PER_ROUND: usize = 8;
 const SIGNAL: u64 = u64::MAX;
 #[derive(Clone, Copy)]
 struct Registration {
@@ -274,6 +277,7 @@ struct ReadyMarks {
     queued: Vec<u8>,
     read: Vec<u32>,
     round: u32,
+    interactive_reads: usize,
 }
 impl ReadyMarks {
     const BULK_MASK: u8 = 3;
@@ -284,9 +288,11 @@ impl ReadyMarks {
             queued: vec![0; count],
             read: vec![0; count],
             round: 1,
+            interactive_reads: 0,
         }
     }
     fn next_round(&mut self) {
+        self.interactive_reads = 0;
         if let Some(round) = self.round.checked_add(1) {
             self.round = round;
         } else {
@@ -326,6 +332,16 @@ impl ReadyMarks {
     fn retire_timer(&mut self, index: usize) {
         self.queued[index] &= !Self::TIMER;
     }
+    fn read_interactive(&mut self, index: usize) -> bool {
+        if self.interactive_reads == INTERACTIVE_READS_PER_ROUND || !self.read_once(index) {
+            return false;
+        }
+        self.interactive_reads += 1;
+        // Cancel an old bulk entry only after this turn actually grants the
+        // promoted attempt. Denied promotions must keep rotating progress.
+        self.promote(index);
+        true
+    }
     fn read_once(&mut self, index: usize) -> bool {
         if self.read[index] == self.round {
             return false;
@@ -333,6 +349,27 @@ impl ReadyMarks {
         self.read[index] = self.round;
         true
     }
+}
+
+/// Select bulk only after short attempts have granted/cancelled their entries.
+/// Preselecting it would waste the bulk turn on an already promoted session.
+fn next_output(
+    short: &mut impl Iterator<Item = (usize, usize)>,
+    bulk: &mut VecDeque<usize>,
+    marks: &mut ReadyMarks,
+    outputs: &mut usize,
+) -> Option<(usize, usize)> {
+    if let Some(ready) = short.next() {
+        return Some(ready);
+    }
+    while *outputs < OUTPUTS_PER_ROUND {
+        let index = bulk.pop_front()?;
+        if marks.take_bulk(index) {
+            *outputs += 1;
+            return Some((index, BULK_READ_BYTES));
+        }
+    }
+    None
 }
 
 /// Settle queues and lifetimes only for a ready session. Registration happens
@@ -344,10 +381,25 @@ fn settle(
     timers: &mut BinaryHeap<Reverse<(Instant, usize)>>,
     marks: &mut ReadyMarks,
 ) -> io::Result<bool> {
+    settle_coalesced(index, slots, registry, timers, marks, false)
+}
+fn settle_coalesced(
+    index: usize,
+    slots: &mut [Option<Session>],
+    registry: &mut Registry,
+    timers: &mut BinaryHeap<Reverse<(Instant, usize)>>,
+    marks: &mut ReadyMarks,
+    coalesce_ack: bool,
+) -> io::Result<bool> {
     let Some(session) = slots[index].as_mut() else {
         return Ok(false);
     };
-    if session.housekeeping()? {
+    let finished = if coalesce_ack {
+        session.housekeeping_coalesced(true)?
+    } else {
+        session.housekeeping()?
+    };
+    if finished {
         slots[index] = None;
         registry.retire(index);
         return Ok(false);
@@ -535,25 +587,6 @@ pub(super) fn run(
             if control || child_exit || session.exit.is_some() {
                 controls.push((index, false));
             }
-            if ready
-                .flags(session.pty.master.as_raw_fd(), &registry)
-                .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
-                || session.exit.is_some()
-            {
-                // Readiness alone cannot distinguish a shell's short reply
-                // from a producer filling its PTY. Only connected consumers
-                // can observe reply latency; detached output needs no ioctl
-                // classification on every turn of the rotating bulk queue.
-                if !session.peers.is_empty()
-                    && crate::pty::available_output(&session.pty.master)
-                        .is_ok_and(|bytes| bytes <= 1024)
-                {
-                    small_reads.push((index, INTERACTIVE_READ_BYTES));
-                    marks.promote(index);
-                } else if marks.queue(index) {
-                    bulk.push_back(index);
-                }
-            }
         }
         // Give every ready shell its input before terminal output, repaint
         // generation or listener admission. Each child can run while the
@@ -592,6 +625,35 @@ pub(super) fn run(
                 live -= 1;
             }
         }
+        // The readable-byte hints are output work too. Even a thousand
+        // simultaneous PTYs must receive ready input before those ioctls.
+        for &index in &work.active {
+            let ready = &work.rows[index];
+            let Some(session) = slots[index].as_ref() else {
+                continue;
+            };
+            if ready
+                .flags(session.pty.master.as_raw_fd(), &registry)
+                .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
+                || session.exit.is_some()
+            {
+                // Readiness alone cannot distinguish a shell's short reply
+                // from a producer filling its PTY. Only connected consumers
+                // can observe reply latency; detached output needs no ioctl
+                // classification on every turn of the rotating bulk queue.
+                // Once this turn's promotion list is full, the rotating
+                // queue preserves progress without another classification ioctl.
+                if small_reads.len() < INTERACTIVE_READS_PER_ROUND
+                    && !session.peers.is_empty()
+                    && crate::pty::available_output(&session.pty.master)
+                        .is_ok_and(|bytes| bytes <= 1024)
+                {
+                    small_reads.push((index, INTERACTIVE_READ_BYTES));
+                } else if marks.queue(index) {
+                    bulk.push_back(index);
+                }
+            }
+        }
         for (index, incoming) in controls.iter().copied() {
             if slots[index].is_none() {
                 continue;
@@ -618,8 +680,18 @@ pub(super) fn run(
                     &[],
                     false,
                 )?;
-                if incoming {
-                    marks.read_once(index);
+                let master = ready.flags(session.pty.master.as_raw_fd(), &registry);
+                let readable = master.intersects(PollFlags::POLLIN | PollFlags::POLLHUP);
+                // Preserve pending control/resize ordering before adding an
+                // opportunistic read for an Ack-only writable visit.
+                let ack_pending = session
+                    .peers
+                    .iter()
+                    .all(|peer| peer.trailing.is_empty() && peer.deferred.is_none())
+                    && session.peers.iter().any(|peer| {
+                        matches!(peer.input_reply, Some(super::super::InputReply::Ack))
+                    });
+                if (incoming || (readable && ack_pending)) && marks.read_interactive(index) {
                     session.step_budget(
                         PollFlags::empty(),
                         PollFlags::POLLIN,
@@ -627,7 +699,21 @@ pub(super) fn run(
                         INTERACTIVE_READ_BYTES,
                     )?;
                 }
-                settle(index, &mut slots, &mut registry, &mut timers, &mut marks)?;
+                let writable = session.peers.iter().any(|peer| {
+                    ready
+                        .flags(peer.stream.as_raw_fd(), &registry)
+                        .contains(PollFlags::POLLOUT)
+                });
+                let coalesce_ack =
+                    (incoming && !writable) || (readable && marks.read[index] != marks.round);
+                settle_coalesced(
+                    index,
+                    &mut slots,
+                    &mut registry,
+                    &mut timers,
+                    &mut marks,
+                    coalesce_ack,
+                )?;
                 Ok(())
             }));
             if result.map_or(true, |result| result.is_err()) {
@@ -647,25 +733,42 @@ pub(super) fn run(
                 live -= 1;
             }
         }
-        // Cancelled entries are discarded only when popped. Each session has
-        // at most one deque entry; no turn scans the whole bulk backlog.
+        // Granted short attempts cancel their old entries before bulk is
+        // selected. Each session retains at most one rotating continuation.
         let mut outputs = 0;
-        while outputs < OUTPUTS_PER_ROUND {
-            let Some(index) = bulk.pop_front() else { break };
-            if marks.take_bulk(index) {
-                small_reads.push((index, BULK_READ_BYTES));
-                outputs += 1;
+        let mut short = small_reads.drain(..);
+        while let Some((index, read_budget)) =
+            next_output(&mut short, &mut bulk, &mut marks, &mut outputs)
+        {
+            if marks.read[index] == marks.round {
+                continue;
             }
-        }
-        for (index, read_budget) in small_reads.drain(..) {
-            if !marks.read_once(index) {
+            if read_budget == INTERACTIVE_READ_BYTES {
+                if !marks.read_interactive(index) {
+                    // No byte was consumed. Keep one rotating continuation even
+                    // if promotion cancelled an older bulk entry this round.
+                    if marks.queue(index) {
+                        bulk.push_back(index);
+                    }
+                    continue;
+                }
+            } else if !marks.read_once(index) {
                 continue;
             }
             if slots[index].is_none() {
                 continue;
             }
             let result = catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
-                if !settle(index, &mut slots, &mut registry, &mut timers, &mut marks)? {
+                // The next bounded PTY read can share an ordered Ack/output
+                // batch. Its final settle always sends even when that read is empty.
+                if !settle_coalesced(
+                    index,
+                    &mut slots,
+                    &mut registry,
+                    &mut timers,
+                    &mut marks,
+                    true,
+                )? {
                     return Ok(());
                 }
                 let session = slots[index]
@@ -1043,6 +1146,77 @@ mod tests {
         drop(session);
         std::fs::remove_dir_all(state).unwrap();
     }
+    #[test]
+    fn short_output_cohort_yields_before_the_next_input_poll() {
+        let mut marks = ReadyMarks::new(1000);
+        let mut bulk = VecDeque::new();
+        // Input-triggered opportunistic reads and readiness-promoted reads
+        // spend the same allowance. A duplicate spends none of it.
+        assert!(marks.read_interactive(0));
+        assert!(!marks.read_interactive(0));
+        let mut reads = 1;
+        for index in 1..1000 {
+            if marks.read_interactive(index) {
+                reads += 1;
+            } else if marks.queue(index) {
+                bulk.push_back(index);
+            }
+        }
+        assert_eq!(
+            reads, 8,
+            "a short-output cohort must not monopolize one turn"
+        );
+        assert_eq!(bulk.len(), 992, "unread output must retain continuation");
+        marks.next_round();
+        let index = bulk.pop_front().unwrap();
+        assert!(marks.take_bulk(index));
+        assert!(marks.read_interactive(index));
+        marks.round = u32::MAX;
+        marks.next_round();
+        assert!(
+            marks.read_interactive(index),
+            "wrap must also restore the allowance"
+        );
+    }
+
+    #[test]
+    fn actual_output_selector_keeps_a_bulk_turn_after_granted_and_denied_promotions() {
+        for input_spent_allowance in [false, true] {
+            let mut marks = ReadyMarks::new(1000);
+            let mut bulk: VecDeque<_> = (0..1000).collect();
+            for index in 0..1000 {
+                assert!(marks.queue(index));
+            }
+            for turn in 0..4 {
+                marks.next_round();
+                if input_spent_allowance {
+                    for index in 0..8 {
+                        assert!(marks.read_interactive(index));
+                    }
+                }
+                // The same fast producers stay ready on every turn. Granted
+                // promotions cancel old entries; denied ones retain rotation.
+                let start = if input_spent_allowance { 8 } else { 0 };
+                let mut short = (start..start + 8).map(|index| (index, INTERACTIVE_READ_BYTES));
+                let mut outputs = 0;
+                let mut bulk_reads = Vec::new();
+                while let Some((index, budget)) =
+                    next_output(&mut short, &mut bulk, &mut marks, &mut outputs)
+                {
+                    if budget == INTERACTIVE_READ_BYTES {
+                        if !marks.read_interactive(index) && marks.queue(index) {
+                            bulk.push_back(index);
+                        }
+                    } else {
+                        assert!(marks.read_once(index), "bulk cannot select a promoted read");
+                        bulk_reads.push(index);
+                    }
+                }
+                assert_eq!(bulk_reads, vec![8 + turn]);
+            }
+        }
+    }
+
     #[test]
     fn cancelled_bulk_membership_reuses_the_existing_deque_entry() {
         let mut marks = ReadyMarks::new(1000);
