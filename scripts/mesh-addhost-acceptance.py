@@ -10,11 +10,15 @@ PTY, so its first authenticated Output supplies a separate causal mesh witness.
 Unrestricted runs also timestamp the existing post-success fenced marker: this
 bounds usability after natural unheld joining, including fixture overhead; it
 never claims the earliest mesh Output of bootstrap itself.
+
+`check-standing --receipts DIR` checks complete release VM receipts offline,
+including the causal switch/fallback byte budgets and preserved writer proofs.
 """
 import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import resource
 from pathlib import Path
@@ -24,6 +28,61 @@ import subprocess
 import sys
 import time
 import uuid
+
+
+def check_standing_receipts(root):
+    """Check complete VM cohorts offline; no failed or unstarted case is omitted.
+
+    This gate covers the causal byte boundary and session integrity only. It
+    cannot waive scale health, static size or natural unheld-join acceptance.
+    All firewall, input and echo overhead remains in the recorded durations.
+    """
+    provenance = json.loads((root / "provenance.json").read_text())
+    samples = provenance["samples_per_venue"]
+    assert type(samples) is int and samples >= 31, "31+ samples per venue required"
+    assert provenance["machine"] == "infraternal-perf-test", "wrong measurement venue"
+    assert provenance["profile"] == "release", "release receipts required"
+    assert provenance["acceptance_mode"] == "standing-switch", "standing witnesses required"
+    assert not provenance.get("packet_diagnostic_observer", False), "packet observer adds a separate cost"
+    failures = []
+    for venue in (0, 150):
+        aggregate = json.loads((root / f"venue-{venue}.json").read_text())
+        assert len(aggregate) == samples, f"incomplete {venue}ms aggregate"
+        reports = []
+        for index in range(samples):
+            case = root / str(venue) / str(index)
+            assert (case / "exit").read_text().strip() == "0", f"failed lifecycle {venue}/{index}"
+            report = json.loads((case / "acceptance.json").read_text())
+            assert report == aggregate[index], f"aggregate differs from raw case {venue}/{index}"
+            assert int(report["rtt_ms"]) == venue
+            for proof in (
+                "terminal_byte_integrity", "connection_preservation_claimed",
+                "tls_admission_counts_unchanged", "control_counts_unchanged",
+                "standing_uses_same_writer_and_attachment", "standing_first_output_path_proven",
+                "post_fence_fresh_marker_mesh_path_proven", "mesh_disable_checked",
+            ):
+                assert report[proof] is True, f"{venue}/{index}: missing {proof}"
+            assert report["initial_control_callbacks"] == report["final_control_callbacks"] == 1
+            if "verified_terminal_bytes" in report:
+                assert report["verified_terminal_bytes"] == report["expected_terminal_bytes"] > 0
+                assert report["terminal_writer_id"] == 2
+            reports.append(report)
+        budget_us = (venue + 50) * 1000
+        for metric, field in (
+            ("switch", "node_handshake_to_standing_first_mesh_output_us"),
+            ("fallback_echo", "cut_to_complete_fallback_echo_us"),
+        ):
+            values = [report[field] for report in reports]
+            assert all(type(value) is int and value >= 0 for value in values), "invalid duration"
+            values.sort()
+            p50 = values[math.ceil(samples * 0.5) - 1]
+            p99 = values[math.ceil(samples * 0.99) - 1]
+            print(f"METRIC mesh_standing_{metric} rtt_ms={venue} n={samples} p50_us={p50} p99_us={p99} budget_us={budget_us}")
+            if p99 > budget_us:
+                failures.append(f"{venue}ms {metric} p99 {p99}us exceeds {budget_us}us")
+    if failures:
+        raise AssertionError("; ".join(failures))
+    print("Standing-session byte budgets and integrity passed; scale, size and natural joining remain separate gates.")
 
 
 def run(*args, **kwargs):
@@ -256,6 +315,12 @@ def lifecycle(args, venue, index):
 
 
 def main():
+    if sys.argv[1:2] == ["check-standing"]:
+        parser = argparse.ArgumentParser(description="Check complete standing-session VM receipts offline (#201).")
+        parser.add_argument("--receipts", type=Path, required=True)
+        args = parser.parse_args(sys.argv[2:])
+        check_standing_receipts(args.receipts)
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--payload", type=Path, required=True)
