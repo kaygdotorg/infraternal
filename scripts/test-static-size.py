@@ -29,7 +29,9 @@ def main():
             shutil.copy2(source / target / "release/infraternal", binary)
             result = check(target)
             assert result.returncode == 0, f"shipping {target} rejected:\n{result.stdout}{result.stderr}"
-            cap = int(re.search(r"max (\d+)", result.stdout)[1])
+            cap_match = re.search(r"cap: (\d+) bytes", result.stdout)
+            assert cap_match, result.stdout + result.stderr
+            cap = int(cap_match[1])
             with binary.open("ab") as image:
                 image.truncate(cap)
             result = check(target)
