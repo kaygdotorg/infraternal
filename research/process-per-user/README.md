@@ -101,15 +101,23 @@ preventing a reused descriptor from inheriting a closed peer's readiness. Retire
 waiting, so live idle sessions do not inherit stale deadlines.
 
 VT is initially absent. A complete origin prefix up to 4 KiB and at most 32
-ordered resize events are retained. Reaching either bound or requesting a
-snapshot allocates the selected production engine at the original geometry,
-then replays each byte range and resize in order. A quiet terminal can therefore
-change geometry without allocating native screen pools. Materialization releases
+ordered resize events are retained, with at most 65,536 destination cells across
+those events. Reaching any bound or requesting a snapshot allocates the selected
+production engine at the original geometry, then replays each byte range and
+resize in order. Small quiet geometry changes need no native screen pools;
+large viewports can materialize earlier to avoid accumulating reflow work in a
+later snapshot. Materialization releases
 both transcript buffers. Their capacities are charged to the session budget;
 numeric receipts expose resize-event capacity as `geometry_bytes`.
 Snapshot still retains unfinished parser
 sequences. State never becomes an evicting raw-byte approximation. VT remains
 allocated once materialized; dropping it would require exact state export.
+
+The cell-work cap limits deferred reflows; it does not eliminate their CPU cost.
+A single native operation, a coalesced control-frame batch and snapshot
+serialization still run on the reactor thread. This cap alone cannot certify
+the mixed-soak echo target. Admission and diagnostic receipts remain distinct
+on issue #205.
 
 The prototype divides **64 MiB of output-ring retention** and **64 MiB of VT
 scrollback retention** over the initial batch. Each session gets the smaller
