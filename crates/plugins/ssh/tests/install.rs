@@ -1517,3 +1517,22 @@ async fn exercise_start_fresh(turn_off: bool) {
         vec!["started", "completed"]
     );
 }
+
+/// Service exit must always retry, including an unexpected successful return.
+#[tokio::test]
+async fn installed_infraternal_agent_always_restarts_without_start_limit() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let unit = std::fs::read_to_string(
+        fixture
+            .root
+            .join(".config/systemd/user/infraternal-agent.service"),
+    )
+    .unwrap();
+    assert!(unit.lines().any(|line| line == "Restart=always"));
+    assert!(unit.lines().any(|line| line == "RestartSec=2"));
+    assert!(unit.lines().any(|line| line == "StartLimitIntervalSec=0"));
+    transaction.rollback().await.unwrap();
+}
