@@ -5,7 +5,7 @@ Status: D270 selects this design for hardening. The prototype remains opt-in;
 D13's default process per terminal is unchanged. D268 Q20 and D270 authorize
 measurement and hardening, without changing D7/D13/D128/D240/D247. No new
 terminal engine or foundational dependency was selected.
-The r4 measurements have not admitted the mixed-soak latency or whole-host
+The r5 measurements have not admitted the mixed-soak latency or whole-host
 upgrade path. Passing focused tests and the cold-history footprint does not
 authorize adoption. Current results and failures are recorded on issue #205.
 
@@ -64,7 +64,8 @@ Attached PTYs with at most 1 KiB waiting are promoted ahead of that queue using
 a non-consuming readiness hint. Detached producers avoid that classification
 syscall. Read-attempt deduplication prevents a promoted session from spending
 another budget through an older bulk entry. Slot-indexed membership uses one
-byte for queued/cancelled bulk work and a four-byte read generation per session.
+byte for queued/cancelled bulk work and retention-timer membership, plus a
+four-byte read generation per session.
 Generation wrap clears old read marks before reuse. A promoted entry can be
 revived in place; cancelled entries are discarded when popped, without scanning
 the whole bulk backlog on every turn. PTY and viewer backpressure keep bulk
@@ -99,6 +100,9 @@ visit ready sessions; live child status is polled only on exit readiness or a
 drained PTY. One descriptor index carries generation-checked registration keys,
 preventing a reused descriptor from inheriting a closed peer's readiness. Retired exit timers are discarded before
 waiting, so live idle sessions do not inherit stale deadlines.
+Timer membership is independent of which path first observes child exit:
+SIGCHLD can establish the deadline before housekeeping. Repeated readiness
+must register it exactly once, including when a viewer retains session ownership.
 
 VT is initially absent. A complete origin prefix up to 4 KiB and at most 32
 ordered resize events are retained, with at most 65,536 destination cells across
@@ -150,6 +154,12 @@ ring, input/writer and peer capacities. Mapping residency uses `mincore`
 without faulting in payload pages. No terminal content is recorded. Existing
 files are refused before PTY creation; a write failure disables only the
 receipt. Without the option there is no file, profiling timer or signal work.
+Session rows separate the structure, socket/config paths and lazy geometry
+capacities. The first live row also includes a `reactor` object with shared
+vector capacities, registration-map usable capacity and pair layout. It adds
+neither a synthetic session row nor an independent memory estimate. Hash-table
+bucket/control bytes and allocator slack require separate allocation/PSS
+measurements; usable entry capacity alone is not an allocation-byte count.
 
 The `idle_session_ownership_ledger` ignored unit probe runs at 1, 10, 100 and
 1,000 sessions on the perf VM. It separately counts the session vector,
@@ -223,6 +233,10 @@ The native `ppu_wire_probe` example is a diagnostic observer. It opens additiona
 viewer sockets with a distinct durable writer, finishes setup before timing,
 and checks output offsets and shell-generated markers. Those extra connections
 change the workload, so it cannot replace the original soak's admission result.
+Its `watch` mode receives the original probes without sending extra input or
+switching the active writer. Monotonic receive timestamps correlate the same
+markers across processes; result serialization waits until the original probes
+and survivor census finish. Additional fan-out remains diagnostic overhead.
 
 The long soak runner now retains the same fixture across short locked segments.
 An external coordinator confirms that its private cgroup is fully frozen,
