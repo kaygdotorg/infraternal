@@ -1,3 +1,4 @@
+# Pin static compilation and normalize build paths for both shipping architectures [D243].
 [build]
 rustc = ".cargo/rustc.sh"
 

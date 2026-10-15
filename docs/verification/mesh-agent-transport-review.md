@@ -62,10 +62,23 @@
   send segmentation remain enabled. Exact segmented-datagram and kernel-latency
   bulk controls cover this representation; scale health remains a separate gate.
 - A candidate owns fresh acknowledgement probes until its bounded proof ends.
-  Idle mesh detection requires both a physical mesh reply and fresh authenticated
-  counters. Enrolled copies alone cannot prove a live mesh. Simultaneous
-  component removal is read after the timeout so disabled proposals stay retired.
-- Backed paths keep the 15 ms probe interval and RTT + 30 ms response margin.
+  Physical proofs require a current sequence and session-bound response MAC
+  from the exact probed tuple. Enrolled authentication cannot authenticate mesh
+  UDP. Responder keys belong to admitted connections, independent of mesh
+  leases, and stay available for enrolled proofs after component down.
+  Simultaneous component removal is read after timeout so proposals stay retired.
+- Native Hello bit 7 opts into physical proofs. An unread Hello remains pending;
+  an authenticated missing bit refuses discovery. Withdrawal cancels an active
+  candidate and is rechecked before a simultaneous successful reply publishes.
+  Independent key leases preserve overlapping admitted connections on one tuple;
+  cancellation of an older or newer lease cannot erase the other. Mixed receive
+  batches retain every neighboring encrypted datagram when proofs are removed.
+- Backed paths start with a 15 ms probe interval and 30 ms scheduling margin.
+  Authenticated physical RTT/variation and measured local timer lateness adapt
+  health at scale; direct single-tuple paths reuse the ordinary adaptive guard.
+  Original direct controls and distinct-tuple 1000-pair controls remain separate.
+  Session-bound key/direction/tuple/replay/cancellation and fixed-envelope
+  parser robustness checks cover the additive probe; it carries no authority.
   Clients request a 5 ms maximum ACK delay through the existing negotiated
   transport extension, retaining the ordinary two-packet threshold and first
   reordered-packet acknowledgement. Copy-first comparisons confirm negotiation;
