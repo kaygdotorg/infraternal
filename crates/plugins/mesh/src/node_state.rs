@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     net::IpAddr,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -135,7 +135,7 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(path)
     {
-        Ok(file) => {
+        Ok(mut file) => {
             let meta = file.metadata()?;
             if !meta.is_file()
                 || meta.uid() != nix::unistd::Uid::effective().as_raw()
@@ -143,9 +143,13 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
             {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
-            // Updates now check the retained revision too. Buffer public-state
-            // reads so peer inventories do not require one syscall per byte.
-            serde_json::from_reader(io::BufReader::new(file))
+            // Reuse the slice decoder already used for peer/access frames,
+            // avoiding a second JSON specialization for public file input. Read
+            // the checked descriptor so replacement cannot bypass no-follow or
+            // ownership validation. These bytes contain no private key material.
+            let mut body = Vec::new();
+            file.read_to_end(&mut body)?;
+            serde_json::from_slice(&body)
                 .map(Some)
                 .map_err(io::Error::other)
         }
