@@ -182,6 +182,7 @@ struct CountedSocket {
     socket: Arc<dyn AsyncUdpSocket>,
     traffic: Arc<Traffic>,
     client: bool,
+    record_sends: bool,
 }
 impl fmt::Debug for CountedSocket {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -209,6 +210,9 @@ impl AsyncUdpSocket for CountedSocket {
             src_ip: source,
             ..*transmit
         })?;
+        if !self.record_sends {
+            return Ok(());
+        }
         let datagrams = transmit
             .segment_size
             .map_or(1, |segment| transmit.contents.len().div_ceil(segment));
@@ -257,12 +261,42 @@ fn counted(
     socket: Arc<dyn AsyncUdpSocket>,
     traffic: &Arc<Traffic>,
     client: bool,
+    record_sends: bool,
 ) -> Arc<dyn AsyncUdpSocket> {
     Arc::new(CountedSocket {
         socket,
         traffic: traffic.clone(),
         client,
+        record_sends,
     })
+}
+
+/// Keep physical counters below the production path adapter, including copies,
+/// while using the same fresh-socket registration as an outgoing host.
+#[derive(Debug)]
+struct CountedRuntime {
+    delegate: Arc<dyn quinn::Runtime>,
+    traffic: Arc<Traffic>,
+    record_sends: bool,
+}
+impl quinn::Runtime for CountedRuntime {
+    fn now(&self) -> std::time::Instant {
+        self.delegate.now()
+    }
+    fn new_timer(&self, at: std::time::Instant) -> Pin<Box<dyn quinn::AsyncTimer>> {
+        self.delegate.new_timer(at)
+    }
+    fn spawn(&self, task: Pin<Box<dyn std::future::Future<Output = ()> + Send>>) {
+        self.delegate.spawn(task);
+    }
+    fn wrap_udp_socket(&self, socket: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {
+        Ok(counted(
+            self.delegate.wrap_udp_socket(socket)?,
+            &self.traffic,
+            true,
+            self.record_sends,
+        ))
+    }
 }
 
 fn counted_server(
@@ -270,8 +304,9 @@ fn counted_server(
     traffic: &Arc<Traffic>,
     diagnostic: Option<&Arc<ReceiveDiagnostic>>,
     index: usize,
+    record_sends: bool,
 ) -> Arc<dyn AsyncUdpSocket> {
-    let socket = counted(socket, traffic, false);
+    let socket = counted(socket, traffic, false, record_sends);
     diagnostic.map_or_else(
         || socket.clone(),
         |diagnostic| diagnostic.wrap(socket.clone(), index),
@@ -294,6 +329,13 @@ fn system_unit(name: &str) -> u64 {
 
 #[tokio::test]
 async fn physical_counters_include_both_source_paths() {
+    for record_sends in [true, false] {
+        physical_counter_paths(record_sends).await;
+    }
+}
+
+/// Accounting modes preserve the exact datagrams and physical source mapping.
+async fn physical_counter_paths(record_sends: bool) {
     let enrolled = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mesh = tokio::net::UdpSocket::bind(SocketAddr::new(
         Ipv4Addr::new(127, 0, 0, 2).into(),
@@ -308,6 +350,7 @@ async fn physical_counters_include_both_source_paths() {
             .unwrap(),
         &traffic,
         true,
+        record_sends,
     );
     let mut writable = socket.clone().create_io_poller();
     for (receiver, source) in [
@@ -347,27 +390,128 @@ async fn physical_counters_include_both_source_paths() {
         assert_eq!(address.ip(), IpAddr::V4(source));
         assert_eq!(address.port(), socket.local_addr().unwrap().port());
     }
-    assert_eq!(traffic.snapshot(), (20, 2));
-    assert_eq!(traffic.enrolled_snapshot(), (10, 1));
+    assert_eq!(
+        traffic.snapshot(),
+        if record_sends { (20, 2) } else { (0, 0) }
+    );
+    assert_eq!(
+        traffic.enrolled_snapshot(),
+        if record_sends { (10, 1) } else { (0, 0) }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Optimized transport-only measurement on the perf VM under its shared benchmark lock."]
 async fn mesh_probe_and_copy_cost_at_one_thousand_transports() {
-    measure_mesh_probe_and_copy_cost(&[false, true], false).await;
+    measure_mesh_probe_and_copy_cost(&[false, true], false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Separate fresh-copy cohort on the perf VM under its shared benchmark lock."]
 async fn fresh_copy_from_admission_at_one_thousand_transports() {
-    measure_mesh_probe_and_copy_cost(&[true], true).await;
+    measure_mesh_probe_and_copy_cost(&[true], true, None).await;
+}
+
+/// An explicit socket-capacity trial never changes the ordinary production-profile gates.
+#[derive(Clone, Copy)]
+struct SocketTrial {
+    client_gro: bool,
+    server_receive_request: usize,
+    server_receive_force: bool,
+    probe_interval_ms: u64,
+    probe_margin_ms: u64,
+    record_sends: bool,
+}
+impl SocketTrial {
+    fn capacity(self, socket: &std::net::UdpSocket) -> usize {
+        let state = quinn::udp::UdpSocketState::new(socket.into()).unwrap();
+        if self.server_receive_request != 0 {
+            if self.server_receive_force {
+                // This privileged, socket-local control never changes a host
+                // sysctl. Record the actual doubled kernel accounting below.
+                nix::sys::socket::setsockopt(
+                    socket,
+                    nix::sys::socket::sockopt::RcvBufForce,
+                    &self.server_receive_request,
+                )
+                .expect("explicit socket-force diagnostic requires CAP_NET_ADMIN");
+            } else {
+                state
+                    .set_recv_buffer_size(socket.into(), self.server_receive_request)
+                    .unwrap();
+            }
+        }
+        state.recv_buffer_size(socket.into()).unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "Explicit socket-configuration diagnostic on the perf VM; ordinary scale gates stay unchanged."]
+async fn socket_configuration_trial_at_one_thousand_transports() {
+    assert_eq!(
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        "infraternal-perf-test"
+    );
+    let client_gro = match std::env::var("INFRATERNAL_MESH_TRIAL_CLIENT_GRO").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => panic!("explicit trial client receive aggregation required"),
+    };
+    let server_receive_request =
+        match std::env::var("INFRATERNAL_MESH_TRIAL_SERVER_RECEIVE").as_deref() {
+            Ok("0") => 0,
+            Ok("212992") => 212_992,
+            Ok("1048576") => 1_048_576,
+            Ok("2097152") => 2_097_152,
+            _ => panic!("explicit bounded trial server receive capacity required"),
+        };
+    let server_receive_force = match std::env::var("INFRATERNAL_MESH_TRIAL_SERVER_FORCE").as_deref()
+    {
+        Err(_) | Ok("0") => false,
+        Ok("1") => true,
+        _ => panic!("explicit socket-local force mode required"),
+    };
+    assert!(server_receive_request <= 212_992 || server_receive_force);
+    let (probe_interval_ms, probe_margin_ms) =
+        match std::env::var("INFRATERNAL_MESH_TRIAL_PROBE_PROFILE").as_deref() {
+            Err(_) | Ok("15-30") => (15, 30),
+            Ok("20-25") => (20, 25),
+            Ok("25-20") => (25, 20),
+            Ok("30-15") => (30, 15),
+            _ => panic!("explicit same-envelope probe profile required"),
+        };
+    let record_sends = match std::env::var("INFRATERNAL_MESH_TRIAL_RECORD_SENDS").as_deref() {
+        Err(_) | Ok("1") => true,
+        Ok("0") => false,
+        _ => panic!("explicit counter-accounting mode required"),
+    };
+    let trial = Some(SocketTrial {
+        client_gro,
+        server_receive_request,
+        server_receive_force,
+        probe_interval_ms,
+        probe_margin_ms,
+        record_sends,
+    });
+    match std::env::var("INFRATERNAL_MESH_TRIAL_COHORT").as_deref() {
+        Ok("fresh") => measure_mesh_probe_and_copy_cost(&[true], true, trial).await,
+        Ok("retained") => measure_mesh_probe_and_copy_cost(&[false, true], false, trial).await,
+        _ => panic!("explicit fresh or retained socket trial cohort required"),
+    }
 }
 
 /// Retain the original same-cohort diagnostic and measure a separately labelled
 /// fresh cohort without changing its connections, windows, or health criteria.
 #[allow(clippy::too_many_lines)]
-async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
+async fn measure_mesh_probe_and_copy_cost(
+    profiles: &[bool],
+    fresh_copy: bool,
+    socket_trial: Option<SocketTrial>,
+) {
     let diagnostic = ReceiveDiagnostic::from_environment();
+    let record_sends = socket_trial.is_none_or(|trial| trial.record_sends);
     let ca = root();
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
@@ -377,6 +521,7 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
     let client_traffic = Arc::new(Traffic::default());
     let server_traffic = Arc::new(Traffic::default());
     let primary = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let primary_capacity = socket_trial.map(|trial| trial.capacity(&primary));
     let enrolled = primary.local_addr().unwrap();
     let mesh = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), enrolled.port());
     if let Some(diagnostic) = &diagnostic {
@@ -387,15 +532,17 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
         &server_traffic,
         diagnostic.as_ref(),
         0,
+        record_sends,
     ));
+    let mesh_socket = std::net::UdpSocket::bind(mesh).unwrap();
+    let mesh_capacity = socket_trial.map(|trial| trial.capacity(&mesh_socket));
     let lease = bindings
         .lease(counted_server(
-            quinn::TokioRuntime
-                .wrap_udp_socket(std::net::UdpSocket::bind(mesh).unwrap())
-                .unwrap(),
+            quinn::TokioRuntime.wrap_udp_socket(mesh_socket).unwrap(),
             &server_traffic,
             diagnostic.as_ref(),
             1,
+            record_sends,
         ))
         .unwrap();
     let server = quinn::Endpoint::new_with_abstract_socket(
@@ -435,14 +582,16 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
         let driver = DialRuntime::new();
         let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         let port = socket.local_addr().unwrap().port();
-        let path = PathSocket::new(
-            counted(
-                driver.runtime().wrap_udp_socket(socket).unwrap(),
-                &client_traffic,
-                true,
-            ),
-            enrolled,
-        );
+        let runtime = CountedRuntime {
+            delegate: driver.runtime(),
+            traffic: client_traffic.clone(),
+            record_sends,
+        };
+        let path = if socket_trial.is_some_and(|trial| trial.client_gro) {
+            PathSocket::new(runtime.wrap_udp_socket(socket).unwrap(), enrolled)
+        } else {
+            PathSocket::from_udp(socket, enrolled, &runtime).unwrap()
+        };
         let mut client = quinn::Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             None,
@@ -526,7 +675,15 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
             peer.set_backup(backup);
         }
         let (interval, margin) = if backup {
-            (Duration::from_millis(15), Duration::from_millis(30))
+            socket_trial.map_or(
+                (Duration::from_millis(15), Duration::from_millis(30)),
+                |trial| {
+                    (
+                        Duration::from_millis(trial.probe_interval_ms),
+                        Duration::from_millis(trial.probe_margin_ms),
+                    )
+                },
+            )
         } else {
             (Duration::from_millis(100), Duration::from_millis(50))
         };
@@ -644,7 +801,7 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
             .filter(|connection| connection.close_reason().is_none())
             .count();
         healthy &= steady_cohort_valid && false_interruptions == 0 && live == CONNECTIONS;
-        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 20 } else { 0 },"retained_server_history":{"units":["entries","payload_bytes","armed_entries","returning_entries"],"before":history_before,"after_ramp":history_after_ramp,"after_warmup":history_after_warmup,"after_windows":bindings.retained_history().unwrap(),"observation":"aggregate_existing_fields_outside_timed_windows"},"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"owned_udp_drops":{"before":udp_drops_before,"after_ramp":udp_drops_after_ramp,"after_warmup":udp_drops_after_warmup,"after_windows":owned_udp_drops(&[enrolled,mesh],&client_addresses),"observation":"four_per_profile_outside_timed_windows"},"startup":{"physical_traffic_before":traffic_before,"physical_traffic_after_ramp":traffic_after_ramp,"physical_traffic_after_warmup":traffic_after_warmup,"physical_traffic_units":"cumulative_payload_bytes_and_successful_udp_datagrams_including_GSO_segments","proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
+        reports.push(serde_json::json!({"profile":if backup { "copy_enabled_authenticated_transport" } else { "no_copy_probe" },"probe_interval_ms":interval.as_millis(),"probe_margin_ms":margin.as_millis(),"copy_delay_ms":if backup { 10 } else { 0 },"retained_server_history":{"units":["entries","payload_bytes","armed_entries","returning_entries"],"before":history_before,"after_ramp":history_after_ramp,"after_warmup":history_after_warmup,"after_windows":bindings.retained_history().unwrap(),"observation":"aggregate_existing_fields_outside_timed_windows"},"load_before":load_before.trim(),"load_after":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"live":live,"false_interruptions":false_interruptions,"steady_cohort_valid_at_start":steady_cohort_valid,"owned_udp_drops":{"before":udp_drops_before,"after_ramp":udp_drops_after_ramp,"after_warmup":udp_drops_after_warmup,"after_windows":owned_udp_drops(&[enrolled,mesh],&client_addresses),"observation":"four_per_profile_outside_timed_windows"},"startup":{"physical_traffic_before":traffic_before,"physical_traffic_after_ramp":traffic_after_ramp,"physical_traffic_after_warmup":traffic_after_warmup,"physical_traffic_units":"cumulative_payload_bytes_and_successful_udp_datagrams_including_GSO_segments","proof_concurrency":8,"production_authenticated_path_proof":true,"rebind":false,"admission_elapsed_us":admission_elapsed.as_micros(),"proof_failures":proof_failures,"proofs":proof_results,"ramp_watchdog_interruptions":ramp_interruptions,"warmup_ms":1000,"warmup_watchdog_interruptions":warmup_interruptions},"samples":samples}));
         watchers.abort_all();
         while watchers.join_next().await.is_some() {}
         for path in &paths {
@@ -654,7 +811,56 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
             peer.set_backup(false);
         }
     }
-    let report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":if fresh_copy { "fresh_copy_only_new_cohort" } else { "no_copy_then_copy_same_retained_cohort" },"fresh_copy_cohort":fresh_copy,"peer_binding_birth":if fresh_copy { "after_all_mutual_TLS_before_any_mesh_selection_backup_enabled_immediately" } else { "before_TLS_with_profile_flags_later" },"limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh",if fresh_copy { "correlated_windows_of_one_fresh_cohort_no_previous_profile" } else { "correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations" },"CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
+    let mut report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":if fresh_copy { "fresh_copy_only_new_cohort" } else { "no_copy_then_copy_same_retained_cohort" },"fresh_copy_cohort":fresh_copy,"peer_binding_birth":if fresh_copy { "after_all_mutual_TLS_before_any_mesh_selection_backup_enabled_immediately" } else { "before_TLS_with_profile_flags_later" },"limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh",if fresh_copy { "correlated_windows_of_one_fresh_cohort_no_previous_profile" } else { "correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations" },"CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
+    report["physical_send_counters_enabled"] = serde_json::json!(record_sends);
+    if !record_sends {
+        report["instrumentation"] = serde_json::json!(
+            "health-only control: no global send accounting; physical traffic fields omitted; per-window process snapshots and source mapping remain"
+        );
+        report.as_object_mut().unwrap().remove("udp_counters");
+        report
+            .as_object_mut()
+            .unwrap()
+            .remove("udp_bytes_exclude_ip_udp_headers");
+        for profile in report["profiles"].as_array_mut().unwrap() {
+            for sample in profile["samples"].as_array_mut().unwrap() {
+                sample
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|key, _| !key.contains("_udp_"));
+            }
+            let startup = profile["startup"].as_object_mut().unwrap();
+            for key in [
+                "physical_traffic_before",
+                "physical_traffic_after_ramp",
+                "physical_traffic_after_warmup",
+                "physical_traffic_units",
+            ] {
+                startup.remove(key);
+            }
+        }
+    }
+    report["socket_configuration_trial"] = socket_trial.map(|trial| serde_json::json!({
+        "scope":"explicit diagnostic socket parameters; not the ordinary production-profile gate",
+        "client_gro_enabled":trial.client_gro,
+        "physical_send_counters_enabled":trial.record_sends,
+        "probe_interval_ms":trial.probe_interval_ms,
+        "probe_margin_ms":trial.probe_margin_ms,
+        "nominal_detection_over_rtt_ms":trial.probe_interval_ms+trial.probe_margin_ms,
+        "server_receive_request_bytes":trial.server_receive_request,"privileged_socket_local_receive_force":trial.server_receive_force,
+        "effective_kernel_accounting_bytes":[primary_capacity,mesh_capacity],
+        "host_setting_changes":false
+    })).into();
+    report["client_max_receive_segments_min"] =
+        serde_json::json!(paths.iter().map(|path| path.max_receive_segments()).min());
+    report["client_max_receive_segments_max"] =
+        serde_json::json!(paths.iter().map(|path| path.max_receive_segments()).max());
+    report["client_single_segment_sockets"] = serde_json::json!(
+        paths
+            .iter()
+            .filter(|path| path.max_receive_segments() == 1)
+            .count()
+    );
     let scratch = PathBuf::from(
         std::env::var_os("INFRATERNAL_MESH_PROOF_SCRATCH")
             .expect("set external proof evidence directory"),
