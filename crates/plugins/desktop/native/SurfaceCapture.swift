@@ -6,7 +6,7 @@ import VideoToolbox
 
 final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let mailbox = NSLock()
-    private let encoding = DispatchQueue(label: "infraternal.desktop.surface.encode", qos: .userInteractive)
+    private let encodingQueue = DispatchQueue(label: "infraternal.desktop.surface.encode", qos: .userInteractive)
     private let callbacks = DispatchQueue(label: "infraternal.desktop.surface.capture", qos: .userInteractive)
     private let encoder = Encoder()
     private var stream: SCStream?
@@ -16,7 +16,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stopped = false
     private var repairing = false
     private var congested = false
-    private var encoding = DamageEncodingState()
+    private var damageState = DamageEncodingState()
     private var bitrate: AdaptiveBitrate
     private var refresh: DispatchSourceTimer?
     private let size: CGSize
@@ -88,7 +88,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil {
             fputs("METRIC source_frame capture_ns=\(nanos(ticks)) damaged=\(damaged)\n", stderr)
         }
-        if schedule { encoding.async { [weak self] in self?.drain() } }
+        if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
 
     private func drain() {
@@ -105,19 +105,19 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 mailbox.unlock()
                 if retired { break }
                 if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
-                if frame != nil { encoding.changed(at: ProcessInfo.processInfo.systemUptime) }
-                if repair { encoding.repair() }
-                guard let current, let decision = encoding.next(at: ProcessInfo.processInfo.systemUptime) else { break }
+                if frame != nil { damageState.changed(at: ProcessInfo.processInfo.systemUptime) }
+                if repair { damageState.repair() }
+                guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
                 let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget)
                 let began = ProcessInfo.processInfo.systemUptime
                 try output(70, body)
-                encoding.completed(delivered: true)
+                damageState.completed(delivered: true)
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }
-            if let deadline = encoding.refreshDeadline {
+            if let deadline = damageState.refreshDeadline {
                 if refresh == nil {
-                    let timer = DispatchSource.makeTimerSource(queue: encoding)
+                    let timer = DispatchSource.makeTimerSource(queue: encodingQueue)
                     timer.setEventHandler { [weak self] in
                         guard let self else { return }
                         self.refresh?.schedule(deadline: .distantFuture)
@@ -135,7 +135,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         mailbox.lock(); active = false; let queued = latest != nil || repairing; let retired = stopped
         if queued && !retired { active = true }; mailbox.unlock()
-        if queued && !retired { encoding.async { [weak self] in self?.drain() } }
+        if queued && !retired { encodingQueue.async { [weak self] in self?.drain() } }
     }
 
     func congestion() { mailbox.lock(); congested = true; mailbox.unlock() }
@@ -143,7 +143,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func repair() {
         mailbox.lock(); repairing = true; let schedule = !active && !stopped
         if schedule { active = true }; mailbox.unlock()
-        if schedule { encoding.async { [weak self] in self?.drain() } }
+        if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
 
     @discardableResult func stop() -> Bool {
@@ -155,7 +155,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if let captured { Task { try? await captured.stopCapture() } }
         // Stop does not block the GUI behind an output write. The private process
         // owner closes the pipes and joins it at retirement; callbacks cannot restart.
-        encoding.async { [weak self] in self?.refresh?.cancel(); self?.refresh = nil; self?.encoder.stop() }
+        encodingQueue.async { [weak self] in self?.refresh?.cancel(); self?.refresh = nil; self?.encoder.stop() }
         return true
     }
 }
