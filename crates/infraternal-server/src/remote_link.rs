@@ -464,6 +464,15 @@ impl RemoteLink {
         }
     }
 
+    /// Observe authenticated `STOP_SENDING` before testing a late detach.
+    #[cfg(test)]
+    pub(crate) fn test_received_stop_sending(&self) -> Option<u64> {
+        match &self.transport {
+            LinkTransport::Quic(link) => Some(link.connection.stats().frame_rx.stop_sending),
+            LinkTransport::Tcp { .. } => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn limit_send_window(&self, bytes: u64) {
         if let LinkTransport::Quic(link) = &self.transport {
@@ -620,10 +629,17 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
+                let terminal_close = stream != 0 && matches!(frame, Frame::Close { .. });
                 let existing = link.streams.lock().await.get(&stream).cloned();
                 let channel = if let Some(channel) = existing {
                     channel
                 } else {
+                    // Peer retirement may win the race with the consumer's
+                    // detach. Cleanup is idempotent; other frames still need
+                    // a live binding, and odd/control ids cannot invent one.
+                    if terminal_close && stream & 1 == 0 {
+                        return Ok(());
+                    }
                     if !matches!(frame, Frame::AttachTerm { .. }) {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
@@ -670,14 +686,20 @@ impl RemoteLink {
                         channel
                     }
                 };
-                Transmit::default()
+                let result = Transmit::default()
                     .send(channel.as_ref(), stream, frame)
-                    .await?;
-                if stream != 0 && matches!(frame, Frame::Close { .. }) {
+                    .await;
+                if terminal_close {
+                    // A peer can stop receiving before local detach is sent.
+                    // Retire this channel even after a partial/failed Close:
+                    // no later frame may follow it, and its writer-local error
+                    // must not make the actor discard the host connection.
                     link.streams.lock().await.remove(&stream);
                     channel.retire();
+                    Ok(())
+                } else {
+                    result
                 }
-                Ok(())
             }
         }
     }
