@@ -458,14 +458,11 @@ async fn release_transition_recovers_enrolled_host_after_long_outage() {
         &fixture.cookie,
     )
     .await;
+    // One retry period plus protocol and terminal-admission allowance.
+    let recovery_budget = Duration::from_secs(31);
     tokio::time::timeout(
-        Duration::from_secs(40),
-        open_remote_with_budget(
-            &mut recovered,
-            host,
-            Instant::now(),
-            Duration::from_secs(40),
-        ),
+        recovery_budget,
+        open_remote_with_budget(&mut recovered, host, Instant::now(), recovery_budget),
     )
     .await
     .expect("infraternal agent did not reconnect after cold server replacement");
