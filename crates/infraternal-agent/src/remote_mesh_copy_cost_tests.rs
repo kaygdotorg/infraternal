@@ -29,6 +29,21 @@ const CONNECTIONS: usize = 1000;
 const WINDOWS: usize = 31;
 const WINDOW: Duration = Duration::from_millis(250);
 
+/// Before a fresh alias has selected mesh, enrolled post-handshake traffic can
+/// queue dormant alternative replies. No scheduled copy or enrolled recovery
+/// may predate the ramp; entry and byte counts remain in the raw receipt.
+fn fresh_history_is_dormant(history: [usize; 4]) -> bool {
+    history[2] == 0 && history[3] == 0
+}
+
+#[test]
+fn fresh_admission_accepts_dormant_replies_but_refuses_pending_recovery() {
+    assert!(fresh_history_is_dormant([0; 4]));
+    assert!(fresh_history_is_dormant([3, 4356, 0, 0]));
+    assert!(!fresh_history_is_dormant([1, 32, 1, 0]));
+    assert!(!fresh_history_is_dormant([1, 32, 0, 1]));
+}
+
 type Watchers = tokio::task::JoinSet<(
     usize,
     io::Result<()>,
@@ -502,9 +517,9 @@ async fn measure_mesh_probe_and_copy_cost(profiles: &[bool], fresh_copy: bool) {
         let udp_drops_before = owned_udp_drops(&[enrolled, mesh], &client_addresses);
         let history_before = bindings.retained_history().unwrap();
         if fresh_copy {
-            assert_eq!(
-                history_before, [0; 4],
-                "fresh peers must have no prior mesh history"
+            assert!(
+                fresh_history_is_dormant(history_before),
+                "fresh peers must have no scheduled copies or enrolled recovery: {history_before:?}"
             );
         }
         for peer in &peers {
