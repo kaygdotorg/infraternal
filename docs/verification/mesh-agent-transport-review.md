@@ -29,7 +29,7 @@
   detached worker survives component down. Each recent queue is bounded to
   64 KiB and 64 datagrams. Two ends at 1000 transports allow 128 MiB of recent
   payload, plus routing metadata and the existing engine state.
-- Ordinary mesh-to-enrolled copies retain individual 20 ms deadlines; an older
+- Ordinary mesh-to-enrolled copies retain individual 10 ms deadlines; an older
   entry's clock cannot send younger entries early. The shared endpoint budget
   is 32 send calls per receive poll, including segmented calls. Due entries
   remain pending across budget exhaustion and socket backpressure. Completed
@@ -46,6 +46,20 @@
   copy-first and shutdown regressions cover the implementation; release
   acceptance remains pending. Unused timers cancel without removing a live
   endpoint's receive registration or pending enrolled recovery.
+- Successful scheduled enrolled backups consume their originals too, so a
+  later route hint cannot replay a second burst of already-copied ciphertext.
+  Failed originals remain available for explicit recovery. Known admitted
+  aliases preserve the generic reply memo from before admission; retiring the
+  alias restores either the primary or the previous leased listener.
+- Repeated mesh hints refresh coordinates without rescanning dormant replies
+  after the first coordinates arrive. Derived copy deadlines are invalidated
+  at the peer's mutable queue boundary; idle/future queues skip the drain scan.
+  The existing send budget and round-robin cursor still bound receive work.
+- Fresh outgoing host sockets disable receive aggregation before dialing, then
+  advertise one receive segment only after the kernel confirms the option.
+  Failure preserves the underlying capacity. Shared server aggregation and
+  send segmentation remain enabled. Exact segmented-datagram and kernel-latency
+  bulk controls cover this representation; scale health remains a separate gate.
 - A candidate owns fresh acknowledgement probes until its bounded proof ends.
   Idle mesh detection requires both a physical mesh reply and fresh authenticated
   counters. Enrolled copies alone cannot prove a live mesh. Simultaneous
@@ -90,6 +104,11 @@
   physical adapter sends, including ciphertext copies. It does not claim 1000
   daemons or kernel mesh nodes. Fixed-order windows retain allocator state and
   counter overhead; failed watchdog cohorts are not accepted cost evidence.
+  Explicit diagnostics separately control cadence, receive aggregation,
+  owned socket capacity and global test-send accounting. Accounting-off reports
+  omit unavailable traffic fields. None disables production path freshness or
+  send-boundary observations. Failed proof/ramp/warmup cohorts cannot claim
+  healthy steady cost just because surviving watchers stop failing later.
 - Release acceptance, both static size ceilings and the complete fast gate are
   recorded on #201. This checklist does not assert outstanding measurements pass.
   The dual reply has no accepted healthy-1000-transport or 31-sample
