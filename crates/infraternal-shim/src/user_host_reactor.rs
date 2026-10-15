@@ -19,7 +19,8 @@ use std::{
 
 // Short output is latency-sensitive too, but an entire ready cohort must not
 // postpone the next input poll. Bulk retains its independent rotating turn.
-const INTERACTIVE_READS_PER_ROUND: usize = 8;
+const INTERACTIVE_READS_PER_ROUND: usize = 64;
+const INTERACTIVE_OUTPUT_TIME: Duration = Duration::from_micros(500);
 const SIGNAL: u64 = u64::MAX;
 #[derive(Clone, Copy)]
 struct Registration {
@@ -283,6 +284,7 @@ struct ReadyMarks {
     read: Vec<u32>,
     round: u32,
     interactive_reads: usize,
+    output_deadline: Option<Instant>,
 }
 impl ReadyMarks {
     const BULK_MASK: u8 = 3;
@@ -294,10 +296,12 @@ impl ReadyMarks {
             read: vec![0; count],
             round: 1,
             interactive_reads: 0,
+            output_deadline: None,
         }
     }
     fn next_round(&mut self) {
         self.interactive_reads = 0;
+        self.output_deadline = None;
         if let Some(round) = self.round.checked_add(1) {
             self.round = round;
         } else {
@@ -337,8 +341,19 @@ impl ReadyMarks {
     fn retire_timer(&mut self, index: usize) {
         self.queued[index] &= !Self::TIMER;
     }
+    fn start_output_round(&mut self, now: Instant) {
+        // Start after input dispatch, never before a blocking poll. Cheap
+        // replies share a turn; costly output yields without an idle timer.
+        self.output_deadline = Some(now + INTERACTIVE_OUTPUT_TIME);
+    }
     fn read_interactive(&mut self, index: usize) -> bool {
-        if self.interactive_reads == INTERACTIVE_READS_PER_ROUND || !self.read_once(index) {
+        self.read_interactive_at(index, Instant::now())
+    }
+    fn read_interactive_at(&mut self, index: usize, now: Instant) -> bool {
+        if self.interactive_reads == INTERACTIVE_READS_PER_ROUND
+            || self.output_deadline.is_some_and(|deadline| now >= deadline)
+            || !self.read_once(index)
+        {
             return false;
         }
         self.interactive_reads += 1;
@@ -650,6 +665,7 @@ pub(super) fn run(
                 live -= 1;
             }
         }
+        marks.start_output_round(Instant::now());
         // The readable-byte hints are output work too. Even a thousand
         // simultaneous PTYs must receive ready input before those ioctls.
         for &index in &work.active {
@@ -1125,26 +1141,34 @@ mod tests {
             let (mut session, mut client, state) =
                 super::super::tests::ack_fixture(34 + u8::from(output));
             let signals = SignalFd::new(&nix::sys::signal::SigSet::empty()).unwrap();
-            let mut registry = Registry::new(9, &signals).unwrap();
-            let mut marks = ReadyMarks::new(9);
-            for index in 0..8 {
+            let mut registry = Registry::new(INTERACTIVE_READS_PER_ROUND + 1, &signals).unwrap();
+            let mut marks = ReadyMarks::new(INTERACTIVE_READS_PER_ROUND + 1);
+            for index in 0..INTERACTIVE_READS_PER_ROUND {
                 assert!(marks.read_interactive(index));
             }
-            assert!(!marks.read_interactive(8));
+            assert!(!marks.read_interactive(INTERACTIVE_READS_PER_ROUND));
             let mut bulk = VecDeque::new();
-            assert!(marks.queue(8));
-            bulk.push_back(8);
+            assert!(marks.queue(INTERACTIVE_READS_PER_ROUND));
+            bulk.push_back(INTERACTIVE_READS_PER_ROUND);
             session.housekeeping_coalesced(true).unwrap();
             let fresh = AckMode::for_control(true, false, false);
             registry
-                .sync(8, &session, matches!(fresh, AckMode::QueuedRead))
+                .sync(
+                    INTERACTIVE_READS_PER_ROUND,
+                    &session,
+                    matches!(fresh, AckMode::QueuedRead),
+                )
                 .unwrap();
             let fd = session.peers[0].stream.as_raw_fd();
             let fresh_write = registry.by_fd[&fd].flags.contains(EpollFlags::EPOLLOUT);
             // A queued read guarantees service without a second writable poll.
             let waiting = AckMode::for_control(false, true, true);
             registry
-                .sync(8, &session, matches!(waiting, AckMode::QueuedRead))
+                .sync(
+                    INTERACTIVE_READS_PER_ROUND,
+                    &session,
+                    matches!(waiting, AckMode::QueuedRead),
+                )
                 .unwrap();
             let waiting_write = registry.by_fd[&fd].flags.contains(EpollFlags::EPOLLOUT);
             let mut events = [EpollEvent::empty(); 8];
@@ -1158,7 +1182,7 @@ mod tests {
             });
             let mut outputs = 0;
             let chosen = next_output(&mut std::iter::empty(), &mut bulk, &mut marks, &mut outputs);
-            let granted = marks.read_once(8);
+            let granted = marks.read_once(INTERACTIVE_READS_PER_ROUND);
             let mut expected = super::super::super::Frame::InputAck(0).encode().unwrap();
             if output {
                 session.ring.append(b"reply").unwrap();
@@ -1170,7 +1194,9 @@ mod tests {
             }
             // The final settle acknowledges even an empty read attempt.
             session.housekeeping().unwrap();
-            registry.sync(8, &session, false).unwrap();
+            registry
+                .sync(INTERACTIVE_READS_PER_ROUND, &session, false)
+                .unwrap();
             let mut received = vec![0; expected.len()];
             let delivered = client.read_exact(&mut received);
             drop(registry);
@@ -1186,7 +1212,7 @@ mod tests {
                 !polled_write,
                 "the kernel must not return the held logical Ack as writable"
             );
-            assert_eq!(chosen, Some((8, BULK_READ_BYTES)));
+            assert_eq!(chosen, Some((INTERACTIVE_READS_PER_ROUND, BULK_READ_BYTES)));
             assert!(granted);
             delivered.expect("queued service must finish the Ack, including an empty read");
             assert_eq!(received, expected);
@@ -1251,6 +1277,33 @@ mod tests {
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
+    fn cheap_replies_share_a_turn_but_expired_output_yields_to_input() {
+        let mut marks = ReadyMarks::new(100);
+        let start = Instant::now();
+        marks.start_output_round(start);
+        for index in 0..16 {
+            assert!(
+                marks.read_interactive_at(index, start + Duration::from_micros(index as u64 * 20)),
+                "cheap replies should not need another poll before the output deadline"
+            );
+        }
+        assert!(!marks.read_interactive_at(16, start + Duration::from_micros(500)));
+        assert!(
+            marks.queue(16),
+            "denied output keeps its rotating continuation"
+        );
+        assert!(marks.take_bulk(16));
+        assert!(marks.read_once(16), "bulk keeps its separate bounded turn");
+        marks.next_round();
+        marks.start_output_round(start + Duration::from_secs(1));
+        assert!(marks.read_interactive_at(17, start + Duration::from_secs(1)));
+        marks.round = u32::MAX;
+        marks.next_round();
+        marks.start_output_round(start + Duration::from_secs(2));
+        assert!(marks.read_interactive_at(17, start + Duration::from_secs(2)));
+    }
+
+    #[test]
     fn short_output_cohort_yields_before_the_next_input_poll() {
         let mut marks = ReadyMarks::new(1000);
         let mut bulk = VecDeque::new();
@@ -1267,10 +1320,14 @@ mod tests {
             }
         }
         assert_eq!(
-            reads, 8,
+            reads, INTERACTIVE_READS_PER_ROUND,
             "a short-output cohort must not monopolize one turn"
         );
-        assert_eq!(bulk.len(), 992, "unread output must retain continuation");
+        assert_eq!(
+            bulk.len(),
+            1000 - INTERACTIVE_READS_PER_ROUND,
+            "unread output must retain continuation"
+        );
         marks.next_round();
         let index = bulk.pop_front().unwrap();
         assert!(marks.take_bulk(index));
@@ -1294,14 +1351,19 @@ mod tests {
             for turn in 0..4 {
                 marks.next_round();
                 if input_spent_allowance {
-                    for index in 0..8 {
+                    for index in 0..INTERACTIVE_READS_PER_ROUND {
                         assert!(marks.read_interactive(index));
                     }
                 }
                 // The same fast producers stay ready on every turn. Granted
                 // promotions cancel old entries; denied ones retain rotation.
-                let start = if input_spent_allowance { 8 } else { 0 };
-                let mut short = (start..start + 8).map(|index| (index, INTERACTIVE_READ_BYTES));
+                let start = if input_spent_allowance {
+                    INTERACTIVE_READS_PER_ROUND
+                } else {
+                    0
+                };
+                let mut short = (start..start + INTERACTIVE_READS_PER_ROUND)
+                    .map(|index| (index, INTERACTIVE_READ_BYTES));
                 let mut outputs = 0;
                 let mut bulk_reads = Vec::new();
                 while let Some((index, budget)) =
@@ -1316,7 +1378,7 @@ mod tests {
                         bulk_reads.push(index);
                     }
                 }
-                assert_eq!(bulk_reads, vec![8 + turn]);
+                assert_eq!(bulk_reads, vec![INTERACTIVE_READS_PER_ROUND + turn]);
             }
         }
     }
