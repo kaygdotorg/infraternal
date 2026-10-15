@@ -448,6 +448,35 @@ impl SocketTrial {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Explicit socket-configuration diagnostic on the perf VM; ordinary scale gates stay unchanged."]
 async fn socket_configuration_trial_at_one_thousand_transports() {
+    run_socket_configuration_trial().await;
+}
+
+/// Compare scheduling configurations without changing the ordinary scale gates.
+#[test]
+#[ignore = "Explicit runtime scheduling control on the perf VM; ordinary runtime and guards unchanged."]
+fn runtime_configuration_trial_at_one_thousand_transports() {
+    let mode = std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME").unwrap();
+    let mut builder = match mode.as_str() {
+        "current_thread" => tokio::runtime::Builder::new_current_thread(),
+        "four_workers_default" | "four_workers_fair" => {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(4);
+            builder
+        }
+        _ => panic!("explicit supported runtime control required"),
+    };
+    if mode == "four_workers_fair" {
+        builder.global_queue_interval(1).event_interval(1);
+    }
+    builder
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_socket_configuration_trial());
+}
+
+/// Parse only explicit diagnostic parameters; the transport measurement owns all guards.
+async fn run_socket_configuration_trial() {
     assert_eq!(
         std::fs::read_to_string("/proc/sys/kernel/hostname")
             .unwrap()
@@ -814,6 +843,10 @@ async fn measure_mesh_probe_and_copy_cost(
     }
     let mut report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":if fresh_copy && profiles == [false] { "fresh_no_copy_only_new_cohort" } else if fresh_copy { "fresh_copy_only_new_cohort" } else { "no_copy_then_copy_same_retained_cohort" },"fresh_copy_cohort":fresh_copy && profiles.contains(&true),"fresh_alias_cohort":fresh_copy,"explicit_fresh_no_copy_control":fresh_copy && profiles == [false],"peer_binding_birth":if fresh_copy { "after_all_mutual_TLS_before_any_mesh_selection_backup_enabled_immediately" } else { "before_TLS_with_profile_flags_later" },"limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh",if fresh_copy { "correlated_windows_of_one_fresh_cohort_no_previous_profile" } else { "correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations" },"CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
     report["physical_send_counters_enabled"] = serde_json::json!(record_sends);
+    report["explicit_runtime_control"] = serde_json::json!(
+        std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME")
+            .unwrap_or_else(|_| "four_workers_macro".into())
+    );
     if !record_sends {
         report["instrumentation"] = serde_json::json!(
             "health-only control: no global send accounting; physical traffic fields omitted; per-window process snapshots and source mapping remain"
