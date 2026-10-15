@@ -138,6 +138,8 @@ fn observer_snapshot(capture: &crate::remote_autoswitch_probe::Capture) -> serde
     serde_json::json!({"tls_callbacks":capture.count(Kind::TlsHandshake),
         "admission_callbacks":capture.count(Kind::LedgerAdmission),
         "control_ready_callbacks":capture.count(Kind::ControlReady),
+        "terminal_detach_already_retired":capture.count(Kind::TerminalDetachAlreadyRetired),
+        "terminal_detach_write_errors":capture.count(Kind::TerminalDetachWriteError),
         "terminal_output_callbacks":capture.count(Kind::TerminalByte),
         "first_events":first_events,"first_event_limit":64,
         "first_events_truncated":events.len()>64,"earliest_unrestricted_output_claimed":false})
@@ -593,6 +595,16 @@ async fn mesh_acceptance_real_addhost() {
     if !baseline_transport {
         // An unused losing dial can finish TLS and its authority lookup before
         // sending Hello. Only control activation creates the host transport.
+        if control_count != 1 {
+            std::fs::write(
+                scratch.join("bootstrap-transport-failure.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "phase":"after_initial_echo_before_mesh_release",
+                    "done_wall_us":wall_us(done_wall),
+                    "callbacks":observer_snapshot(&capture),
+                })).unwrap(),
+            ).unwrap();
+        }
         assert!(tls_count >= 1, "bootstrap TLS handshake was not observed");
         assert_eq!(control_count, 1, "bootstrap activated multiple transports");
         assert!(
@@ -600,6 +612,8 @@ async fn mesh_acceptance_real_addhost() {
             "bootstrap authority lookup was not observed"
         );
     }
+    let stage_observer = std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some();
+    let mut standing_stages = None;
     let mut standing_first = None;
     let mut standing_peer = None;
     let mut release_wall = None;
@@ -624,15 +638,32 @@ async fn mesh_acceptance_real_addhost() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }).await.unwrap());
+        let counter_finished = stage_observer.then(SystemTime::now);
         capture.clear_terminal_milestones();
+        let fence_started = stage_observer.then(SystemTime::now);
         nft(&fence_rules(node, controller, "acceptance_standing_fence"));
+        let fence_finished = stage_observer.then(SystemTime::now);
         let boundary = Instant::now();
         let marker = format!("standing-mesh-{}|", Uuid::new_v4());
         expected.extend_from_slice(marker.as_bytes());
+        let send_started = stage_observer.then(SystemTime::now);
         echo.send(marker.as_bytes()).await;
+        let send_finished = stage_observer.then(SystemTime::now);
         echo.wait(&expected).await;
         standing_first = capture.first_terminal_after(terminal_writer, boundary);
         assert!(standing_first.is_some(), "fresh standing marker has no authenticated Output witness");
+        if stage_observer {
+            // Attribute fixture scheduling separately; no overhead is removed
+            // from the causal handshake-to-Output acceptance boundary.
+            standing_stages = Some(serde_json::json!({
+                "scope":"observer-cost stage attribution; not adjusted acceptance latency",
+                "counter_finished_wall_us":wall_us(counter_finished.unwrap()),
+                "fence_started_wall_us":wall_us(fence_started.unwrap()),
+                "fence_finished_wall_us":wall_us(fence_finished.unwrap()),
+                "send_started_wall_us":wall_us(send_started.unwrap()),
+                "send_finished_wall_us":wall_us(send_finished.unwrap())
+            }));
+        }
         nft("delete table inet acceptance_standing_fence");
         wait_link(&remote, ServerLinkKind::Mesh).await;
     }
@@ -735,6 +766,27 @@ async fn mesh_acceptance_real_addhost() {
         }
     );
     nft("delete table inet acceptance_cut");
+    // Optional full lifecycle coverage reuses the real installed daemon and
+    // its writer after the measured cut. Its work cannot alter earlier clocks.
+    let mesh_disable_checked = std::env::var_os("ACCEPTANCE_DISABLE_LIFECYCLE").is_some();
+    if mesh_disable_checked {
+        runtime
+            .set_enabled("mesh", false)
+            .await
+            .expect("mesh disable failed after fallback");
+        wait_link(&remote, ServerLinkKind::Fallback).await;
+        let enabled: i64 = sqlx::query_scalar(
+            "SELECT enabled FROM plugin_settings WHERE role='server' AND plugin='mesh'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(enabled, 0, "mesh disable was not durably committed");
+        let marker = format!("disabled-survived-{}|", Uuid::new_v4());
+        expected.extend_from_slice(marker.as_bytes());
+        echo.send(marker.as_bytes()).await;
+        echo.wait(&expected).await;
+    }
     let final_tls = capture.count(crate::remote_autoswitch_probe::Kind::TlsHandshake);
     let final_admissions = capture.count(crate::remote_autoswitch_probe::Kind::LedgerAdmission);
     let final_controls = capture.count(crate::remote_autoswitch_probe::Kind::ControlReady);
@@ -782,7 +834,7 @@ async fn mesh_acceptance_real_addhost() {
         "same_terminal_attachment":true,"connection_preservation_required":!baseline_transport,"connection_preservation_claimed":!baseline_transport,
         "initial_tls_callbacks":tls_count,"final_tls_callbacks":final_tls,"initial_control_callbacks":control_count,"final_control_callbacks":final_controls,"initial_admission_callbacks":admission_count,"final_admission_callbacks":final_admissions,
         "tls_admission_counts_unchanged":tls_count==final_tls && admission_count==final_admissions,"control_counts_unchanged":control_count==final_controls,"terminal_opened_after_initial_mesh_join":true,"initial_ssh_shell_handoff_proven":false,"terminal_byte_integrity":byte_integrity,"fresh_real_ssh_install":true,"inventory_only_extra_peers":0});
-    let standing_report = serde_json::json!({"controlled_standing_session_switch":standing,"intentional_initial_mesh_hold":standing,"standing_release_wall_us":release_wall.map(wall_us),"standing_first_mesh_output_wall_us":standing_first.as_ref().map(|event|wall_us(event.wall)),"node_handshake_to_standing_first_mesh_output_us":standing_first.as_ref().map(|event|event.wall.duration_since(joined).unwrap().as_micros()),"standing_first_output_path_proven":standing_first.is_some(),"standing_uses_same_writer_and_attachment":standing,"terminal_opened_after_initial_mesh_join":!standing,"acceptance_mode":if standing {"standing-switch"} else if fenced_canary {"fenced-canary"} else {"unrestricted"},"ordinary_latency_acceptance":!standing && !diagnostic_profile && !cfg!(debug_assertions)});
+    let standing_report = serde_json::json!({"mesh_disable_checked":mesh_disable_checked,"standing_stage_observer":stage_observer,"standing_stage_observations":standing_stages,"controlled_standing_session_switch":standing,"intentional_initial_mesh_hold":standing,"standing_release_wall_us":release_wall.map(wall_us),"standing_first_mesh_output_wall_us":standing_first.as_ref().map(|event|wall_us(event.wall)),"node_handshake_to_standing_first_mesh_output_us":standing_first.as_ref().map(|event|event.wall.duration_since(joined).unwrap().as_micros()),"standing_first_output_path_proven":standing_first.is_some(),"standing_uses_same_writer_and_attachment":standing,"terminal_opened_after_initial_mesh_join":!standing,"acceptance_mode":if standing {"standing-switch"} else if fenced_canary {"fenced-canary"} else {"unrestricted"},"ordinary_latency_acceptance":!standing && !diagnostic_profile && !cfg!(debug_assertions)});
     let natural_report = serde_json::json!({
         "natural_unheld_join_post_success_witness":natural_witness,
         "natural_witness_scope":"upper bound after normal readiness, commit, terminal setup, initial echo, counter query, local fence, and marker input/echo; no overhead subtracted",
@@ -804,6 +856,13 @@ async fn mesh_acceptance_real_addhost() {
             .unwrap()
             .extend(fields.as_object().unwrap().clone());
     }
+    if stage_observer {
+        // Retain late cleanup observations too; the Done snapshot may precede
+        // terminal detach. All measured byte boundaries are already captured.
+        report["final_transport_observations"] = observer_snapshot(&capture);
+    }
+    report["expected_terminal_bytes"] = serde_json::json!(expected.len());
+    report["verified_terminal_bytes"] = serde_json::json!(byte_integrity.then_some(expected.len()));
     report["terminal_writer_id"] = serde_json::json!(terminal_writer);
     report["standing_first_output_writer_id"] = serde_json::json!(standing_first.as_ref().map(|event|event.stream));
     std::fs::write(
