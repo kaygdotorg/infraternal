@@ -192,7 +192,7 @@ impl CredentialSession {
         if let Some((listener, secret)) = prompt {
             let image =
                 image.ok_or_else(|| Failure::install("The SSH prompt image is unavailable."))?;
-            self.askpass = Some(tokio::spawn(serve(
+            self.askpass = Some(crate::tasks::spawn(serve(
                 listener,
                 secret,
                 self.prompt_parent.clone(),
