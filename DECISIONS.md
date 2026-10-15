@@ -2750,8 +2750,23 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        install the root infraternal agent's system service, then wiped from
        memory. It is never written to disk, a log or the server.
      - **Going back to the rootless agent is possible but deliberately hard
-       to reach,** so that nobody downgrades by accident. The details are
-       still open. Removing the host removes everything (D273).
+       to reach,** so that nobody downgrades by accident:
+       - Only admins of that host ever see the action, anywhere.
+       - It is not in the host's details: the "Full access" line there shows
+         the state only. The action is found by search and in the host's ⋯
+         menu.
+       - **Two prompts.** The first explains why and what, as a short
+         point-by-point list of what stops on this host right now (for
+         example "build-01 leaves the mesh: 3 machines lose their direct
+         link", "4 containers run by root disappear from Containers"),
+         concise and hand-held. The second asks "are you sure", asks which
+         user the rootless infraternal agent should run as, and has the
+         person type the host's name.
+       - Every admin of the host gets an Inbox item (who and when) with
+         "Allow full access again", which asks for the password again
+         because none was kept.
+       - Further friction is still being discussed with the owner.
+       Removing the host removes everything (D273).
 275. **The wheel scrolls what is under it (owner, 2026-10-15; refines D177,
      #215):** today a snapped canvas sends every wheel to window navigation,
      so a window's own list (Access) cannot scroll without the input lock.
@@ -2777,3 +2792,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        way they do at the sides. There is no new indicator, and no
        appearance setting turns peeking off: a window's full-screen view
        is the way to see one window alone.
+276. **Inbox items can be dismissed (owner, 2026-10-15, #215):** every Inbox
+     item can be dismissed, except the few that block something from
+     working until they are acted on (for example "Allow host connections").
+     Those stay until resolved, and say what they block.
