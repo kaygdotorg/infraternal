@@ -81,7 +81,7 @@ impl Registry {
         let fd = RawFd::try_from(key & u64::from(u32::MAX)).ok()?;
         self.by_fd.get(&fd).filter(|entry| entry.key == key)
     }
-    fn sync(&mut self, index: usize, session: &Session, read_pending: bool) -> io::Result<()> {
+    fn sync(&mut self, index: usize, session: &Session, hold_ack: bool) -> io::Result<()> {
         // Peer admission already caps this array. Steady interest changes
         // borrow a small stack list rather than allocate on every settle.
         let mut storage: [Option<(BorrowedFd<'_>, EpollFlags)>; MAX_PEERS + 2] =
@@ -104,8 +104,8 @@ impl Registry {
             if peer.deferred.is_none() && peer.trailing.is_empty() {
                 flags |= EpollFlags::EPOLLIN;
             }
-            let writable = if read_pending {
-                session.can_write_while_read_pending(peer)
+            let writable = if hold_ack {
+                session.can_write_with_ack_held(peer)
             } else {
                 session.can_write(peer)
             };
@@ -289,6 +289,7 @@ struct ReadyMarks {
 impl ReadyMarks {
     const BULK_MASK: u8 = 3;
     const TIMER: u8 = 4;
+    const ACK: u8 = 8;
 
     fn new(count: usize) -> Self {
         Self {
@@ -341,6 +342,18 @@ impl ReadyMarks {
     fn retire_timer(&mut self, index: usize) {
         self.queued[index] &= !Self::TIMER;
     }
+    fn queue_ack(&mut self, index: usize) -> bool {
+        let state = &mut self.queued[index];
+        let prior = *state & Self::ACK;
+        *state |= Self::ACK;
+        prior == 0
+    }
+    fn take_ack(&mut self, index: usize) -> bool {
+        let state = &mut self.queued[index];
+        let prior = *state & Self::ACK;
+        *state &= !Self::ACK;
+        prior != 0
+    }
     fn start_output_round(&mut self, now: Instant) {
         // Start after input dispatch, never before a blocking poll. Cheap
         // replies share a turn; costly output yields without an idle timer.
@@ -392,8 +405,8 @@ fn next_output(
     None
 }
 
-/// Fresh Acks retain the silent-program writable fallback. `QueuedRead` relies
-/// on an already queued PTY attempt and must not add a writable polling loop.
+/// Fresh Acks get one local next-turn fallback; a due fallback is immediate
+/// even if more input arrived. `QueuedRead` relies on a bounded PTY attempt.
 #[derive(Clone, Copy)]
 enum AckMode {
     Immediate,
@@ -409,6 +422,29 @@ impl AckMode {
         } else {
             Self::Immediate
         }
+    }
+}
+
+/// A fresh logical Ack receives one local next-turn fallback, rather than
+/// toggling kernel writable interest twice. Existing slot bits deduplicate it.
+fn queue_fresh_ack(
+    index: usize,
+    session: &Session,
+    mode: AckMode,
+    marks: &mut ReadyMarks,
+    fallback: &mut VecDeque<usize>,
+) {
+    if matches!(mode, AckMode::Fresh)
+        && session.peers.iter().any(|peer| {
+            super::may_coalesce_data_ack(
+                peer,
+                session.ring.head(),
+                !session.drained && session.exit.is_none(),
+            )
+        })
+        && marks.queue_ack(index)
+    {
+        fallback.push_back(index);
     }
 }
 
@@ -451,7 +487,7 @@ fn settle_with_ack_mode(
     {
         timers.push(Reverse((deadline, index)));
     }
-    registry.sync(index, session, matches!(ack_mode, AckMode::QueuedRead))?;
+    registry.sync(index, session, !matches!(ack_mode, AckMode::Immediate))?;
     Ok(true)
 }
 fn retire_failed(index: usize, slots: &mut [Option<Session>], registry: &mut Registry) {
@@ -476,6 +512,7 @@ pub(super) fn run(
     let mut live = slots.len();
     let mut failed = false;
     let mut bulk = VecDeque::new();
+    let mut ack_fallback = VecDeque::new();
     let mut marks = ReadyMarks::new(slots.len());
     // All ordinary PTYs/listeners fit this batch at the requested 1000-session
     // scale; control readiness is not hidden behind many small bulk-only waits.
@@ -497,7 +534,7 @@ pub(super) fn run(
                 marks.retire_timer(index);
             }
         }
-        let timeout = if bulk.is_empty() {
+        let timeout = if bulk.is_empty() && ack_fallback.is_empty() {
             timers
                 .peek()
                 .map_or(EpollTimeout::NONE, |Reverse((deadline, _))| {
@@ -515,6 +552,11 @@ pub(super) fn run(
             Err(nix::errno::Errno::EINTR) => continue,
             Err(e) => return Err(e.into()),
         };
+        // The prior turn's fallback can never hide ready input: first collect
+        // all kernel readiness, then dispatch input for the combined work list.
+        for index in ack_fallback.drain(..) {
+            work.entry(index);
+        }
         let mut child_exit = false;
         let mut signal_ready = false;
         for event in &events[..count] {
@@ -550,7 +592,7 @@ pub(super) fn run(
                             &slots,
                             &mut accounting,
                             Some(format_args!(
-                                "{{\"slots_capacity\":{},\"slot_size\":{},\"registry_vectors_bytes\":{},\"registry_capacity\":{},\"registry_pair_size\":{},\"ready_rows_bytes\":{},\"ready_indices_bytes\":{},\"ready_spill_bytes\":{},\"membership_bytes\":{},\"event_bytes\":{},\"bulk_bytes\":{},\"control_bytes\":{},\"small_read_bytes\":{},\"deadline_bytes\":{}}}",
+                                "{{\"slots_capacity\":{},\"slot_size\":{},\"registry_vectors_bytes\":{},\"registry_capacity\":{},\"registry_pair_size\":{},\"ready_rows_bytes\":{},\"ready_indices_bytes\":{},\"ready_spill_bytes\":{},\"membership_bytes\":{},\"event_bytes\":{},\"bulk_bytes\":{},\"control_bytes\":{},\"ack_fallback_bytes\":{},\"small_read_bytes\":{},\"deadline_bytes\":{}}}",
                                 slots.capacity(),
                                 std::mem::size_of::<Option<Session>>(),
                                 registry.owned.capacity() * std::mem::size_of::<Vec<RawFd>>()
@@ -572,7 +614,8 @@ pub(super) fn run(
                                     + marks.read.capacity() * std::mem::size_of::<u32>(),
                                 events.capacity() * std::mem::size_of::<EpollEvent>(),
                                 bulk.capacity() * std::mem::size_of::<usize>(),
-                                controls.capacity() * std::mem::size_of::<(usize, bool)>(),
+                                controls.capacity() * std::mem::size_of::<(usize, bool, bool)>(),
+                                ack_fallback.capacity() * std::mem::size_of::<usize>(),
                                 small_reads.capacity() * std::mem::size_of::<(usize, usize)>(),
                                 timers.capacity()
                                     * std::mem::size_of::<Reverse<(Instant, usize)>>(),
@@ -611,6 +654,7 @@ pub(super) fn run(
         }
         for &index in &work.active {
             let ready = &work.rows[index];
+            let fallback = marks.take_ack(index);
             let Some(session) = slots[index].as_ref() else {
                 continue;
             };
@@ -624,14 +668,14 @@ pub(super) fn run(
                     .peers
                     .iter()
                     .any(|p| !ready.flags(p.stream.as_raw_fd(), &registry).is_empty());
-            if control || child_exit || session.exit.is_some() {
-                controls.push((index, false));
+            if control || fallback || child_exit || session.exit.is_some() {
+                controls.push((index, false, fallback));
             }
         }
         // Give every ready shell its input before terminal output, repaint
         // generation or listener admission. Each child can run while the
         // remaining cohort is serviced, rather than behind another VT batch.
-        for (index, incoming) in &mut controls {
+        for (index, incoming, _) in &mut controls {
             let index = *index;
             let result = catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
                 let session = slots[index]
@@ -695,7 +739,7 @@ pub(super) fn run(
                 }
             }
         }
-        for (index, incoming) in controls.iter().copied() {
+        for (index, incoming, fallback) in controls.iter().copied() {
             if slots[index].is_none() {
                 continue;
             }
@@ -746,7 +790,7 @@ pub(super) fn run(
                         .contains(PollFlags::POLLOUT)
                 });
                 let ack_mode = AckMode::for_control(
-                    incoming,
+                    incoming && !fallback,
                     writable,
                     readable && marks.read[index] != marks.round,
                 );
@@ -758,6 +802,9 @@ pub(super) fn run(
                     &mut marks,
                     ack_mode,
                 )?;
+                if let Some(session) = slots[index].as_ref() {
+                    queue_fresh_ack(index, session, ack_mode, &mut marks, &mut ack_fallback);
+                }
                 Ok(())
             }));
             if result.map_or(true, |result| result.is_err()) {
@@ -1135,6 +1182,76 @@ mod tests {
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
+    fn fresh_ack_fallback_avoids_writable_poll_and_finishes_with_new_input() {
+        use std::io::Read as _;
+        let (session, mut client, state) = super::super::tests::ack_fixture(38);
+        let signals = SignalFd::new(&nix::sys::signal::SigSet::empty()).unwrap();
+        let mut registry = Registry::new(1, &signals).unwrap();
+        let mut marks = ReadyMarks::new(1);
+        let mut slots = [Some(session)];
+        let mut timers = BinaryHeap::new();
+        let mut fallback = VecDeque::new();
+        settle_with_ack_mode(
+            0,
+            &mut slots,
+            &mut registry,
+            &mut timers,
+            &mut marks,
+            AckMode::Fresh,
+        )
+        .unwrap();
+        let session = slots[0].as_ref().unwrap();
+        let fd = session.peers[0].stream.as_raw_fd();
+        assert!(
+            !registry.by_fd[&fd].flags.contains(EpollFlags::EPOLLOUT),
+            "a local fallback must not toggle logical Ack writability"
+        );
+        let mut events = [EpollEvent::empty(); 8];
+        let count = registry
+            .epoll
+            .wait(&mut events, EpollTimeout::ZERO)
+            .unwrap();
+        assert!(
+            !events[..count].iter().any(|event| {
+                event.data() & u64::from(u32::MAX) == u64::try_from(fd).unwrap()
+                    && event.events().contains(EpollFlags::EPOLLOUT)
+            }),
+            "the kernel must not return a held logical Ack as writable"
+        );
+        queue_fresh_ack(0, session, AckMode::Fresh, &mut marks, &mut fallback);
+        queue_fresh_ack(0, session, AckMode::Fresh, &mut marks, &mut fallback);
+        assert_eq!(fallback.len(), 1);
+        assert!(marks.queue_timer(0));
+        assert!(marks.queue(0));
+        let mut work = ReadyWork::new(1);
+        work.next_round();
+        for index in fallback.drain(..) {
+            work.entry(index);
+        }
+        assert_eq!(work.active, [0]);
+        let due = marks.take_ack(0);
+        assert!(due);
+        assert!(!marks.take_ack(0));
+        // New incoming bytes must not renew a silent program's Ack forever.
+        let incoming = true;
+        let mode = AckMode::for_control(incoming && !due, false, false);
+        assert!(matches!(mode, AckMode::Immediate));
+        settle_with_ack_mode(0, &mut slots, &mut registry, &mut timers, &mut marks, mode).unwrap();
+        assert!(marks.take_bulk(0), "Ack membership must preserve bulk work");
+        assert!(!marks.queue_timer(0), "Ack membership must preserve timers");
+        let expected = super::super::super::Frame::InputAck(0).encode().unwrap();
+        let mut received = vec![0; expected.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, expected);
+        assert!(fallback.is_empty());
+        assert!(!registry.by_fd[&fd].flags.contains(EpollFlags::EPOLLOUT));
+        drop(registry);
+        drop(client);
+        drop(slots);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn queued_data_ack_needs_no_writable_poll_before_pty_service() {
         use std::io::Read as _;
         for output in [false, true] {
@@ -1156,7 +1273,7 @@ mod tests {
                 .sync(
                     INTERACTIVE_READS_PER_ROUND,
                     &session,
-                    matches!(fresh, AckMode::QueuedRead),
+                    !matches!(fresh, AckMode::Immediate),
                 )
                 .unwrap();
             let fd = session.peers[0].stream.as_raw_fd();
@@ -1167,7 +1284,7 @@ mod tests {
                 .sync(
                     INTERACTIVE_READS_PER_ROUND,
                     &session,
-                    matches!(waiting, AckMode::QueuedRead),
+                    !matches!(waiting, AckMode::Immediate),
                 )
                 .unwrap();
             let waiting_write = registry.by_fd[&fd].flags.contains(EpollFlags::EPOLLOUT);
@@ -1203,7 +1320,7 @@ mod tests {
             drop(client);
             drop(session);
             std::fs::remove_dir_all(state).unwrap();
-            assert!(fresh_write, "fresh Acks retain the silent-program fallback");
+            assert!(!fresh_write, "fresh Acks use the local next-turn fallback");
             assert!(
                 !waiting_write,
                 "a queued PTY turn must not rearm logical Ack writability"

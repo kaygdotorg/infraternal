@@ -343,9 +343,9 @@ impl Session {
                 seq < self.ring.head() || (self.drained && self.exit.is_some() && !peer.exited_sent)
             })
     }
-    /// Queued PTY service supplies the fallback for a logical Ack. Keeping
-    /// that Ack writable would revisit it on every turn before the read.
-    fn can_write_while_read_pending(&self, peer: &Peer) -> bool {
+    /// Queued local service supplies the fallback for a logical Ack. Keeping
+    /// that Ack writable would revisit it before its bounded continuation.
+    fn can_write_with_ack_held(&self, peer: &Peer) -> bool {
         self.can_write(peer)
             && !may_coalesce_data_ack(peer, self.ring.head(), !self.drained && self.exit.is_none())
     }
@@ -366,7 +366,7 @@ impl Session {
         self.housekeeping_coalesced(false)
     }
     /// Keep an ordinary data Ack logical while its caller prepares a read.
-    /// The caller must retain writable interest or guarantee queued PTY service.
+    /// The caller must retain writable interest or guarantee queued local service.
     /// Settle without deferral after that service, including an empty read;
     /// explicit state and input-only links are immediate.
     #[allow(clippy::too_many_lines)]
@@ -972,7 +972,7 @@ mod tests {
                 session.peers[0].cursor = None;
                 Frame::InputAck(0).encode().unwrap()
             };
-            assert!(session.can_write_while_read_pending(&session.peers[0]));
+            assert!(session.can_write_with_ack_held(&session.peers[0]));
             session.housekeeping_coalesced(true).unwrap();
             let mut received = vec![0; expected.len()];
             client.read_exact(&mut received).unwrap();
