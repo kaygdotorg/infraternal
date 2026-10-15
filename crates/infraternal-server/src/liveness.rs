@@ -90,11 +90,22 @@ impl Liveness {
     }
 
     pub(crate) fn ping(&mut self) -> (u64, u64) {
-        // Begin a response deadline only when the peer has something to answer.
-        // SQL/writer scheduling before this probe is not evidence of peer loss.
         // Never move an outstanding deadline: pipelining cannot mask silence.
         if self.issued.is_empty() {
-            self.answered = Instant::now();
+            let now = Instant::now();
+            if self.acked == 0 || self.answer_paced {
+                // Serial routes budget their idle gap separately; startup has
+                // no measured silence window until the first actual request.
+                self.answered = now;
+            } else {
+                // Keep the pipelined last-answer window, including its intended
+                // idle tick. Only a late local callback earns timing credit.
+                let due =
+                    (self.origin + Duration::from_micros(self.sent) + TICK).max(self.answered);
+                if now > due {
+                    self.answered += now - due;
+                }
+            }
         }
         self.sent = u64::try_from(self.origin.elapsed().as_micros())
             .unwrap_or(u64::MAX)
@@ -143,6 +154,41 @@ impl Liveness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn pipelined_idle_gap_does_not_renew_the_sampled_lease() {
+        let mut route = Liveness::new();
+        tokio::time::advance(TICK).await;
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(nonce, stamp));
+        tokio::time::advance(TICK - Duration::from_millis(1)).await;
+        route.ping();
+        tokio::time::advance(Duration::from_millis(26)).await;
+        assert!(
+            !route.expired(),
+            "the existing silence boundary is inclusive"
+        );
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert!(
+            route.expired(),
+            "the intended idle gap cannot renew readiness"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_native_probe_keeps_its_unissued_reply_allowance() {
+        let mut route = Liveness::new();
+        tokio::time::advance(TICK).await;
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(nonce, stamp));
+        // The next intended tick is 50ms; its local callback arrives 11ms late.
+        tokio::time::advance(Duration::from_millis(35)).await;
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(20)).await;
+        assert!(route.pong(nonce, stamp), "local delay is not peer silence");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn delayed_server_probe_does_not_expire_an_answered_route() {
