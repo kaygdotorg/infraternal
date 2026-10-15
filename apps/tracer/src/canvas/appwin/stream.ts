@@ -10,7 +10,7 @@
  * - A stream that is not visible detaches its viewer and resets its worker: no bytes arrive and nothing decodes. After
  *   a while (at once on a phone) the worker and its surface are released too. The session stays on the machine, so
  *   coming back attaches again and the server sends a keyframe first.
- * - Input is sent only after control was granted, moves are coalesced to one per animation frame by the caller.
+ * - Input is sent only after control was approved, moves are coalesced to one per animation frame by the caller.
  *
  * The machine's own words about what is happening to a stream (the app quit, a permission was withdrawn, local input
  * pauses remote input) reach the page through `desktop.session.clock`, polled only while control is in use; the shape
@@ -385,8 +385,10 @@ export class AppStream {
       this.pollStatus();
       return true;
     } catch {
-      this.controlRefusedAt = performance.now();
-      if (this.streamId === id) this.setControl({ kind: "view-only", why: "rights" });
+      if (this.streamId === id) {
+        this.controlRefusedAt = performance.now();
+        this.setControl({ kind: "view-only", why: "rights" });
+      }
       return false;
     }
   }

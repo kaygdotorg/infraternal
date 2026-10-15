@@ -21,7 +21,8 @@ afterAll(() => {
   }
 });
 
-async function fixture() {
+async function fixture(deferControl = false) {
+  let controlReply: ((allowed: boolean) => void) | undefined;
   let next = 1;
   let controller: number | undefined;
   let clockReply: ((value: Record<string, unknown>) => void) | undefined;
@@ -34,7 +35,10 @@ async function fixture() {
     async call(action, input) {
       actions.push(action);
       if (action === "desktop.session.start") return { session_id: "00000000-0000-0000-0000-000000000146" };
-      if (action === "desktop.session.control") { controller = Number(input.stream_id); return {}; }
+      if (action === "desktop.session.control") {
+        if (deferControl) await new Promise<void>((resolve, reject) => { controlReply = allowed => allowed ? resolve() : reject(new Error("refused")); });
+        controller = Number(input.stream_id); return {};
+      }
       if (action === "desktop.session.clock" || action === "desktop.session.status") return new Promise(resolve => { clockReply = resolve; });
       return {};
     },
@@ -48,7 +52,7 @@ async function fixture() {
   await stream.open({ width: 800, height: 600, density: 1 });
   stream.setVisible(true);
   await Promise.resolve();
-  return { stream, frames, actions, closed, handlers, controller: () => controller, reply: (value: Record<string, unknown>) => clockReply?.(value) };
+  return { stream, frames, actions, closed, handlers, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
 }
 
 test("viewing never sends controller-only resize before acquisition", async () => {
@@ -101,5 +105,22 @@ test("native local-input priority pauses control and release clears that state",
     f.stream.releaseControl();
     expect(f.stream.controlState.kind).toBe("none");
     expect(f.controller()).toBeUndefined();
+  } finally { f.stream.dispose(); }
+});
+
+
+test("a retired viewer's late control refusal does not throttle its replacement", async () => {
+  const f = await fixture(true);
+  try {
+    const old = f.stream.takeControl();
+    f.stream.releaseControl();
+    await Promise.resolve();
+    f.answerControl(false);
+    expect(await old).toBe(false);
+    const replacement = f.stream.takeControl();
+    expect(f.actions.filter(action => action === "desktop.session.control")).toHaveLength(2);
+    f.answerControl(true);
+    expect(await replacement).toBe(true);
+    expect(f.controller()).toBe(3);
   } finally { f.stream.dispose(); }
 });
