@@ -47,9 +47,9 @@ fn stale_and_conflicting_snapshots_cannot_replace_acknowledged_intent() {
 
 #[test]
 fn worker_start_stop_apply_interleavings_never_decrease_acknowledged_revision() {
-    // Exhaust every schedule of six operations over two worker slots. Start
-    // captures a retained snapshot, stop drops that owner, and apply can race a
-    // newer durable acknowledgement. The oracle tracks only accepted writes.
+    // Exhaust six-operation schedules over two alternating worker slots. Start
+    // binds a candidate revision, stop drops that owner, and apply may arrive
+    // after a newer durable acknowledgement. Track only accepted writes.
     for mut schedule in 0_u32..729 {
         let directory = Directory::new();
         let mut workers = [None, None];
@@ -162,5 +162,25 @@ fn accepted_snapshot_persistence_at_1000_peers() {
         std::fs::read_to_string("/proc/loadavg")
             .expect("load")
             .trim(),
+    );
+}
+
+#[test]
+fn exact_legacy_binding_upgrade_preserves_the_revision_fence() {
+    let directory = Directory::new();
+    let (store, _) = Store::open(&directory.0).expect("store");
+    let mut state = revision(2);
+    store.save(&state).expect("legacy snapshot");
+    state.config.as_mut().expect("config").local_key =
+        Some(crate::policy::model::PublicKey([1; 32]));
+    store.save(&state).expect("key-only metadata upgrade");
+    assert!(
+        store.save(&revision(2)).is_err(),
+        "binding cannot be erased"
+    );
+    state.config.as_mut().expect("config").default_policy = DefaultPolicy::Allow;
+    assert!(
+        store.save(&state).is_err(),
+        "binding cannot hide an access change"
     );
 }

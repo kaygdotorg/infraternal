@@ -81,8 +81,38 @@ impl Store {
     }
     /// Atomically publish public intent and fsync the replacement and directory.
     /// # Errors
-    /// Reports incomplete persistence; no existing temporary file is overwritten.
+    /// Refuses stale/conflicting revisions or incomplete persistence; no existing
+    /// temporary file is overwritten. Identical replay and exact legacy-key
+    /// metadata upgrades retain their established semantics.
     pub fn save(&self, state: &State) -> io::Result<()> {
+        // The directory inode is stable across atomic snapshot replacement.
+        // Lock it, not the replaced file, so independent Store instances cannot
+        // race the revision check and rename. No idle descriptor is retained.
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(self.path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        if let (Some(previous), Some(next)) = (read_public::<State>(&self.path)?, &state.config)
+            && let Some(old) = previous.config
+        {
+            if next.version < old.version {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if next.version == old.version && next != &old {
+                // An existing exact legacy-key upgrade changes metadata only;
+                // Node's authenticated binding check still authorizes that key.
+                let mut bound = old;
+                if bound.local_key.is_some() || next.local_key.is_none() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                bound.local_key = next.local_key;
+                if &bound != next {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+            }
+        }
         #[cfg(feature = "cutoff-measure")]
         let encode = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_encode")
@@ -113,7 +143,9 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
             {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
-            serde_json::from_reader(file)
+            // Updates now check the retained revision too. Buffer public-state
+            // reads so peer inventories do not require one syscall per byte.
+            serde_json::from_reader(io::BufReader::new(file))
                 .map(Some)
                 .map_err(io::Error::other)
         }

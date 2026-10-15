@@ -568,7 +568,10 @@ impl Node {
                             client.peers(std::slice::from_ref(*previous), &[previous.key])?;
                         }
                     }
-                    self.save(Some(old), true)?;
+                    // Keep the newer durable desired endpoints for recovery.
+                    // No revision is acknowledged on failure; the server may
+                    // retry it after this kernel-only rollback. Publishing old
+                    // intent here would violate the durable revision fence.
                     return Err(error);
                 }
                 self.config = Some(config);
