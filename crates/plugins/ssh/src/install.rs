@@ -93,6 +93,9 @@ pub struct Installation {
     host: uuid::Uuid,
     transaction: uuid::Uuid,
     mode: InstallMode,
+    // Cloned retries share at most the original session image and the full
+    // exact-version image. Neither digest comes from the target or its journal.
+    images: Arc<[std::sync::OnceLock<Arc<str>>; 2]>,
 }
 
 /// Nonsecret rollback coordinates retained for a later retry with fresh SSH credentials.
@@ -327,6 +330,7 @@ impl Installation {
             host: cleanup.host,
             transaction: cleanup.transaction,
             mode: cleanup.mode,
+            images: Arc::default(),
         })
     }
     /// Validate consent and URL again at the mutation boundary.
@@ -356,6 +360,7 @@ impl Installation {
             host: join.host,
             transaction: uuid::Uuid::new_v4(),
             mode: target.mode,
+            images: Arc::default(),
         })
     }
 
@@ -402,6 +407,7 @@ impl Installation {
             ));
         }
         let transfer = Self::negotiated_payload(binary).await?;
+        self.pin_image(1, &transfer.digest)?;
         let mut upload = String::new();
         if let Some(cleanup) = cleanup {
             // Observe the child status explicitly: conditional function calls
@@ -557,6 +563,7 @@ impl Installation {
         checked: Option<Checked>,
     ) -> Result<(uuid::Uuid, crate::duplex::Duplex), Failure> {
         let transfer = Self::negotiated_payload(binary).await?;
+        self.pin_image(0, &transfer.digest)?;
         // A declared encoding lets the payload follow the setup script at once.
         // Root mode keeps selection under sudo, where its own cache is visible.
         let declared = checked
@@ -665,6 +672,7 @@ impl Installation {
         let digest = crate::payload::digest(binary)
             .await
             .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+        self.pin_image(1, &digest)?;
         let query = format!(
             "{PAYLOAD_CACHE}\nvalidate_cache\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then printf 'reuse\\n'; elif command -v zstd >/dev/null 2>&1; then printf 'zstd\\n'; elif command -v gzip >/dev/null 2>&1; then printf 'gzip\\n'; fi",
             shell_quote(&digest)
@@ -962,23 +970,43 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
         self.session.clone()
     }
 
+    /// Keep each attempt on its two admitted exact-version images. A different
+    /// full image cannot silently change what an already-published retry executes.
+    fn pin_image(&self, slot: usize, digest: &Arc<str>) -> Result<(), Failure> {
+        if self.images[slot].get_or_init(|| digest.clone()) == digest {
+            Ok(())
+        } else {
+            Err(invalid_setup())
+        }
+    }
+
     /// Reattach the same shim after a setup failure; never launch a replacement shell.
     /// # Errors
     /// Refuses foreign ownership, missing payloads and a changed session receipt.
     pub async fn resume_session(&self, id: uuid::Uuid) -> Result<crate::duplex::Duplex, Failure> {
+        let mut images = self.images.iter().filter_map(std::sync::OnceLock::get);
+        let first = images.next().ok_or_else(invalid_setup)?;
+        let allowed = images
+            .next()
+            .map_or_else(|| first.to_string(), |full| format!("{first}|{full}"));
+        // The stage can contain a partial full-image write. The cache changes
+        // only after upload verification; hash it again before any execution.
+        // Both its structural checks and the same transaction guard still apply.
         let body = format!(
             r#"
+{PAYLOAD_CACHE}
+validate_cache
 [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
 stage="$base/.bootstrap-lock"
-if [ -f "$stage/payload" ] && [ ! -L "$stage/payload" ]; then
-    [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
-    payload="$stage/payload"
-else
-    [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] || exit 71
-    payload="$base/bin/live"
+if [ -e "$stage" ] || [ -L "$stage" ]; then
+    [ -d "$stage" ] && [ ! -L "$stage" ] && [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 fi
+[ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] || exit 71
+digest=$(sha256sum < "$cache/payload")
+digest=${{digest%% *}}
+case "$digest" in {allowed}) :;; *) exit 71;; esac
 exec 9<&-
-exec "$payload" __ssh-session --state "$base/sessions" --session {id}
+exec "$cache/payload" __ssh-session --state "$base/sessions" --session {id}
 "#
         );
         let channel = self.session.stream(&self.script(&body)).await?;

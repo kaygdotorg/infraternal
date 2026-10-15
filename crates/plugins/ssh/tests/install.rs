@@ -2653,7 +2653,7 @@ async fn full_payload_restaging_preserves_the_running_session_build() {
     assert_eq!(channel.line(64).await.unwrap(), b"before full upload\n");
     // Force a real compressed full transfer after the distinct session image.
     let full = format!(
-        "{}\n#{}\n",
+        "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\n{}\n#{}\n",
         std::fs::read_to_string(&f.binary).unwrap(),
         "x".repeat(100_000)
     );
@@ -2672,6 +2672,10 @@ async fn full_payload_restaging_preserves_the_running_session_build() {
     );
     channel.write(b"after full upload\n").await.unwrap();
     assert_eq!(channel.line(64).await.unwrap(), b"after full upload\n");
+    let reopened = transaction.resume_session(id).await.unwrap();
+    reopened.write(b"verified full bridge\n").await.unwrap();
+    assert_eq!(reopened.line(64).await.unwrap(), b"verified full bridge\n");
+    drop(reopened);
     transaction.commit().await.unwrap();
     channel.write(b"after commit\n").await.unwrap();
     assert_eq!(channel.line(64).await.unwrap(), b"after commit\n");
@@ -2750,5 +2754,92 @@ async fn compound_restaging_refuses_a_foreign_journal_before_upload() {
     assert_eq!(std::fs::read(&payload).unwrap(), before);
     assert!(!f.base().join("state").exists());
     std::fs::write(&journal, original).unwrap();
+    transaction.rollback().await.unwrap();
+}
+
+/// Service exit must always retry, including an unexpected successful return.
+#[tokio::test]
+async fn installed_infraternal_agent_always_restarts_without_start_limit() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let unit = std::fs::read_to_string(
+        fixture
+            .root
+            .join(".config/systemd/user/infraternal-agent.service"),
+    )
+    .unwrap();
+    assert!(unit.lines().any(|line| line == "Restart=always"));
+    assert!(unit.lines().any(|line| line == "RestartSec=2"));
+    assert!(unit.lines().any(|line| line == "StartLimitIntervalSec=0"));
+    transaction.rollback().await.unwrap();
+}
+
+/// A failed deferred upload leaves an incomplete stage; only an admitted cached
+/// image may reopen the original shim, and changed cache bytes must not execute.
+#[tokio::test]
+async fn partial_full_upload_rebridges_from_a_verified_image() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    let starter = f.root.join("session-build");
+    executable(
+        &starter,
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = __ssh-session ] || exit 1\nprintf 'SESSION {id}\\n'\nexec cat\n"
+        ),
+    );
+    let transaction = Installation::new(
+        Arc::new(Compound(Local {
+            root: f.root.clone(),
+        })),
+        &f.target,
+        &f.join,
+    )
+    .unwrap();
+    let (_, original) = transaction.stage_session(&starter).await.unwrap();
+    let stage = f.base().join(".bootstrap-lock/payload");
+    // Restaging unlinks the old image before writing a new inode; the running
+    // shim and verified cache retain the original inode throughout that write.
+    std::fs::remove_file(&stage).unwrap();
+    std::fs::write(&stage, b"incomplete full executable").unwrap();
+    let reopened = transaction.resume_session(id).await.unwrap();
+    reopened
+        .write(b"same session after partial upload\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.line(64).await.unwrap(),
+        b"same session after partial upload\n"
+    );
+    original
+        .write(b"original bridge remains usable\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        original.line(64).await.unwrap(),
+        b"original bridge remains usable\n"
+    );
+    drop(reopened);
+    let journal = f.base().join(".bootstrap-lock/transaction");
+    let owned = std::fs::read(&journal).unwrap();
+    std::fs::write(&journal, uuid::Uuid::new_v4().simple().to_string()).unwrap();
+    assert!(transaction.resume_session(id).await.is_err());
+    std::fs::write(&journal, owned).unwrap();
+    let cache = f
+        .base()
+        .with_file_name("infraternal.bootstrap-cache")
+        .join("payload");
+    let executed = f.root.join("unverified-executed");
+    executable(
+        &cache,
+        &format!(
+            "#!/bin/sh\ntouch {}\nprintf 'SESSION {id}\\n'\nexec cat\n",
+            infraternal_plugin_ssh::transport::shell_quote(executed.to_str().unwrap()),
+        ),
+    );
+    assert!(transaction.resume_session(id).await.is_err());
+    assert!(!executed.exists(), "changed cache bytes must never execute");
+    drop(original);
     transaction.rollback().await.unwrap();
 }
