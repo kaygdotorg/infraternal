@@ -295,6 +295,27 @@ impl AsyncUdpSocket for CopyFirstSocket {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn copy_first_real_mesh_originals_do_not_strand_the_authenticated_mesh_guard() {
+    copy_first_guard(false, None).await;
+}
+
+/// Receiving probe DATAGRAMs sends no application response: progress here must
+/// come from QUIC acknowledgements and the existing alternative-path copies.
+#[tokio::test]
+#[ignore = "Physical 15ms/30ms guard comparison on the perf VM under its benchmark lock."]
+async fn copy_first_ack_only_probes_keep_authenticated_mesh_guard_live() {
+    copy_first_guard(true, None).await;
+}
+
+/// Compare only the requested delayed-ACK bound on the pinned perf VM. The
+/// default regression remains separate; this prototype selects no policy.
+#[tokio::test]
+#[ignore = "ACK-delay hypothesis comparison on the quiet perf VM under its benchmark lock."]
+async fn copy_first_ack_only_requested_ack_delay_five_ms_comparison() {
+    copy_first_guard(true, Some(Duration::from_millis(5))).await;
+}
+
+#[allow(clippy::too_many_lines)]
+async fn copy_first_guard(ack_only: bool, requested_ack_delay: Option<Duration>) {
     use crate::remote_bindings::Bindings;
     let ca = root();
     let gate = Arc::new(CopyFirstGate::default());
@@ -331,7 +352,28 @@ async fn copy_first_real_mesh_originals_do_not_strand_the_authenticated_mesh_gua
         Arc::new(quinn::TokioRuntime),
     )
     .unwrap();
-    client.set_default_client_config(client_config(&leaf(&ca, false), &[ca.certificate]).unwrap());
+    let mut config = client_config(&leaf(&ca, false), &[ca.certificate]).unwrap();
+    if let Some(delay) = requested_ack_delay {
+        // Reuse every existing client transport setting. Only this test asks
+        // the peer to shorten delayed ACKs; the guard still uses 15ms/30ms.
+        let mut transport = transport_with_liveness(
+            u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS).unwrap(),
+            Duration::from_secs(15),
+            Duration::from_secs(60),
+            true,
+        );
+        let mut frequency = quinn::AckFrequencyConfig::default();
+        frequency.max_ack_delay(Some(delay));
+        // With the extension absent, pinned quinn-proto acknowledges the first
+        // reordered packet. Preserve that behavior rather than the extension's
+        // default threshold of two. Ack-eliciting threshold remains one.
+        frequency.reordering_threshold(1u32.into());
+        Arc::get_mut(&mut transport)
+            .unwrap()
+            .ack_frequency_config(Some(frequency));
+        config.transport_config(transport);
+    }
+    client.set_default_client_config(config);
     let (dial, accepted) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
         server.accept().await.unwrap().await
     });
@@ -363,8 +405,14 @@ async fn copy_first_real_mesh_originals_do_not_strand_the_authenticated_mesh_gua
     assert!(path.mesh_datagrams() > 0);
     gate.state.lock().unwrap().armed = true;
     let authenticated_before = authenticated_frames(&dial);
-    let (mut client_send, mut client_receive) = dial.open_bi().await.unwrap();
     let exchanges = async {
+        if ack_only {
+            for _ in 0..8 {
+                assert_eq!(&accepted.read_datagram().await.unwrap()[..], &[0]);
+            }
+            return;
+        }
+        let (mut client_send, mut client_receive) = dial.open_bi().await.unwrap();
         // Reliable stream bytes are completion barriers; the intentionally
         // small, unreliable DATAGRAM receive queue belongs to watchdog probes.
         client_send.write_all(&[1]).await.unwrap();
@@ -413,7 +461,9 @@ async fn copy_first_real_mesh_originals_do_not_strand_the_authenticated_mesh_gua
     // Require delivery before the guard/exchange race ended. Waiting for a
     // later release here could disguise an artificially unavailable mesh.
     assert!(gate.state.lock().unwrap().delivered > 0);
-    assert_ne!(authenticated_before, authenticated_frames(&dial));
+    if outcome.is_none() {
+        assert_ne!(authenticated_before, authenticated_frames(&dial));
+    }
     assert!(dial.close_reason().is_none());
     assert!(accepted.close_reason().is_none());
     if outcome.is_some() {
@@ -426,6 +476,18 @@ async fn copy_first_real_mesh_originals_do_not_strand_the_authenticated_mesh_gua
             bindings.retained_history().unwrap(),
             dial.stats().frame_tx,
             accepted.stats().frame_tx
+        );
+    }
+    if let Some(delay) = requested_ack_delay {
+        let requested = dial.stats().frame_tx.ack_frequency;
+        let received = accepted.stats().frame_rx.ack_frequency;
+        eprintln!(
+            "ack_delay_comparison requested_delay_us={} ack_frequency_sent={requested} ack_frequency_received={received} guard_outcome={outcome:?}",
+            delay.as_micros()
+        );
+        assert!(
+            requested > 0 && received > 0,
+            "comparison must deliver the negotiated ACK request"
         );
     }
     client.close(0u32.into(), b"");
