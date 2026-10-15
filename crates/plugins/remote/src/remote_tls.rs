@@ -173,10 +173,7 @@ pub async fn dial(
     name: &str,
     config: &SslConnector,
 ) -> io::Result<Connection> {
-    let socket = tokio::time::timeout(HANDSHAKE, tokio::net::TcpStream::connect(address))
-        .await
-        .map_err(|_| denied())??;
-    socket.set_nodelay(true)?;
+    let socket = dial_socket(address).await?;
     let ssl = config
         .configure()
         .map_err(|_| denied())?
@@ -189,6 +186,37 @@ pub async fn dial(
         .map_err(|_| denied())?;
     finish(stream)
 }
+/// Keep connection construction separate so OS liveness can be verified on the
+/// actual outgoing socket before the encrypted channel owns its split halves.
+async fn dial_socket(address: SocketAddr) -> io::Result<tokio::net::TcpStream> {
+    let socket = tokio::time::timeout(HANDSHAKE, tokio::net::TcpStream::connect(address))
+        .await
+        .map_err(|_| denied())??;
+    socket.set_nodelay(true)?;
+    #[cfg(feature = "agent")]
+    {
+        use nix::sys::socket::{setsockopt, sockopt};
+        // A silent server outage otherwise leaves an idle fallback established
+        // indefinitely. Kernel probes need no daemon heartbeat or idle wakeups.
+        setsockopt(&socket, sockopt::KeepAlive, &true)?;
+        #[cfg(target_os = "linux")]
+        {
+            setsockopt(&socket, sockopt::TcpKeepIdle, &30)?;
+            // Also bound outstanding writes: keepalive alone only covers idle
+            // sockets, and a queued write can otherwise use the long TCP retry limit.
+            setsockopt(&socket, sockopt::TcpUserTimeout, &60_000)?;
+        }
+        #[cfg(target_os = "macos")]
+        setsockopt(&socket, sockopt::TcpKeepAlive, &30)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            setsockopt(&socket, sockopt::TcpKeepInterval, &10)?;
+            setsockopt(&socket, sockopt::TcpKeepCount, &3)?;
+        }
+    }
+    Ok(socket)
+}
+
 /// Authenticate a server-side accepted socket before handing it to host admission.
 /// # Errors
 /// Refuses failed mutual verification or a handshake deadline.
@@ -331,6 +359,25 @@ pub mod tests {
             key,
         }
     }
+    /// No application traffic is required for the kernel to retire a vanished
+    /// server. Exercise the real socket, rather than transport configuration data.
+    #[cfg(all(feature = "agent", target_os = "linux"))]
+    #[tokio::test]
+    async fn outgoing_tcp_detects_a_vanished_peer_without_application_traffic() {
+        use nix::sys::socket::{getsockopt, sockopt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = dial_socket(listener.local_addr().unwrap()).await.unwrap();
+        let _peer = listener.accept().await.unwrap();
+        assert!(getsockopt(&socket, sockopt::KeepAlive).unwrap());
+        assert_eq!(getsockopt(&socket, sockopt::TcpKeepIdle).unwrap(), 30);
+        assert_eq!(getsockopt(&socket, sockopt::TcpKeepInterval).unwrap(), 10);
+        assert_eq!(getsockopt(&socket, sockopt::TcpKeepCount).unwrap(), 3);
+        assert_eq!(
+            getsockopt(&socket, sockopt::TcpUserTimeout).unwrap(),
+            60_000
+        );
+    }
+
     #[tokio::test]
     async fn mutual_tls_delivers_exact_bytes_and_verified_leaf_fingerprints() {
         let ca = root();
