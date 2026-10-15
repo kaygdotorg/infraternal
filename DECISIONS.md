@@ -2819,3 +2819,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      users. The first planned item is second-admin approval for downgrading
      privileged access (D274). The AGPL core never depends on it and
      builds and runs alone. How the two are built together is still open.
+278. **Where the mesh path change shows (owner, 2026-10-15, #201):** there is
+     no separate indicator for automatic mesh switching. The path a host
+     settles on (relayed, then direct) appears as a step in the add-host
+     steps, and as one of the loading steps in the top pill's progress
+     circle while the host connects. After that, the Mesh view's
+     direct/relayed label is the only place it shows.
