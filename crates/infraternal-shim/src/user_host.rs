@@ -35,6 +35,9 @@ use std::{
 
 const PREFIX_LIMIT: usize = 4096;
 const RESIZE_LIMIT: usize = 32;
+// Event count alone can defer many large reflows to the first snapshot.
+// Bound destination cells without adding another per-session counter.
+const RESIZE_CELL_LIMIT: usize = 64 * 1024;
 // A global output quantum keeps one thousand ready PTYs from postponing input.
 const OUTPUTS_PER_ROUND: usize = 1;
 const INTERACTIVE_READ_BYTES: usize = 4096;
@@ -161,15 +164,24 @@ impl SessionTerminal for LazyTerminal {
         {
             return Ok(());
         }
-        if state.terminal.is_none() && state.resizes.len() < RESIZE_LIMIT {
-            // Geometry alone need not allocate screen pools. The bounded
-            // transcript preserves every reflow at its historical byte offset.
+        if state.terminal.is_none()
+            && state.resizes.len() < RESIZE_LIMIT
+            && state.resizes.iter().fold(
+                usize::from(cols) * usize::from(rows),
+                |cells, (_, cols, rows)| {
+                    cells.saturating_add(usize::from(*cols) * usize::from(*rows))
+                },
+            ) <= RESIZE_CELL_LIMIT
+        {
+            // Small quiet geometry needs no screen pools. The bounded
+            // transcript preserves each reflow at its historical byte offset;
+            // large reflows are paid individually rather than in one snapshot.
             state.resizes.push((state.prefix.len(), cols, rows));
             self.cols = cols;
             self.rows = rows;
             return Ok(());
         }
-        // Reaching either transcript bound materializes the original state
+        // Reaching any transcript bound materializes the original state
         // before applying this resize. A failed replay leaves it retryable.
         self.materialize()?;
         self.state
@@ -1242,6 +1254,47 @@ mod tests {
         }
         assert_eq!(lazy.state.borrow().resizes.capacity(), 0);
         assert_eq!(lazy.state.borrow().prefix.capacity(), 0);
+        assert_same_state(&lazy, &eager);
+    }
+
+    // Deferred geometry CPU must not accumulate many large reflows on a later snapshot [D270].
+    #[test]
+    fn large_geometry_cannot_defer_a_long_first_snapshot_reflow_queue() {
+        let mut lazy = LazyTerminal::new(80, 24, 65536);
+        let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        for number in 0..RESIZE_LIMIT {
+            let cols = 999 + u16::try_from(number % 2).unwrap();
+            lazy.process(b"\x1b[31mrow\x1b[0m\r\n").unwrap();
+            eager.process(b"\x1b[31mrow\x1b[0m\r\n");
+            lazy.resize(cols, 100).unwrap();
+            eager.resize(cols, 100).unwrap();
+            assert!(
+                lazy.state.borrow().terminal.is_some(),
+                "large reflows must not accumulate until first snapshot"
+            );
+        }
+        assert_same_state(&lazy, &eager);
+    }
+
+    #[test]
+    fn medium_geometry_materializes_before_deferred_cell_work_exceeds_the_bound() {
+        let mut lazy = LazyTerminal::new(80, 24, 65536);
+        let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        for number in 0..8 {
+            let cols = 160 + u16::try_from(number % 2).unwrap();
+            lazy.process(b"row\r\n").unwrap();
+            eager.process(b"row\r\n");
+            lazy.resize(cols, 60).unwrap();
+            eager.resize(cols, 60).unwrap();
+            let state = lazy.state.borrow();
+            let cells: usize = state
+                .resizes
+                .iter()
+                .map(|(_, cols, rows)| usize::from(*cols) * usize::from(*rows))
+                .sum();
+            assert!(cells <= RESIZE_CELL_LIMIT);
+            assert_eq!(state.terminal.is_some(), number >= 6);
+        }
         assert_same_state(&lazy, &eager);
     }
 
