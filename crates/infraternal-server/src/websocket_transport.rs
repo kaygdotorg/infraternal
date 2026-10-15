@@ -7,7 +7,7 @@ use crate::liveness::Liveness;
 use axum::extract::ws::{Message, WebSocket};
 use bytes::{Bytes, BytesMut};
 use futures_util::{
-    Sink, SinkExt,
+    FutureExt, Sink, SinkExt,
     stream::{SplitSink, SplitStream},
 };
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
@@ -182,8 +182,9 @@ impl Transport {
         let (reply, replies) = mpsc::channel(CONTROL_SLOTS);
         let (active, activity) = watch::channel(false);
         let mut tasks = tokio::task::JoinSet::new();
-        tasks.spawn(read(context.clone(), reader, receive, send, reply));
-        tasks.spawn(proofs(context.clone(), activity, replies, authority));
+        // Erase both future types once per connection to share task bookkeeping code.
+        tasks.spawn(read(context.clone(), reader, receive, send, reply).boxed());
+        tasks.spawn(proofs(context.clone(), activity, replies, authority).boxed());
         // Keep one serialized WebSocket writer. The existing send timeout still
         // covers lock acquisition and flushing; no extra payload copy or queued
         // output is introduced by this adapter.
@@ -482,9 +483,11 @@ async fn proofs(
                 continue;
             }
         }
-        // Collect already-runnable replies without a timed coalescing wait.
-        // Fallback and response margins still sum to measured RTT + 50ms.
-        tokio::task::yield_now().await;
+        // A queued reply already has its reader event. Timer-driven sends give
+        // runnable socket data one turn to join the same bounded write.
+        if first.is_none() {
+            tokio::task::yield_now().await;
+        }
         let active = *activity.borrow();
         let result = authority.run(&context.state, &context.user, &context.token, async {
             tokio::select! {
