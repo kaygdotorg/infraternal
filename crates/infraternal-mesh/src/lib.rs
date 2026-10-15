@@ -16,4 +16,6 @@ pub mod coordinator;
 
 pub mod backend;
 
+pub mod discovery;
+
 pub mod cli;
