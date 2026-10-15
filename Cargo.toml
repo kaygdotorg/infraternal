@@ -53,6 +53,8 @@ openssl = { version = "0.10", features = ["vendored"] }
 tokio-openssl = "0.6.5"
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"] }
+# The native QUIC provider already includes this exact HMAC implementation.
+ring = { version = "0.17.14", default-features = false }
 aes-gcm = "0.10"
 hkdf = "0.12"
 serde_cbor_2 = "0.13"

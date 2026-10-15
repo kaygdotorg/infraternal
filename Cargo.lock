@@ -1482,6 +1482,7 @@ dependencies = [
  "nix",
  "openssl",
  "quinn",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
