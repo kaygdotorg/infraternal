@@ -184,6 +184,8 @@ class Browser:
         # The final control proof drains earlier route events too. A live socket
         # cannot make a dropped terminal count as a healthy idle attachment.
         assert message[1] != 0x0f, 'fixture terminal route retired'
+        if message[0] != 0 and message[1] == 0x33:
+            assert json.loads(message[2][4:]).get('type') != 'terminal.reconnecting', 'fixture terminal route reconnecting'
         return message
 
     async def close(self):
