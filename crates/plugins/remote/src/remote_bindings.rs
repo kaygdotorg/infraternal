@@ -195,7 +195,6 @@ impl Bindings {
         }
         if let Ok(mut peers) = self.peers.lock() {
             for (index, received) in meta.iter_mut().enumerate() {
-                let mut fresh = true;
                 let physical = received.addr;
                 if let Some(peer) = peers.by_physical(physical) {
                     let logical = peer.logical;
@@ -210,7 +209,7 @@ impl Bindings {
                             clock.arm(at);
                         }
                     }
-                    fresh = bufs
+                    let fresh = bufs
                         .get(index)
                         .and_then(|buf| buf.get(..received.len))
                         .is_some_and(|contents| peer.seen.observe(contents, received.stride));
@@ -233,11 +232,12 @@ impl Bindings {
                         peer.local = received.dst_ip;
                     }
                     received.addr = logical;
+                    // Peers owns the admitted alias's reply route. Preserve the
+                    // generic memo from before admission so retirement restores
+                    // that previous path, rather than the last alternative.
+                    continue;
                 }
-                // A duplicate must retain both the alias and the socket route.
-                if fresh {
-                    self.learn(lease, std::slice::from_ref(received));
-                }
+                self.learn(lease, std::slice::from_ref(received));
             }
         }
     }
@@ -614,6 +614,113 @@ mod tests {
                 src_ip,
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn alias_retirement_restores_the_previous_reply_socket() {
+        for original_lease in [false, true] {
+            let bindings = Bindings::new(bound("127.0.0.1:0"));
+            let primary = bindings.local_addr().unwrap();
+            let original = bound("127.0.0.2:0");
+            let original_address = original.local_addr().unwrap();
+            let _original_lease = bindings.lease(original).unwrap();
+            let alternative = bound("127.0.0.5:0");
+            let alternative_address = alternative.local_addr().unwrap();
+            let _alternative_lease = bindings.lease(alternative).unwrap();
+            let mut pair = None;
+            for _ in 0..16 {
+                let logical = tokio::net::UdpSocket::bind("127.0.0.3:0").await.unwrap();
+                let address = SocketAddr::new(
+                    "127.0.0.4".parse().unwrap(),
+                    logical.local_addr().unwrap().port(),
+                );
+                match tokio::net::UdpSocket::bind(address).await {
+                    Ok(mesh) => {
+                        pair = Some((logical, mesh));
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+                    Err(error) => panic!("could not bind owned alternative: {error}"),
+                }
+            }
+            let (logical_socket, mesh_socket) = pair.expect("owned alias tuple pairs collided");
+            let logical = logical_socket.local_addr().unwrap();
+            let alternate = mesh_socket.local_addr().unwrap();
+            let mut writable = bindings.clone().create_io_poller();
+            std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+                .await
+                .unwrap();
+            let mut bytes = [0; 64];
+            if original_lease {
+                // The original path may itself be a leased listener. Its memo
+                // must survive an admitted alternative, not be erased at admission.
+                logical_socket
+                    .send_to(b"original-route", original_address)
+                    .await
+                    .unwrap();
+                assert_eq!(receive(&bindings).await.0.addr, logical);
+                send(&bindings, logical, b"original-reply", None);
+                let (count, source) = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    logical_socket.recv_from(&mut bytes),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    (&bytes[..count], source),
+                    (&b"original-reply"[..], original_address)
+                );
+            }
+            let peer = bindings.route_peer(logical, alternate).unwrap();
+            mesh_socket
+                .send_to(b"admitted-alternative", alternative_address)
+                .await
+                .unwrap();
+            let (metadata, payload) = receive(&bindings).await;
+            assert_eq!(
+                (metadata.addr, payload.as_slice()),
+                (logical, &b"admitted-alternative"[..])
+            );
+            drop(peer);
+            // Keep both shared listeners for other peers while this peer's
+            // routing lease ends. Its next write uses its actual previous path.
+            send(&bindings, logical, b"retired-reply", None);
+            let (count, source) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                logical_socket.recv_from(&mut bytes),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(&bytes[..count], b"retired-reply");
+            assert_eq!(
+                source,
+                if original_lease {
+                    original_address
+                } else {
+                    primary
+                },
+                "retired alias left an alternative-sourced reply on its previous path"
+            );
+            mesh_socket
+                .send_to(b"unaliased-mesh", alternative_address)
+                .await
+                .unwrap();
+            assert_eq!(receive(&bindings).await.0.addr, alternate);
+            send(&bindings, alternate, b"unaliased-reply", None);
+            let (count, source) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                mesh_socket.recv_from(&mut bytes),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                (&bytes[..count], source),
+                (&b"unaliased-reply"[..], alternative_address)
+            );
+        }
     }
 
     #[tokio::test]
