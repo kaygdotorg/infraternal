@@ -3,7 +3,13 @@ use std::{future::Future, io, time::Duration};
 use tokio::sync::watch;
 
 const OFFLINE_LIMIT: Duration = Duration::from_mins(5);
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
+pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Failed work consumes the interval; only its remaining wait gains jitter.
+pub(super) fn retry_delay(backoff: Duration, elapsed: Duration) -> Duration {
+    let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
+    backoff.saturating_sub(elapsed) + jitter
+}
 
 /// A healthy link has no watchdog timer. Only an uninterrupted offline interval
 /// can cancel its owner; losing probes and their sockets leave scope together.
@@ -53,12 +59,11 @@ where
                     "Infraternal agent server link ended ({:?}); retrying",
                     result.err().map(|error| error.kind())
                 );
-                if started.elapsed() >= Duration::from_secs(10) {
+                let elapsed = started.elapsed();
+                if elapsed >= Duration::from_secs(10) {
                     backoff = Duration::from_millis(200);
                 }
-                let jitter =
-                    Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
-                tokio::time::sleep(backoff + jitter).await;
+                tokio::time::sleep(retry_delay(backoff, elapsed)).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         };
@@ -75,7 +80,7 @@ where
 mod tests {
     use super::*;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -131,5 +136,35 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(OFFLINE_LIMIT).await;
         watchdog.await.unwrap();
+    }
+
+    /// Handshake work is part of the reconnect interval, not extra waiting time.
+    #[tokio::test(start_paused = true)]
+    async fn failed_attempt_cost_does_not_extend_the_retry_period() {
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let recorded = starts.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(600),
+            run(move |_| {
+                recorded.lock().unwrap().push(tokio::time::Instant::now());
+                async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    Err(io::ErrorKind::ConnectionRefused.into())
+                }
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let starts = starts.lock().unwrap();
+        assert!(starts.len() > 10);
+        let maximum = starts
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .max()
+            .unwrap();
+        assert!(
+            maximum <= Duration::from_millis(30_100),
+            "retry period exceeded its cap: {maximum:?}"
+        );
     }
 }

@@ -1,6 +1,9 @@
 //! Proves plugin-proposed server paths before replacement, retaining one live authenticated transport during probes [128,198,215].
 use super::{
-    Connected, RemoteIdentity, dial_preferred, dial_runtime::DialRuntime, quic_session_on,
+    Connected, RemoteIdentity, dial_preferred,
+    dial_runtime::DialRuntime,
+    quic_session_on,
+    supervisor::{MAX_BACKOFF, retry_delay},
 };
 use crate::{channel::Channel, daemon, remote_quic, remote_tls};
 use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
@@ -325,7 +328,7 @@ async fn warming(
         }
         current(identity, renewal, identity.endpoint)?;
         tokio::time::sleep(retry).await;
-        retry = (retry * 2).min(Duration::from_secs(30));
+        retry = (retry * 2).min(MAX_BACKOFF);
     }
 }
 
@@ -443,7 +446,7 @@ async fn replacement(
             () = tokio::time::sleep(retry) => {},
             changed = paths.changed() => { changed.map_err(|_| io::ErrorKind::BrokenPipe)?; },
         }
-        retry = (retry * 2).min(Duration::from_secs(30));
+        retry = (retry * 2).min(MAX_BACKOFF);
     }
 }
 
@@ -580,6 +583,7 @@ pub(super) async fn run(
     let mut backoff = Duration::from_millis(200);
     let mut cooling = false;
     loop {
+        let attempt_started = tokio::time::Instant::now();
         // Reconnection itself never waits for a failed mesh probe. Once the
         // fallback is healthy, probes run alongside it and cannot lose bytes.
         let link = if let Some(link) = live.take() {
@@ -606,10 +610,8 @@ pub(super) async fn run(
                         );
                     }
                     report(&registry, None, reason);
-                    let jitter =
-                        Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
-                    tokio::time::sleep(backoff + jitter).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    tokio::time::sleep(retry_delay(backoff, attempt_started.elapsed())).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                     continue;
                 }
             }
@@ -651,13 +653,14 @@ pub(super) async fn run(
             force_fallback = cooling;
             report(&registry, None, reason);
             if link.kind == ServerLinkKind::Fallback {
-                if started.elapsed() > Duration::from_secs(10) {
+                let elapsed = if started.elapsed() > Duration::from_secs(10) {
                     backoff = Duration::from_millis(200);
-                }
-                let jitter =
-                    Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
-                tokio::time::sleep(backoff + jitter).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                    Duration::ZERO
+                } else {
+                    attempt_started.elapsed()
+                };
+                tokio::time::sleep(retry_delay(backoff, elapsed)).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
         drop(link);
