@@ -43,7 +43,7 @@ impl Options {
     /// # Errors
     /// Returns runtime, private-state, shim admission or bridge failures.
     pub fn run_image(self) -> io::Result<()> {
-        run_mode::<true>(self.state, self.session)
+        run_mode(self.state, self.session, daemon::run_session_image)
     }
 }
 
@@ -52,22 +52,33 @@ impl Options {
 /// # Errors
 /// Returns runtime, private-state, shim admission or authenticated bridge failures.
 pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> io::Result<()> {
-    run_mode::<false>(state, session)
+    run_mode(state, session, full_dispatch)
 }
 
-fn run_mode<const SESSION_ONLY: bool>(
-    state: PathBuf,
-    session: Option<uuid::Uuid>,
+async fn full_dispatch(
+    socket: &Socket,
+    state: Option<PathBuf>,
+    uid: u32,
+    session: sessions::Session,
 ) -> io::Result<()> {
+    drop(session);
+    daemon::run_authenticated(socket, state, uid).await
+}
+
+fn run_mode<F>(state: PathBuf, session: Option<uuid::Uuid>, serve: F) -> io::Result<()>
+where
+    F: for<'a> AsyncFnOnce(&'a Socket, Option<PathBuf>, u32, sessions::Session) -> io::Result<()>
+        + 'static,
+{
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    infraternal_agent::block_on_io(&runtime, Box::pin(bridge::<SESSION_ONLY>(state, session)))
+    infraternal_agent::block_on_io(&runtime, Box::pin(bridge(state, session, serve)))
 }
-async fn bridge<const SESSION_ONLY: bool>(
-    state: PathBuf,
-    existing: Option<uuid::Uuid>,
-) -> io::Result<()> {
+async fn bridge<F>(state: PathBuf, existing: Option<uuid::Uuid>, serve: F) -> io::Result<()>
+where
+    F: for<'a> AsyncFnOnce(&'a Socket, Option<PathBuf>, u32, sessions::Session) -> io::Result<()>,
+{
     let state = sessions::state(Some(state))?;
     let uid = nix::unistd::Uid::effective().as_raw();
     let exe = std::env::current_exe()?;
@@ -98,14 +109,9 @@ async fn bridge<const SESSION_ONLY: bool>(
     let socket = Socket::inherited(dispatch.as_raw_fd())?;
     let relay = tokio::net::UnixStream::from_std(relay.into())?;
     tokio::select! {
-        result = async {
-            if SESSION_ONLY {
-                daemon::run_session_image(&socket, Some(state), uid, session).await
-            } else {
-                drop(session);
-                daemon::run_authenticated(&socket, Some(state), uid).await
-            }
-        } => result,
+        // Choose the future type before constructing this async state. A
+        // branch containing both dispatchers also retains their drop paths.
+        result = serve(&socket, Some(state), uid, session) => result,
         result = relay_pipes(&pipes, relay, session_id) => result,
     }
 }
