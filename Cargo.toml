@@ -27,7 +27,9 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 infraternal-plugin-api = { version = "0.1.0", path = "crates/infraternal-plugin-api" }
 argon2 = "0.5"
-axum = { version = "0.8", features = ["ws"] }
+# Retain the server's HTTP, JSON, WebSocket and tracing paths; the form, query,
+# matched-path and original-URI extractors are not used [#198].
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tower-log", "tracing", "ws"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-openssl"] }
 bytes = "1"
 base64 = "0.22"

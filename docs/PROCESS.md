@@ -143,13 +143,14 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,407,568 bytes |
-  | `aarch64-unknown-linux-musl` | 19,581,800 bytes |
+  | `x86_64-unknown-linux-musl` | 21,403,120 bytes |
+  | `aarch64-unknown-linux-musl` | 19,576,520 bytes |
 
   These are the #198 measurements of the full-feature release recipe after
-  unused native APIs, duplicated action metadata construction, and OpenSSL's
-  unused VAES/AVX-512 AES-GCM dispatch were cut (D243, D264). The x86_64 build
-  retains AES-NI and generic AES-GCM dispatch, checked against a NIST vector
+  unused native APIs, duplicated action metadata construction, OpenSSL's
+  unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
+  cut (D243, D264, #198). The x86_64 build retains AES-NI and generic AES-GCM
+  dispatch, checked against a NIST vector
   using the shipping static crypto archive.
   The release and host-facts plugins use size optimization; terminal and mesh
   data paths retain speed optimization (D243).
@@ -159,8 +160,8 @@ Reviews and fixes run at the same time as the next lane's build.
   regrowth. Update both targets and this table with evidence on the issue.
   An intentional increase needs a justified, target-specific measured owner
   exception under D243. The gate never updates a ceiling automatically.
-  Attribution, retained feature costs and runtime tradeoffs are recorded in
-  `docs/verification/size-ratchet/README.md`.
+  Attribution, retained feature costs and runtime tradeoffs for #198 are
+  recorded on that issue.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
