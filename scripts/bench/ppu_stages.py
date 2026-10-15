@@ -11,7 +11,6 @@ import contextvars
 import json
 import os
 from pathlib import Path
-import re
 import signal
 import time
 from types import SimpleNamespace
@@ -31,7 +30,7 @@ ORIGINAL_SEND = suite.Peer.send
 ORIGINAL_FRAME = suite.Peer.frame
 ORIGINAL_SOAK = suite.soak
 ORIGINAL_WRITE = suite.Recorder.write
-MARKER = re.compile(rb'probe-(\d+)-(\d+)\r?\n')
+MARKER_RECEIPT = 'registered-marker-bytes'
 
 
 def init(host, binary, root, *args, **kwargs):
@@ -54,7 +53,7 @@ async def ready(host):
     with (host.root.parent / 'stages.log').open() as source:
         read_header(source)
     for index, peer in enumerate(host.peers):
-        READERS[peer.reader] = dict(session=index, tail=b'', head=peer.head)
+        READERS[peer.reader] = dict(session=index, tail=b'', head=peer.head, peer=peer)
 
 
 async def frame(reader):
@@ -66,11 +65,20 @@ async def frame(reader):
         payload = result[9:]
         tail = state['tail'] if offset == state['head'] else b''
         combined = tail + payload
-        for match in MARKER.finditer(combined):
-            session, number = map(int, match.groups())
-            if session == state['session']:
-                end = offset - len(tail) + match.end()
-                RECEIVED.setdefault((session, number), dict(receive_ns=stamp, output_end=end))
+        # Match the same unfinished waiter as Peer.receive. Waiting for a
+        # delimiter can select a later frame after the timed echo already ended.
+        for marker, future in list(state['peer'].waiters.items()):
+            if not marker.startswith(b'probe-') or future.done():
+                continue
+            position = combined.find(marker)
+            if position >= 0:
+                _, session, number = marker.split(b'-')
+                session, number = int(session), int(number)
+                if session != state['session']:
+                    raise ValueError('probe waiter belongs to another session')
+                end = offset - len(tail) + position + len(marker)
+                RECEIVED.setdefault((session, number), dict(receive_ns=stamp, output_end=end,
+                    receive_active_s=suite.clock_now()))
         state.update(tail=combined[-64:], head=offset + len(payload))
     return result
 
@@ -79,7 +87,7 @@ async def send(peer, kind, data=b''):
     probe = CURRENT.get()
     if kind == 0x10 and probe is not None:
         probe.update(input_start=peer.accepted, input_end=peer.accepted + len(data),
-                     send_before_ns=time.monotonic_ns())
+                     send_before_ns=time.monotonic_ns(), send_before_s=suite.clock_now())
         await ORIGINAL_SEND(peer, kind, data)
         probe['send_after_ns'] = time.monotonic_ns()
     else:
@@ -128,7 +136,7 @@ async def soak(host, args, record, rng):
         ended = max((row['completed_ns'] for row in rows), default=started)
         settled = [(stamp, kind, state) for stamp, kind, state in scheduler.events
                    if started + args.warmup * 1_000_000_000 <= stamp * 1_000_000_000 <= ended]
-        summary.update(diagnostic_only=True, full_trace_includes_census=True,
+        summary.update(diagnostic_only=True, marker_receipt=MARKER_RECEIPT, full_trace_includes_census=True,
                        settled_scheduler=trace.summarize(settled), ended_ns=ended,
                        started_ns=started, origin=host.origin, probes=rows,
                        matched=sum('receive_ns' in probe for probe in rows))
@@ -141,7 +149,7 @@ async def soak(host, args, record, rng):
 
 def write(record, kind, **fields):
     if kind == 'environment':
-        fields.update(diagnostic_only=True, budget_admission=False, stage_capacity=65536,
+        fields.update(diagnostic_only=True, budget_admission=False, marker_receipt=MARKER_RECEIPT, stage_capacity=65536,
                       stage_flush_interval_s=.5)
     return ORIGINAL_WRITE(record, kind, **fields)
 

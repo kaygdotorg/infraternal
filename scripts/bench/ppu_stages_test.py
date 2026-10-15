@@ -56,13 +56,34 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
                        b'\x11' + (123 + len(first)).to_bytes(8, 'little') + second])
         async def receive(_):
             return next(frames)
-        stages.READERS[reader] = dict(session=900, tail=b'', head=123)
+        stages.READERS[reader] = dict(session=900, tail=b'', head=123,
+            peer=SimpleNamespace(waiters={b'probe-900-12': asyncio.get_running_loop().create_future()}))
         with patch.object(stages, 'ORIGINAL_FRAME', receive):
             await stages.frame(reader)
             await stages.frame(reader)
         row = stages.RECEIVED[(900, 12)]
-        self.assertEqual(row['output_end'], 123 + len(first) + len(b'12\r\n'))
+        self.assertEqual(row['output_end'], 123 + len(first) + len(b'12'))
         self.assertGreater(row['receive_ns'], 0)
+
+    async def test_registered_marker_receipt_does_not_wait_for_its_newline(self):
+        reader = object()
+        marker = b'probe-900-12'
+        future = asyncio.get_running_loop().create_future()
+        peer = SimpleNamespace(waiters={marker: future})
+        frames = iter([b'\x11' + (0).to_bytes(8, 'little') + marker,
+                       b'\x11' + len(marker).to_bytes(8, 'little') + b'\r\n'])
+        async def receive(_):
+            return next(frames)
+        stages.READERS[reader] = dict(session=900, tail=b'', head=0, peer=peer)
+        with patch.object(stages, 'ORIGINAL_FRAME', receive):
+            await stages.frame(reader)
+            self.assertIn((900, 12), stages.RECEIVED,
+                          'the timed waiter completes on marker bytes, before newline')
+            first = stages.RECEIVED[(900, 12)].copy()
+            self.assertEqual(first['output_end'], len(marker))
+            future.set_result(0)
+            await stages.frame(reader)
+        self.assertEqual(stages.RECEIVED[(900, 12)], first)
 
     async def test_output_gap_cannot_complete_an_earlier_marker(self):
         reader = object()
@@ -71,7 +92,8 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
                        b'\x11' + (len(first) + 1).to_bytes(8, 'little') + b'12\r\n'])
         async def receive(_):
             return next(frames)
-        stages.READERS[reader] = dict(session=900, tail=b'', head=0)
+        stages.READERS[reader] = dict(session=900, tail=b'', head=0,
+            peer=SimpleNamespace(waiters={b'probe-900-12': asyncio.get_running_loop().create_future()}))
         with patch.object(stages, 'ORIGINAL_FRAME', receive):
             await stages.frame(reader)
             await stages.frame(reader)
