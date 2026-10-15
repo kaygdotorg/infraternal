@@ -2746,11 +2746,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Every privileged action is recorded** in the host's activity log
        and the Inbox: what ran, who asked and when, never secrets. A failed
        attempt shows in the Inbox at once.
-     - Still open: whether the password is kept anywhere (proposed: used
-       once for the upgrade, then wiped, never stored), and how the
-       privilege is taken back (proposed: a "Full access" line in the
-       host's details that returns it to the rootless agent; removing the
-       host also removes it).
+     - **Hold as few secrets as possible:** the password is used once to
+       install the root infraternal agent's system service, then wiped from
+       memory. It is never written to disk, a log or the server.
+     - **Going back to the rootless agent is possible but deliberately hard
+       to reach,** so that nobody downgrades by accident. The details are
+       still open. Removing the host removes everything (D273).
 275. **The wheel scrolls what is under it (owner, 2026-10-15; refines D177,
      #215):** today a snapped canvas sends every wheel to window navigation,
      so a window's own list (Access) cannot scroll without the input lock.
