@@ -148,9 +148,9 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    struct Directory(PathBuf);
+    pub(super) struct Directory(pub(super) PathBuf);
     impl Directory {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let base = std::env::var_os("CARGO_TARGET_DIR")
                 .map_or_else(
                     || std::env::current_dir().map(|path| path.join("target")),
@@ -298,3 +298,7 @@ mod tests {
         assert!(Store::open(&directory.0).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "node_state_order_tests.rs"]
+mod order_tests;
