@@ -107,16 +107,15 @@ async fn connect(
     let refreshed = current_credentials(identity, renewal)?;
     let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
     let driver = DialRuntime::new();
-    let path = PathSocket::new(
-        driver.runtime().wrap_udp_socket(std::net::UdpSocket::bind(
-            if identity.endpoint.is_ipv6() {
-                "[::]:0"
-            } else {
-                "0.0.0.0:0"
-            },
-        )?)?,
+    let path = PathSocket::from_udp(
+        std::net::UdpSocket::bind(if identity.endpoint.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        })?,
         identity.endpoint,
-    );
+        driver.runtime().as_ref(),
+    )?;
     if kind == ServerLinkKind::Mesh {
         path.use_mesh(address);
     }
