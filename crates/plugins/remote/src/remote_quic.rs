@@ -876,3 +876,7 @@ mod probe_tests;
 #[cfg(test)]
 #[path = "remote_mtu_tests.rs"]
 mod mtu_tests;
+
+#[cfg(test)]
+#[path = "remote_design_scale_review.rs"]
+mod design_scale_review;
