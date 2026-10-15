@@ -2840,3 +2840,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      shrink it by removing committed artifacts that belong on Forgejo issues
      (D262). The plan and the cut-over are shown to the owner before the
      rewrite.
+281. **In-app feedback (owner, 2026-10-15; design round in progress):**
+     - **Fully automated:** the person never leaves the app and needs no
+       GitHub account. The owner rejected opening a ready-filled GitHub page.
+     - **Where:** "Send feedback" is found in search ("feedback", "bug",
+       "idea") and in the version pill's popover. There is no permanent
+       button. One short form follows, and whether it is a bug or an idea is
+       read from the wording, not picked from a menu.
+     - **Attached:** version, edition (CE/EE), browser, OS and screen size,
+       shown before sending. Never host names, addresses, user names or
+       terminal content in the text. **A screenshot is included by default
+       (opt-out).**
+     - **Everything lands in GitHub Discussions** on the public mirror. A
+       Claude Code triage bot reads the list and promotes what is
+       actionable to issues.
+     - Still open: the transport and who holds which credential, how
+       screenshots are kept from showing private things publicly, abuse
+       limits, replies, authorship, and where promoted work is tracked.
