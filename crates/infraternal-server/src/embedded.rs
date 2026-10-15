@@ -941,10 +941,9 @@ async fn run_actor(
                 match event {}
             }
             _ = ticks.tick(), if !attachments.is_empty() => {
-                let (nonce, sent_us) = liveness.ping();
                 let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
-                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
-                    || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
+                if (liveness.expired()
+                    || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue, Some(&mut liveness)).await)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
                         writes.stop().await;

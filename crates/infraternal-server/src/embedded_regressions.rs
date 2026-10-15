@@ -153,6 +153,7 @@ async fn actor_batch_probes_every_ready_route_without_payload_notifications() {
             &mut HashMap::new(),
             true,
             &mut queued,
+            None,
         )
         .await
     );
@@ -1276,7 +1277,8 @@ async fn expired_route_waits_for_browser_authority_before_rebind() {
             &mut routes,
             &mut HashMap::new(),
             true,
-            &mut std::collections::VecDeque::new()
+            &mut std::collections::VecDeque::new(),
+            None,
         )
         .await
     );
@@ -1317,7 +1319,8 @@ async fn expired_route_retires_full_consumer() {
             &mut routes,
             &mut HashMap::new(),
             true,
-            &mut std::collections::VecDeque::new()
+            &mut std::collections::VecDeque::new(),
+            None,
         )
         .await
     );
@@ -1359,4 +1362,94 @@ async fn recovered_route_ignores_stale_browser_rebind() {
             .await
             .is_err()
     );
+}
+
+/// A host proof belongs in the same ordered batch as its ready terminal proofs.
+#[tokio::test]
+async fn host_control_and_ready_route_probes_share_the_local_batch() {
+    let (mut link, mut peer) = connection();
+    let (output, mut reader) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(
+        1,
+        AttachmentState {
+            route: Some(Liveness::new()),
+            ..attachment(output)
+        },
+    )]);
+    let mut control = Liveness::new();
+    assert!(
+        route_proofs::tick(
+            &mut link,
+            &mut attachments,
+            &mut HashMap::from([(2, 1)]),
+            &mut HashMap::new(),
+            true,
+            &mut std::collections::VecDeque::new(),
+            Some(&mut control)
+        )
+        .await
+    );
+    let mut wire = [0; 4096];
+    let count = tokio::time::timeout(Duration::from_secs(3), peer.read(&mut wire))
+        .await
+        .unwrap()
+        .unwrap();
+    let first = decode_muxed_frame(&wire[..count]).unwrap();
+    assert_eq!(first.stream_id, 0, "host control proof must lead the batch");
+    let Frame::Ping { nonce, sent_us } = first.frame else {
+        panic!("expected control probe");
+    };
+    assert!(
+        control.pong(nonce, sent_us),
+        "control reply must correlate with its issued probe"
+    );
+    let second = decode_muxed_frame(&wire[first.wire_len..count]).unwrap();
+    assert_eq!(second.stream_id, 2);
+    assert!(matches!(second.frame, Frame::Ping { .. }));
+    assert_eq!(first.wire_len + second.wire_len, count);
+    assert!(
+        reader.try_recv().is_err(),
+        "proofs cannot wake payload consumers"
+    );
+}
+
+/// Waiting terminal acknowledgements cannot suppress the independent host proof.
+#[tokio::test]
+async fn host_control_probe_survives_when_every_terminal_route_waits() {
+    let (mut link, mut peer) = connection();
+    let (output, _reader) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(
+        1,
+        AttachmentState {
+            awaiting_ack: true,
+            route: Some(Liveness::new()),
+            ..attachment(output)
+        },
+    )]);
+    let mut control = Liveness::new();
+    assert!(
+        route_proofs::tick(
+            &mut link,
+            &mut attachments,
+            &mut HashMap::from([(2, 1)]),
+            &mut HashMap::new(),
+            true,
+            &mut std::collections::VecDeque::new(),
+            Some(&mut control)
+        )
+        .await
+    );
+    assert!(
+        control.response_deadline().is_some(),
+        "host proof must actually be issued"
+    );
+    let mut wire = [0; 256];
+    let count = tokio::time::timeout(Duration::from_secs(3), peer.read(&mut wire))
+        .await
+        .unwrap()
+        .unwrap();
+    let decoded = decode_muxed_frame(&wire[..count]).unwrap();
+    assert_eq!(decoded.stream_id, 0);
+    assert!(matches!(decoded.frame, Frame::Ping { .. }));
+    assert_eq!(decoded.wire_len, count);
 }

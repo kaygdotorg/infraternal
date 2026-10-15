@@ -1,4 +1,4 @@
-//! Batches shim-fenced browser proofs on the existing host tick without waking payload consumers [81,265], #199.
+//! Batches host and shim-fenced proofs on the existing tick without waking payload consumers [81,265], #199.
 
 use super::{
     AgentConnection, AsyncWriteExt, AttachmentState, Command, Duration, Frame, HashMap, Liveness,
@@ -12,7 +12,16 @@ pub(super) async fn tick(
     pending: &mut HashMap<u32, PendingCall>,
     available: bool,
     remote_probes: &mut std::collections::VecDeque<u64>,
+    mut control: Option<&mut Liveness>,
 ) -> bool {
+    let local = matches!(connection.peer, Peer::Local { .. });
+    // Remote peers retain their owned control writer and queue admission.
+    if !local && let Some(control) = control.as_deref_mut() {
+        let (nonce, sent_us) = control.ping();
+        if !write_frame(connection, 0, &Frame::Ping { nonce, sent_us }).await {
+            return false;
+        }
+    }
     let expired: Vec<u64> = attachments
         .iter()
         .filter_map(|(&id, a)| {
@@ -53,8 +62,10 @@ pub(super) async fn tick(
     let mut batch = std::mem::take(&mut connection.encode);
     batch.clear();
     let mut encoded = Vec::with_capacity(24);
-    let local = matches!(connection.peer, Peer::Local { .. });
-    let mut valid = true;
+    // Local peers have no owned control writer. Stamp their host proof after
+    // expiry work, then send it first in the same write as the ready routes.
+    let mut valid =
+        !local || control.is_none_or(|lease| append_probe(&mut batch, &mut encoded, 0, lease));
     remote_probes.retain(|id| {
         attachments
             .get(id)
@@ -62,6 +73,9 @@ pub(super) async fn tick(
     });
     let fill_remote_queue = remote_probes.is_empty();
     for (&id, attachment) in attachments.iter_mut() {
+        if !valid {
+            break;
+        }
         if attachment.awaiting_ack || attachment.proof_rebind_pending {
             continue;
         }
@@ -74,15 +88,7 @@ pub(super) async fn tick(
             }
             continue;
         }
-        let (nonce, sent_us) = route.ping();
-        let frame = Frame::Ping { nonce, sent_us };
-        if local {
-            if encode_muxed_frame_into(attachment.stream_id, &frame, &mut encoded).is_err() {
-                valid = false;
-                break;
-            }
-            batch.extend_from_slice(&encoded);
-        }
+        valid = append_probe(&mut batch, &mut encoded, attachment.stream_id, route);
     }
     if valid && !batch.is_empty() {
         valid = match &mut connection.peer {
@@ -98,6 +104,21 @@ pub(super) async fn tick(
     batch.clear();
     connection.encode = batch;
     valid
+}
+
+/// Only header bytes enter this batch; no await separates issuance and encoding.
+fn append_probe(
+    batch: &mut Vec<u8>,
+    encoded: &mut Vec<u8>,
+    stream: u32,
+    lease: &mut Liveness,
+) -> bool {
+    let (nonce, sent_us) = lease.ping();
+    if encode_muxed_frame_into(stream, &Frame::Ping { nonce, sent_us }, encoded).is_err() {
+        return false;
+    }
+    batch.extend_from_slice(encoded);
+    true
 }
 
 /// A queued remote proof owns at most one write before the actor polls replies again.
