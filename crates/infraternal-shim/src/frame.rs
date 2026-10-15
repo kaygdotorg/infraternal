@@ -160,15 +160,41 @@ impl Frame {
     pub fn encode_into(&self, wire: &mut Vec<u8>) -> io::Result<()> {
         self.encode_mode::<false>(wire)
     }
-    /// Append one complete frame to an unsent shared-host batch.
+    /// Encode retained output directly from a possibly wrapped ring. The
+    /// complete frame size is validated before touching any preceding batch.
     /// # Errors
-    /// Rejects oversized payloads without changing the preceding frames.
+    /// Rejects payloads beyond the frozen frame bound without changing `wire`.
     #[cfg(feature = "process-per-user")]
-    pub(crate) fn append_into(&self, wire: &mut Vec<u8>) -> io::Result<()> {
-        self.encode_mode::<true>(wire)
+    pub(crate) fn output_slices_into<const APPEND: bool>(
+        seq: u64,
+        first: &[u8],
+        second: &[u8],
+        wire: &mut Vec<u8>,
+    ) -> io::Result<()> {
+        let size = first
+            .len()
+            .checked_add(second.len())
+            .and_then(|bytes| bytes.checked_add(9))
+            .filter(|size| *size <= MAX_FRAME)
+            .ok_or_else(invalid)?;
+        let length = u32::try_from(size).map_err(|_| invalid())?;
+        if !APPEND {
+            wire.clear();
+        }
+        wire.reserve(size + 4);
+        wire.extend_from_slice(&length.to_le_bytes());
+        wire.push(0x11);
+        wire.extend_from_slice(&seq.to_le_bytes());
+        wire.extend_from_slice(first);
+        wire.extend_from_slice(second);
+        Ok(())
     }
     #[allow(clippy::too_many_lines)]
     fn encode_mode<const APPEND: bool>(&self, wire: &mut Vec<u8>) -> io::Result<()> {
+        #[cfg(feature = "process-per-user")]
+        if let Self::Output(seq, bytes) = self {
+            return Self::output_slices_into::<APPEND>(*seq, bytes, &[], wire);
+        }
         let size = match self {
             Self::Input(bytes) => 1 + bytes.len(),
             Self::Output(_, bytes) | Self::Snapshot(_, bytes) | Self::SequencedInput(_, bytes) => {

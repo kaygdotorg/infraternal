@@ -20,6 +20,33 @@ mod tests {
 
     #[cfg(feature = "process-per-user")]
     #[test]
+    fn borrowed_ranges_obey_absolute_offsets_across_physical_wrap() {
+        let mut ring = Ring::new(8);
+        for byte in 0..43 {
+            ring.append(&[byte]).unwrap();
+        }
+        assert!(
+            !ring.bytes.as_slices().1.is_empty(),
+            "exercise a physical wrap"
+        );
+        for seq in 34..=44 {
+            for limit in 0..=12 {
+                let expected = (35..=43).contains(&seq).then(|| {
+                    (seq..43)
+                        .take(limit)
+                        .map(|n| u8::try_from(n).unwrap())
+                        .collect::<Vec<_>>()
+                });
+                let actual = ring
+                    .read_slices(seq, limit)
+                    .map(|(first, second)| [first, second].concat());
+                assert_eq!(actual, expected, "seq={seq} limit={limit}");
+            }
+        }
+    }
+
+    #[cfg(feature = "process-per-user")]
+    #[test]
     fn shared_history_reservation_never_rounds_past_its_share() {
         let mut ring = Ring::new(67_108);
         for _ in 0..40 {

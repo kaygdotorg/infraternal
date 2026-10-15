@@ -38,6 +38,20 @@ impl Ring {
     pub fn origin_slices(&self) -> Option<(&[u8], &[u8])> {
         (self.start() == 0).then_some(self.bytes.as_slices())
     }
+    /// Borrow a bounded retained range across at most one physical wrap.
+    /// Like `read`, the current head is a valid empty range, but stale and
+    /// future offsets are refused. No temporary payload allocation is needed.
+    #[cfg(feature = "process-per-user")]
+    #[must_use]
+    pub(crate) fn read_slices(&self, seq: u64, limit: usize) -> Option<(&[u8], &[u8])> {
+        let offset = usize::try_from(seq.checked_sub(self.start())?).ok()?;
+        let count = limit.min(self.bytes.len().checked_sub(offset)?);
+        let (first, second) = self.bytes.as_slices();
+        let second_at = offset.saturating_sub(first.len());
+        let first_at = offset.min(first.len());
+        let first = &first[first_at..first.len().min(first_at + count)];
+        Some((first, &second[second_at..second_at + count - first.len()]))
+    }
     /// Append output without resetting its identity when the ring wraps.
     /// # Errors
     /// Fails rather than wrapping the absolute offset after `u64::MAX` bytes.

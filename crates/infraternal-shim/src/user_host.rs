@@ -396,17 +396,17 @@ impl Session {
                         p.cursor = None;
                     }
                 } else if seq < self.ring.head() {
-                    let bytes = self
+                    let (first, second) = self
                         .ring
-                        .read(seq, CHUNK)
+                        .read_slices(seq, CHUNK)
                         .ok_or_else(|| io::Error::other("delivery cursor invariant"))?;
-                    p.cursor = Some(seq + bytes.len() as u64);
-                    let frame = Frame::Output(seq, bytes);
                     if queued_reply {
-                        frame.append_into(&mut p.pending)?;
+                        Frame::output_slices_into::<true>(seq, first, second, &mut p.pending)?;
                     } else {
-                        p.queue(&frame)?;
+                        Frame::output_slices_into::<false>(seq, first, second, &mut p.pending)?;
+                        p.written = 0;
                     }
+                    p.cursor = Some(seq + (first.len() + second.len()) as u64);
                 } else if !queued_reply
                     && self.drained
                     && !p.exited_sent
@@ -721,6 +721,39 @@ mod child_checks;
 mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
+
+    #[test]
+    fn steady_replay_needs_no_payload_allocation() {
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/br{}",
+            std::process::id()
+        ));
+        let mut config = Config::new([24; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        client.read_exact(&mut [0; 63]).unwrap();
+        let peer = &mut session.peers[0];
+        peer.attached = true;
+        peer.cursor = Some(0);
+        peer.pending.reserve(CHUNK + 13);
+        session.ring.append(b"bounded replay").unwrap();
+        let ((), delta) = crate::heap_accounting::measure(|| {
+            session.housekeeping().unwrap();
+        });
+        drop(client);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+        assert_eq!(
+            delta.allocations, 0,
+            "replay must borrow retained ring bytes"
+        );
+    }
 
     #[test]
     fn blocked_state_and_output_share_one_ordered_write_batch() {
