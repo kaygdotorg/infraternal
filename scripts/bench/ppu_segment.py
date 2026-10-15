@@ -71,6 +71,28 @@ def retire(child, unit, description):
                             unit + '.scope'], check=False)
         child.kill()
         child.wait(timeout=30)
+    if group is not None:
+        # The launcher can exit while a descendant ignores TERM and HUP.
+        # Revalidate the invocation after waiting: the name alone must never
+        # authorize signalling a replacement unit created by another job.
+        try:
+            remaining = owned_group(unit, description)
+        except ValueError:
+            return
+        if remaining is not None and 'populated 1' in (remaining / 'cgroup.events').read_text().splitlines():
+            subprocess.run(['systemctl', 'kill', '--kill-whom=all', '--signal=KILL',
+                            unit + '.scope'], check=False)
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    remaining = owned_group(unit, description)
+                    if remaining is None or 'populated 0' in (remaining / 'cgroup.events').read_text().splitlines():
+                        break
+                except (FileNotFoundError, ValueError):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('owned fixture still populated after cleanup')
+                time.sleep(.01)
 
 
 def acquire(lock, notify):

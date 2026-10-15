@@ -43,6 +43,39 @@ class Segments(unittest.TestCase):
             kill_unit.assert_not_called()
             child.terminate.assert_called_once()
 
+    def test_exited_launcher_does_not_leave_owned_children_after_term(self):
+        with tempfile.TemporaryDirectory() as root:
+            group = Path(root)
+            (group / 'cgroup.events').write_text('populated 1\nfrozen 0\n')
+            child = Mock()
+            child.poll.return_value = 0
+            def signal_unit(command, **unused):
+                if '--signal=KILL' in command:
+                    (group / 'cgroup.events').write_text('populated 0\nfrozen 0\n')
+            with patch.object(ppu_segment, 'owned_group', return_value=group), \
+                    patch.object(ppu_segment.subprocess, 'run', side_effect=signal_unit) as signals:
+                ppu_segment.retire(child, 'ppu-soak-owned', 'our invocation')
+            self.assertTrue(any('--signal=KILL' in call.args[0] for call in signals.call_args_list),
+                            'launcher exit does not certify an empty owned scope')
+            self.assertIn('populated 0', (group / 'cgroup.events').read_text())
+
+    def test_reused_unit_is_not_killed_after_original_launcher_exits(self):
+        with tempfile.TemporaryDirectory() as root:
+            child = Mock()
+            child.poll.return_value = 0
+            with patch.object(ppu_segment, 'owned_group', side_effect=[Path(root), ValueError('foreign')]), \
+                    patch.object(ppu_segment.subprocess, 'run') as signals:
+                ppu_segment.retire(child, 'ppu-soak-owned', 'our invocation')
+            self.assertFalse(any('--signal=KILL' in call.args[0] for call in signals.call_args_list))
+
+    def test_scope_query_error_after_launcher_exit_is_not_cleanup_proof(self):
+        with tempfile.TemporaryDirectory() as root:
+            child = Mock()
+            child.poll.return_value = 0
+            with patch.object(ppu_segment, 'owned_group', side_effect=[Path(root), OSError('query failed')]), \
+                    patch.object(ppu_segment.subprocess, 'run'), self.assertRaises(OSError):
+                ppu_segment.retire(child, 'ppu-soak-owned', 'our invocation')
+
     def test_pause_changes_existing_mapping_without_replacing_its_inode(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / 'clock'
