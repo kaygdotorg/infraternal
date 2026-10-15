@@ -98,9 +98,12 @@ pub(crate) fn initialize(file: Option<&mut std::fs::File>) -> io::Result<()> {
 pub(crate) fn enable(enabled: bool) -> io::Result<()> {
     TRACE.with_borrow_mut(|trace| {
         if enabled {
+            // Vec reservations are additional to length. Re-enabling with
+            // retained records must not reserve another full record budget.
+            let remaining = LIMIT.saturating_sub(trace.records.len());
             trace
                 .records
-                .try_reserve_exact(LIMIT)
+                .try_reserve_exact(remaining)
                 .map_err(io::Error::other)?;
         }
         if !enabled {
@@ -193,6 +196,17 @@ pub(crate) fn credited_ranges() -> Vec<(usize, u64, usize)> {
 mod tests {
     //! Validate hard diagnostic bounds and numeric-only serialization.
     use super::*;
+    #[test]
+    fn reenabling_a_nonempty_trace_preserves_its_capacity() {
+        enable(false).unwrap();
+        enable(true).unwrap();
+        record(Stage::PeerRead, [4; 16], 5, 0, 1, 0);
+        let before = TRACE.with_borrow(|trace| trace.records.capacity());
+        enable(true).unwrap();
+        let after = TRACE.with_borrow(|trace| trace.records.capacity());
+        enable(false).unwrap();
+        assert_eq!(after, before);
+    }
     #[test]
     fn full_trace_counts_dropped_records_without_growing_storage() {
         let mut trace = Trace::default();
