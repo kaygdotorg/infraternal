@@ -13,7 +13,10 @@ use std::{
 
 #[tokio::test]
 async fn silent_inventory_helper_releases_control_admission_after_deadline() {
-    let runtime = PathBuf::from("target").join(format!("sd-{}", std::process::id()));
+    let target = PathBuf::from("target");
+    let remove_target_afterward = !target.exists();
+    fs::create_dir_all(&target).unwrap();
+    let runtime = target.join(format!("sd-{}", std::process::id()));
     fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
     let executable = runtime.join("silent.py");
     fs::write(
@@ -59,6 +62,9 @@ while connection.recv(65536):
         let _ = worker.await;
     }
     fs::remove_dir_all(runtime).unwrap();
+    if remove_target_afterward {
+        let _ = fs::remove_dir(target);
+    }
     assert!(
         bounded && active == 0,
         "silent inventory retained its control operation and helper until explicit disable (active_work={active})"

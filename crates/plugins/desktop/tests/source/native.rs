@@ -25,24 +25,45 @@ use std::{
     fs,
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 static NEXT: AtomicU64 = AtomicU64::new(1);
+#[derive(Default)]
+struct TargetParent {
+    active_fixtures: usize,
+    created_by_fixtures: bool,
+}
+static TARGET_PARENT: OnceLock<Mutex<TargetParent>> = OnceLock::new();
+fn target_parent() -> &'static Mutex<TargetParent> {
+    TARGET_PARENT.get_or_init(|| Mutex::new(TargetParent::default()))
+}
 struct Fixture {
     runtime: PathBuf,
     bridge: SourceBridge,
 }
 impl Fixture {
     fn new() -> Self {
-        let runtime = PathBuf::from("target").join(format!(
-            "sb-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
+        // Cargo may put build output elsewhere; serialize parent creation so a
+        // last fixture cannot remove it while another fixture is starting.
+        let runtime = {
+            let mut parent = target_parent().lock().unwrap();
+            let target = PathBuf::from("target");
+            if !target.exists() {
+                fs::create_dir_all(&target).unwrap();
+                parent.created_by_fixtures = true;
+            }
+            let runtime = target.join(format!(
+                "sb-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
+            parent.active_fixtures += 1;
+            runtime
+        };
         let executable =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/source-helper.py");
         let bridge = SourceBridge::new(runtime.clone(), executable, 10);
@@ -69,7 +90,15 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let mut parent = target_parent().lock().unwrap();
         let _ = fs::remove_dir_all(&self.runtime);
+        parent.active_fixtures -= 1;
+        if parent.active_fixtures == 0
+            && parent.created_by_fixtures
+            && fs::remove_dir("target").is_ok()
+        {
+            parent.created_by_fixtures = false;
+        }
     }
 }
 
