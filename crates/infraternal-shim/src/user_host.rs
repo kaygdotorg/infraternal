@@ -146,12 +146,21 @@ impl SessionTerminal for LazyTerminal {
         self.resize_with_ring(cols, rows, None)
     }
     fn resize_with_ring(&mut self, cols: u16, rows: u16, ring: Option<&Ring>) -> io::Result<()> {
-        // Writer selection also reapplies unchanged geometry. That is not
-        // reflow and must not allocate VT for a light-output idle session.
-        if (cols, rows) == (self.cols, self.rows) && self.state.get_mut().terminal.is_none() {
+        let state = self.state.get_mut();
+        // Native resize also ends synchronized output. Only an empty byte
+        // range since the previous resize makes equal geometry redundant;
+        // intervening bytes may have enabled that mode again.
+        if (cols, rows) == (self.cols, self.rows)
+            && state.terminal.is_none()
+            && state
+                .resizes
+                .last()
+                .map_or(state.prefix.is_empty(), |(offset, _, _)| {
+                    *offset == state.prefix.len()
+                })
+        {
             return Ok(());
         }
-        let state = self.state.get_mut();
         if state.terminal.is_none() && state.resizes.len() < RESIZE_LIMIT {
             // Geometry alone need not allocate screen pools. The bounded
             // transcript preserves every reflow at its historical byte offset.
@@ -1269,6 +1278,37 @@ mod tests {
                 eager.resize(cols, rows).unwrap();
             }
             assert_same_state(&lazy, &eager);
+        }
+    }
+
+    #[test]
+    fn unchanged_geometry_retains_native_resize_side_effects() {
+        for resized_first in [false, true] {
+            let mut lazy = LazyTerminal::new(80, 24, 65536);
+            let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+            let cols = if resized_first { 81 } else { 80 };
+            if resized_first {
+                lazy.resize(cols, 24).unwrap();
+                eager.resize(cols, 24).unwrap();
+            }
+            lazy.process(b"\x1bc\x1b[?2026h").unwrap();
+            eager.process(b"\x1bc\x1b[?2026h");
+            assert!(eager.research_synchronized_output().unwrap());
+            lazy.resize(cols, 24).unwrap();
+            eager.resize(cols, 24).unwrap();
+            assert!(!eager.research_synchronized_output().unwrap());
+            lazy.materialize().unwrap();
+            assert!(
+                !lazy
+                    .state
+                    .borrow()
+                    .terminal
+                    .as_ref()
+                    .unwrap()
+                    .research_synchronized_output()
+                    .unwrap(),
+                "unchanged geometry must retain the native synchronization reset"
+            );
         }
     }
     #[test]

@@ -24,6 +24,8 @@ unsafe extern "C" {
     ) -> i32;
     #[cfg(test)]
     fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void, strict: bool) -> usize;
+    #[cfg(all(test, feature = "process-per-user"))]
+    fn ghostty_terminal_mode_get(terminal: *mut c_void, tag: u16, out: *mut bool) -> i32;
     #[cfg(any(test, feature = "process-per-user"))]
     fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
     fn infraternal_vt_approximate(terminal: *mut c_void, data: *mut u8, len: usize) -> usize;
@@ -46,6 +48,19 @@ pub(super) struct Engine(
     #[cfg(feature = "process-per-user")] Option<Box<crate::terminal_memory::Memory>>,
 );
 impl Engine {
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(super) fn synchronized_output(&self) -> io::Result<bool> {
+        let handle = self.0.ok_or_else(|| io::Error::other("retired VT"))?;
+        let mut value = false;
+        // SAFETY: the live handle and bool output remain valid synchronously.
+        // ModeTag is packed u16: low 15 bits are the mode, ANSI flag is clear.
+        let result = unsafe { ghostty_terminal_mode_get(handle.as_ptr(), 2026, &raw mut value) };
+        if result == 0 {
+            Ok(value)
+        } else {
+            Err(io::Error::other("native mode query failed"))
+        }
+    }
     #[cfg(feature = "process-per-user")]
     pub fn bounded(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
         #[cfg(not(feature = "compact-history"))]

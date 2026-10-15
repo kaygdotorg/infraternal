@@ -57,6 +57,11 @@ pub struct Terminal {
     recovery_pending: bool,
 }
 impl Terminal {
+    /// Inspect the live flag independently of repaint, which ends synchronization.
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(crate) fn research_synchronized_output(&self) -> io::Result<bool> {
+        self.engine.synchronized_output()
+    }
     /// Compare native state independently of the bounded repaint serializer.
     #[cfg(all(test, feature = "process-per-user"))]
     pub(crate) fn research_state_difference(&self, other: &Self) -> usize {
