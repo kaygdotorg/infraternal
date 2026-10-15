@@ -13,6 +13,11 @@ Build artifacts on the build host. Run measurements only on the perf VM under
 `flock -w 3600 /var/lock/perf-bench.lock`, releasing the lock between fresh
 targets. Keep the fixture's short state directory and unique container name
 exclusive to this lane. Use a unique `TRACER_TEST_PORT` for each browser run.
+Each held run writes the job and UTC start time to `/var/lock/perf-bench.owner`
+and finishes within thirty minutes; copying and builds happen outside the lock.
+After forty-five minutes waiting, report the owner receipt on the issue and
+continue waiting. The native timing runner bounds its held subprocess group
+with `timeout` and removes its owner receipt before releasing the lock.
 `measure.py` takes explicit full and session images and verifies the installed
 full-image digest after handover; omitting the session image is refused.
 

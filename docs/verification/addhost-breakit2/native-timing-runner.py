@@ -30,6 +30,16 @@ def direct(binary: Path, arguments: list[str]) -> None:
     os.execv(binary, [str(binary), *arguments])
 
 
+def locked_measurement(program: str, lock="/var/lock/perf-bench.lock",
+                       owner="/var/lock/perf-bench.owner") -> str:
+    """Bound the entire held measurement, including stalled children, below thirty minutes."""
+    owned = ("printf 'addhost-instant started=%s\\n' \"$(date -u +%FT%TZ)\" > "
+             + shlex.quote(owner) + "; trap "
+             + shlex.quote("rm -f -- " + shlex.quote(owner)) + " EXIT; " + program)
+    return shlex.join(["flock", "-w", "3600", lock, "timeout", "--kill-after=10",
+                       "1750", "sh", "-c", owned])
+
+
 def main() -> int:
     binary = Path(sys.argv[1]).resolve()
     arguments = sys.argv[2:]
@@ -82,7 +92,7 @@ def main() -> int:
         commands.append(command)
         commands.append('result=$?; printf "NATIVE_TIMING_EXIT %s=%s\\n" ' + shlex.quote(case) + ' "$result"; [ "$result" -eq 0 ] || aggregate=1')
     commands.append('exit "$aggregate"')
-    remote = shlex.join(["flock", "-w", "3600", "/var/lock/perf-bench.lock", "sh", "-c", "; ".join(commands)])
+    remote = locked_measurement("; ".join(commands))
     result = subprocess.run(
         ["netbird", "ssh", "--no-browser", "root@10.69.69.208", remote],
         capture_output=True, text=True,
