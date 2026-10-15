@@ -1,11 +1,12 @@
 """Check idle fixture ownership, worker accounting and shared browser probe cadence [81], #199."""
 import importlib.util
+import asyncio
 import os
 from pathlib import Path
 import socket
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 spec = importlib.util.spec_from_file_location('idle_routes', Path(__file__).with_name('bench-idle-routes.py'))
 fixture = importlib.util.module_from_spec(spec)
@@ -33,6 +34,17 @@ class PeerInspection(unittest.TestCase):
 
 
 class SampleAccounting(unittest.IsolatedAsyncioTestCase):
+    async def test_broken_socket_close_does_not_abort_fixture_teardown(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.task = asyncio.create_task(asyncio.sleep(3600))
+        browser.probe_task = asyncio.create_task(asyncio.sleep(3600))
+        browser.writer = Mock()
+        browser.writer.wait_closed = AsyncMock(side_effect=BrokenPipeError)
+        await browser.close()
+        self.assertTrue(browser.task.done())
+        self.assertTrue(browser.probe_task.done())
+        browser.writer.close.assert_called_once()
+
     async def test_incoming_and_timer_samples_share_one_probe_cadence(self):
         browser = fixture.Browser.__new__(fixture.Browser)
         browser.last_ping = float('-inf')
