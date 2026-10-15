@@ -76,6 +76,54 @@ impl Params {
     }
 }
 
+#[cfg(feature = "std")]
+impl Params {
+    /// Preserve both completed groups and a group's unfinished subparameters.
+    pub(crate) fn checkpoint_write(&self, out: &mut Vec<u8>) {
+        out.push(self.current_subparams);
+        out.push(self.len as u8);
+        out.extend_from_slice(&self.subparams);
+        for value in self.params {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    pub(crate) fn checkpoint_read(
+        input: &mut crate::checkpoint::Reader<'_>,
+    ) -> Result<Self, crate::checkpoint::CheckpointError> {
+        use crate::checkpoint::CheckpointError::Invalid;
+        let current_subparams = input.byte()?;
+        let len = usize::from(input.byte()?);
+        let mut subparams = [0; MAX_PARAMS];
+        subparams.copy_from_slice(input.take(MAX_PARAMS)?);
+        let mut params = [0; MAX_PARAMS];
+        for value in &mut params {
+            *value = input.u16()?;
+        }
+        if len > MAX_PARAMS || usize::from(current_subparams) > len {
+            return Err(Invalid);
+        }
+        let complete = len - usize::from(current_subparams);
+        let mut at = 0;
+        while at < complete {
+            let count = usize::from(subparams[at]);
+            if count == 0 || count > complete - at {
+                return Err(Invalid);
+            }
+            at += count;
+        }
+        if current_subparams > 0 && subparams[complete] != current_subparams {
+            return Err(Invalid);
+        }
+        Ok(Self {
+            subparams,
+            params,
+            current_subparams,
+            len,
+        })
+    }
+}
+
 impl<'a> IntoIterator for &'a Params {
     type IntoIter = ParamsIter<'a>;
     type Item = &'a [u16];

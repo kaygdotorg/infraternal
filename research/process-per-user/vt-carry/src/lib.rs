@@ -14,6 +14,9 @@ use arrayvec::ArrayVec;
 
 mod params;
 
+#[cfg(feature = "std")]
+pub mod checkpoint;
+
 pub use params::{Params, ParamsIter};
 
 const MAX_INTERMEDIATES: usize = 2;
