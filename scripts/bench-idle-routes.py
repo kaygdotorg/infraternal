@@ -188,8 +188,12 @@ class Browser:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self.writer.close()
-        await self.writer.wait_closed()
+        try:
+            self.writer.close()
+            await self.writer.wait_closed()
+        except ConnectionError:
+            # A retired peer must not prevent the private unit's teardown.
+            pass
 
     @classmethod
     async def connect(cls, port, token):
@@ -335,6 +339,7 @@ async def run(args):
                               attached_sessions=min(len(sessions), args.clients * 25),
                               server_pid=server_pid, seconds=args.settle)), flush=True)
         await asyncio.sleep(args.settle)
+        assert all(not browser.task.done() and (browser.probe_task is None or not browser.probe_task.done()) for browser in browsers), 'idle browser retired during settling'
         client_before = [(b.probes_sent, b.timer_wakeups) for b in browsers]
         result = await measure(server_pid, args.seconds)
         client_activity = [dict(probes_per_second=(b.probes_sent - before[0]) / result['seconds'],
@@ -366,8 +371,9 @@ async def run(args):
             assert await child.wait() == 0, 'fixture profile capture failed'
             print(json.dumps(dict(phase='profile', revision=args.revision, clients=len(browsers))), flush=True)
     finally:
-        for browser in browsers:
-            await browser.close()
+        # Retire every client even if an unexpected close error occurs. Report
+        # that error only after stopping the unit and its private shim peers.
+        closed = await asyncio.gather(*(browser.close() for browser in browsers), return_exceptions=True)
         subprocess.run(['systemctl', 'stop', unit], check=False)
         subprocess.run(['systemctl', 'reset-failed', unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Managed login/shim scopes may outlive the server's control group.
@@ -388,6 +394,7 @@ async def run(args):
         print(json.dumps(dict(phase='cleanup', server_pid=server_pid,
                               shim_pids=cleanup_pids, remaining_shims=live)), flush=True)
         shutil.rmtree(root)
+        assert not any(isinstance(result, BaseException) for result in closed), 'fixture browser teardown failed'
 
 
 if __name__ == '__main__':
