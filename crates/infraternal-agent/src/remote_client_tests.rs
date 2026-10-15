@@ -372,6 +372,7 @@ async fn delayed_proxy_keeps_replies_bound_to_the_original_udp_client() {
 }
 
 #[tokio::test]
+#[ignore = "Physical packet-spacing budget: run on the perf VM under the shared benchmark lock."]
 async fn tcp_proxy_preserves_spacing_between_packets_already_in_flight() {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
