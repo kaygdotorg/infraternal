@@ -330,6 +330,10 @@ pub(super) struct Peer {
     recent: Recent,
     pub seen: Seen,
     pub backup: bool,
+    /// Mutable history access invalidates this derived hint. A clean None
+    /// means no queued copy; this owns no timer or allocation.
+    copy_deadline: Option<tokio::time::Instant>,
+    copy_dirty: bool,
 }
 impl Peer {
     /// Retained ciphertext belongs to this peer's bounded queue.
@@ -338,7 +342,15 @@ impl Peer {
     }
     /// Keep externally initiated queue mutations at one peer boundary.
     pub fn recent_mut(&mut self) -> &mut Recent {
+        self.copy_dirty = true;
         &mut self.recent
+    }
+    fn copy_deadline(&mut self) -> Option<tokio::time::Instant> {
+        if self.copy_dirty {
+            self.copy_deadline = self.recent.deadline();
+            self.copy_dirty = false;
+        }
+        self.copy_deadline
     }
 }
 /// Both trusted tuple keys share one bounded slot. Use the same address/u64
@@ -366,35 +378,43 @@ impl Peers {
         if len == 0 {
             return None;
         }
+        // Classify future/empty peers from one poll snapshot. Due sends still
+        // check each entry against a fresh clock in the existing drain below.
+        let now = tokio::time::Instant::now();
         let start = self.copy_cursor % len;
         let (before, after) = self.slots.split_at_mut(start);
         let mut remaining = COPY_BATCH;
         let mut deadline = None;
         for (index, slot) in after.iter_mut().chain(before.iter_mut()).enumerate() {
             if let Some(peer) = slot {
-                let mesh = peer.mesh.and_then(|route| {
-                    let (socket, source) = if let Some(id) = route.binding {
-                        (
-                            leases.iter().find(|lease| lease.id == id)?.socket.as_ref(),
-                            None,
-                        )
-                    } else {
-                        (socket, if bound { None } else { route.local })
-                    };
-                    Some(CopyRoute {
-                        socket,
-                        destination: peer.alternate,
-                        source,
-                    })
-                });
-                if peer.mesh.is_some() && mesh.is_none() {
-                    peer.recent.cancel_mesh_replies();
-                    peer.mesh = None;
-                }
-                if let Some(at) =
-                    peer.recent
-                        .copies_to(socket, peer.logical, bound, mesh, &mut remaining)
-                {
+                let next = peer.copy_deadline();
+                let next = if next.is_some_and(|at| at <= now) {
+                    let mesh = peer.mesh.and_then(|route| {
+                        let (socket, source) = if let Some(id) = route.binding {
+                            (
+                                leases.iter().find(|lease| lease.id == id)?.socket.as_ref(),
+                                None,
+                            )
+                        } else {
+                            (socket, if bound { None } else { route.local })
+                        };
+                        Some(CopyRoute {
+                            socket,
+                            destination: peer.alternate,
+                            source,
+                        })
+                    });
+                    if peer.mesh.is_some() && mesh.is_none() {
+                        peer.recent_mut().cancel_mesh_replies();
+                        peer.mesh = None;
+                    }
+                    let logical = peer.logical;
+                    peer.recent_mut()
+                        .copies_to(socket, logical, bound, mesh, &mut remaining)
+                } else {
+                    next
+                };
+                if let Some(at) = next {
                     deadline = Some(deadline.map_or(at, |old: tokio::time::Instant| old.min(at)));
                 }
             }
@@ -464,6 +484,8 @@ impl Peers {
             recent: Recent::default(),
             seen: Seen::default(),
             backup: false,
+            copy_deadline: None,
+            copy_dirty: true,
         });
         if self.free.pop().is_some() {
             self.slots[index] = peer;
