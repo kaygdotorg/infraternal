@@ -285,6 +285,15 @@ own sockets with those same probes. It decodes decimal event fields and the
 syscall printer's hexadecimal fields separately, discards raw arguments, and
 refuses a run with no correlated writes. Its conservative reader-delay bounds
 cannot be subtracted from admission latency.
+`ppu_stages.py` observes the registered unfinished probe waiter and ends its
+output range at the same marker bytes as the timed echo. A following delimiter
+is a different stream position and may arrive in a later frame. The reporter
+requires finite active-clock bounds whose receipt span cannot exceed the original
+RTT; it refuses legacy newline-based captures. Host-wide budget start/denial
+records use no peer identity and distinguish elapsed expiry from count exhaustion.
+The denial reason is authoritative; the start receipt follows the runtime clock
+sample and cannot certify a precise deadline age if descheduled between them.
+These diagnostic records do not change the normal admission reader or thresholds.
 `ppu_raw_echo.py` compares the same synthetic shell markers over
 direct masters; its different reader prevents treating that result as a hard
 latency lower bound. The unchanged two-hour `ppu-run --phase soak` remains the
