@@ -36,7 +36,7 @@ import { coarse, el, reduced } from "../dom";
 import { byFrecency, type SessionRecord, type SessionState } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
 import { ICON, SESSION_ICON } from "../views/icons";
-import { paintStrip, type StripView } from "./strip";
+import { paintStrip, type StripView } from "../../../../../packages/ui/src/window-strip";
 
 /** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
 export interface SessionUiPart {

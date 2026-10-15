@@ -27,11 +27,6 @@
 
 /* The strip and the badge sit over the picture; neither blocks the machine's own pixels outside its small box. */
 .aw > .cl-sx-strip { z-index: 2; }
-.aw > .cl-sx-strip[data-result="info"] .cl-sx-strip-text { color: var(--fg-2); }
-.aw > .cl-sx-strip[data-bare] { padding-right: 14px; }
-.cl-sx-glyph { display: inline-grid; flex: none; place-items: center; width: 14px; height: 14px; margin-left: -2px; color: var(--fg-2); }
-.cl-sx-glyph svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-
 /* "Controlled from infraternal": the badge mirrors the machine's own menu-bar indicator. Quiet, and a button only to let go. */
 .aw-control { z-index: 2; animation: aw-in 180ms var(--ease-out, ease-out); transition: opacity 160ms ease, transform 140ms var(--ease-out, ease-out), background-color 140ms ease; }
 .aw-control[data-leaving] { opacity: 0; pointer-events: none; }

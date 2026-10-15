@@ -4,10 +4,16 @@
  * (Try again) and an app window or screen that stopped (Close window) all use it, so they look and move the same.
  *
  * `paintStrip` keeps at most one strip per body. It is rebuilt only when what it says changes (its `signature`), so a
- * repaint never resets a hover or a press on it. Placement and motion are in sessions.css (`.cl-sx-strip`).
+ * repaint never resets a hover or a press on it. Shared material, placement and motion are in packages/ui/styles.css (`.cl-sx-strip`).
  */
-import { ICON_X, icon } from "../../../../../packages/ui/src/icons";
-import { el } from "../dom";
+import { ICON_X, icon } from "./icons";
+/** Creates strip content; DOM allocation occurs only when the signature changes. */
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text?: string): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
 
 /** What a window's strip says and does. */
 export interface StripView {

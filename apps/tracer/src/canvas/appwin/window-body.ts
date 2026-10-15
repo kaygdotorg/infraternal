@@ -25,7 +25,7 @@ import type { VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { Ctx, WinRec } from "../context";
 import type { SessionBinding } from "../sessions/adapter";
 import { coarse, el } from "../dom";
-import { paintStrip, type StripView } from "../windows/strip";
+import { paintStrip, type StripView } from "../../../../../packages/ui/src/window-strip";
 import { containedRect, framePoint, keyInput, modifierBits, movedEnough, scrollDelta, wireButton } from "./input";
 import { controlLine, describe, type ControlState, type StateView, type StreamState } from "./status";
 import { AppStream } from "./stream";
