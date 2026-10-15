@@ -199,11 +199,18 @@ impl Bindings {
                 if let Some(peer) = peers.by_physical(physical) {
                     let logical = peer.logical;
                     if physical == peer.alternate {
-                        peer.mesh = Some(MeshRoute {
-                            binding: lease,
-                            local: received.dst_ip,
-                        });
-                        if let Some(at) = peer.recent_mut().mesh_ready()
+                        let first_mesh = peer
+                            .mesh
+                            .replace(MeshRoute {
+                                binding: lease,
+                                local: received.dst_ip,
+                            })
+                            .is_none();
+                        // Dormant replies can exist only before coordinates
+                        // are known. Later replies are armed at insertion;
+                        // lease retirement clears both coordinates and replies.
+                        if first_mesh
+                            && let Some(at) = peer.recent_mut().mesh_ready()
                             && let Ok(mut clock) = self.copies.lock()
                         {
                             clock.arm(at);
