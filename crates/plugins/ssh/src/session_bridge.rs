@@ -87,7 +87,15 @@ where
         // The server supplies only the original person's published session id.
         sessions::connect(sessions::rendezvous(&state, *id.as_bytes()), *id.as_bytes()).await?
     } else {
-        sessions::launch(&exe, &state, Manager::detect().await, uid, 80, 24).await?
+        // Both image entrypoints are called only after Check::parse and
+        // authorize_mode proved the applicable managed scope. Do not probe
+        // again or silently detach if that manager has since withdrawn.
+        let manager = if uid == 0 {
+            Manager::System
+        } else {
+            Manager::User
+        };
+        sessions::launch(&exe, &state, manager, uid, 80, 24).await?
     };
     let pipes = crate::stdio::Stdio::inherited()?;
     let session_id = session.id;
