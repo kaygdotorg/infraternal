@@ -2922,3 +2922,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        real NAT types, and each relayed pair records why it was relayed. A
        trick is built when its measured success and its cost (packets,
        time, side effects such as intrusion alarms) justify it.
+286. **Privileged access upgrade flow approved (owner, 2026-10-15, #215):**
+     the privileged-access consent mockup (D274) is approved as designed:
+     scenarios for sudo, doas, root password, denied, wrong password,
+     offline, timeout and several machines; the inline password sealed to
+     the host; the tooltip kept clear of the field. The downgrade flow
+     (D274) is still to be mocked up.
