@@ -34,6 +34,7 @@ enum LinkTransport {
 /// Authority is attached only after durable mTLS admission and guards both
 /// transport directions; direct actor tests may still construct an unguarded link.
 pub(crate) struct RemoteLink {
+    path_proof: Option<infraternal_plugin_remote::remote_bindings::ConnectionProof>,
     // TCP has no Quinn peer accessor. Retain only its public authenticated tuple
     // in opt-in tests; this field is absent from every shipping build.
     #[cfg(all(test, feature = "mesh-transport-proof"))]
@@ -191,6 +192,7 @@ impl RemoteLink {
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
         Ok(Self {
+            path_proof: None,
             #[cfg(all(test, feature = "mesh-transport-proof"))]
             diagnostic_peer: None,
             transport: LinkTransport::Tcp {
@@ -248,6 +250,7 @@ impl RemoteLink {
             receive,
         ));
         Ok(Self {
+            path_proof: None,
             #[cfg(all(test, feature = "mesh-transport-proof"))]
             diagnostic_peer: None,
             transport: LinkTransport::Quic(QuicLink {
@@ -268,6 +271,18 @@ impl RemoteLink {
                 admission.and_then(|admission| admission.priming.take()),
             )),
         })
+    }
+
+    /// Keep physical proof service with the admitted transport, including queue
+    /// cancellation and link replacement; the durable host actor outlives both.
+    pub(crate) fn prove_paths(
+        &mut self,
+        bindings: &Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
+    ) -> io::Result<()> {
+        if let LinkTransport::Quic(link) = &self.transport {
+            self.path_proof = Some(bindings.connection_proof(&link.connection)?);
+        }
+        Ok(())
     }
 
     /// Public TCP coordinates label authenticated observations, never authority

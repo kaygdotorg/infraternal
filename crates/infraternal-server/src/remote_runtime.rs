@@ -233,10 +233,20 @@ impl RemoteHosts {
         host.channel = Some(channel);
         Ok(())
     }
+    fn prove_paths(&self, link: &mut RemoteLink) -> io::Result<()> {
+        if link.peer_capabilities() & infraternal_plugin_api::channel::REMOTE_PATH_PROOF == 0 {
+            return Ok(());
+        }
+        if let Some(factory) = self.3.lock().map_err(|_| io::ErrorKind::Other)?.clone() {
+            link.prove_paths(&factory.bindings)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn admit_observed(
         &self,
         authority: AuthorityGuard,
-        link: RemoteLink,
+        mut link: RemoteLink,
         ip: std::net::IpAddr,
     ) -> io::Result<()> {
         if link.primed() {
@@ -259,6 +269,7 @@ impl RemoteHosts {
             if host.uid != uid {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
+            self.prove_paths(&mut link)?;
             host.accepts
                 .try_send(link.authorize(authority.clone()))
                 .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
@@ -278,6 +289,7 @@ impl RemoteHosts {
                 ip.to_canonical()
             };
         } else {
+            self.prove_paths(&mut link)?;
             let (actor, accepts) = EmbeddedAgent::remote(uid);
             accepts
                 .try_send(link.authorize(authority.clone()))
@@ -313,7 +325,11 @@ impl RemoteHosts {
 
     /// A primed native link belongs to the existing actor. Its admission waiter
     /// publishes metadata after activation, outside the actor's plugin turn.
-    async fn admit_primed(&self, authority: AuthorityGuard, link: RemoteLink) -> io::Result<()> {
+    async fn admit_primed(
+        &self,
+        authority: AuthorityGuard,
+        mut link: RemoteLink,
+    ) -> io::Result<()> {
         authority.admit_operation().await?;
         let id = authority.identity.host;
         let uid = authority.identity.execution_uid;
@@ -327,6 +343,7 @@ impl RemoteHosts {
         };
         let peer = link.peer_address();
         let caps = link.peer_capabilities();
+        self.prove_paths(&mut link)?;
         let (activated, activation) = tokio::sync::oneshot::channel();
         link.activation(activated)?;
         actor
