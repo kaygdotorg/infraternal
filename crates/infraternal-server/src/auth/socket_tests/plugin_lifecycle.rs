@@ -22,18 +22,22 @@ where
         },
     )
     .await;
-    {
+    loop {
         let wire = read_client_frame(socket).await;
-        if let Frame::Result {
-            call_id: received,
-            ok,
-            json,
-        } = decode_muxed_frame(&wire).unwrap().frame
-        {
-            assert_eq!(received, call_id);
-            return (ok, serde_json::from_slice(json).unwrap());
+        match decode_muxed_frame(&wire).unwrap().frame {
+            Frame::Result {
+                call_id: received,
+                ok,
+                json,
+            } => {
+                assert_eq!(received, call_id);
+                return (ok, serde_json::from_slice(json).unwrap());
+            }
+            // An active subscription can publish between the request and its
+            // response. Its independent sub_id does not identify this call.
+            Frame::Event { .. } => {}
+            _ => panic!("unexpected control reply"),
         }
-        panic!("unexpected control reply");
     }
 }
 
@@ -597,4 +601,48 @@ fn mesh_destructive_metadata_matches_frozen_confirmation_requirements() {
             "mesh.manage_roles"
         ]
     );
+}
+
+/// Subscription snapshots may precede the result of a call on the shared control stream.
+#[tokio::test]
+async fn plugin_exchange_correlates_results_after_subscription_events() {
+    use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+    let (client, peer) = tokio::io::duplex(4096);
+    let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+    let mut peer = WebSocketStream::from_raw_socket(peer, Role::Server, None).await;
+    let sender = tokio::spawn(async move {
+        let call = read_client_frame(&mut peer).await;
+        assert!(matches!(
+            decode_muxed_frame(&call).unwrap().frame,
+            Frame::Call {
+                call_id: 1,
+                action_id: "plugins.list",
+                ..
+            }
+        ));
+        client_ws_send(
+            &mut peer,
+            0,
+            &Frame::Event {
+                sub_id: 77,
+                event_json: br#"{"nodes":[]}"#,
+            },
+        )
+        .await;
+        client_ws_send(
+            &mut peer,
+            0,
+            &Frame::Result {
+                call_id: 1,
+                ok: true,
+                json: br#"{"plugins":[]}"#,
+            },
+        )
+        .await;
+    });
+    assert_eq!(
+        exchange(&mut client, 1, "plugins.list", b"{}").await,
+        (true, json!({"plugins": []}))
+    );
+    sender.await.unwrap();
 }

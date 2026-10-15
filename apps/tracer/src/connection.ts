@@ -62,6 +62,9 @@ export function reconnectDelay(attempt: number): number {
   return step + Math.random() * (step / 2);
 }
 const LIVENESS_TICK_MS = 25;
+// Idle waits for its correlated answer before sampling again. Ten milliseconds
+// after that answer leaves forty of the RTT + 50ms budget for scheduling jitter.
+const IDLE_PROBE_PAUSE_MS = 10;
 const MAX_SOCKETS = 12;
 const VERSION = 1;
 const SEND_BUFFER_SIZE = 32 * 1024;
@@ -119,9 +122,15 @@ export class MuxConnection {
   private readonly pendingPings = new Map<bigint, number>();
   private livenessTimer = 0;
   private lastPongAt = 0;
+  private fastProbeUntil = 0;
+  private readonly unacknowledgedInput = new Map<number, bigint>();
   // Unknown startup RTT uses the same bounded two-second grace as native routes.
-  // Once sampled, only the learned RTT plus scheduling allowance renews readiness.
+  // Once sampled, smoothed RTT and variation tolerate local scheduling stalls.
   private livenessRtt: number | undefined;
+  // Keep the existing link-doubt signal independent of the response estimator,
+  // so smoothing the deadline does not change healthy-idle probe frequency.
+  private livenessSrtt: number | undefined;
+  private livenessRttvar = 0;
   private lastRttReportAt = -Infinity;
   private readonly subscriptions = new Map<number, Subscription>();
   private readonly welcomeListeners = new Set<() => void>();
@@ -179,6 +188,7 @@ export class MuxConnection {
   /** Detaches a stream (the session keeps running). The connection stays up for the others. */
   closeStream(id: number): void {
     if (!this.streams.delete(id)) return;
+    this.unacknowledgedInput.delete(id);
     this.send(id, { type: "Close", code: 1000, reason: "window closed" });
   }
 
@@ -190,6 +200,14 @@ export class MuxConnection {
       const length = encodeMuxedFrameInto(streamId, frame, this.sendScratch);
       // Even an attachment closed before replay completes retains a server writer row.
       if (frame.type === "AttachTerm") this.writersUsed.add(streamId);
+      if (frame.type === "Input" && this.streams.has(streamId)) {
+        const end = frame.inSeq + BigInt(frame.bytes.byteLength);
+        const previous = this.unacknowledgedInput.get(streamId) ?? 0n;
+        // Replayed earlier bytes cannot lower the outstanding input watermark.
+        this.unacknowledgedInput.set(streamId, end > previous ? end : previous);
+        this.fastProbeUntil = performance.now() + 250;
+        this.scheduleLiveness();
+      }
       onEncoded?.(performance.now());
       socket.send(this.sendScratch.subarray(0, length));
       onSent?.(performance.now());
@@ -261,13 +279,26 @@ export class MuxConnection {
     return () => { this.rttListeners.delete(listener); };
   }
 
-  /** Pipeline bounded liveness probes so a missing response is noticed within RTT + 50 ms [D265]. */
-  sampleRoundTrip(): void {
+  /** Probe at the existing cadence; correlated RTT and jitter bound silence [D265, #199]. */
+  sampleRoundTrip(urgent = true): void {
     const startedAt = performance.now();
-    if (!this.isWelcomed || this.closed || startedAt - this.lastPingAt < LIVENESS_TICK_MS) return;
+    if (!this.isWelcomed || this.closed) return;
+    if (urgent) {
+      this.fastProbeUntil = startedAt + 250;
+      this.scheduleLiveness();
+    }
+    const dueAt = this.nextProbeAt();
+    if (startedAt < dueAt) return;
     this.lastPingAt = startedAt;
     this.nextPingNonce = this.nextPingNonce >= MAX_U64 ? 1n : this.nextPingNonce + 1n;
     const nonce = this.nextPingNonce;
+    // A delayed local timer cannot prove peer loss before there is a probe to answer.
+    // Start a deadline only when the fully answered route issues its next probe.
+    if (this.pendingPings.size === 0) {
+      // Start the response allowance at actual issuance, including after a
+      // delayed local callback. Further sends cannot move an outstanding lease.
+      this.lastPongAt = startedAt;
+    }
     if (this.pendingPings.size >= 128) {
       const oldest = this.pendingPings.keys().next().value as bigint | undefined;
       if (oldest !== undefined) this.pendingPings.delete(oldest);
@@ -283,7 +314,7 @@ export class MuxConnection {
     const now = performance.now();
     // A renderer can wake with an old reply queued ahead of its timer. Enforce the
     // existing lease first; suspension must not become an hours-long learned RTT.
-    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
+    if (this.pendingPings.size > 0 && now - this.lastPongAt >= this.responseAllowance()) {
       this.retireUnresponsiveSocket();
       return;
     }
@@ -291,7 +322,12 @@ export class MuxConnection {
     for (const key of this.pendingPings.keys()) { if (key <= nonce) this.pendingPings.delete(key); }
     this.lastPongAt = now;
     const ms = Math.max(1, now - startedAt);
+    if (this.livenessRtt !== undefined && ms > this.livenessRtt + 5) this.fastProbeUntil = now + Math.max(250, ms * 2);
+    // Variation uses the previous smoothed RTT; only correlated replies train it.
+    this.livenessRttvar = this.livenessSrtt === undefined ? ms / 2 : this.livenessRttvar * 0.75 + Math.abs(this.livenessSrtt - ms) * 0.25;
+    this.livenessSrtt = this.livenessSrtt === undefined ? ms : this.livenessSrtt * 0.875 + ms * 0.125;
     this.livenessRtt = Math.max(ms, this.livenessRtt === undefined ? ms : this.livenessRtt * 0.95);
+    this.scheduleLiveness();
     // Probe frequency must not drive DOM/prediction updates more often than the former sampling cadence.
     if (this.lastPongAt - this.lastRttReportAt >= 2000) {
       this.lastRttReportAt = this.lastPongAt;
@@ -420,20 +456,39 @@ export class MuxConnection {
     if (this.streams.size > 0) this.scheduleReconnect();
   }
 
+  /** Match native response estimation without adding timers or changing probe frequency. */
+  private responseAllowance(): number {
+    return this.livenessSrtt === undefined ? 2000 : Math.max(250, this.livenessSrtt + 4 * this.livenessRttvar + 50);
+  }
+
   private checkLiveness(): void {
     this.livenessTimer = 0;
     if (!this.isWelcomed || this.closed) return;
     const now = performance.now();
-    if (now - this.lastPongAt >= (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50)) {
+    if (this.pendingPings.size > 0 && now - this.lastPongAt >= this.responseAllowance()) {
       this.retireUnresponsiveSocket();
       return;
     }
-    this.sampleRoundTrip();
+    this.sampleRoundTrip(false);
+    this.scheduleLiveness();
+  }
+
+  private nextProbeAt(): number {
+    const first = this.lastPingAt + LIVENESS_TICK_MS;
+    if (this.livenessRtt === undefined || performance.now() < this.fastProbeUntil || this.unacknowledgedInput.size > 0) return first;
+    // The response deadline stays armed while idle waits. Another request cannot
+    // redeem silence; typing or link doubt immediately restores pipelining.
+    return this.pendingPings.size > 0 ? Infinity : Math.max(first, this.lastPongAt + IDLE_PROBE_PAUSE_MS);
+  }
+
+  private scheduleLiveness(): void {
+    if (!this.isWelcomed || this.closed) return;
+    window.clearTimeout(this.livenessTimer);
     // Input or a server Ping may have sampled between timer ticks. Schedule at that probe's next due time,
     // rather than skipping a tick and then expiring a healthy low-RTT route before another probe is sent.
     const clock = performance.now();
-    const nextProbe = this.lastPingAt + LIVENESS_TICK_MS - clock;
-    const remaining = this.lastPongAt + (this.livenessRtt === undefined ? 2000 : this.livenessRtt + 50) - clock;
+    const nextProbe = this.nextProbeAt() - clock;
+    const remaining = this.pendingPings.size > 0 ? this.lastPongAt + this.responseAllowance() - clock : Infinity;
     this.livenessTimer = window.setTimeout(() => this.checkLiveness(), Math.max(1, Math.min(nextProbe, remaining)));
   }
 
@@ -452,6 +507,10 @@ export class MuxConnection {
       if (streamId % 2 === 1 && streamId < this.nextStream) return;
       this.fail("server used an unexpected stream id");
       return;
+    }
+    if (frame.type === "Ack") {
+      const pending = this.unacknowledgedInput.get(streamId);
+      if (pending !== undefined && frame.inSeqAcked >= pending) this.unacknowledgedInput.delete(streamId);
     }
     handler.onFrame(frame, message, receivedAt);
   }
@@ -475,8 +534,11 @@ export class MuxConnection {
         this.welcomed = true;
         this.welcomedAt = performance.now();
         this.lastPongAt = this.welcomedAt;
+        this.fastProbeUntil = this.welcomedAt + 250;
         // A network change may have a different RTT; relearn before enforcing its deadline.
         this.livenessRtt = undefined;
+        this.livenessSrtt = undefined;
+        this.livenessRttvar = 0;
         this.livenessTimer = window.setTimeout(() => this.checkLiveness(), LIVENESS_TICK_MS);
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
@@ -513,7 +575,7 @@ export class MuxConnection {
       case "Ping":
         this.send(CONTROL_STREAM, { type: "Pong", nonce: frame.nonce, sentUs: frame.sentUs });
         // Incoming probes keep sampling alive when background tabs clamp timers.
-        this.sampleRoundTrip();
+        this.sampleRoundTrip(false);
         return;
       case "Pong":
         this.acceptPong(frame.nonce, frame.sentUs);
@@ -544,6 +606,8 @@ export class MuxConnection {
     this.lastPingAt = -Infinity;
     this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
+    this.unacknowledgedInput.clear();
+    this.fastProbeUntil = 0;
     for (const l of this.rttListeners) l(undefined);
   }
 }

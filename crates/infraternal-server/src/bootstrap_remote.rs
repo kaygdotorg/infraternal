@@ -495,8 +495,8 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
             }
             TerminalOutput::Closed { .. } => break,
             TerminalOutput::Ack { .. }
-            | TerminalOutput::Pong { .. }
-            | TerminalOutput::Reconnecting => {}
+            | TerminalOutput::Reconnecting
+            | TerminalOutput::RouteExpired => {}
         }
     }
     Err(unavailable())

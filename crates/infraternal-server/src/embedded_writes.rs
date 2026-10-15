@@ -378,6 +378,8 @@ mod tests {
             credit: 0,
             awaiting_ack: false,
             replaying: false,
+            route: None,
+            proof_rebind_pending: false,
             output,
         }
     }
@@ -593,6 +595,8 @@ mod tests {
                         credit: 0,
                         awaiting_ack: false,
                         replaying: false,
+                        route: None,
+                        proof_rebind_pending: false,
                         output,
                     },
                 )

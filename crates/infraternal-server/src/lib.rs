@@ -79,6 +79,7 @@ mod terminal_exit;
 mod web_assets;
 mod websocket;
 mod websocket_input;
+mod websocket_transport;
 
 #[cfg(feature = "remote")]
 pub use remote_runtime::RemoteService;

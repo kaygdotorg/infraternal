@@ -285,7 +285,11 @@ activate authority, and expired pending rows are deleted on the auth path.
 
 Socket authority covers server Hello, client Hello/Resume, all nested pending
 frame/backend/database/writer awaits and terminal output. Each operation enters
-with one authoritative SQLite read; its expiry snapshot and the committed
+with one authoritative SQLite read, except content-free Ping/Pong proofs (#199),
+which reuse a non-renewing snapshot watched by committed revocation and absolute
+expiry. This exception includes bounded transport echoes, cancels pending proof
+writes on revocation/expiry, and never applies to application frames, terminal
+payloads or backend rebinds. Each operation’s expiry snapshot and the committed
 revocation generation are rechecked after waits. Backend/persistence boundaries
 also read actual authority before success frames; SQLite writer locks and mutation
 predicates order commits with logout/recovery. Revocation interrupts

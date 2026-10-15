@@ -1,4 +1,4 @@
-//! Checks that one terminal awaiting durable input credit leaves its browser control stream runnable [128,215], #129.
+//! Tests browser control and content-free proof authority while input or SQL is blocked [128,215,265], #199.
 use super::*;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -346,8 +346,9 @@ async fn assert_overload_isolation(browser: &mut WebSocketStream<MaybeTlsStream<
     )
     .await;
     let mut closed = false;
+    let mut responsive = false;
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
+        while !closed || !responsive {
             let wire = read_client_frame(browser).await;
             let decoded = decode_muxed_frame(&wire).unwrap();
             match decoded.frame {
@@ -356,10 +357,10 @@ async fn assert_overload_isolation(browser: &mut WebSocketStream<MaybeTlsStream<
                     assert!(!closed);
                     closed = true;
                 }
-                Frame::Pong { nonce: 130, .. } => {
-                    assert!(closed);
-                    break;
-                }
+                // Control proofs are independent of terminal admission. As in
+                // the browser, observe both results without treating a latency
+                // Pong on stream 0 as a fence for stream 1's queued input.
+                Frame::Pong { nonce: 130, .. } => responsive = true,
                 other => panic!("unexpected overload response: {other:?}"),
             }
         }
@@ -393,4 +394,229 @@ async fn fill_browser_input(
             Observed::Input(sequence, half)
         );
     }
+}
+
+/// A cached content-free proof must neither renew idle authority nor poll a busy database.
+#[tokio::test]
+async fn idle_server_probes_do_not_renew_session_authority() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .await
+    .unwrap()
+    .with_authority_read_timeout(Duration::from_millis(50));
+    let expiry = crate::websocket::now_seconds().unwrap() + 600;
+    sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
+        .bind(expiry)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let mut authority = crate::websocket::probe_authority::Lease::new(&state, &f.user, &f.session)
+        .await
+        .unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=?")
+        .bind(hash(&f.session))
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, expiry,
+        "idle server proofs renewed session authority"
+    );
+    let held = f.auth.pool.acquire().await.unwrap();
+    for _ in 0..128 {
+        assert!(
+            authority
+                .run(&state, &f.user, &f.session, async { Ok::<(), ()>(()) })
+                .await
+                .is_ok(),
+            "content-free proofs polled SQLite"
+        );
+    }
+    drop(held);
+}
+
+/// A committed logout cancels an already waiting proof before its write can resume.
+#[tokio::test]
+async fn idle_probe_authority_cancels_waiting_write_on_committed_revocation() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let state = std::sync::Arc::new(
+        crate::websocket::WebSocketState::new(
+            f.auth.clone(),
+            f.auth.pool.clone(),
+            EmbeddedAgent::from_test_socket(socket),
+        )
+        .await
+        .unwrap()
+        .with_authority_read_timeout(Duration::from_secs(2)),
+    );
+    let mut authority = crate::websocket::probe_authority::Lease::new(&state, &f.user, &f.session)
+        .await
+        .unwrap();
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let wrote = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let state = state.clone();
+        let entered = entered.clone();
+        let release = release.clone();
+        let wrote = wrote.clone();
+        let user = f.user.clone();
+        let token = f.session.clone();
+        tokio::spawn(async move {
+            authority
+                .run(&state, &user, &token, async {
+                    entered.notify_one();
+                    release.notified().await;
+                    wrote.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(())
+                })
+                .await
+        })
+    };
+    entered.notified().await;
+    f.auth.logout(&f.session).await.unwrap();
+    release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(!wrote.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// A cached deadline must reread authorized renewal before it closes an active socket.
+#[tokio::test(start_paused = true)]
+async fn idle_probe_authority_refreshes_expiry_after_authorized_activity() {
+    use futures_util::FutureExt;
+    let _guard = SERIAL.lock().await;
+    let _clock = FrozenSocketTime::new().await;
+    let f = fixture().await;
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .await
+    .unwrap()
+    .with_authority_read_timeout(Duration::from_secs(2));
+    let now = crate::websocket::now_seconds().unwrap();
+    sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
+        .bind(now + 5)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let mut authority = crate::websocket::probe_authority::Lease::new(&state, &f.user, &f.session)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .socket_activity(&f.session, &f.user, now)
+            .await
+            .unwrap()
+            > now + 5
+    );
+    tokio::time::advance(Duration::from_secs(6)).await;
+    authority
+        .run(&state, &f.user, &f.session, async { Ok::<(), ()>(()) })
+        .await
+        .unwrap();
+    let held = f.auth.pool.acquire().await.unwrap();
+    assert!(
+        authority
+            .run(&state, &f.user, &f.session, async { Ok::<(), ()>(()) })
+            .now_or_never()
+            .unwrap()
+            .is_ok(),
+        "renewed expiry was not cached"
+    );
+    drop(held);
+}
+
+/// Incoming content-free proofs keep the real socket responsive without renewing or polling SQL.
+#[tokio::test]
+async fn idle_browser_probes_do_not_renew_or_poll_session_authority() {
+    let _guard = SERIAL.lock().await;
+    let (f, address, server) =
+        socket_fixture_from_fixture(fixture().await, Some(Duration::from_secs(5))).await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut socket, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut socket).await;
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "idle-proof-fixture",
+        },
+    )
+    .await;
+    read_welcome(&mut socket).await;
+    let expiry = crate::websocket::now_seconds().unwrap() + 600;
+    sqlx::query("UPDATE sessions SET expires=? WHERE token_hash=?")
+        .bind(expiry)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    client_ws_send(
+        &mut socket,
+        0,
+        &Frame::Ping {
+            nonce: 200,
+            sent_us: 200,
+        },
+    )
+    .await;
+    let wire = read_client_frame(&mut socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&wire).unwrap().frame,
+        Frame::Pong {
+            nonce: 200,
+            sent_us: 200
+        }
+    ));
+    let after: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=?")
+        .bind(hash(&f.session))
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, expiry,
+        "idle browser proofs renewed session authority"
+    );
+    // With no attachments there are no server-generated probes. Every response
+    // below therefore exercises the incoming browser proof path specifically.
+    let held = f.auth.pool.acquire().await.unwrap();
+    for nonce in 201..209 {
+        client_ws_send(
+            &mut socket,
+            0,
+            &Frame::Ping {
+                nonce,
+                sent_us: nonce,
+            },
+        )
+        .await;
+        let wire = read_client_frame(&mut socket).await;
+        assert!(matches!(decode_muxed_frame(&wire).unwrap().frame,
+            Frame::Pong { nonce: got, sent_us } if got == nonce && sent_us == nonce));
+    }
+    drop(held);
+    server.abort();
 }

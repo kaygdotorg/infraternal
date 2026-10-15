@@ -32,6 +32,8 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         credit: 0,
         awaiting_ack: false,
         replaying: false,
+        route: None,
+        proof_rebind_pending: false,
         output,
     }
 }
@@ -42,6 +44,156 @@ fn funded_attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         credit: 1024 * 1024,
         ..attachment(output)
     }
+}
+
+#[tokio::test]
+async fn idle_route_proofs_do_not_queue_payload_notifications_at_capacity() {
+    let (mut link, mut peer) = connection();
+    let mut attachments = HashMap::new();
+    let mut routes = HashMap::new();
+    let mut readers = Vec::new();
+    let mut pending = HashMap::new();
+    for id in 1..=128_u32 {
+        let stream = id * 2;
+        let (output, reader) = mpsc::channel(4);
+        attachments.insert(
+            u64::from(id),
+            AttachmentState {
+                stream_id: stream,
+                route: Some(Liveness::new()),
+                ..attachment(output)
+            },
+        );
+        routes.insert(stream, u64::from(id));
+        readers.push(reader);
+        let mut wire = Vec::new();
+        encode_muxed_frame_into(
+            1,
+            &Frame::Ping {
+                nonce: u64::from(id),
+                sent_us: u64::from(id),
+            },
+            &mut wire,
+        )
+        .unwrap();
+        assert!(
+            process_command(
+                Command::Input {
+                    attachment_id: u64::from(id),
+                    frame: Bytes::copy_from_slice(&wire),
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut pending,
+            )
+            .await
+        );
+        let mut request = vec![0; 64];
+        let count = peer.read(&mut request).await.unwrap();
+        let decoded = decode_muxed_frame(&request[..count]).unwrap();
+        assert_eq!(decoded.stream_id, stream);
+        assert!(matches!(decoded.frame, Frame::Ping { .. }));
+        encode_muxed_frame_into(
+            stream,
+            &Frame::Pong {
+                nonce: u64::from(id),
+                sent_us: u64::from(id),
+            },
+            &mut wire,
+        )
+        .unwrap();
+        peer.write_all(&wire).await.unwrap();
+        let incoming = read_incoming(&mut link).await.unwrap();
+        assert!(
+            process_incoming(
+                incoming,
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut pending,
+            )
+            .await
+        );
+    }
+    // Proofs are content-free bookkeeping. Delivering one through every payload
+    // queue wakes every attachment forwarder and browser loop on every probe tick.
+    assert!(
+        readers.iter().all(mpsc::Receiver::is_empty),
+        "idle proofs woke per-session payload consumers"
+    );
+}
+
+#[tokio::test]
+async fn actor_batch_probes_every_ready_route_without_payload_notifications() {
+    let (mut link, mut peer) = connection();
+    let mut attachments = HashMap::new();
+    let mut routes = HashMap::new();
+    let mut readers = Vec::new();
+    for id in 1..=128_u32 {
+        let (output, reader) = mpsc::channel(4);
+        attachments.insert(
+            u64::from(id),
+            AttachmentState {
+                stream_id: id * 2,
+                route: Some(Liveness::new()),
+                awaiting_ack: id == 128,
+                ..attachment(output)
+            },
+        );
+        routes.insert(id * 2, u64::from(id));
+        readers.push(reader);
+    }
+    let mut queued = std::collections::VecDeque::from([999, 128]);
+    assert!(
+        route_proofs::tick(
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+            true,
+            &mut queued,
+        )
+        .await
+    );
+    assert!(
+        queued.is_empty(),
+        "stale and awaiting-ack probes must be pruned"
+    );
+    let mut wire = vec![0; 4096];
+    let count = peer.read(&mut wire).await.unwrap();
+    let mut offset = 0;
+    let mut seen = std::collections::HashSet::new();
+    while offset < count {
+        let decoded = decode_muxed_frame(&wire[offset..count]).unwrap();
+        let Frame::Ping { nonce, sent_us } = decoded.frame else {
+            panic!("batch must contain only route probes");
+        };
+        assert!(seen.insert(decoded.stream_id));
+        assert!(
+            process_incoming(
+                Incoming::Pong {
+                    stream_id: decoded.stream_id,
+                    nonce,
+                    sent_us,
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new(),
+            )
+            .await
+        );
+        offset += decoded.wire_len;
+    }
+    assert_eq!(seen.len(), 127, "the unacknowledged writer must not probe");
+    assert!(!seen.contains(&256));
+    assert!(readers.iter().all(mpsc::Receiver::is_empty));
+    assert!(
+        attachments
+            .values()
+            .all(|a| !a.route.as_ref().unwrap().expired())
+    );
 }
 
 /// Route probes cross the shim fence even when native input has its own bounded writer.
@@ -1098,4 +1250,113 @@ async fn half_open_infraternal_agent_route_loses_inventory_without_eof() {
         .unwrap();
     assert_eq!(*inventory.borrow(), SessionInventoryState::Unavailable);
     drop(peer);
+}
+
+/// An expired browser route must wait for authenticated consumer admission before backend work.
+#[tokio::test(start_paused = true)]
+async fn expired_route_waits_for_browser_authority_before_rebind() {
+    let (mut link, mut peer) = connection();
+    let (output, mut reader) = mpsc::channel(4);
+    let mut lease = Liveness::new();
+    lease.ping();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let mut attachments = HashMap::from([(
+        1,
+        AttachmentState {
+            route: Some(lease),
+            unacknowledged: BytesMut::from(&b"retained"[..]),
+            ..attachment(output)
+        },
+    )]);
+    let mut routes = HashMap::from([(2, 1)]);
+    assert!(
+        route_proofs::tick(
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+            true,
+            &mut std::collections::VecDeque::new()
+        )
+        .await
+    );
+    assert!(
+        reader.try_recv().is_ok(),
+        "consumer must observe the transition"
+    );
+    let mut wire = [0; 256];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), peer.read(&mut wire))
+            .await
+            .is_err(),
+        "expiry performed backend work before browser authority"
+    );
+}
+
+/// A full consumer cannot lose the readiness transition and retain a live backend route.
+#[tokio::test(start_paused = true)]
+async fn expired_route_retires_full_consumer() {
+    let (mut link, mut peer) = connection();
+    let (output, _reader) = mpsc::channel(1);
+    output.try_send(TerminalOutput::Reconnecting).unwrap();
+    let mut lease = Liveness::new();
+    lease.ping();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let mut attachments = HashMap::from([(
+        1,
+        AttachmentState {
+            route: Some(lease),
+            ..attachment(output)
+        },
+    )]);
+    let mut routes = HashMap::from([(2, 1)]);
+    assert!(
+        route_proofs::tick(
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+            true,
+            &mut std::collections::VecDeque::new()
+        )
+        .await
+    );
+    assert!(attachments.is_empty());
+    assert!(routes.is_empty());
+    let mut wire = [0; 256];
+    let count = peer.read(&mut wire).await.unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&wire[..count]).unwrap().frame,
+        Frame::Close { code: 1000, .. }
+    ));
+}
+
+/// A queued expiry notice must not rebind a route already restored by shared recovery.
+#[tokio::test(start_paused = true)]
+async fn recovered_route_ignores_stale_browser_rebind() {
+    let (mut link, mut peer) = connection();
+    let (output, _reader) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(
+        1,
+        AttachmentState {
+            route: Some(Liveness::new()),
+            ..attachment(output)
+        },
+    )]);
+    assert!(
+        process_command(
+            Command::Reconnect { attachment_id: 1 },
+            &mut link,
+            &mut attachments,
+            &mut HashMap::from([(2, 1)]),
+            &mut HashMap::new()
+        )
+        .await
+    );
+    let mut wire = [0; 256];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), peer.read(&mut wire))
+            .await
+            .is_err()
+    );
 }

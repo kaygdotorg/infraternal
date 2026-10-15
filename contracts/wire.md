@@ -375,12 +375,36 @@ fence may be in flight per data link and is discarded when that link is parked.
 
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
-Probes are pipelined with bounded state, so detecting a broken direction does
-not first wait for another full request/response cycle. The initial RTT is
-unknown; after sampling, expiry follows the measured RTT with a small scheduling
-allowance. Liveness traffic must not drive the latency pill or terminal painter
+Startup, pending input and recent link doubt keep browser probes pipelined
+with bounded state. A healthy idle browser may keep one probe in flight and
+pace its next sample from the correlated answer. Waiting or issuing a request
+never renews an outstanding deadline. Detecting a broken direction does not
+first wait for another full request/response cycle. The initial RTT is
+unknown and retains the bounded two-second startup grace. Correlated replies
+initialize `srtt = RTT`, `rttvar = RTT / 2`; subsequent samples update
+`rttvar = 3/4 × rttvar + 1/4 × abs(srtt − RTT)` before
+`srtt = 7/8 × srtt + 1/8 × RTT` ([RFC 6298 §2](https://www.rfc-editor.org/rfc/rfc6298.html#section-2) estimator).
+The response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
+The floor tolerates a 150 ms scheduler/main-thread stall on a healthy low-RTT
+route, rather than confusing local load with peer loss. A settled quiet link
+therefore detects silence within that floor plus one probe interval (at most
+26 ms); above the floor it follows measured RTT and jitter. This is the
+owner-approved #199 scheduling exception to D265's approximate one-RTT detection;
+reusable/fresh connection recovery budgets remain D265/D267. Renewed monitoring
+on a replacement route relearns both estimates; jitter decays with healthy
+replies. Liveness traffic must not drive the latency pill or terminal painter
 at the probe frequency. Initial unpainted windows remain connecting; previously
 confirmed windows are monitored continuously through reconnect and replay.
+
+The server's sampled browser-control route may likewise keep one probe in
+flight. Its idle fallback gap remains 26 ms; the response allowance begins
+when a probe is actually issued, including after a late local callback.
+An already-ready control reply
+may carry the next eligible probe in the same write, retaining separate frame
+boundaries. Application progress may briefly retain the faster cadence;
+content-free proofs cannot keep that activity window alive. An answered route
+has no response deadline until another probe is actually issued. Restarting
+monitoring on the same socket must not reuse an earlier probe identifier.
 
 A stalled session attachment is rebound on the server while retaining its
 browser stream and durable writer. It retains acknowledged and unacknowledged
