@@ -73,6 +73,32 @@ def retire(child, unit, description):
         child.wait(timeout=30)
 
 
+def acquire(lock, notify):
+    """Keep frozen state across lock timeouts; stop only our own wait process."""
+    while True:
+        waiter = subprocess.Popen(['flock', '-w', '3600', str(lock.fileno())],
+                                  pass_fds=(lock.fileno(),))
+        try:
+            try:
+                code = waiter.wait(timeout=2700)
+            except subprocess.TimeoutExpired:
+                try:
+                    owner = Path('/var/lock/perf-bench.owner').read_text().strip()
+                except OSError:
+                    owner = 'owner file unavailable'
+                notify('lock-wait-45m', owner=owner)
+                code = waiter.wait()
+        except BaseException:
+            waiter.terminate()
+            waiter.wait()
+            raise
+        if code == 0:
+            return
+        if code != 1:
+            raise subprocess.CalledProcessError(code, 'flock')
+        notify('lock-wait-timeout')
+
+
 def run(args):
     if not re.fullmatch(r'ppu-soak-[a-z0-9-]{1,60}', args.unit) or not 1 <= args.segment_seconds <= 1740:
         raise ValueError('invalid private unit or segment duration')
@@ -94,9 +120,12 @@ def run(args):
     description = f'process-per-user fixture {uuid.uuid4().hex}'
 
     def record(kind, **fields):
-        log.write(json.dumps(dict(kind=kind, wall_utc=datetime.datetime.now(
-            datetime.timezone.utc).isoformat(), **fields), sort_keys=True) + '\n')
+        row = dict(kind=kind, wall_utc=datetime.datetime.now(
+            datetime.timezone.utc).isoformat(), **fields)
+        log.write(json.dumps(row, sort_keys=True) + '\n')
         log.flush()
+        if kind.startswith('lock-wait'):
+            print(json.dumps(row, sort_keys=True), flush=True)
 
     def interrupted(signum, frame):
         raise InterruptedError(f'coordinator received signal {signum}')
@@ -106,8 +135,7 @@ def run(args):
     try:
         while True:
             # Waiting and all coordinator work are outside the fixture scope.
-            subprocess.run(['flock', '-w', '3600', str(lock.fileno())],
-                           pass_fds=(lock.fileno(),), check=True)
+            acquire(lock, record)
             held = True
             Path('/var/lock/perf-bench.owner').write_text(
                 f'process-per-user {args.unit} {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n')

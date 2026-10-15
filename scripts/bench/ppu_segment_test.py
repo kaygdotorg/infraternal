@@ -10,6 +10,27 @@ import ppu_segment
 
 
 class Segments(unittest.TestCase):
+    def test_lock_timeout_retries_without_thawing_the_fixture(self):
+        first, second = Mock(), Mock()
+        first.wait.return_value = 1
+        second.wait.return_value = 0
+        notices = []
+        with patch.object(ppu_segment.subprocess, 'Popen', side_effect=[first, second]), \
+                patch.object(ppu_segment, 'frozen') as thaw:
+            ppu_segment.acquire(Mock(fileno=lambda: 19), lambda *args, **kw: notices.append((args, kw)))
+        self.assertTrue(notices)
+        thaw.assert_not_called()
+
+    def test_long_wait_records_owner_before_continuing_to_wait(self):
+        waiter = Mock()
+        waiter.wait.side_effect = [ppu_segment.subprocess.TimeoutExpired('flock', 2700), 0]
+        notices = []
+        with patch.object(ppu_segment.subprocess, 'Popen', return_value=waiter), \
+                patch.object(Path, 'read_text', return_value='other-job started-now'):
+            ppu_segment.acquire(Mock(fileno=lambda: 19), lambda *args, **kw: notices.append((args, kw)))
+        self.assertEqual(notices, [(('lock-wait-45m',), {'owner': 'other-job started-now'})])
+        waiter.terminate.assert_not_called()
+
     def test_existing_foreign_unit_cannot_be_frozen_or_retired(self):
         properties = 'ControlGroup=/system.slice/ppu-soak-collision.scope\nDescription=other job\n'
         with patch.object(ppu_segment.subprocess, 'check_output', return_value=properties):
