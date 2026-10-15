@@ -20,10 +20,9 @@ use std::{
 const SIGNAL: u64 = u64::MAX;
 #[derive(Clone, Copy)]
 struct Registration {
-    fd: RawFd,
     flags: EpollFlags,
     key: u64,
-    session: usize,
+    session: u16,
 }
 pub(super) struct Registry {
     epoll: Epoll,
@@ -141,42 +140,60 @@ impl Registry {
                 let key = (u64::from(self.next_key) << 32)
                     | u64::try_from(fd.as_raw_fd()).map_err(io::Error::other)?;
                 let entry = Registration {
-                    fd: fd.as_raw_fd(),
                     flags,
                     key,
-                    session: index,
+                    // Admission caps slots below this bound; refuse rather
+                    // than truncate if a caller ever exceeds it.
+                    session: u16::try_from(index).map_err(io::Error::other)?,
                 };
                 self.epoll.add(fd, EpollEvent::new(flags, entry.key))?;
-                self.by_fd.insert(entry.fd, entry);
-                self.owned[index].push(entry.fd);
+                self.by_fd.insert(fd.as_raw_fd(), entry);
+                self.owned[index].push(fd.as_raw_fd());
             }
         }
         Ok(())
     }
 }
-#[derive(Default)]
+/// Ordinary readiness holds a PTY and one viewer inline. Extra viewers spill
+/// only their descriptor flags; generations still identify each exact open fd.
 struct Ready {
-    first: Option<(u64, EpollFlags)>,
+    keys: [u64; 2],
+    flags: [EpollFlags; 2],
+    generation: u32,
     more: Vec<(u64, EpollFlags)>,
+}
+impl Default for Ready {
+    fn default() -> Self {
+        Self {
+            keys: [0; 2],
+            flags: [EpollFlags::empty(); 2],
+            generation: 0,
+            more: Vec::new(),
+        }
+    }
 }
 impl Ready {
     fn insert(&mut self, key: u64, flags: EpollFlags) {
-        if let Some((first, current)) = &mut self.first {
-            if *first == key {
-                *current |= flags;
-            } else if let Some((_, current)) = self.more.iter_mut().find(|(old, _)| *old == key) {
-                *current |= flags;
-            } else {
-                self.more.push((key, flags));
+        // Registration generations start at one, so zero is never an fd key.
+        debug_assert_ne!(key, 0);
+        for index in 0..self.keys.len() {
+            if self.keys[index] == key || self.keys[index] == 0 {
+                self.keys[index] = key;
+                self.flags[index] |= flags;
+                return;
             }
+        }
+        if let Some((_, current)) = self.more.iter_mut().find(|(old, _)| *old == key) {
+            *current |= flags;
         } else {
-            self.first = Some((key, flags));
+            self.more.push((key, flags));
         }
     }
     fn get(&self, key: u64) -> Option<EpollFlags> {
-        self.first
-            .filter(|(old, _)| *old == key)
-            .map(|(_, flags)| flags)
+        self.keys
+            .iter()
+            .position(|old| *old == key && key != 0)
+            .map(|index| self.flags[index])
             .or_else(|| {
                 self.more
                     .iter()
@@ -204,6 +221,50 @@ impl Ready {
             result |= PollFlags::POLLERR;
         }
         result
+    }
+}
+
+/// Immutable session slots address ready rows directly. Only rows touched in
+/// this turn are reset; idle sessions cause no scans or per-turn allocations.
+struct ReadyWork {
+    rows: Vec<Ready>,
+    active: Vec<usize>,
+    round: u32,
+}
+impl ReadyWork {
+    fn new(count: usize) -> Self {
+        Self {
+            rows: (0..count).map(|_| Ready::default()).collect(),
+            active: Vec::with_capacity(count),
+            round: 0,
+        }
+    }
+    fn next_round(&mut self) {
+        self.active.clear();
+        if let Some(round) = self.round.checked_add(1) {
+            self.round = round;
+        } else {
+            // Clear before reuse so an old row cannot become current again.
+            for ready in &mut self.rows {
+                ready.generation = 0;
+            }
+            self.round = 1;
+        }
+    }
+    fn entry(&mut self, index: usize) -> &mut Ready {
+        let ready = &mut self.rows[index];
+        if ready.generation != self.round {
+            ready.keys.fill(0);
+            ready.flags.fill(EpollFlags::empty());
+            ready.more.clear();
+            ready.generation = self.round;
+            self.active.push(index);
+        }
+        ready
+    }
+    fn get(&self, index: usize) -> Option<&Ready> {
+        let ready = self.rows.get(index)?;
+        (ready.generation == self.round && self.round != 0).then_some(ready)
     }
 }
 
@@ -305,14 +366,12 @@ pub(super) fn run(
     // All ordinary PTYs/listeners fit this batch at the requested 1000-session
     // scale; control readiness is not hidden behind many small bulk-only waits.
     let mut events = vec![EpollEvent::empty(); 2048];
-    // These are host-wide high-water buffers, not per-session idle storage.
-    // Retain their bounded capacity across turns instead of fragmenting the
-    // allocator with a fresh readiness table and two work lists per syscall.
-    let mut work: HashMap<usize, Ready> = HashMap::new();
+    let mut work = ReadyWork::new(slots.len());
+    // Retain bounded work lists instead of reallocating on every syscall.
     let mut controls = Vec::new();
     let mut small_reads = Vec::new();
     while live > 0 {
-        work.clear();
+        work.next_round();
         controls.clear();
         small_reads.clear();
         marks.next_round();
@@ -348,8 +407,7 @@ pub(super) fn run(
                 continue;
             }
             if let Some(entry) = registry.registration(event.data()) {
-                work.entry(entry.session)
-                    .or_default()
+                work.entry(usize::from(entry.session))
                     .insert(entry.key, event.events());
             }
         }
@@ -376,7 +434,7 @@ pub(super) fn run(
                         live -= 1;
                         failed = true;
                     } else {
-                        work.entry(index).or_default();
+                        work.entry(index);
                     }
                 }
             }
@@ -387,10 +445,11 @@ pub(super) fn run(
             }
             timers.pop();
             if slots[index].is_some() {
-                work.entry(index).or_default();
+                work.entry(index);
             }
         }
-        for (&index, ready) in &work {
+        for &index in &work.active {
+            let ready = &work.rows[index];
             let Some(session) = slots[index].as_ref() else {
                 continue;
             };
@@ -437,7 +496,7 @@ pub(super) fn run(
                     .as_mut()
                     .ok_or_else(|| io::Error::other("host session disappeared"))?;
                 let ready = work
-                    .get(&index)
+                    .get(index)
                     .ok_or_else(|| io::Error::other("host readiness disappeared"))?;
                 let flags: [PollFlags; MAX_PEERS] = std::array::from_fn(|i| {
                     session.peers.get(i).map_or_else(PollFlags::empty, |p| {
@@ -482,7 +541,7 @@ pub(super) fn run(
                     .as_mut()
                     .ok_or_else(|| io::Error::other("host session disappeared"))?;
                 let ready = work
-                    .get(&index)
+                    .get(index)
                     .ok_or_else(|| io::Error::other("host readiness disappeared"))?;
                 session.step(
                     ready.flags(session.listener.as_raw_fd(), &registry),
@@ -586,6 +645,85 @@ mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
     #[test]
+    fn readiness_storage_registration_is_at_most_sixteen_bytes() {
+        assert!(
+            std::mem::size_of::<Registration>() <= 16,
+            "registration owns {} bytes before table overhead",
+            std::mem::size_of::<Registration>()
+        );
+    }
+
+    #[test]
+    fn readiness_storage_two_descriptors_are_allocation_free() {
+        let (_ready, delta) = crate::heap_accounting::measure(|| {
+            let mut ready = Ready::default();
+            ready.insert(7, EpollFlags::EPOLLIN);
+            ready.insert(8, EpollFlags::EPOLLHUP);
+            assert_eq!(ready.get(7), Some(EpollFlags::EPOLLIN));
+            assert_eq!(ready.get(8), Some(EpollFlags::EPOLLHUP));
+            ready
+        });
+        assert_eq!(
+            delta.allocations, 0,
+            "PTY and peer readiness must stay inline"
+        );
+    }
+    #[test]
+    fn ready_rows_clear_only_touched_slots_and_fence_round_wrap() {
+        let mut work = ReadyWork::new(3);
+        assert!(work.get(0).is_none());
+        work.next_round();
+        work.entry(2).insert(7, EpollFlags::EPOLLIN);
+        work.entry(2).insert(8, EpollFlags::EPOLLHUP);
+        assert_eq!(work.active, [2]);
+        work.next_round();
+        assert!(work.get(2).is_none());
+        assert_eq!(work.rows[2].get(7), Some(EpollFlags::EPOLLIN));
+        work.entry(2).insert(9, EpollFlags::EPOLLERR);
+        assert_eq!(work.get(2).unwrap().get(7), None);
+        work.rows[0].generation = 1;
+        work.round = u32::MAX;
+        work.next_round();
+        assert!(work.get(0).is_none());
+        assert!(work.get(2).is_none());
+        work.entry(0).insert(10, EpollFlags::EPOLLIN);
+        assert_eq!(work.active, [0]);
+    }
+
+    #[test]
+    fn ready_rows_keep_two_descriptor_turns_allocation_free_within_64_bytes_per_slot() {
+        let (mut work, allocation) = crate::heap_accounting::measure(|| ReadyWork::new(1000));
+        assert!(
+            allocation.bytes <= 64_000,
+            "ready rows own {} bytes",
+            allocation.bytes
+        );
+        let ((), allocation) = crate::heap_accounting::measure(|| {
+            for _ in 0..3 {
+                work.next_round();
+                for index in 0..1000 {
+                    work.entry(index).insert(7, EpollFlags::EPOLLIN);
+                    work.entry(index).insert(8, EpollFlags::EPOLLOUT);
+                }
+            }
+        });
+        assert_eq!(allocation.allocations, 0);
+        assert_eq!(work.active.len(), 1000);
+        work.entry(0).insert(9, EpollFlags::EPOLLHUP);
+        let ((), allocation) = crate::heap_accounting::measure(|| {
+            work.next_round();
+            for key in 7..=9 {
+                work.entry(0).insert(key, EpollFlags::EPOLLIN);
+            }
+        });
+        assert_eq!(
+            allocation.allocations, 0,
+            "viewer overflow capacity must survive the turn"
+        );
+        assert_eq!(work.active, [0]);
+    }
+
+    #[test]
     fn input_phase_retires_closed_identity_without_publishing_transient_interest() {
         let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
             ".cache/codex-scratch/process-per-user/i{}",
@@ -642,6 +780,8 @@ mod tests {
         ready.insert(8, EpollFlags::EPOLLHUP);
         ready.insert(7, EpollFlags::EPOLLOUT);
         ready.insert(8, EpollFlags::EPOLLIN);
+        ready.insert(9, EpollFlags::EPOLLERR);
+        ready.insert(9, EpollFlags::EPOLLOUT);
         assert_eq!(
             ready.get(7),
             Some(EpollFlags::EPOLLIN | EpollFlags::EPOLLOUT)
@@ -650,7 +790,11 @@ mod tests {
             ready.get(8),
             Some(EpollFlags::EPOLLHUP | EpollFlags::EPOLLIN)
         );
-        assert_eq!(ready.get(9), None);
+        assert_eq!(
+            ready.get(9),
+            Some(EpollFlags::EPOLLERR | EpollFlags::EPOLLOUT)
+        );
+        assert_eq!(ready.get(10), None);
         assert_eq!(ready.more.len(), 1);
     }
     #[test]
@@ -897,15 +1041,11 @@ mod tests {
         assert_eq!(session.peers[0].stream.as_raw_fd(), fd);
         let replacement = registry.by_fd[&fd].key;
         assert_ne!(key, replacement);
-        let obsolete = Ready {
-            first: Some((key, EpollFlags::EPOLLIN)),
-            more: Vec::new(),
-        };
+        let mut obsolete = Ready::default();
+        obsolete.insert(key, EpollFlags::EPOLLIN);
         assert_eq!(obsolete.flags(fd, &registry), PollFlags::empty());
-        let current = Ready {
-            first: Some((replacement, EpollFlags::EPOLLIN)),
-            more: Vec::new(),
-        };
+        let mut current = Ready::default();
+        current.insert(replacement, EpollFlags::EPOLLIN);
         assert_eq!(current.flags(fd, &registry), PollFlags::POLLIN);
         drop(peer);
         drop(session);
