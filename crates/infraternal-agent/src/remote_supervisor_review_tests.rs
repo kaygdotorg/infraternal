@@ -80,7 +80,7 @@ async fn watchdog_bounds_workers_when_local_path_discovery_stalls() {
     let active = Arc::new(AtomicUsize::new(0));
     let observed = active.clone();
     let (started, starts) = mpsc::channel();
-    let (finished, finishes) = mpsc::channel();
+    let (finished, completions) = mpsc::channel();
     let task = tokio::spawn(run(move |_| {
         let mut plugins = PluginRegistry::default();
         plugins
@@ -113,10 +113,36 @@ async fn watchdog_bounds_workers_when_local_path_discovery_stalls() {
     let _ = task.await;
     drop(cleanup);
     for _ in 0..3 {
-        finishes.recv_timeout(Duration::from_secs(5)).unwrap();
+        completions.recv_timeout(Duration::from_secs(5)).unwrap();
     }
     assert!(
         retained <= 1,
         "offline recovery retained {retained} synchronous workers; local work must stay bounded"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn six_hour_server_outage_keeps_one_retry_owner_with_bounded_attempts() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let result = tokio::time::timeout(
+        Duration::from_hours(6),
+        run(move |_| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(io::ErrorKind::ConnectionRefused.into()) }
+        }),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "server downtime must not return to the service manager"
+    );
+    let count = observed.load(Ordering::SeqCst);
+    println!("virtual_outage_seconds=21600 attempts={count} service_returned=false");
+    // Six hours at a 30-second cap gives 720 attempts, plus startup and
+    // watchdog boundaries. This is a virtual-clock correctness assertion.
+    assert!(
+        (720..850).contains(&count),
+        "unexpected retry count: {count}"
     );
 }
