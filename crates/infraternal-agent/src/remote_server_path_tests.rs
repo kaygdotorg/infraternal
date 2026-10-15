@@ -11,6 +11,25 @@ use infraternal_plugin_api::{
 use infraternal_protocol::Frame;
 use std::net::IpAddr;
 
+/// Exercise the shipping retry owner around a fixture registry and real transport.
+async fn run(
+    identity: &RemoteIdentity,
+    state: PathBuf,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    registry: crate::plugin_control::Registry,
+) -> io::Result<()> {
+    super::super::supervisor::run(|connected| {
+        super::run(
+            identity,
+            state.clone(),
+            renewal,
+            registry.clone(),
+            connected,
+        )
+    })
+    .await
+}
+
 const ACTION: ActionDef = ActionDef {
     id: "path.configure",
     summary: "Set fixture destination",
@@ -913,4 +932,46 @@ async fn component_down_activates_the_warm_fallback_without_a_new_connection() {
     );
     supervisor.abort();
     let _ = supervisor.await;
+}
+
+/// Credential validity can change during an outage; it must not retire the dialer.
+#[tokio::test]
+async fn unavailable_credentials_do_not_end_server_link() {
+    use openssl::{asn1::Asn1Time, hash::MessageDigest, x509::X509};
+    let ca = root();
+    let mut credentials = leaf(&ca, false);
+    let mut expired = X509::builder().unwrap();
+    expired.set_version(2).unwrap();
+    expired
+        .set_subject_name(credentials.certificate.subject_name())
+        .unwrap();
+    expired
+        .set_issuer_name(ca.certificate.subject_name())
+        .unwrap();
+    expired.set_pubkey(&credentials.key).unwrap();
+    expired
+        .set_not_before(&Asn1Time::from_unix(1).unwrap())
+        .unwrap();
+    expired
+        .set_not_after(&Asn1Time::from_unix(2).unwrap())
+        .unwrap();
+    expired.sign(&ca.key, MessageDigest::null()).unwrap();
+    credentials.certificate = expired.build();
+    let identity = RemoteIdentity {
+        identity: credentials,
+        roots: vec![ca.certificate],
+        endpoint: "127.0.0.1:1".parse().unwrap(),
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let directory = Directory::new();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            run(&identity, directory.0.clone(), None, registry()),
+        )
+        .await
+        .is_err(),
+        "a recoverable credential error ended the server link"
+    );
 }

@@ -495,7 +495,10 @@ async fn transition(
             }
 
             result = &mut replacing => return result.ok(),
-            _ = &mut active => return None,
+            result = &mut active => {
+                eprintln!("Infraternal agent server session ended ({:?}); reconnecting", result.err().map(|error| error.kind()));
+                return None;
+            },
             result = async { preparing.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.await },
                 if preparing.is_some() && warm.is_none() => {
                 *warm = result.ok();
@@ -562,11 +565,13 @@ pub(super) async fn run(
     state: PathBuf,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     registry: crate::plugin_control::Registry,
+    connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
-    registry
-        .initialize_paths()
-        .await
-        .map_err(|_| io::ErrorKind::Other)?;
+    if registry.initialize_paths().await.is_err() {
+        // Retained mesh preference is optional. A failed plugin worker must not
+        // prevent contact through the enrolled server endpoint.
+        eprintln!("Infraternal agent server paths unavailable; using enrolled endpoint");
+    }
     let mut live = None;
     let mut warm = None;
     let mut force_fallback = false;
@@ -593,6 +598,12 @@ pub(super) async fn run(
                         continue;
                     }
                     current(identity, renewal, identity.endpoint)?;
+                    if backoff == Duration::from_millis(200) {
+                        eprintln!(
+                            "Infraternal agent server unavailable ({:?}); retrying with bounded backoff",
+                            error.kind()
+                        );
+                    }
                     report(&registry, None, reason);
                     let jitter =
                         Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
@@ -604,24 +615,25 @@ pub(super) async fn run(
         };
         let started = tokio::time::Instant::now();
         report(&registry, Some(&link), reason);
+        connected.send_replace(true);
         // Both futures leave scope before retiring the old transport. Aborting
         // a partial write is safe only because Link closes that entire channel.
         let moved = transition(
             &link, identity, &state, renewal, &registry, cooling, &mut warm,
         )
         .await;
+        connected.send_replace(false);
         // A transport close can win the replacement race after component down.
         // The current applied preference owns the reason, rather than whichever
         // future happened to finish first.
         let interrupted_reason = interruption_reason(&registry);
         let moved = match moved {
             Some((next, why)) if next.kind == ServerLinkKind::Fallback && warm.is_some() => {
-                Some((warm.take().ok_or(io::ErrorKind::BrokenPipe)?, why))
+                Some((warm.take().unwrap_or(next), why))
             }
-            None if link.kind == ServerLinkKind::Mesh && warm.is_some() => Some((
-                warm.take().ok_or(io::ErrorKind::BrokenPipe)?,
-                interrupted_reason,
-            )),
+            None if link.kind == ServerLinkKind::Mesh => {
+                warm.take().map(|next| (next, interrupted_reason))
+            }
             other => other,
         };
         if let Some((next, why)) = moved {
