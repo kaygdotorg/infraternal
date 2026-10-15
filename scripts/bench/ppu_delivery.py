@@ -24,7 +24,10 @@ def number(body, field):
     if not match:
         return None
     separator, token = match.groups()
-    value = int(token, 16 if separator != b'=' or b'0x' in token else 10)
+    try:
+        value = int(token, 16 if separator != b'=' or b'0x' in token else 10)
+    except ValueError:
+        return None
     return value - (1 << 64) if value >= 1 << 63 else value
 
 
@@ -116,9 +119,9 @@ class DeliveryTrace(original_trace):
             # delivery cannot predate its host's final successful write exit.
             rows.append(probe | dict(last_write_exit=writes[at],
                 driver_delay_lower_ms=max(0, (probe['receive_lower'] - writes[at]) * 1000)))
-        if not rows:
+        if not rows or len(rows) != len(probes):
             summary['complete'] = False
-            summary['delivery_error'] = 'no correlated writes; syscall printer or socket identity unsupported'
+            summary['delivery_error'] = 'incomplete probe correlation; syscall printer or socket identity unsupported'
         summary['delivery'] = dict(budget_admission=False, probe_count=len(probes),
             correlated_count=len(rows), write_count=len(self.writes), rows=rows)
         return summary
@@ -146,9 +149,10 @@ def main():
     parser.add_argument('--without-trace', action='store_true')
     arguments = parser.parse_args()
     asyncio.run(trace.run(arguments))
-    result = json.loads((arguments.evidence / 'trace-summary.json').read_text())
-    if not result['complete']:
-        raise SystemExit(2)
+    if not arguments.without_trace:
+        result = json.loads((arguments.evidence / 'trace-summary.json').read_text())
+        if not result['complete']:
+            raise SystemExit(2)
 
 
 if __name__ == '__main__':
