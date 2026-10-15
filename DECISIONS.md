@@ -2866,3 +2866,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      and whether RFB is re-encoded to video or decoded in the browser, comes
      to the owner as measured candidates (#223). Either is acceptable to the
      owner if it is the fastest.
+     - **Proxmox is zero-configuration through the infraternal agent on
+       the node:** the agent on a Proxmox node detects Proxmox, lists its
+       VMs and containers (and the cluster's other nodes) on its own, and
+       opens a VM's console as a VNC window locally, with no API token and
+       no setup by the person. Containers open as terminal windows. The
+       Proxmox API path is only for nodes without our agent.
