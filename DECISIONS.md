@@ -2765,7 +2765,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        - Every admin of the host gets an Inbox item (who and when) with
          "Allow full access again", which asks for the password again
          because none was kept.
-       - Further friction is still being discussed with the owner.
+       - **Passkey at the last step, always:** the person confirms with
+         their passkey (Touch ID or Face ID), so neither a stray click nor
+         someone at an unlocked laptop can downgrade.
+       - **Organisation lock:** admins can mark hosts "Full access
+         required"; nobody can downgrade those, and the action says why
+         instead.
+       - **Second-admin approval** is an `ee/` feature (items 31 and 33):
+         when an organisation turns it on, the downgrade waits in the other
+         admins' Inbox until one approves. Only its seam is built before
+         there are users.
+       - Not adopted: a delayed downgrade with undo (it makes the real state
+         unclear), and refusing while root-only things are in use (prompt
+         1 already lists them).
        Removing the host removes everything (D273).
 275. **The wheel scrolls what is under it (owner, 2026-10-15; refines D177,
      #215):** today a snapped canvas sends every wheel to window navigation,
