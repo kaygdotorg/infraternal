@@ -219,6 +219,13 @@ async fn runtime_directory_symlinks_and_public_permissions_are_refused() {
         .mode(0o755)
         .create(directory.0.join("restart"))
         .unwrap();
+    // DirBuilder modes are filtered by umask. Establish the public fixture
+    // explicitly without changing the process-global mask of concurrent tests.
+    std::fs::set_permissions(
+        directory.0.join("restart"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     assert!(Control::start(&directory.0).is_err());
 }
 

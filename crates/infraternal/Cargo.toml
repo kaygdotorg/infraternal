@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, optional = true }
 infraternal-plugin-release = { path = "../plugins/release", version = "0.1.0", optional = true, default-features = false, features = ["server"] }
 sqlx = { workspace = true, optional = true }
 clap = { workspace = true, features = ["string"] }
@@ -38,6 +39,7 @@ infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true }
 
 [features]
+desktop = ["plugin-agent", "infraternal-agent/desktop", "plugin-server", "dep:infraternal-plugin-desktop", "infraternal-plugin-desktop/desktop", "infraternal-server/desktop"]
 # Per-run test authority is compiled only into explicit staging images (#188 D1).
 staging-trust = ["plugin-server", "infraternal-server/staging-trust"]
 release = ["plugin-server", "infraternal-server/release", "dep:infraternal-plugin-release", "dep:sqlx"]

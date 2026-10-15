@@ -1358,6 +1358,7 @@ dependencies = [
  "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-plugin-backup",
+ "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
  "infraternal-plugin-mesh",
  "infraternal-plugin-relay",
@@ -1455,7 +1456,9 @@ name = "infraternal-plugin-desktop"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "infraternal-agent",
  "infraternal-plugin-api",
+ "infraternal-plugin-remote",
  "infraternal-protocol",
  "nix",
  "quinn",
