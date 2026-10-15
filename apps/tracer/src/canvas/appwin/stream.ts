@@ -256,8 +256,8 @@ export class AppStream {
   private frame(frame: WireFrame): void {
     if (frame.type === "Close") {
       // The server ended this viewer: the session is over (the app quit, or the machine stopped it), or this socket
-      // lost it. Ask the machine which, once, instead of guessing.
-      this.streamId = undefined; this.attached = false;
+      // lost it. Retire the local registration too; MuxConnection keeps handlers until closeStream is called.
+      this.detach();
       this.session = undefined;
       this.setControl({ kind: "none" });
       void this.diagnose(this.generation, new Error("closed"));

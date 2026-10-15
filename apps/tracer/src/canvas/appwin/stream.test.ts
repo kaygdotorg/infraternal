@@ -70,6 +70,19 @@ test("retry after a decoder failure stops the previous native session", async ()
   } finally { f.stream.dispose(); }
 });
 
+test("server Close unregisters its app-window handler before disposal", async () => {
+  const f = await fixture();
+  try {
+    expect([...f.handlers.keys()]).toEqual([1]);
+    f.handlers.get(1)!.onFrame({ type: "Close", code: 4404, reason: "viewer ended" }, new Uint8Array(), 0);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    f.stream.dispose();
+    // MuxConnection dispatches Close to the registered handler; only
+    // closeStream removes that handler from the page's shared stream table.
+    expect([...f.handlers.keys()]).toEqual([]);
+  } finally { f.stream.dispose(); }
+});
+
 test("viewing never sends controller-only resize before acquisition", async () => {
   const f = await fixture();
   try {
