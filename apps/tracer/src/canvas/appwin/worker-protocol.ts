@@ -11,7 +11,7 @@
 /** Main thread to worker. */
 export type ToWorker =
   /** Hands over the visible surface. Sent once, with the canvas in the transfer list. */
-  | { t: "init"; canvas: OffscreenCanvas; hardware: HardwareAcceleration; /** Measurement only (preview builds): 2D context options other than the default. */ context?: { alpha: boolean; desynchronized: boolean } }
+  | { t: "init"; canvas: OffscreenCanvas; hardware: HardwareAcceleration }
   /** One access unit. `bytes` is transferred (the worker owns it). `sequence` is the wire's sequence (starts at 1). */
   | { t: "chunk"; sequence: number; keyframe: boolean; bytes: ArrayBuffer }
   /** Drops the decoder and every queued frame (a pause, a re-attach). The picture on the surface stays. */
@@ -40,10 +40,4 @@ export interface WorkerStats {
   /** Frames replaced by a newer one before the display could take them. */
   superseded: number;
   repairs: number;
-  /** Total milliseconds spent in `drawImage` (submission only, not presentation). */
-  drawMs: number;
-  drawMaxMs: number;
-  /** Total milliseconds from an access unit reaching the worker to its decoded frame. */
-  decodeMs: number;
-  decodeMaxMs: number;
 }

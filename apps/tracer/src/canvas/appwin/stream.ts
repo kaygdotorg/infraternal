@@ -25,19 +25,6 @@ import { chooseSize, densityMilli, sizeChanged, type StreamSize } from "./size";
 import { onConnection, type ControlState, type StreamState } from "./status";
 import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 
-declare const __CLUSTERS_PREVIEW__: boolean;
-/**
- * Measurement switches, read only in preview builds (production code never reads the address): `?awctx=desync|alpha` changes the
- * canvas context options (the default is opaque and synchronized) and `?awdrop=1` discards access units on arrival, so one run
- * isolates what receiving costs the page.
- */
-const MEASURE: { context?: { alpha: boolean; desynchronized: boolean }; dropAtPage: boolean } = (() => {
-  if (typeof __CLUSTERS_PREVIEW__ === "undefined" || !__CLUSTERS_PREVIEW__ || typeof location === "undefined") return { dropAtPage: false };
-  const q = new URLSearchParams(location.search);
-  const ctx = q.get("awctx");
-  return { dropAtPage: q.get("awdrop") === "1", ...(ctx === "desync" ? { context: { alpha: false, desynchronized: true } } : ctx === "alpha" ? { context: { alpha: true, desynchronized: false } } : {}) };
-})();
-
 /** `no-preference` lets the browser pick hardware decoding where it has it (the choice is the browser's, not ours). */
 const HARDWARE: HardwareAcceleration = "no-preference";
 /** How many times a start waits for a lost connection and goes again. */
@@ -280,7 +267,6 @@ export class AppStream {
     const m = frame.message;
     // The access unit is a view into the socket's receive buffer, which the next message reuses: copy it into a buffer
     // the worker takes over (one memcpy of the unit, nothing else on this thread).
-    if (MEASURE.dropAtPage) return;
     const copy = m.bytes.slice();
     this.worker?.postMessage({ t: "chunk", sequence: Number(m.sequence), keyframe: m.keyframe, bytes: copy.buffer } satisfies ToWorker, [copy.buffer]);
   }
@@ -297,7 +283,7 @@ export class AppStream {
     const worker = this.o.makeWorker ? this.o.makeWorker() : new Worker(new URL("./decode.worker.on-demand.js", document.baseURI), { type: "module" });
     worker.onmessage = (event: MessageEvent<FromWorker>) => this.fromWorker(event.data);
     worker.onerror = () => { this.setState({ kind: "failed", reason: "decode" }); };
-    worker.postMessage({ t: "init", canvas: offscreen, hardware: HARDWARE, ...(MEASURE.context ? { context: MEASURE.context } : {}) } satisfies ToWorker, [offscreen]);
+    worker.postMessage({ t: "init", canvas: offscreen, hardware: HARDWARE } satisfies ToWorker, [offscreen]);
     this.worker = worker;
     this.canvas = canvas;
     this.o.events.surface(canvas);
