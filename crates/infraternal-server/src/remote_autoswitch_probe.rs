@@ -16,6 +16,10 @@ pub(crate) enum Kind {
     TlsHandshake,
     LedgerAdmission,
     ControlReady,
+    QuicControlReady,
+    TcpControlReady,
+    TerminalDetachAlreadyRetired,
+    TerminalDetachWriteError,
     TerminalByte,
 }
 

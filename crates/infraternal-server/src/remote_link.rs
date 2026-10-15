@@ -638,6 +638,14 @@ impl RemoteLink {
                     // detach. Cleanup is idempotent; other frames still need
                     // a live binding, and odd/control ids cannot invent one.
                     if terminal_close && stream & 1 == 0 {
+                        #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+                        if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                            crate::remote_autoswitch_probe::record(
+                                crate::remote_autoswitch_probe::Kind::TerminalDetachAlreadyRetired,
+                                link.connection.remote_address(),
+                                stream,
+                            );
+                        }
                         return Ok(());
                     }
                     if !matches!(frame, Frame::AttachTerm { .. }) {
@@ -690,10 +698,20 @@ impl RemoteLink {
                     .send(channel.as_ref(), stream, frame)
                     .await;
                 if terminal_close {
+                    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+                    if result.is_err() && std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                        crate::remote_autoswitch_probe::record(
+                            crate::remote_autoswitch_probe::Kind::TerminalDetachWriteError,
+                            link.connection.remote_address(),
+                            stream,
+                        );
+                    }
                     // A peer can stop receiving before local detach is sent.
                     // Retire this channel even after a partial/failed Close:
                     // no later frame may follow it, and its writer-local error
                     // must not make the actor discard the host connection.
+                    // Release any write error before waiting for the map lock.
+                    drop(result);
                     link.streams.lock().await.remove(&stream);
                     channel.retire();
                     Ok(())

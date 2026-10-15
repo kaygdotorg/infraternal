@@ -123,6 +123,14 @@ pub(crate) async fn quic(
                     connection.remote_address(),
                     0,
                 );
+                #[cfg(all(test, feature = "mesh-transport-proof"))]
+                if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                    crate::remote_autoswitch_probe::record(
+                        crate::remote_autoswitch_probe::Kind::QuicControlReady,
+                        connection.remote_address(),
+                        0,
+                    );
+                }
                 hosts
                     .admit_observed(admission.authority, link, address)
                     .await?;
@@ -232,6 +240,9 @@ pub(crate) async fn tcp(
             #[cfg(all(test, feature = "mesh-transport-proof"))]
             let link = {
                 probe::record(probe::Kind::ControlReady, diagnostic_peer, 0);
+                if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                    probe::record(probe::Kind::TcpControlReady, diagnostic_peer, 0);
+                }
                 link.with_diagnostic_peer(diagnostic_peer)
             };
             if hosts
