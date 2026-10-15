@@ -419,33 +419,20 @@ impl AsyncUdpSocket for Bindings {
         } else {
             (self.outbound(transmit), transmit.src_ip)
         };
-        let result = match socket {
-            // A leased socket is bound to its own address: no source override.
-            Some(socket) => socket.try_send(&Transmit {
-                destination: physical,
-                ecn: transmit.ecn,
-                contents: transmit.contents,
-                segment_size: transmit.segment_size,
-                src_ip: None,
-            }),
-            // A connection accepted on a lease keeps that lease's address as
-            // Quinn's source hint for life. After it moves to the primary path
-            // (or its lease is gone) that hint names an address the primary
-            // socket is not bound to, and the kernel refuses the datagram.
-            // A specifically bound primary chooses its own source.
-            None if self.primary_bound => self.primary.try_send(&Transmit {
-                destination: physical,
-                ecn: transmit.ecn,
-                contents: transmit.contents,
-                segment_size: transmit.segment_size,
-                src_ip: None,
-            }),
-            None => self.primary.try_send(&Transmit {
-                destination: physical,
-                src_ip: source,
-                ..*transmit
-            }),
+        // Leases and specifically bound primaries choose their own IP. Quinn
+        // retains its initial local address across a move, so only a wildcard
+        // primary can use the peer's learned local destination as a source.
+        let source = if socket.is_some() || self.primary_bound {
+            None
+        } else {
+            source
         };
+        let sender = socket.as_deref().unwrap_or(self.primary.as_ref());
+        let result = sender.try_send(&Transmit {
+            destination: physical,
+            src_ip: source,
+            ..*transmit
+        });
         // Enrolled replies never become mesh recovery history, including
         // replayed ciphertext. A return consumes the queue instead of making
         // old packets eligible for another burst on a later upgrade.
