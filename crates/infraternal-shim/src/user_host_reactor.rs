@@ -615,6 +615,9 @@ mod tests {
             registry.registration(key).unwrap().flags,
             EpollFlags::EPOLLIN
         );
+        // Other test threads may fork with this descriptor before exec.
+        // Shutdown fences the connection even while an inherited copy exists.
+        client.shutdown(std::net::Shutdown::Both).unwrap();
         drop(client);
         session
             .step(
