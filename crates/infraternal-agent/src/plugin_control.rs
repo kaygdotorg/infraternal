@@ -135,6 +135,8 @@ impl Registry {
                     let Ok(mut registry) = factory() else {
                         return;
                     };
+                    // Drop the registry before the captured receiver. Never
+                    // close it early: ended() uses that as its replacement fence.
                     while let Some(job) = incoming.blocking_recv() {
                         if let Ok(link) = link.lock() {
                             registry.set_server_link(&link);

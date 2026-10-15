@@ -571,7 +571,7 @@ pub(super) async fn run(
     connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
     // No preference is valid; an error means the local worker is unavailable.
-    // Return to the retry owner so it recreates that service before reconnecting.
+    // The retry owner replaces only a terminated worker before reconnecting.
     registry
         .initialize_paths()
         .await
