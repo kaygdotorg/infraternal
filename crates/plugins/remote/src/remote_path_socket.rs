@@ -51,6 +51,8 @@ struct Paths {
 /// Physical routing for one connection's logical server address.
 pub struct PathSocket {
     socket: Arc<dyn AsyncUdpSocket>,
+    /// Immutable before endpoint creation; never understate kernel aggregation.
+    receive_segments: usize,
     logical: SocketAddr,
     on_mesh: AtomicBool,
     paths: Mutex<Paths>,
@@ -173,8 +175,53 @@ impl PathSocket {
     /// `logical` is the enrolled server address the connection was dialed to.
     #[must_use]
     pub fn new(socket: Arc<dyn AsyncUdpSocket>, logical: SocketAddr) -> Arc<Self> {
+        let receive_segments = socket.max_receive_segments();
+        Self::with_receive_segments(socket, logical, receive_segments)
+    }
+
+    /// Register a fresh outgoing socket for one host connection. Send
+    /// segmentation stays enabled; server receive aggregation is independent.
+    /// Receive aggregation multiplies the endpoint's per-host scratch space.
+    /// Advertise a single-datagram buffer only after the kernel disables it.
+    ///
+    /// # Errors
+    /// Propagates the selected runtime's socket registration errors.
+    #[cfg(feature = "agent")]
+    pub fn from_udp(
+        socket: std::net::UdpSocket,
+        logical: SocketAddr,
+        runtime: &dyn quinn::Runtime,
+    ) -> io::Result<Arc<Self>> {
+        #[cfg(target_os = "linux")]
+        let control = socket.try_clone().ok();
+        // Runtime registration enables aggregation. Disable it afterwards,
+        // before dialing can queue any authenticated incoming datagrams.
+        let socket = runtime.wrap_udp_socket(socket)?;
+        let receive_segments = socket.max_receive_segments();
+        #[cfg(target_os = "linux")]
+        let receive_segments = if control.as_ref().is_some_and(|control| {
+            nix::sys::socket::setsockopt(control, nix::sys::socket::sockopt::UdpGroSegment, &false)
+                .is_ok()
+        }) {
+            1
+        } else {
+            receive_segments
+        };
+        Ok(Self::with_receive_segments(
+            socket,
+            logical,
+            receive_segments,
+        ))
+    }
+
+    fn with_receive_segments(
+        socket: Arc<dyn AsyncUdpSocket>,
+        logical: SocketAddr,
+        receive_segments: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             socket,
+            receive_segments,
             logical,
             on_mesh: AtomicBool::new(false),
             paths: Mutex::new(Paths {
@@ -468,7 +515,7 @@ impl AsyncUdpSocket for PathSocket {
         self.socket.max_transmit_segments()
     }
     fn max_receive_segments(&self) -> usize {
-        self.socket.max_receive_segments()
+        self.receive_segments
     }
     fn may_fragment(&self) -> bool {
         self.socket.may_fragment()
@@ -512,6 +559,57 @@ mod tests {
     use super::*;
     use quinn::Runtime as _;
     use std::{io::IoSliceMut, sync::Arc, time::Duration};
+
+    #[cfg(all(feature = "agent", target_os = "linux"))]
+    #[tokio::test]
+    async fn dedicated_receive_preserves_segmented_sends_in_single_datagram_buffers() {
+        const DATAGRAMS: usize = 32;
+        const PAYLOAD: usize = 1200;
+        let receiving = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sender = PathSocket::from_udp(
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+            receiving.local_addr().unwrap(),
+            &quinn::TokioRuntime,
+        )
+        .unwrap();
+        let path = PathSocket::from_udp(
+            receiving,
+            sender.local_addr().unwrap(),
+            &quinn::TokioRuntime,
+        )
+        .unwrap();
+        let mut writable = sender.clone().create_io_poller();
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        let mut packets = Vec::new();
+        for index in 0..DATAGRAMS {
+            packets.extend_from_slice(&[u8::try_from(index).unwrap(); PAYLOAD]);
+        }
+        let batch = sender.max_transmit_segments().clamp(1, DATAGRAMS);
+        for contents in packets.chunks(batch * PAYLOAD) {
+            sender
+                .try_send(&Transmit {
+                    destination: path.local_addr().unwrap(),
+                    contents,
+                    segment_size: (batch > 1).then_some(PAYLOAD),
+                    ecn: None,
+                    src_ip: None,
+                })
+                .unwrap();
+        }
+        let mut seen = [false; DATAGRAMS];
+        let mut bytes = [0; 1472];
+        for _ in 0..DATAGRAMS {
+            let metadata = receive(&path, &mut bytes).await;
+            assert_eq!(metadata.len, PAYLOAD, "aggregated datagram was truncated");
+            let index = usize::from(bytes[0]);
+            assert!(index < DATAGRAMS && !seen[index]);
+            assert_eq!(&bytes[..PAYLOAD], &[u8::try_from(index).unwrap(); PAYLOAD]);
+            seen[index] = true;
+        }
+        assert!(seen.into_iter().all(|received| received));
+    }
 
     #[derive(Debug)]
     struct CountedSocket {
