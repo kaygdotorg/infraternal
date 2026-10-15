@@ -1,3 +1,4 @@
+/** Checks canonical random window identifiers on origins without the secure-context UUID helper. */
 import { expect, test } from "bun:test";
 import { isCanonicalUuid, randomUuid } from "./identifiers";
 

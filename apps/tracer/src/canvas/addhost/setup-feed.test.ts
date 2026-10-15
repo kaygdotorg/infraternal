@@ -1,3 +1,4 @@
+/** Exercises retained setup delivery, replay, retry and subscription cleanup without a live socket. */
 // SPDX-License-Identifier: AGPL-3.0-only
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createSetupFeed } from "./setup-feed";

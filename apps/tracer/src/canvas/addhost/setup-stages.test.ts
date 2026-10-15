@@ -1,3 +1,4 @@
+/** Checks setup-event parsing, stage folding and failure guidance for the machine pill. */
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, test } from "bun:test";
 import { foldSetup, freshSetup, parseSetupEvent, setupGuide, stageOfStep, type SetupEvent } from "./setup-stages";
