@@ -2872,3 +2872,25 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        opens a VM's console as a VNC window locally, with no API token and
        no setup by the person. Containers open as terminal windows. The
        Proxmox API path is only for nodes without our agent.
+283. **The person's card (owner, 2026-10-15; Q1 to be refined after the
+     mockup):**
+     - **Fields (Q1, mockup first):** name; username; email; picture
+       (initials by default); organisation and role; "logs in as" (a summary
+       of login access, e.g. "kayg on 12 hosts, root on 2"); sign-in health
+       (passkeys, recovery key, devices); sign out of this device. Nothing
+       we would have no use for (phone, address, title, timezone).
+     - **One home per thing (Q2):** the card edits name, picture and email
+       in place. Username, passkeys, recovery key and devices show their
+       state only, and each row jumps to its home in Settings → Account.
+     - **Username changes (Q3):** allowed for an admin (or yourself in
+       Community) behind one confirm. New SSH certificates are issued, old
+       ones are revoked at once, and access rules follow the person, not the
+       name. Needs careful design before it is built.
+     - **Email (Q4):** optional, never part of sign-in. It is required only
+       to invite people, which is an EE feature, or it comes from the
+       identity provider with OIDC.
+     - **Organisation and role (Q5):** shown only with more than one person
+       (EE). Community shows neither.
+     - **The pill (Q6):** unchanged (picture, name, username), plus one amber
+       mark when something needs attention, such as an unchecked recovery
+       key or a passkey on only one device.
