@@ -144,7 +144,7 @@ Reviews and fixes run at the same time as the next lane's build.
   | Target | Measured ceiling |
   | --- | ---: |
   | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,569,568 bytes |
+  | `aarch64-unknown-linux-musl` | 19,516,992 bytes |
 
   These ceilings retain the lower recorded per-target measurements from #198
   and #201 while combined-source release artifacts are checked on #201. The
@@ -158,8 +158,8 @@ Reviews and fixes run at the same time as the next lane's build.
   regrowth. Update both targets and this table with evidence on the issue.
   An intentional increase needs a justified, target-specific measured owner
   exception under D243. The gate never updates a ceiling automatically.
-  Attribution, retained feature costs and runtime tradeoffs for #198 are
-  recorded on that issue.
+  Attribution, retained feature costs and runtime tradeoffs are recorded
+  on #198 and [#201](https://git.kayg.org/kayg/infraternal/issues/201).
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
