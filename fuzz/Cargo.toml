@@ -11,6 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/release", default-features = false }
+infraternal-plugin-desktop = { version = "0.1.0", path = "../crates/plugins/desktop", features = ["source", "server"] }
 serde_json.workspace = true
 infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh" }
 infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent", default-features = false, features = ["remote"] }
