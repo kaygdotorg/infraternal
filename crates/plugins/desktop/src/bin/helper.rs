@@ -19,6 +19,23 @@ fn main() -> std::io::Result<()> {
             .exec();
         return Err(error);
     }
+    if std::env::args_os().any(|arg| arg == "--check-permissions") {
+        let path = configured_companion()?.ok_or_else(|| {
+            std::io::Error::other(
+                "Set INFRATERNAL_DESKTOP_COMPANION to the signed companion executable.",
+            )
+        })?;
+        // The native entrypoint establishes responsibility before its preflight;
+        // diagnostics and every production Native::spawn use that same path.
+        let status = std::process::Command::new(path)
+            .arg("--check-permissions")
+            .status()?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("Desktop permission check failed."))
+        };
+    }
     run()
 }
 #[cfg(target_os = "macos")]
@@ -59,7 +76,10 @@ async fn run() -> std::io::Result<()> {
     let endpoint = Endpoint::bind(&runtime)?;
     let companion_runtime = companion_runtime.as_deref().unwrap_or(&runtime);
     infraternal_plugin_desktop::socket::validate_runtime(companion_runtime)?;
-    let native_path = extract_companion(companion_runtime)?;
+    let native_path = match configured_companion()? {
+        Some(path) => path,
+        None => extract_companion(companion_runtime)?,
+    };
     endpoint.listener.set_nonblocking(true)?;
     let listener = tokio::net::UnixListener::from_std(endpoint.listener.try_clone()?)?;
     let stopping = Arc::new(AtomicBool::new(false));
@@ -104,6 +124,33 @@ async fn run() -> std::io::Result<()> {
     // address the same executable on later starts. Disabling leaves no process.
     result
 }
+/// A locally configured signed companion keeps its installed bundle identity.
+/// Remote action bodies cannot select this path; the supervising user owns it.
+#[cfg(target_os = "macos")]
+fn configured_companion() -> std::io::Result<Option<std::path::PathBuf>> {
+    std::env::var_os("INFRATERNAL_DESKTOP_COMPANION")
+        .map(std::path::PathBuf::from)
+        .map(|path| validate_companion(&path).map(|()| path))
+        .transpose()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !path.is_absolute()
+        || !metadata.is_file()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o100 == 0
+    {
+        return Err(std::io::Error::other(
+            "Desktop companion must be an absolute, owned executable without shared write access.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn extract_companion(runtime: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     use std::{
@@ -185,4 +232,49 @@ fn main() {
         );
     }
     std::process::exit(2);
+}
+
+/// Exercises the local executable boundary without invoking platform privacy APIs.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod companion_tests {
+    use super::validate_companion;
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+        path::PathBuf,
+    };
+
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn signed_companion_path_requires_owned_executable_and_refuses_links_and_shared_writes() {
+        let base =
+            PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()));
+        fs::create_dir_all(&base).unwrap();
+        let root = fs::canonicalize(base)
+            .unwrap()
+            .join(format!("companion-path-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let _cleanup = Cleanup(root.clone());
+        let executable = root.join("companion");
+        fs::write(&executable, b"fixture executable").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(validate_companion(&executable).is_ok());
+        let link = root.join("link");
+        symlink(&executable, &link).unwrap();
+        assert!(validate_companion(&link).is_err());
+        assert!(validate_companion(&root).is_err());
+        assert!(validate_companion(std::path::Path::new("relative-companion")).is_err());
+        for mode in [0o600, 0o720, 0o702] {
+            fs::set_permissions(&executable, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(validate_companion(&executable).is_err(), "mode {mode:o}");
+        }
+        assert!(validate_companion(&root.join("missing")).is_err());
+    }
 }

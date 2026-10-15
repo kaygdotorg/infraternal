@@ -11,6 +11,14 @@ catch {
     exit(1)
 }
 
+// Diagnostic mode shares production attribution and exits before AppKit state,
+// capture, input monitors or any permission-request API can be created.
+if CommandLine.arguments.contains("--check-permissions") {
+    do { FileHandle.standardOutput.write(try permissionJSON() + Data([10])) }
+    catch { exit(1) }
+    exit(0)
+}
+
 let surfaceMode = CommandLine.arguments.contains("--surface-capture")
 private let encoderMode = CommandLine.arguments.contains("--encoder")
 

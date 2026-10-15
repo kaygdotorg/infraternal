@@ -37,6 +37,7 @@ fn main() {
             "-O",
             "-whole-module-optimization",
             "native/ResponsibleLaunch.swift",
+            "native/Permissions.swift",
             "native/CaptureState.swift",
             "native/Inventory.swift",
             "native/Geometry.swift",
