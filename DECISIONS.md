@@ -2832,3 +2832,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      them. On phones a long-press starts selecting and taps add more.
      Search does the same in words ("allow full access on all offline
      hosts"). There is no select mode and there are no checkboxes.
+280. **The public GitHub mirror (owner, 2026-10-15; extends item 43):**
+     `kaygdotorg/infraternal` on GitHub is public and receives `dev` and
+     `main` only, never work branches. Issues stay on Forgejo. Nothing is
+     pushed until the full history has been checked for secrets. The
+     history is then rewritten only to (a) erase any secret found and (b)
+     shrink it by removing committed artifacts that belong on Forgejo issues
+     (D262). The plan and the cut-over are shown to the owner before the
+     rewrite.
