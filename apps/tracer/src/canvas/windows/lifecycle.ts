@@ -37,7 +37,8 @@ export interface WindowsModule {
   setActive(rec: WinRec | undefined): void;
   /** Adds a window in a new column at `index` of a tiled view; the others glide aside. */
   addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean, opaque?: boolean): WinRec;
-  close(rec: WinRec): void;
+  /** Immediate closure uses the same cleanup when a feature withdraws its windows. */
+  close(rec: WinRec, instant?: boolean): void;
   /**
    * The keyboard close (D212 shortcuts): the window closes at once, with no motion, through the same path as the close
    * button (its session keeps running, detached). Focus and the active window move to the next window in reading order

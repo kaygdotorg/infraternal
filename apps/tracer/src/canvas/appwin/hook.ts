@@ -45,17 +45,43 @@ export function installAppWindows(cx: Ctx): AppWindowsHook | undefined {
   if (!adapter) return undefined;
   let part: AppWindowsPart | undefined;
   let loading: Promise<AppWindowsPart | undefined> | undefined;
+  let generation = 0;
+  let disposed = false;
   const load = (): Promise<AppWindowsPart | undefined> => {
-    loading ??= onDemand(() => import("./appwin.on-demand")).then((m) => (part = m.createAppWindowsPart(cx, adapter)))
-      .catch(() => { loading = undefined; cx.toast.show({ message: "Could not load app windows. Try again.", tone: "error", duration: 5000 }); return undefined; });
+    if (disposed || cx.signal.aborted || !adapter.available()) return Promise.resolve(undefined);
+    if (!loading) {
+      const epoch = generation;
+      loading = onDemand(() => import("./appwin.on-demand")).then((m) => {
+        // A queued import must not restart inventory work after preference-off,
+        // capability withdrawal, or a newer enable generation.
+        if (epoch !== generation || disposed || cx.signal.aborted || !adapter.available()) return undefined;
+        return (part = m.createAppWindowsPart(cx, adapter));
+      }).catch(() => {
+        if (epoch === generation && !disposed && adapter.available()) {
+          loading = undefined;
+          cx.toast.show({ message: "Could not load app windows. Try again.", tone: "error", duration: 5000 });
+        }
+        return undefined;
+      });
+    }
     return loading;
   };
   const warm = (): void => { if (adapter.available()) whenIdle(() => { void load(); }); };
   warm();
   const off = adapter.onChange(() => {
-    if (cx.signal.aborted) return;
-    warm();
-    // The palette lists app windows only while the feature is on.
+    if (disposed || cx.signal.aborted) return;
+    if (adapter.available()) warm();
+    else {
+      generation++;
+      loading = undefined;
+      part?.dispose();
+      part = undefined;
+      // Dispose through the existing window lifecycle while the socket can still
+      // deliver Stop. Immediate removal also prevents a rapid re-enable from
+      // finding a closing, already-disposed window as the existing target.
+      const windows = [...cx.views.values()].flatMap(view => [...view.wins.values()]);
+      for (const rec of windows) if (rec.model.kind === "app" || rec.model.kind === "screen") cx.win.close(rec, true);
+    }
     cx.core.refreshPalette();
   });
   const removeProvider = cx.core.addPaletteProvider(() => (adapter.available() ? part?.paletteEntries() ?? [] : []));
@@ -66,13 +92,14 @@ export function installAppWindows(cx: Ctx): AppWindowsHook | undefined {
     setWanted: (on) => adapter.setWanted(on),
     onChange: (listener) => adapter.onChange(listener),
     togglePicker(anchor, source, query) {
+      if (!adapter.available()) return;
       if (part) { part.togglePicker(anchor, source, query); return; }
-      void load().then((p) => { if (p && anchor.isConnected) p.togglePicker(anchor, source, query); });
+      void load().then((p) => { if (p && p === part && adapter.available() && anchor.isConnected) p.togglePicker(anchor, source, query); });
     },
     paletteEntries: () => (adapter.available() ? part?.paletteEntries() ?? [] : []),
-    openFromPalette(value) { void load().then((p) => p?.openFromPalette(value)); },
+    openFromPalette(value) { void load().then((p) => { if (p && p === part && adapter.available()) p.openFromPalette(value); }); },
     bindingFor: (rec) => part?.bindingFor(rec),
     warm,
-    dispose() { off(); removeProvider(); part?.dispose(); },
+    dispose() { disposed = true; generation++; off(); removeProvider(); part?.dispose(); part = undefined; loading = undefined; },
   };
 }

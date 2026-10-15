@@ -253,6 +253,9 @@ export async function appwinHttp(request: IncomingMessage, response: ServerRespo
   if (request.method === "POST" && pathname === "/__mock/appwin/config") {
     const body = await readJson(request) as Partial<typeof config> & { reset?: boolean } | undefined;
     if (!body || typeof body !== "object") { sendJson(response, 400, { error: "invalid request" }); return true; }
+    // A reset is a new test source: prior pages may leave server-held sessions
+    // intentionally alive, so retire their timers and registrations as well.
+    if (body.reset) { for (const session of sessions.values()) for (const viewer of [...session.viewers]) detach(viewer); sessions.clear(); }
     if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0 }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
     for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
     if (Array.isArray(body.windows)) config.windows = body.windows as Win[];
