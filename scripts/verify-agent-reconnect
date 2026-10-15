@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Run the release-transition process proof in an owned network namespace [128,168,215], #225.
+set -euo pipefail
+: "${INFRATERNAL_RECONNECT_TEST_BINARY:?set the prebuilt test harness matching the oldest server schema}"
+: "${INFRATERNAL_OLD_TEST_BINARY:?set the enrolled infraternal agent binary}"
+: "${INFRATERNAL_REMOTE_TEST_BINARY:?set the replacement server binary}"
+: "${CARGO_TARGET_DIR:?set the job build directory}"
+job_root="$(dirname -- "$CARGO_TARGET_DIR")"
+control="$(mktemp -d "$job_root/reconnect.XXXXXX")"
+chmod 700 "$control"
+mkdir -m 700 "$control/runtime"
+export INFRATERNAL_RECONNECT_CONTROL="$control"
+export XDG_RUNTIME_DIR="$control/runtime"
+# Keep shim socket names within Linux sun_path while retaining job ownership.
+export INFRATERNAL_TEST_STATE_ROOT="$job_root/t"
+# Never let fixture shims or session-manager detection reach the owner's bus.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$control/no-bus"
+fixture_uid="$(id -u)"
+fixture_gid="$(id -g)"
+trap 'rm -rf -- "$control"' EXIT
+unshare --user --map-root-user --net bash -s -- "$fixture_uid" "$fixture_gid" <<'NAMESPACE'
+set -euo pipefail
+ip link set lo up
+if [[ "${INFRATERNAL_RECONNECT_TCP_ONLY:-0}" == 1 ]]; then
+    # Protocol routing drops only UDP inside this namespace, proving the real
+    # TCP fallback rather than assuming which dial race won.
+    ip rule del pref 0
+    ip rule add pref 100 lookup local
+    ip rule add pref 50 ipproto udp blackhole
+    printf 'namespace_network tcp_only=true\n'
+fi
+# The outer namespace owns network administration. The test and every daemon
+# retain the caller's rootless uid in a nested user namespace.
+unshare --user --map-user="$1" --map-group="$2" \
+    "$INFRATERNAL_RECONNECT_TEST_BINARY" \
+    --exact runtime::remote_demo_tests::cold_start::release_transition_recovers_enrolled_host_after_long_outage \
+    --ignored --nocapture &
+test_pid=$!
+wait_phase() {
+    local phase="$1"
+    while [[ ! -f "$INFRATERNAL_RECONNECT_CONTROL/$phase" ]]; do
+        if ! kill -0 "$test_pid" 2>/dev/null; then
+            wait "$test_pid"
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+wait_phase disconnect
+ip link set lo down
+: > "$INFRATERNAL_RECONNECT_CONTROL/disconnect-done"
+printf 'namespace_network unreachable=true\n'
+wait_phase restore
+ip link set lo up
+: > "$INFRATERNAL_RECONNECT_CONTROL/restore-done"
+printf 'namespace_network restored=true\n'
+wait "$test_pid"
+NAMESPACE

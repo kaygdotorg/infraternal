@@ -25,9 +25,11 @@ type Browser = WebSocketStream<tokio_openssl::SslStream<tokio::net::TcpStream>>;
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        let path = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/ra6")
-            .join(format!("{:08x}", rand::random::<u32>()));
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ra6"),
+            PathBuf::from,
+        );
+        let path = root.join(format!("{:08x}", rand::random::<u32>()));
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -324,12 +326,19 @@ async fn browser(address: SocketAddr, root: &X509, origin: &str, cookie: &str) -
 }
 
 async fn open_remote(browser: &mut Browser, host: uuid::Uuid, started: Instant) -> uuid::Uuid {
+    open_remote_with_budget(browser, host, started, Duration::from_secs(10)).await
+}
+
+/// Release outage checks allow the complete bounded reconnect backoff.
+async fn open_remote_with_budget(
+    browser: &mut Browser,
+    host: uuid::Uuid,
+    started: Instant,
+    budget: Duration,
+) -> uuid::Uuid {
     // Retry only host admission, without creating any successful duplicate PTYs.
     loop {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "remote host did not register"
-        );
+        assert!(started.elapsed() < budget, "remote host did not register");
         let input = serde_json::json!({"host_id":host}).to_string();
         send(
             browser,
@@ -556,8 +565,20 @@ fn cli(binary: &Path, directory: &Directory, join: bool) -> Process {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../infraternal/tests/profile"),
             )
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(
+                if std::env::var_os("INFRATERNAL_RECONNECT_CONTROL").is_some() {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                },
+            )
+            .stderr(
+                if std::env::var_os("INFRATERNAL_RECONNECT_CONTROL").is_some() {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                },
+            )
             .spawn()
             .unwrap(),
     )

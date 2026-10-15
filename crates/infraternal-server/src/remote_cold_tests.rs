@@ -387,3 +387,159 @@ async fn normal_cli_cold_start_keeps_enrolled_remote_terminal_while_signing_lock
     drop(directory);
     assert_eq!(remaining_shims(&state), 0);
 }
+
+/// Isolated release-transition proof. Run in a private network namespace: these
+/// fixture ports and retained credentials must never address a real deployment.
+#[tokio::test]
+#[ignore = "requires isolated release binaries and a ten-minute outage"]
+async fn release_transition_recovers_enrolled_host_after_long_outage() {
+    let enrolled = PathBuf::from(std::env::var_os("INFRATERNAL_OLD_TEST_BINARY").unwrap());
+    let new = PathBuf::from(std::env::var_os("INFRATERNAL_REMOTE_TEST_BINARY").unwrap());
+    let directory = Directory::new();
+    let endpoint = "127.0.0.1:7443".parse().unwrap();
+    let mut fixture = fixture_at(&directory, "127.0.0.1:4701".parse().unwrap(), endpoint).await;
+    let ca = retained_trust(&directory, &fixture);
+    let host = uuid::Uuid::new_v4();
+    let invitation = invitation(
+        fixture.address,
+        &fixture.root,
+        "https://localhost:4701",
+        &fixture.cookie,
+        host,
+    )
+    .await;
+    let mut child = cli(&enrolled, &directory, true);
+    child
+        .0
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&invitation)
+        .unwrap();
+    drop(invitation);
+    let mut browser = browser(
+        fixture.address,
+        &fixture.root,
+        "https://localhost:4701",
+        &fixture.cookie,
+    )
+    .await;
+    println!("release_transition initial_transport_ready=true");
+    open_remote(&mut browser, host, Instant::now()).await;
+    drop(browser);
+    release_fixture(&mut fixture, endpoint).await;
+    let previous_binary = std::env::var_os("INFRATERNAL_PREVIOUS_SERVER_BINARY")
+        .map_or_else(|| new.clone(), PathBuf::from);
+    let mut previous = cold_cli(&previous_binary, &directory, &ca);
+    wait_cli_listener(fixture.address, Instant::now()).await;
+    let mut connected = super::browser(
+        fixture.address,
+        &fixture.root,
+        "https://localhost:4701",
+        &fixture.cookie,
+    )
+    .await;
+    open_remote(&mut connected, host, Instant::now()).await;
+    drop(connected);
+    println!("release_transition previous_server=true infraternal_agent_connected=true");
+    interrupt_server(&mut previous, &mut child, endpoint).await;
+    let mut cold_previous = cold_cli(&previous_binary, &directory, &ca);
+    wait_cli_listener(fixture.address, Instant::now()).await;
+    println!("release_transition previous_server_cold_restart=true");
+    cold_previous.0.kill().unwrap();
+    cold_previous.0.wait().unwrap();
+    let replacement = cold_cli(&new, &directory, &ca);
+    wait_cli_listener(fixture.address, Instant::now()).await;
+    let mut recovered = super::browser(
+        fixture.address,
+        &fixture.root,
+        "https://localhost:4701",
+        &fixture.cookie,
+    )
+    .await;
+    tokio::time::timeout(
+        Duration::from_secs(40),
+        open_remote_with_budget(
+            &mut recovered,
+            host,
+            Instant::now(),
+            Duration::from_secs(40),
+        ),
+    )
+    .await
+    .expect("infraternal agent did not reconnect after cold server replacement");
+    assert!(child.0.try_wait().unwrap().is_none());
+    process_threads(&child, "reconnected");
+    locked_join(&fixture).await;
+    println!("release_transition replacement_ca_locked=true infraternal_agent_reconnected=true");
+    drop(recovered);
+    drop(replacement);
+    drop(child);
+    drop(cold_previous);
+    drop(previous);
+    fixture.pool.close().await;
+    let state = directory.0.join("s");
+    drop(fixture);
+    drop(directory);
+    assert_eq!(
+        remaining_shims(&state),
+        0,
+        "release proof left a fixture shim"
+    );
+}
+
+/// The namespace controller owns link changes; the test process remains rootless.
+async fn outage_network(phase: &str) {
+    let control = PathBuf::from(std::env::var_os("INFRATERNAL_RECONNECT_CONTROL").unwrap());
+    std::fs::write(control.join(phase), b"ready").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !control.join(format!("{phase}-done")).exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("network namespace controller did not acknowledge link change");
+}
+
+/// Thread counts are observable even when private process descriptors are hidden.
+fn process_threads(child: &Process, phase: &str) {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", child.0.id())).unwrap();
+    let threads = status
+        .lines()
+        .find(|line| line.starts_with("Threads:"))
+        .unwrap();
+    println!("release_transition phase={phase} {}", threads.trim());
+}
+
+/// Stall userspace while TCP accepts, then model abrupt power loss and no route.
+async fn interrupt_server(previous: &mut Process, child: &mut Process, endpoint: SocketAddr) {
+    process_threads(child, "before_stall");
+    if let Ok(seconds) = std::env::var("INFRATERNAL_RECONNECT_STALL_SECONDS") {
+        let seconds = seconds.parse::<u64>().unwrap();
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(previous.0.id()).unwrap()),
+            nix::sys::signal::Signal::SIGSTOP,
+        )
+        .unwrap();
+        // SIGSTOP leaves the kernel listener accepting TCP while no userspace
+        // TLS, QUIC or application work can answer, matching a stalled server.
+        assert!(tokio::net::TcpStream::connect(endpoint).await.is_ok());
+        println!("release_transition server_stopped=true tcp_accepts=true");
+        tokio::time::sleep(Duration::from_secs(seconds)).await;
+        assert!(child.0.try_wait().unwrap().is_none());
+        process_threads(child, "after_stall");
+    }
+    outage_network("disconnect").await;
+    previous.0.kill().unwrap();
+    previous.0.wait().unwrap();
+    let outage_seconds = std::env::var("INFRATERNAL_RECONNECT_OUTAGE_SECONDS")
+        .map_or(600, |value| value.parse::<u64>().unwrap());
+    tokio::time::sleep(Duration::from_secs(outage_seconds)).await;
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "infraternal agent exited during outage"
+    );
+    println!("release_transition outage_seconds={outage_seconds} process_alive=true");
+    process_threads(child, "after_no_route");
+    outage_network("restore").await;
+}
