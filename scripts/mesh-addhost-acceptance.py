@@ -218,7 +218,7 @@ def lifecycle(args, venue, index):
                 capture_files.append(capture)
                 captures.append(subprocess.Popen([
                     "nsenter", "-t", pid, "-n", "tcpdump", "-i", "any", "-nn", "-tt", "-l", "-q",
-                    "-c", "20000", "udp", "and", "port", "4930",
+                    "-c", "20000", "udp",
                 ], stdout=capture, stderr=subprocess.DEVNULL))
         if args.acceptance_mode == "standing-switch":
             environment["ACCEPTANCE_COUNTER_PIPE"] = str(scratch / "counter.sock")
@@ -349,6 +349,11 @@ def main():
     resource.setrlimit(resource.RLIMIT_MEMLOCK, (8388608, 8388608))
     args.fixture, args.payload = args.fixture.resolve(), args.payload.resolve()
     if args.locked:
+        # The parent acquired the shared lock for this single bounded lifecycle.
+        # Publish ownership only here, never while waiting, copying or building.
+        Path("/var/lock/perf-bench.owner").write_text(
+            f"mesh-autoswitch {args.label} venue={args.single_venue} sample={args.single_index} started={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+        )
         assert args.single_venue is not None and args.single_index is not None
         lifecycle(args, args.single_venue, args.single_index)
         return 0
