@@ -31,13 +31,22 @@ def direct(binary: Path, arguments: list[str]) -> None:
 
 
 def locked_measurement(program: str, lock="/var/lock/perf-bench.lock",
-                       owner="/var/lock/perf-bench.owner") -> str:
-    """Bound the entire held measurement, including stalled children, below thirty minutes."""
+                       owner="/var/lock/perf-bench.owner", *, duration=1750,
+                       kill_grace=10) -> str:
+    """Keep receipt cleanup outside the bounded measurement's process group."""
+    if not 0 < duration <= 1750 or not 0 < kill_grace <= 10:
+        raise ValueError("A measurement must finish inside the fair lock ceiling")
+    timed = shlex.join(["timeout", f"--kill-after={kill_grace}", str(duration),
+                        "sh", "-c", program])
+    # Timeout may force-stop every process in the measurement group. The
+    # lock-holder survives that group, removes its receipt, then unlocks.
     owned = ("printf 'addhost-instant started=%s\\n' \"$(date -u +%FT%TZ)\" > "
-             + shlex.quote(owner) + "; trap "
-             + shlex.quote("rm -f -- " + shlex.quote(owner)) + " EXIT; " + program)
-    return shlex.join(["flock", "-w", "3600", lock, "timeout", "--kill-after=10",
-                       "1750", "sh", "-c", owned])
+             + shlex.quote(owner) + " || exit 1; trap "
+             + shlex.quote("rm -f -- " + shlex.quote(owner)) + " EXIT; " + timed
+             + '; measurement_exit=$?; exit "$measurement_exit"')
+    # Session processes deliberately survive their launcher; none may inherit
+    # the scheduler lock descriptor when the measurement itself has finished.
+    return shlex.join(["flock", "--close", "-w", "3600", lock, "sh", "-c", owned])
 
 
 def main() -> int:
