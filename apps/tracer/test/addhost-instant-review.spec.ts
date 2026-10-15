@@ -1,5 +1,6 @@
 /** Independent D255 product-flow regressions: an early prompt still needs retained setup status and retry. */
 import { expect, test } from "playwright/test";
+import { tracerEvidencePath } from "./evidence-path";
 
 test("review published host window subscribes to setup after the wizard closes", async ({ page }) => {
   const subscriptions: string[] = [];
@@ -22,7 +23,7 @@ test("review published host window subscribes to setup after the wizard closes",
   // Raw-socket coverage in addhost-instant.spec.ts proves this fixture publishes
   // Join:failed after Done. Here only the product may subscribe; the test does
   // not supply the missing status adapter or drive retry on the person's behalf.
-  await page.screenshot({ path: "test-results/addhost-instant-review-after-publication.png" });
+  await page.screenshot({ path: tracerEvidencePath("addhost-instant-review-after-publication.png") });
   await expect.poll(() => subscriptions.some((text) => {
     const value = JSON.parse(text) as { action?: string; host_id?: string; window_id?: string };
     return value.action === "subscribe" && Boolean(value.host_id && value.window_id);
