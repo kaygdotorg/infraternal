@@ -102,9 +102,8 @@ fn transport_with_liveness(
     let mut config = quinn::TransportConfig::default();
     config.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER));
     if client {
-        // An enrolled ciphertext copy can arrive 20ms after its mesh original.
-        // The default 25ms delayed ACK then exceeds the backed path's 30ms
-        // response margin. Negotiate 5ms without extending loss detection;
+        // Enrolled ciphertext copies and ACK delay share the backed path's
+        // 30ms response margin. Negotiate 5ms without extending loss detection;
         // preserve the ordinary immediate ACK on the first reordered packet.
         let mut frequency = quinn::AckFrequencyConfig::default();
         frequency.max_ack_delay(Some(std::time::Duration::from_millis(5)));
