@@ -231,11 +231,18 @@ impl Recent {
                         segment_size: sent.segment_size,
                         src_ip: route.source,
                     });
-                    if result.is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock) {
+                    if result
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+                    {
                         sent.copy_at = Some(now + COPY_DELAY);
                     } else {
                         sent.copy_at = None;
-                        if sent.kind != CopyKind::Original {
+                        // A successful backup already sent this ciphertext on the
+                        // enrolled path. Consume it instead of replaying a second
+                        // burst on a later routing hint. Other send errors keep
+                        // uncopied originals available for explicit recovery.
+                        if result.is_ok() || sent.kind != CopyKind::Original {
                             *bytes -= sent.contents.len();
                             return false;
                         }
@@ -668,6 +675,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_backup_copies_cannot_be_replayed_as_a_second_return_burst() {
+        use quinn::Runtime as _;
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let socket = quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let mut writable = socket.clone().create_io_poller();
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        let mut recent = Recent::default();
+        for index in 0..MAX_DATAGRAMS {
+            recent.keep_copying(
+                &Transmit {
+                    destination,
+                    contents: &[u8::try_from(index).unwrap(); 32],
+                    ecn: None,
+                    segment_size: None,
+                    src_ip: None,
+                },
+                true,
+            );
+        }
+        // Publish eligibility directly; this checks retirement, not elapsed time.
+        for datagram in &mut recent.datagrams {
+            datagram.copy_at = Some(tokio::time::Instant::now());
+        }
+        for _ in 0..2 {
+            let mut budget = COPY_BATCH;
+            recent.copies(socket.as_ref(), destination, true, &mut budget);
+            assert_eq!(budget, 0);
+        }
+        assert!(
+            recent.replay(None).is_none(),
+            "completed backups were queued for a second return burst"
+        );
+        assert!(recent.datagrams.is_empty());
+        assert_eq!(recent.bytes, 0);
+        let mut seen = [false; MAX_DATAGRAMS];
+        let mut bytes = [0; 64];
+        for _ in 0..MAX_DATAGRAMS {
+            let (length, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                receiver.recv_from(&mut bytes),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(length, 32);
+            let index = usize::from(bytes[0]);
+            assert!(index < MAX_DATAGRAMS && !seen[index]);
+            assert_eq!(&bytes[..length], &[u8::try_from(index).unwrap(); 32]);
+            seen[index] = true;
+        }
+        assert!(seen.into_iter().all(|received| received));
+        assert_eq!(
+            receiver.try_recv_from(&mut bytes).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        // An original without a negotiated backup still needs legacy recovery.
+        recent.keep(&Transmit {
+            destination,
+            contents: b"uncopied",
+            ecn: None,
+            segment_size: None,
+            src_ip: None,
+        });
+        assert!(recent.replay(None).is_some());
+        let mut budget = 1;
+        assert!(
+            recent
+                .copies(socket.as_ref(), destination, true, &mut budget)
+                .is_none()
+        );
+        let (length, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            receiver.recv_from(&mut bytes),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&bytes[..length], b"uncopied");
+        assert!(recent.datagrams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsuccessful_backups_preserve_originals_for_explicit_recovery() {
+        use quinn::Runtime as _;
+        #[derive(Debug)]
+        struct Reject {
+            inner: std::sync::Arc<dyn AsyncUdpSocket>,
+            kind: std::io::ErrorKind,
+        }
+        impl AsyncUdpSocket for Reject {
+            fn create_io_poller(
+                self: std::sync::Arc<Self>,
+            ) -> std::pin::Pin<Box<dyn quinn::UdpPoller>> {
+                self.inner.clone().create_io_poller()
+            }
+            fn try_send(&self, _: &Transmit<'_>) -> std::io::Result<()> {
+                Err(self.kind.into())
+            }
+            fn poll_recv(
+                &self,
+                cx: &mut std::task::Context<'_>,
+                bufs: &mut [std::io::IoSliceMut<'_>],
+                meta: &mut [quinn::udp::RecvMeta],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                self.inner.poll_recv(cx, bufs, meta)
+            }
+            fn local_addr(&self) -> std::io::Result<SocketAddr> {
+                self.inner.local_addr()
+            }
+        }
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let inner = quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let mut writable = inner.clone().create_io_poller();
+        std::future::poll_fn(|cx| writable.as_mut().poll_writable(cx))
+            .await
+            .unwrap();
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            let socket = Reject {
+                inner: inner.clone(),
+                kind,
+            };
+            let mut recent = Recent::default();
+            recent.keep_copying(
+                &Transmit {
+                    destination,
+                    contents: b"not-copied",
+                    ecn: None,
+                    segment_size: None,
+                    src_ip: None,
+                },
+                true,
+            );
+            recent.datagrams.front_mut().unwrap().copy_at = Some(tokio::time::Instant::now());
+            let mut budget = 1;
+            let next = recent.copies(&socket, destination, true, &mut budget);
+            assert_eq!(next.is_some(), kind == std::io::ErrorKind::WouldBlock);
+            assert_eq!(recent.datagrams.len(), 1);
+            assert!(recent.replay(None).is_some());
+            let mut budget = 1;
+            assert!(
+                recent
+                    .copies(inner.as_ref(), destination, true, &mut budget)
+                    .is_none()
+            );
+            assert!(recent.datagrams.is_empty());
+            assert_eq!(recent.bytes, 0);
+        }
+    }
+
+    #[tokio::test]
     async fn completed_return_entries_stay_consumed_when_new_mesh_history_arrives() {
         use quinn::Runtime as _;
         fn transmit(destination: SocketAddr, contents: &[u8]) -> Transmit<'_> {
@@ -823,8 +991,8 @@ mod tests {
                 .copies(socket.as_ref(), destination, true, &mut copy_budget)
                 .is_none()
         );
-        assert!(recent.datagrams.iter().all(|sent| sent.copy_at.is_none()));
-        assert_eq!(recent.bytes, MAX_BYTES);
+        assert!(recent.datagrams.is_empty());
+        assert_eq!(recent.bytes, 0);
     }
 
     #[test]
