@@ -66,6 +66,11 @@ impl Registry {
     pub(crate) fn new(registry: PluginRegistry) -> Self {
         Self::from_factory(Box::new(move || Ok(registry)))
     }
+    /// Exercise startup failure through the real lazy worker/channel lifecycle.
+    #[cfg(all(test, feature = "remote"))]
+    pub(crate) fn unavailable() -> Self {
+        Self::from_factory(Box::new(|| Err(PluginError::Rejected)))
+    }
     fn for_mode(
         state: PathBuf,
         mode: crate::plugins::ExecutionMode,

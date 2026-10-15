@@ -567,11 +567,12 @@ pub(super) async fn run(
     registry: crate::plugin_control::Registry,
     connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
-    if registry.initialize_paths().await.is_err() {
-        // Retained mesh preference is optional. A failed plugin worker must not
-        // prevent contact through the enrolled server endpoint.
-        eprintln!("Infraternal agent server paths unavailable; using enrolled endpoint");
-    }
+    // No preference is valid; an error means the local worker is unavailable.
+    // Return to the retry owner so it recreates that service before reconnecting.
+    registry
+        .initialize_paths()
+        .await
+        .map_err(|_| io::ErrorKind::Other)?;
     let mut live = None;
     let mut warm = None;
     let mut force_fallback = false;

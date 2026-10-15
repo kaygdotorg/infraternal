@@ -975,3 +975,30 @@ async fn unavailable_credentials_do_not_end_server_link() {
         "a recoverable credential error ended the server link"
     );
 }
+
+/// A live transport cannot repair a worker whose one-shot factory has failed.
+#[tokio::test]
+async fn failed_control_worker_returns_to_retry_owner() {
+    let ca = root();
+    let identity = RemoteIdentity {
+        identity: leaf(&ca, false),
+        roots: vec![ca.certificate],
+        endpoint: "127.0.0.1:1".parse().unwrap(),
+        server_name: "localhost".into(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+    };
+    let directory = Directory::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        super::run(
+            &identity,
+            directory.0.clone(),
+            None,
+            crate::plugin_control::Registry::unavailable(),
+            tokio::sync::watch::channel(false).0,
+        ),
+    )
+    .await
+    .expect("failed worker must return to the owner that recreates its service");
+    assert!(result.is_err());
+}
