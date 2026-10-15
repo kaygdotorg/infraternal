@@ -126,6 +126,18 @@ impl Capture {
         assert!(!events.overflow, "transport milestone recorder overflowed");
         events.first.values().cloned().collect()
     }
+    /// Select a fresh terminal witness for the expected non-control writer.
+    pub(crate) fn first_terminal_after(&self, stream: u32, boundary: Instant) -> Option<Event> {
+        assert!(stream != 0 && stream & 1 == 0);
+        self.events()
+            .into_iter()
+            .filter(|event| {
+                event.kind == Kind::TerminalByte
+                    && event.stream == stream
+                    && event.monotonic >= boundary
+            })
+            .min_by_key(|event| event.monotonic)
+    }
     /// Begin a fresh terminal witness after draining earlier expected bytes.
     /// Retain cumulative admission/control and global output callback counts.
     /// Retire terminal peer counters too, preserving the recorder's key bound.
@@ -185,6 +197,41 @@ pub(crate) fn record(kind: Kind, peer: SocketAddr, stream: u32) {
 mod tests {
     //! Recording retains first milestones, distinguishes streams and ends with its proof owner.
     use super::*;
+    #[test]
+    fn fresh_terminal_witness_excludes_another_writer() {
+        let _owner = TEST_SERIAL.blocking_lock();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 7444));
+        let capture = Capture::start(|peer| peer == SocketAddr::from(([127, 0, 0, 1], 7444)));
+        let boundary = Instant::now();
+        {
+            let mut events = capture.0.lock().unwrap();
+            // Insert out of time order: another terminal's earlier callback
+            // cannot satisfy this writer's post-fence byte witness.
+            for (kind, stream, offset) in [
+                (Kind::TerminalByte, 2, 2),
+                (Kind::TerminalByte, 4, 1),
+                (Kind::ControlReady, 2, 0),
+            ] {
+                events.record(Event {
+                    kind,
+                    peer,
+                    stream,
+                    monotonic: boundary + std::time::Duration::from_millis(offset),
+                    wall: SystemTime::UNIX_EPOCH,
+                });
+            }
+        }
+        let observed = capture.first_terminal_after(2, boundary).unwrap();
+        assert_eq!(
+            observed.stream, 2,
+            "another writer supplied the byte witness"
+        );
+        assert_eq!(
+            observed.monotonic,
+            boundary + std::time::Duration::from_millis(2)
+        );
+    }
+
     #[test]
     fn capture_retains_first_milestones_and_releases_ownership() {
         let _owner = TEST_SERIAL.blocking_lock();

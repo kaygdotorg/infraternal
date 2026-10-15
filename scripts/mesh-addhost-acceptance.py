@@ -63,6 +63,9 @@ def check_standing_receipts(root):
             ):
                 assert report[proof] is True, f"{venue}/{index}: missing {proof}"
             assert report["initial_control_callbacks"] == report["final_control_callbacks"] == 1
+            writer = report["terminal_writer_id"]
+            assert type(writer) is int and writer > 0 and writer % 2 == 0
+            assert report["standing_first_output_writer_id"] == writer, "wrong first-byte writer"
             if "verified_terminal_bytes" in report:
                 assert report["verified_terminal_bytes"] == report["expected_terminal_bytes"] > 0
                 assert report["terminal_writer_id"] == 2

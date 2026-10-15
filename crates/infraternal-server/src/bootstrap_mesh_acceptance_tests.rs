@@ -582,6 +582,7 @@ async fn mesh_acceptance_real_addhost() {
         .await
         .unwrap();
     let mut echo = Echo::start(&remote, Uuid::from_bytes(session)).await;
+    let terminal_writer = echo.writer_id();
     let mut expected = b"unrestricted|".to_vec();
     echo.send(&expected).await;
     echo.wait(&expected).await;
@@ -630,7 +631,7 @@ async fn mesh_acceptance_real_addhost() {
         expected.extend_from_slice(marker.as_bytes());
         echo.send(marker.as_bytes()).await;
         echo.wait(&expected).await;
-        standing_first = capture.events().into_iter().filter(|event| event.kind == crate::remote_autoswitch_probe::Kind::TerminalByte && event.monotonic >= boundary).min_by_key(|event| event.monotonic);
+        standing_first = capture.first_terminal_after(terminal_writer, boundary);
         assert!(standing_first.is_some(), "fresh standing marker has no authenticated Output witness");
         nft("delete table inet acceptance_standing_fence");
         wait_link(&remote, ServerLinkKind::Mesh).await;
@@ -682,16 +683,7 @@ async fn mesh_acceptance_real_addhost() {
     let witness_wall = SystemTime::now();
     let natural_first = natural_witness.then(|| {
         let first = capture
-            .events()
-            .into_iter()
-            .filter(|event| {
-                event.kind == crate::remote_autoswitch_probe::Kind::TerminalByte
-                    // Echo's existing attachment uses stream 2; readiness output
-                    // on another stream must not satisfy this fresh witness.
-                    && event.stream == 2
-                    && event.monotonic >= fence
-            })
-            .min_by_key(|event| event.monotonic)
+            .first_terminal_after(terminal_writer, fence)
             .expect("post-success marker has no authenticated Output witness");
         assert!(first.wall >= joined && first.monotonic >= done);
         first
@@ -812,6 +804,8 @@ async fn mesh_acceptance_real_addhost() {
             .unwrap()
             .extend(fields.as_object().unwrap().clone());
     }
+    report["terminal_writer_id"] = serde_json::json!(terminal_writer);
+    report["standing_first_output_writer_id"] = serde_json::json!(standing_first.as_ref().map(|event|event.stream));
     std::fs::write(
         scratch.join("acceptance.json"),
         serde_json::to_vec_pretty(&report).unwrap(),

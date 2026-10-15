@@ -288,6 +288,10 @@ impl Drop for Echo {
     }
 }
 impl Echo {
+    pub(crate) fn writer_id(&self) -> u32 {
+        self.input.stream_id()
+    }
+
     pub(crate) async fn start(actor: &EmbeddedAgent, session: Uuid) -> Self {
         let (input, mut output) = actor
             .attach(session.into_bytes(), 0, 0, 2)
