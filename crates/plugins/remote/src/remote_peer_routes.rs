@@ -494,6 +494,10 @@ impl Peers {
 }
 
 #[cfg(test)]
+#[path = "remote_copy_scan_tests.rs"]
+mod copy_scan_tests;
+
+#[cfg(test)]
 mod tests {
     //! GSO batches remain within both replay bounds even when many old packets must retire.
     use super::*;
