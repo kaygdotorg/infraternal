@@ -613,12 +613,18 @@ async fn run_channel<const SESSION_ONLY: bool>(
                     registry.refresh();
                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
-                result = renewals.join_next(), if !renewals.is_empty() => {
+                result = renewals.join_next(), if !SESSION_ONLY && !renewals.is_empty() => {
+                    // The private image never starts these jobs. Keep their result
+                    // handlers outside that monomorph as well as the select mask.
+                    if SESSION_ONLY { return Err(sessions::invalid("session image cannot complete identity renewal")); }
                     let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
                     let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
                     reply(&control, Message::Result(0, call_id, ok, json))?;
                 }
-                result = opens.join_next(), if !opens.is_empty() => {
+                result = opens.join_next(), if !SESSION_ONLY && !opens.is_empty() => {
+                    // The private image never starts these jobs. Keep their result
+                    // handlers outside that monomorph as well as the select mask.
+                    if SESSION_ONLY { return Err(sessions::invalid("session image cannot complete session launch")); }
                     let (stream, call_id, result) = result.ok_or_else(|| sessions::invalid("missing launch task"))?.map_err(io::Error::other)?;
                     match result {
                         Ok(session) => {
