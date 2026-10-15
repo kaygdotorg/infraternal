@@ -2791,7 +2791,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Neighbours peek in at the top and bottom** by a few pixels, the
        way they do at the sides. There is no new indicator, and no
        appearance setting turns peeking off: a window's full-screen view
-       is the way to see one window alone.
+       is the way to see one window alone. The phone window size "Full
+       width (no neighbours showing)" is removed; phones keep "Edge to edge"
+       and "Comfortable". The owner: "simplify and make UI/UX extremely
+       easy".
 276. **Inbox items can be dismissed (owner, 2026-10-15, #215):** every Inbox
      item can be dismissed, except the few that block something from
      working until they are acted on (for example "Allow host connections").
