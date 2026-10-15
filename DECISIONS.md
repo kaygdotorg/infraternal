@@ -2811,3 +2811,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      item can be dismissed, except the few that block something from
      working until they are acted on (for example "Allow host connections").
      Those stay until resolved, and say what they block.
+277. **Commercial code lives in its own repository (owner, 2026-10-15;
+     changes where item 31 puts it):** the commercial code, previously
+     planned as the `ee/` directory, lives in `kayg/infraternal-enterprise`
+     on Forgejo. Its licence and scope are unchanged (items 31–33): the
+     commercial licence with an offline key, and only seams until there are
+     users. The first planned item is second-admin approval for downgrading
+     privileged access (D274). The AGPL core never depends on it and
+     builds and runs alone. How the two are built together is still open.
