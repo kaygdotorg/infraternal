@@ -5,10 +5,10 @@
 //! endpoint per address would own a separate connection-ID space, so a host
 //! whose packets moved to the mesh address would be unknown there (and answered
 //! with a stateless reset). This socket set gives the endpoint every bound
-//! socket at once, and Quinn's own server-side path migration then validates
-//! the new path of the existing connection.
+//! socket at once. Admitted peer aliases preserve the logical tuple; unknown
+//! tuples still require Quinn's ordinary server-side path validation.
 //!
-//! Replies leave through the socket the peer was last heard on. Quinn records a
+//! Replies follow the last fresh ciphertext hint. Quinn records a
 //! connection's local IP only once, at creation, so its source hint cannot
 //! follow a migration; the learned peer route can. Routes are hints, never
 //! authority: the connection's keys authenticate every datagram either way.

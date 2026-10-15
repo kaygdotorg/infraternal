@@ -50,6 +50,20 @@
   Idle mesh detection requires both a physical mesh reply and fresh authenticated
   counters. Enrolled copies alone cannot prove a live mesh. Simultaneous
   component removal is read after the timeout so disabled proposals stay retired.
+- Backed paths keep the 15 ms probe interval and RTT + 30 ms response margin.
+  Clients request a 5 ms maximum ACK delay through the existing negotiated
+  transport extension, retaining the ordinary two-packet threshold and first
+  reordered-packet acknowledgement. Copy-first comparisons confirm negotiation;
+  they do not isolate timer changes from the extension's extra frames. The
+  physical ACK-only comparison runs on the pinned VM, never as a host timing
+  acceptance claim. Healthy 1000-transport and lifecycle acceptance are separate.
+- Both client and server discovery retain the 1352-byte UDP payload ceiling for
+  the current IPv4 mesh path. A socket-level move preserves the learned MTU,
+  so an enrolled server cannot learn a larger payload and depend on later
+  black-hole recovery. The regression delivers exact stream bytes and checks
+  real acknowledged discovery in both directions, rather than configuration
+  readback alone. Admitted aliases preserve logical tuples; they do not trigger
+  the engine's ordinary address-migration validation.
 - Cancellation tests use a file/WAL namespace pool matching production. An
   in-memory pool can lose its schema when SQLx retires its final checked-out
   connection; a failed namespace fixture alone does not prove a production

@@ -5,8 +5,8 @@
 //! to that address, or to the server's mesh address. Datagrams from either
 //! physical address are reported as coming from the logical one, so the
 //! client connection never sees an address change and keeps its streams,
-//! writer bindings and congestion state. The server sees the host's new
-//! source and validates it with QUIC's own path migration.
+//! writer bindings and congestion state. Trusted server aliases likewise map
+//! the host's admitted physical tuples onto its enrolled logical tuple.
 //!
 //! The mesh address is supplied by the host's own applied mesh configuration
 //! (trusted routing), never learned from UDP. A mapped datagram grants no
