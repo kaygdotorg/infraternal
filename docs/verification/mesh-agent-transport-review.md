@@ -121,7 +121,7 @@
   path and cannot establish switch acceptance. Failed controls do not justify
   weaker freshness guards or an accepted healthy-cohort CPU/RSS claim.
 - Release acceptance, exact static size ceilings and full gate transcripts live
-  on #201. Standing-session release cohorts meet their per-venue byte budgets;
-  this does not establish the earliest byte of natural joining, the original
+  on #201. A standing-session verdict cannot establish the earliest byte of
+  natural joining, the original
   SSH-shell handoff, healthy scale cost or a clean gate on a subsequent head.
   Each remains independently reviewable and outstanding failures stay recorded.
