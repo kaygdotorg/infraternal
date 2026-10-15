@@ -3,12 +3,36 @@
 
 SPDX-License-Identifier: AGPL-3.0-only
 """
+import contextlib
+import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from ppu_trace import parse_event, summarize
+from ppu_trace import Trace, parse_event, summarize
 
 
 class Attribution(unittest.TestCase):
+    def test_failed_instance_admission_never_changes_an_existing_trace(self):
+        scratch = Path.home() / '.cache/codex-scratch/ppu-trace-tests'
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            parent = Path(directory)
+            instance = parent / f'ppu-stalls-{os.getpid()}'
+            instance.mkdir()
+            knob = instance / 'tracing_on'
+            knob.write_text('existing trace stays enabled')
+            with patch('ppu_trace.Path', return_value=parent):
+                observer = Trace(123)
+            result = None
+            with contextlib.suppress(OSError):
+                result = observer.close()
+            self.assertEqual(knob.read_text(), 'existing trace stays enabled')
+            self.assertTrue(instance.exists())
+            self.assertIsNotNone(result)
+            self.assertFalse(result['complete'])
+
     def test_both_syscall_printers_discard_arguments(self):
         for body, expected in [(b'sys_read(fd: 3, buf: 0xabcd, count: 0x1000)', 'sys_enter_read'),
                                (b'sys_read -> 0x1000', 'sys_exit_read'),

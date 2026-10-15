@@ -81,6 +81,7 @@ class Trace:
     """Stream only the fixture host's events from an independently owned instance."""
     def __init__(self, pid):
         self.pid = pid
+        self.owned = False
         self.root = Path('/sys/kernel/tracing/instances') / f'ppu-stalls-{os.getpid()}'
         self.stop = threading.Event()
         self.thread = None
@@ -89,6 +90,7 @@ class Trace:
         self.error = None
         try:
             self.root.mkdir()
+            self.owned = True
             (self.root / 'tracing_on').write_text('0')
             (self.root / 'trace_clock').write_text('mono')
             (self.root / 'buffer_size_kb').write_text('16384')
@@ -122,7 +124,7 @@ class Trace:
                             self.events.append(event)
 
     def close(self):
-        if self.root.exists():
+        if self.owned and self.root.exists():
             with contextlib.suppress(OSError):
                 (self.root / 'tracing_on').write_text('0')
         self.stop.set()
@@ -131,7 +133,7 @@ class Trace:
         if self.fd is not None:
             os.close(self.fd)
         overruns = 0
-        if self.root.exists():
+        if self.owned and self.root.exists():
             for path in (self.root / 'per_cpu').glob('cpu*/stats'):
                 for line in path.read_text().splitlines():
                     key, _, value = line.partition(':')
@@ -141,6 +143,7 @@ class Trace:
                 with contextlib.suppress(OSError):
                     path.write_text('0')
             self.root.rmdir()
+            self.owned = False
         return summarize(self.events) | dict(error=self.error, overruns=overruns,
                                               complete=self.error is None and overruns == 0)
 
