@@ -150,7 +150,8 @@ export class AppStream {
     this.setState({ kind: "connecting" });
     // A call made while the socket is down would wait for ever (nothing is sent), and one in flight when the socket drops is
     // rejected: either way the start waits for the connection and goes again, a few times, before it explains itself.
-    for (let attempt = 0; attempt < MAX_START_TRIES; attempt++) {
+    let attempts = 0;
+    while (attempts < MAX_START_TRIES) {
       await this.welcomed();
       if (generation !== this.generation || this.disposed) return;
       // A disconnected retry retains the old session ID until Stop is acknowledged (or refused). Starting first
@@ -159,7 +160,8 @@ export class AppStream {
         if (!(await this.flushStops())) continue;
         if (!this.o.connection.isWelcomed) continue;
       }
-      if (await this.start(generation, attempt === MAX_START_TRIES - 1)) return;
+      if (await this.start(generation, attempts === MAX_START_TRIES - 1)) return;
+      attempts++;
     }
   }
 

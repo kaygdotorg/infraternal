@@ -6,12 +6,13 @@ import { AppStream } from "./stream";
 
 const settled = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 
-test("retry after a decoder failure while disconnected stops both native sessions", async () => {
+test("retry retains Stop across repeated disconnects before replacing the native session", async () => {
   const originals = new Map<string, PropertyDescriptor | undefined>();
   const sockets: Socket[] = [];
   const timers = new Map<number, () => void>();
   const starts: string[] = [];
   const stops: string[] = [];
+  let stopResponsesToDrop = 6;
   let nextTimer = 0;
   class Canvas { className = ""; width = 2; height = 2; transferControlToOffscreen() { return {}; } }
   class Socket {
@@ -33,7 +34,14 @@ test("retry after a decoder failure while disconnected stops both native session
       if (frame.actionId === "desktop.session.start") {
         const id = `00000000-0000-0000-0000-${(starts.length + 1).toString().padStart(12, "0")}`;
         starts.push(id); reply = { session_id: id };
-      } else if (frame.actionId === "desktop.session.stop") stops.push(String(input.session_id));
+      } else if (frame.actionId === "desktop.session.stop") {
+        stops.push(String(input.session_id));
+        if (stopResponsesToDrop > 0) {
+          stopResponsesToDrop--;
+          queueMicrotask(() => this.close());
+          return;
+        }
+      }
       queueMicrotask(() => this.receive({ type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify(reply)) }));
     }
     close(): void { this.readyState = 3; this.onclose?.(); }
@@ -70,11 +78,18 @@ test("retry after a decoder failure while disconnected stops both native session
     stream.retry(css); await settled();
     // Only the reconnect timer remains after detach clears this viewer's timers.
     expect(timers.size).toBe(1);
-    expect(starts).toHaveLength(1);
-    expect(stops).toEqual([]);
-    [...timers.values()][0]!(); sockets[1]!.welcome(); await settled();
+    for (let attempt = 0; attempt < 6; attempt++) {
+      expect(starts).toHaveLength(1);
+      const [timerId, reconnect] = [...timers.entries()][0]!;
+      timers.delete(timerId); reconnect(); sockets[attempt + 1]!.welcome(); await settled();
+      expect(stops).toHaveLength(attempt + 1);
+      expect(starts).toHaveLength(1);
+    }
+    expect(timers.size).toBe(1);
+    const [timerId, reconnect] = [...timers.entries()][0]!;
+    timers.delete(timerId); reconnect(); sockets[7]!.welcome(); await settled();
     expect(starts).toHaveLength(2);
-    expect(stops).toEqual([starts[0]!]);
+    expect(stops).toEqual(Array(7).fill(starts[0]!));
     stream.dispose(); await settled();
     expect(stops).toContain(starts[0]!);
     expect(stops).toContain(starts[1]!);
