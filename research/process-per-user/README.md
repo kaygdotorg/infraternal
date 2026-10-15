@@ -70,9 +70,15 @@ revived in place; cancelled entries are discarded when popped, without scanning
 the whole bulk backlog on every turn. PTY and viewer backpressure keep bulk
 producers from allocating an unbounded transmit queue.
 
-A session's first ready descriptor stays inline; additional descriptors use a
-bounded spill list. Registration updates and peer readiness borrow arrays sized
-by the existing 32-peer admission cap. Healthy peer sockets flush immediately:
+A session's first two ready descriptors stay inline in its readiness row;
+additional descriptors use a bounded spill list whose capacity survives the
+next turn.
+Rows are indexed by immutable session slots. A current-generation active list
+visits only touched rows, and generation wrap invalidates every old row before
+reuse. Descriptor registrations keep the fd only in their generation key and
+use a checked 16-bit session index under the 1,000-session admission ceiling.
+Registration updates and peer readiness borrow arrays sized by the existing
+32-peer admission cap. Healthy peer sockets flush immediately:
 each housekeeping visit shares a 32-KiB/four-write budget across pending, state
 and output frames. Partial frames retain their byte cursor and ordering; logical
 replay work keeps writable interest after an inline frame has drained. Large
@@ -80,8 +86,11 @@ completed repaint buffers release storage before an indefinite idle wait.
 Retained output is borrowed across physical ring wrap and encoded directly
 into that peer's reusable wire buffer. A partial frame keeps stable bytes while
 the ring changes; no borrowed ring pointer survives the housekeeping visit.
-Ready-session tables and work lists reuse bounded host-wide capacity between
-turns instead of allocating a fresh copy for each readiness batch.
+Ready rows and work lists reuse bounded host-wide capacity between turns.
+Ordinary PTY-plus-viewer readiness requires no transient allocation, and the
+indexed rows plus active indices reserve at most 64 requested bytes per slot.
+This host-wide ownership is included in the independent PSS slope, separately
+from the per-session terminal ledger.
 Blocked/drained PTYs are omitted to prevent level-triggered HUP spin. Live
 idle sessions have no timers: the readiness wait sleeps indefinitely until socket, PTY or
 child-exit readiness. Exited sessions alone use the existing ten-minute
