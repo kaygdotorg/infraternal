@@ -4,12 +4,24 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import ppu_clock
 import ppu_segment
 
 
 class Segments(unittest.TestCase):
+    def test_existing_foreign_unit_cannot_be_frozen_or_retired(self):
+        properties = 'ControlGroup=/system.slice/ppu-soak-collision.scope\nDescription=other job\n'
+        with patch.object(ppu_segment.subprocess, 'check_output', return_value=properties):
+            with self.assertRaises(ValueError):
+                ppu_segment.owned_group('ppu-soak-collision', 'our invocation')
+            child = Mock()
+            child.poll.return_value = None
+            with patch.object(ppu_segment.subprocess, 'run') as kill_unit:
+                ppu_segment.retire(child, 'ppu-soak-collision', 'our invocation')
+            kill_unit.assert_not_called()
+            child.terminate.assert_called_once()
+
     def test_pause_changes_existing_mapping_without_replacing_its_inode(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / 'clock'

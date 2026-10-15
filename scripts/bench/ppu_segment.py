@@ -17,6 +17,7 @@ import signal
 import struct
 import subprocess
 import time
+import uuid
 
 
 def frozen(group, value, timeout=30):
@@ -33,6 +34,43 @@ def publish_pause(path, total_ns):
     """The reader is frozen; preserve the inode backing its existing mapping."""
     with path.open('r+b', buffering=0) as target:
         assert target.write(struct.pack('<Q', total_ns)) == 8
+
+
+def owned_group(unit, description):
+    """A matching name is insufficient: fence ownership by this invocation tag."""
+    properties = subprocess.check_output(['systemctl', 'show', unit + '.scope',
+        '-p', 'ControlGroup', '-p', 'Description'], text=True)
+    values = dict(line.split('=', 1) for line in properties.splitlines() if '=' in line)
+    if not values.get('ControlGroup'):
+        return None
+    if values.get('Description') != description:
+        raise ValueError('refuse foreign scope invocation')
+    candidate = Path('/sys/fs/cgroup') / values['ControlGroup'].lstrip('/')
+    if candidate.name != unit + '.scope':
+        raise ValueError('refuse foreign cgroup')
+    return candidate if (candidate / 'cgroup.freeze').exists() else None
+
+
+def retire(child, unit, description):
+    """A failed launcher never gives authority to kill an existing unit name."""
+    group = None
+    with contextlib.suppress(OSError, ValueError, subprocess.CalledProcessError):
+        group = owned_group(unit, description)
+    if group is not None:
+        with contextlib.suppress(OSError):
+            (group / 'cgroup.freeze').write_text('0')
+        subprocess.run(['systemctl', 'kill', '--kill-whom=all', '--signal=TERM',
+                        unit + '.scope'], check=False)
+    elif child.poll() is None:
+        child.terminate()
+    try:
+        child.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        if group is not None:
+            subprocess.run(['systemctl', 'kill', '--kill-whom=all', '--signal=KILL',
+                            unit + '.scope'], check=False)
+        child.kill()
+        child.wait(timeout=30)
 
 
 def run(args):
@@ -53,6 +91,7 @@ def run(args):
     held = False
     active_start = None
     active_elapsed = 0
+    description = f'process-per-user fixture {uuid.uuid4().hex}'
 
     def record(kind, **fields):
         log.write(json.dumps(dict(kind=kind, wall_utc=datetime.datetime.now(
@@ -76,20 +115,14 @@ def run(args):
             if child is None:
                 environment = dict(os.environ, PPU_PAUSE_CLOCK=str(clock))
                 child = subprocess.Popen(['systemd-run', '--quiet', '--scope', '--unit', args.unit,
+                    '--description', description,
                     '-p', 'CPUWeight=10000', '-p', 'MemoryMax=5G', '-p', 'MemorySwapMax=0',
                     '-p', 'OOMPolicy=kill', *args.command], env=environment)
                 until = time.monotonic() + 30
                 while group is None:
                     if child.poll() is not None:
                         return child.returncode
-                    control = subprocess.check_output(['systemctl', 'show', args.unit + '.scope',
-                        '-p', 'ControlGroup', '--value'], text=True).strip()
-                    if control:
-                        candidate = Path('/sys/fs/cgroup') / control.lstrip('/')
-                        if candidate.name != args.unit + '.scope':
-                            raise ValueError('refuse foreign cgroup')
-                        if (candidate / 'cgroup.freeze').exists():
-                            group = candidate
+                    group = owned_group(args.unit, description)
                     if time.monotonic() >= until:
                         raise TimeoutError('scope startup timed out')
                     time.sleep(.05)
@@ -119,18 +152,8 @@ def run(args):
         # A failed coordinator must never leave its own scope frozen or running.
         for sig in previous:
             signal.signal(sig, signal.SIG_IGN)
-        if group is not None and group.exists():
-            with contextlib.suppress(OSError):
-                (group / 'cgroup.freeze').write_text('0')
-        if child is not None and child.poll() is None:
-            subprocess.run(['systemctl', 'kill', '--kill-whom=all', '--signal=TERM',
-                            args.unit + '.scope'], check=False)
-            try:
-                child.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                subprocess.run(['systemctl', 'kill', '--kill-whom=all', '--signal=KILL',
-                                args.unit + '.scope'], check=False)
-                child.wait(timeout=30)
+        if child is not None:
+            retire(child, args.unit, description)
         if held:
             record('lock-released', active_seconds=active_elapsed)
         lock.close()
