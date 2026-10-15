@@ -25,7 +25,6 @@ pub(crate) enum Message {
     Shim(u32, Shim),
     Result(u32, u32, bool, Vec<u8>),
     Deferred(u32, u32, infraternal_plugin_api::ActionReply),
-    #[cfg(target_os = "linux")]
     Event(u32, Vec<u8>),
     #[cfg(target_os = "linux")]
     Exited(u32, Vec<u8>, oneshot::Sender<()>),
@@ -142,7 +141,6 @@ pub(crate) async fn writer(
             Message::Deferred(stream, call_id, reply) => {
                 deferred_reply(&mut tx, socket, stream, call_id, reply).await?;
             }
-            #[cfg(target_os = "linux")]
             Message::Event(stream, json) => write_event(&mut tx, socket, stream, &json).await?,
             #[cfg(target_os = "linux")]
             Message::Exited(stream, json, delivered) => {
@@ -173,8 +171,7 @@ pub(crate) async fn writer(
     }
     Ok(())
 }
-/// Keep both ordinary and acknowledged exit Events on the same ordered wire path.
-#[cfg(target_os = "linux")]
+/// Keep startup inventories, ordinary events and acknowledged exits on one ordered wire path.
 async fn write_event(
     tx: &mut Transmit,
     socket: &impl Channel,

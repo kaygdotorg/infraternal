@@ -104,6 +104,16 @@ async fn dispatch(
                 calls.capabilities(caps & wire_caps);
             }
         }
+        // Portable nodes have no terminal shims. The authoritative empty census
+        // makes admission visible without weakening the server's readiness check.
+        // The common writer guarantees Hello precedes this one startup event.
+        reply(
+            &tx,
+            Message::Event(
+                0,
+                br#"{"type":"terminal.sessions.snapshot","session_ids":[]}"#.to_vec(),
+            ),
+        )?;
         loop {
             tokio::select! {
                 result = calls.completed(), if calls.pending() => {
@@ -203,3 +213,7 @@ pub async fn run_negotiated_bound_terminal(
 ) -> io::Result<()> {
     run_bound_terminal(channel, state).await
 }
+
+#[cfg(test)]
+#[path = "daemon_portable_tests.rs"]
+mod tests;
