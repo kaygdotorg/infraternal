@@ -3,6 +3,14 @@ import AppKit
 import Foundation
 import Darwin
 
+// Privacy preflights and every framework object must be created only after
+// responsibility changes. The same entry path serves production and diagnostics.
+do { try establishResponsibility() }
+catch {
+    FileHandle.standardError.write(Data("Desktop responsibility launch unavailable.\n".utf8))
+    exit(1)
+}
+
 let surfaceMode = CommandLine.arguments.contains("--surface-capture")
 private let encoderMode = CommandLine.arguments.contains("--encoder")
 

@@ -44,6 +44,8 @@ impl Native {
         Self::spawn_mode(executable, false, true)
     }
     fn spawn_mode(executable: &Path, encoder: bool, surface: bool) -> io::Result<Self> {
+        // The native entrypoint uses a responsibility-disclaimed SETEXEC before
+        // AppKit or capture access. It preserves this owned PID and both pipes.
         let mut command = Command::new(executable);
         if encoder {
             command.arg("--encoder");

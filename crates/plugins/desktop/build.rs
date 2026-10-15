@@ -36,6 +36,7 @@ fn main() {
         .args([
             "-O",
             "-whole-module-optimization",
+            "native/ResponsibleLaunch.swift",
             "native/CaptureState.swift",
             "native/Inventory.swift",
             "native/Geometry.swift",

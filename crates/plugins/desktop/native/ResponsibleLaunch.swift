@@ -1,0 +1,40 @@
+/// Role: establish the companion's own privacy attribution while retaining its PID and inherited pipes [D203,D208].
+import Darwin
+import Foundation
+
+/// Resolve the system responsibility hook at runtime: it is shipped by macOS,
+/// but is not a public SDK contract. Missing support is an error, never a launch
+/// that silently charges permissions to the infraternal agent's launcher.
+func establishResponsibility() throws {
+    let marker = "--responsible-child"
+    if CommandLine.arguments.contains(marker) { return }
+    typealias Disclaim = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
+    guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_spawnattrs_setdisclaim") else {
+        throw POSIXError(.ENOTSUP)
+    }
+    let disclaim = unsafeBitCast(symbol, to: Disclaim.self)
+    var attributes: posix_spawnattr_t?
+    func check(_ result: Int32) throws {
+        if result != 0 { throw POSIXError(POSIXErrorCode(rawValue:result) ?? .EINVAL) }
+    }
+    try check(posix_spawnattr_init(&attributes))
+    defer { posix_spawnattr_destroy(&attributes) }
+    try check(disclaim(&attributes, 1))
+    // SETEXEC replaces this process rather than leaving a supervising child.
+    // Rust keeps the same Child/PID, process group and stdin/stdout endpoints;
+    // EOF restoration, deadlines and forced retirement continue to work.
+    try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETEXEC)))
+    let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
+    let arguments = ([executable] + Array(CommandLine.arguments.dropFirst()) + [marker]).map { strdup($0) }
+    defer { arguments.forEach { free($0) } }
+    var argv = arguments + [nil]
+    let environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+    defer { environment.forEach { free($0) } }
+    var envp = environment + [nil]
+    var pid: pid_t = 0
+    try check(executable.withCString { path in
+        posix_spawn(&pid, path, nil, &attributes, &argv, &envp)
+    })
+    // Successful SETEXEC never returns, even if the replacement later fails.
+    throw POSIXError(.EIO)
+}
