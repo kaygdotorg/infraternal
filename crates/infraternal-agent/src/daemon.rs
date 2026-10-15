@@ -44,6 +44,8 @@ use tokio::{
 
 #[path = "session_commands.rs"]
 mod session_commands;
+#[path = "terminal_events.rs"]
+mod terminal_events;
 
 enum Command {
     Input(u64, Vec<u8>),
@@ -273,14 +275,10 @@ fn publish_session_snapshot(
     if published.as_ref() == Some(&session_ids) {
         return Ok(true);
     }
-    let ids: Vec<String> = session_ids
-        .iter()
-        .map(|id| uuid::Uuid::from_bytes(*id).to_string())
-        .collect();
-    let json = serde_json::to_vec(&serde_json::json!({
-        "type": "terminal.sessions.snapshot",
-        "session_ids": ids,
-    }))?;
+    let json = terminal_events::Notice::SessionsSnapshot {
+        session_ids: &session_ids,
+    }
+    .json()?;
     match tx.try_send(Message::Event(0, json)) {
         Ok(()) => *published = Some(session_ids),
         Err(mpsc::error::TrySendError::Full(_)) => return Ok(false),
@@ -1003,11 +1001,11 @@ async fn replay_complete(
     id: [u8; 16],
     out_seq: u64,
 ) -> io::Result<()> {
-    let json = serde_json::to_vec(&serde_json::json!({
-        "type": "terminal.replay_complete",
-        "session_id": uuid::Uuid::from_bytes(id),
-        "out_seq": out_seq.to_string(),
-    }))?;
+    let json = terminal_events::Notice::ReplayComplete {
+        session_id: uuid::Uuid::from_bytes(id),
+        out_seq,
+    }
+    .json()?;
     emit(tx, Message::Event(stream, json)).await
 }
 
@@ -1020,12 +1018,14 @@ async fn exited(
     final_seq: u64,
     retired: bool,
 ) -> io::Result<()> {
-    let mut notice = serde_json::json!({"type":"terminal.exited", "session_id":uuid::Uuid::from_bytes(id), "status":status, "final_seq":final_seq});
     // A saved exit proves status, but cannot promise a final repaint after retirement.
-    if retired {
-        notice["retired"] = serde_json::Value::Bool(true);
+    let json = terminal_events::Notice::Exited {
+        session_id: uuid::Uuid::from_bytes(id),
+        status,
+        final_seq,
+        retired: retired.then_some(true),
     }
-    let json = serde_json::to_vec(&notice)?;
+    .json()?;
     if retired {
         // The shim has already retired: no ownership remains to acknowledge.
         // Queue both final frames on one FIFO so the native completion drain
@@ -1277,9 +1277,12 @@ async fn terminal_run(
                     if output.repaint(seq, length).is_ok() {
                         deadline = None;
                         if approximate {
-                            let json = serde_json::to_vec(
-                                &serde_json::json!({"type":"terminal.snapshot", "session_id":uuid::Uuid::from_bytes(id), "seq":seq, "approximate":true}),
-                            )?;
+                            let json = terminal_events::Notice::Snapshot {
+                                session_id: uuid::Uuid::from_bytes(id),
+                                seq,
+                                approximate: true,
+                            }
+                            .json()?;
                             emit(&tx, Message::Event(stream, json)).await?;
                         }
                         emit(&tx, Message::Shim(stream, frame)).await?;
@@ -1457,7 +1460,9 @@ async fn terminal_run(
                         // Older shims cannot negotiate approximation. Park
                         // until credit/input/resize triggers recovery: keep the
                         // live mux stream, but neither busy-loop nor block PTY.
-                        let json = serde_json::to_vec(&serde_json::json!({"type":"terminal.snapshot_unavailable", "session_id":uuid::Uuid::from_bytes(id), "seq":output.cursor()}))?;
+                        let json = terminal_events::Notice::SnapshotUnavailable {
+                            session_id: uuid::Uuid::from_bytes(id), seq: output.cursor(),
+                        }.json()?;
                         emit(&tx, Message::Event(stream, json)).await?;
                         session = None; probe = None;
                     }
