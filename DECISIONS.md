@@ -2825,3 +2825,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      steps, and as one of the loading steps in the top pill's progress
      circle while the host connects. After that, the Mesh view's
      direct/relayed label is the only place it shows.
+279. **Selecting several machines (owner, 2026-10-15, #215):** in the
+     sidebar and on the Map, ⌘-click (Ctrl-click on Linux and Windows) adds
+     or removes a machine, and Shift-click selects a range in the sidebar.
+     The action pill then reads "3 machines" and its actions apply to all of
+     them. On phones a long-press starts selecting and taps add more.
+     Search does the same in words ("allow full access on all offline
+     hosts"). There is no select mode and there are no checkboxes.
