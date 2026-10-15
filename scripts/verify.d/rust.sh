@@ -176,6 +176,8 @@ rust_static_build_check() {
 
     scripts/auth-toolchain || return $?
     python3 scripts/test-musl-cc.py || return $?
+    python3 scripts/test-native-metadata.py || return $?
+    python3 scripts/test-rustc-paths.py || return $?
     python3 scripts/release/production_trust_test.py || return $?
 
     for target in "${targets[@]}"; do

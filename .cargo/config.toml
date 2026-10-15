@@ -1,3 +1,6 @@
+[build]
+rustc = ".cargo/rustc.sh"
+
 # Use the pinned Rust toolchain's bundled LLD and musl CRT for static targets.
 [target.x86_64-unknown-linux-musl]
 linker = ".cargo/rust-lld.sh"
@@ -9,6 +12,8 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 # cc-rs and openssl-src both honor these target-qualified compiler/archive settings.
 [env]
+# Upstream native build timestamps must not depend on the build wall clock.
+SOURCE_DATE_EPOCH = "0"
 CC_x86_64_unknown_linux_musl = { value = ".cargo/musl-cc-avx512.sh", relative = true }
 CC_aarch64_unknown_linux_musl = { value = ".cargo/musl-cc.sh", relative = true }
 AR_x86_64_unknown_linux_musl = { value = ".cargo/musl-ar.sh", relative = true }

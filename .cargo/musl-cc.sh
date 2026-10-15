@@ -12,7 +12,15 @@ esac
 export ZIG_GLOBAL_CACHE_DIR="$target_root/auth-tools/cache"
 # cc-rs detects Clang and adds Rust's target spelling, which Zig does not
 # accept. Reject mismatches and translate only the target this wrapper owns.
-args=()
+# Only the generated build output is normalized; dependency sources stay intact.
+# Upstream records the whole compiler command as a C array, so file-prefix
+# mapping alone cannot remove that absolute path from the version string.
+for arg in "$@"; do
+    if [[ "$arg" == crypto/cversion.c ]]; then
+        python3 "$root/scripts/normalize-native-metadata.py" crypto/buildinf.h
+    fi
+done
+args=("-ffile-prefix-map=$root=/infraternal" "-ffile-prefix-map=$target_root=/build")
 for arg in "$@"; do
     case "$arg" in
         # openssl-src adds this historical musl workaround. Our pinned Zig

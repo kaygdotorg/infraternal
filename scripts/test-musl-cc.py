@@ -25,7 +25,9 @@ with tempfile.TemporaryDirectory(prefix='wrapper-test-', dir=SCRATCH) as directo
              '-DOPENSSL_NO_SECURE_MEMORY', *retained],
             env=environment, check=True, capture_output=True, text=True,
         )
-        assert result.stdout.splitlines() == ['cc', '-target', zig_target, *retained], target
+        assert result.stdout.splitlines() == ['cc', '-target', zig_target,
+            f'-ffile-prefix-map={ROOT}=/infraternal',
+            f'-ffile-prefix-map={directory}=/build', *retained], target
         result = subprocess.run(
             [str(ROOT / '.cargo/musl-cc.sh'), '--target=unowned-target'],
             env=environment, capture_output=True, text=True,
