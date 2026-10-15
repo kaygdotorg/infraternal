@@ -51,8 +51,8 @@ struct Paths {
 /// Physical routing for one connection's logical server address.
 pub struct PathSocket {
     socket: Arc<dyn AsyncUdpSocket>,
-    /// Immutable before endpoint creation; never understate kernel aggregation.
-    receive_segments: usize,
+    /// Set before endpoint creation, only after kernel aggregation is disabled.
+    single_receive: bool,
     logical: SocketAddr,
     on_mesh: AtomicBool,
     paths: Mutex<Paths>,
@@ -175,8 +175,7 @@ impl PathSocket {
     /// `logical` is the enrolled server address the connection was dialed to.
     #[must_use]
     pub fn new(socket: Arc<dyn AsyncUdpSocket>, logical: SocketAddr) -> Arc<Self> {
-        let receive_segments = socket.max_receive_segments();
-        Self::with_receive_segments(socket, logical, receive_segments)
+        Self::with_single_receive(socket, logical, false)
     }
 
     /// Register a fresh outgoing socket for one host connection. Send
@@ -193,35 +192,28 @@ impl PathSocket {
         runtime: &dyn quinn::Runtime,
     ) -> io::Result<Arc<Self>> {
         #[cfg(target_os = "linux")]
-        let control = socket.try_clone().ok();
+        let control = std::os::fd::AsFd::as_fd(&socket).try_clone_to_owned().ok();
         // Runtime registration enables aggregation. Disable it afterwards,
         // before dialing can queue any authenticated incoming datagrams.
         let socket = runtime.wrap_udp_socket(socket)?;
-        let receive_segments = socket.max_receive_segments();
         #[cfg(target_os = "linux")]
-        let receive_segments = if control.as_ref().is_some_and(|control| {
+        let single_receive = control.as_ref().is_some_and(|control| {
             nix::sys::socket::setsockopt(control, nix::sys::socket::sockopt::UdpGroSegment, &false)
                 .is_ok()
-        }) {
-            1
-        } else {
-            receive_segments
-        };
-        Ok(Self::with_receive_segments(
-            socket,
-            logical,
-            receive_segments,
-        ))
+        });
+        #[cfg(not(target_os = "linux"))]
+        let single_receive = false;
+        Ok(Self::with_single_receive(socket, logical, single_receive))
     }
 
-    fn with_receive_segments(
+    fn with_single_receive(
         socket: Arc<dyn AsyncUdpSocket>,
         logical: SocketAddr,
-        receive_segments: usize,
+        single_receive: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             socket,
-            receive_segments,
+            single_receive,
             logical,
             on_mesh: AtomicBool::new(false),
             paths: Mutex::new(Paths {
@@ -515,7 +507,11 @@ impl AsyncUdpSocket for PathSocket {
         self.socket.max_transmit_segments()
     }
     fn max_receive_segments(&self) -> usize {
-        self.receive_segments
+        if self.single_receive {
+            1
+        } else {
+            self.socket.max_receive_segments()
+        }
     }
     fn may_fragment(&self) -> bool {
         self.socket.may_fragment()
