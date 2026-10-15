@@ -38,7 +38,7 @@ interface LinkCharacter {
   target?: string;
 }
 
-const URL_PATTERN = /(?<![\p{L}\p{N}_@])(?:https?:\/\/|file:\/\/)[^\s<>"'`]+/giu;
+const URL_PATTERN = /(?<![\p{L}\p{N}_@])(?:https?:\/\/|mailto:|file:\/\/)[^\s<>"'`]+/giu;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/u;
 const BRACKETS = [["(", ")"], ["[", "]"], ["{", "}"]] as const;
 

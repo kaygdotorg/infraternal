@@ -78,6 +78,12 @@ test("opens only HTTP, HTTPS, and mailto targets", () => {
   expect(["file:///tmp/report", "javascript:alert(1)", "data:text/html,hi", "custom:thing"].map(isOpenableTarget)).toEqual([false, false, false, false]);
 });
 
+test("recognizes plain mailto links as openable terminal links", () => {
+  expect(detectTerminalLinks([row("mailto:person@example.test", 0)])).toMatchObject([
+    { kind: "url", target: "mailto:person@example.test", openable: true },
+  ]);
+});
+
 test("shows file URLs locally without making them openable", () => {
   const target = "file:///home/user/report.txt";
   expect(detectTerminalLinks([row(target, 2)])).toMatchObject([{ kind: "url", target, openable: false }]);
