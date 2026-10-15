@@ -2714,3 +2714,161 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      within noise on hardware without AVX-512. A gate check fails the build
      if a future OpenSSL brings the AVX-512 AES-GCM code back. It merges
      after the switch-over, once its review's P2 fixes pass.
+273. **Host removal, list stability, session manager and the + picker
+     (owner, 2026-10-15; #215, #212):**
+     - **Removing a host uninstalls the infraternal agent.** We clean up
+       after ourselves: the infraternal agent is small and the server holds
+       all configuration, so there is no "keep it installed" option.
+     - **Lists stay put while open.** Rows may be added or removed in the
+       sidebar, but the list never moves under the person's focus.
+     - **The session manager gets a Delete button** beside Rename; F2
+       renames in place.
+     - **The shortcuts panel lists F2, Delete and ⌘I.**
+     - **The + picker lists every host that has been added,** reachable or
+       not, each with its online/offline state.
+     - **`/docs/privileges` is written** (Astro Starlight per item 44). It
+       explains what the privileged infraternal agent can do and how to take
+       the privilege back. Before any of it is built, the privileged-password
+       handling goes through a design round with the owner.
+274. **Privileged access: how the password is handled (owner, 2026-10-15;
+     round 1 of the design pass from D273, #215):**
+     - **The privilege model stays D18 and D163:** consent upgrades the
+       host's rootless infraternal agent to the root infraternal agent.
+       There is no separate root helper. Each person's sessions already run
+       in that person's own process (D229, D270), so the code that faces
+       terminals does not run as root.
+     - **The password never reaches the server in readable form.** The
+       browser seals it to that host's infraternal agent key. The server
+       forwards bytes it cannot read.
+     - **The way in is detected and has no menu,** in this order: sudo
+       without a password (consent only, no field), then sudo or doas (the
+       person's own password), then the root password (su).
+     - **Every privileged action is recorded** in the host's activity log
+       and the Inbox: what ran, who asked and when, never secrets. A failed
+       attempt shows in the Inbox at once.
+     - **Hold as few secrets as possible:** the password is used once to
+       install the root infraternal agent's system service, then wiped from
+       memory. It is never written to disk, a log or the server.
+     - **Going back to the rootless agent is possible but deliberately hard
+       to reach,** so that nobody downgrades by accident:
+       - Only admins of that host ever see the action, anywhere.
+       - It is not in the host's details: the "Full access" line there shows
+         the state only. The action is found by search and in the host's ⋯
+         menu.
+       - **Two prompts.** The first explains why and what, as a short
+         point-by-point list of what stops on this host right now (for
+         example "build-01 leaves the mesh: 3 machines lose their direct
+         link", "4 containers run by root disappear from Containers"),
+         concise and hand-held. The second asks "are you sure", asks which
+         user the rootless infraternal agent should run as, and has the
+         person type the host's name.
+       - Every admin of the host gets an Inbox item (who and when) with
+         "Allow full access again", which asks for the password again
+         because none was kept.
+       - **Passkey at the last step, always:** the person confirms with
+         their passkey (Touch ID or Face ID), so neither a stray click nor
+         someone at an unlocked laptop can downgrade.
+       - **Organisation lock:** admins can mark hosts "Full access
+         required"; nobody can downgrade those, and the action says why
+         instead.
+       - **Second-admin approval** is an `ee/` feature (items 31 and 33):
+         when an organisation turns it on, the downgrade waits in the other
+         admins' Inbox until one approves. Only its seam is built before
+         there are users.
+       - Not adopted: a delayed downgrade with undo (it makes the real state
+         unclear), and refusing while root-only things are in use (prompt
+         1 already lists them).
+       Removing the host removes everything (D273).
+275. **The wheel scrolls what is under it (owner, 2026-10-15; refines D177,
+     #215):** today a snapped canvas sends every wheel to window navigation,
+     so a window's own list (Access) cannot scroll without the input lock.
+     - **Split by direction.** Vertical wheel scrolls what is under the
+       pointer: a list, a log, or the focused terminal's scrollback (or its
+       running program, as terminals do). Horizontal (sideways trackpad
+       swipe, Shift+wheel) moves between windows. ⌘/Ctrl+wheel zooms.
+     - **An unfocused terminal** behaves like any other window that does
+       not scroll: the wheel over it belongs to the canvas.
+     - **The input lock keeps its other job:** all input, keys included,
+       stays in one window and the canvas never moves.
+     - **Touch:** one finger up/down scrolls the content and a sideways
+       swipe moves between windows. Two fingers pan and pinch the canvas as
+       before.
+     - **Moving along a column of stacked windows:** a vertical wheel
+       moves the column whenever the thing under the pointer cannot scroll
+       that way (the window's pill, the gap between windows, a window with
+       nothing to scroll, an unfocused terminal). At a list's top or bottom,
+       a fresh gesture (about 150 ms of wheel quiet) moves to the
+       neighbouring window. A fling's momentum stops at the end and never
+       carries over. The input lock is how a person prevents the handoff.
+     - **Neighbours peek in at the top and bottom** by a few pixels, the
+       way they do at the sides. There is no new indicator, and no
+       appearance setting turns peeking off: a window's full-screen view
+       is the way to see one window alone. The phone window size "Full
+       width (no neighbours showing)" is removed; phones keep "Edge to edge"
+       and "Comfortable". The owner: "simplify and make UI/UX extremely
+       easy".
+276. **Inbox items can be dismissed (owner, 2026-10-15, #215):** every Inbox
+     item can be dismissed, except the few that block something from
+     working until they are acted on (for example "Allow host connections").
+     Those stay until resolved, and say what they block.
+277. **Commercial code lives in its own repository (owner, 2026-10-15;
+     changes where item 31 puts it):** the commercial code, previously
+     planned as the `ee/` directory, lives in `kayg/infraternal-enterprise`
+     on Forgejo. Its licence and scope are unchanged (items 31–33): the
+     commercial licence with an offline key, and only seams until there are
+     users. The first planned item is second-admin approval for downgrading
+     privileged access (D274). The AGPL core never depends on it and
+     builds and runs alone. How the two are built together is still open.
+278. **Where the mesh path change shows (owner, 2026-10-15, #201):** there is
+     no separate indicator for automatic mesh switching. The path a host
+     settles on (relayed, then direct) appears as a step in the add-host
+     steps, and as one of the loading steps in the top pill's progress
+     circle while the host connects. After that, the Mesh view's
+     direct/relayed label is the only place it shows.
+279. **Selecting several machines (owner, 2026-10-15, #215):** in the
+     sidebar and on the Map, ⌘-click (Ctrl-click on Linux and Windows) adds
+     or removes a machine, and Shift-click selects a range in the sidebar.
+     The action pill then reads "3 machines" and its actions apply to all of
+     them. On phones a long-press starts selecting and taps add more.
+     Search does the same in words ("allow full access on all offline
+     hosts"). There is no select mode and there are no checkboxes.
+280. **The public GitHub mirror (owner, 2026-10-15; extends item 43):**
+     `kaygdotorg/infraternal` on GitHub is public and receives `dev` and
+     `main` only, never work branches. Issues stay on Forgejo. Nothing is
+     pushed until the full history has been checked for secrets. The
+     history is then rewritten only to (a) erase any secret found and (b)
+     shrink it by removing committed artifacts that belong on Forgejo issues
+     (D262). The plan and the cut-over are shown to the owner before the
+     rewrite.
+281. **In-app feedback (owner, 2026-10-15; design round in progress):**
+     - **Fully automated:** the person never leaves the app and needs no
+       GitHub account. The owner rejected opening a ready-filled GitHub page.
+     - **Where:** "Send feedback" is found in search ("feedback", "bug",
+       "idea") and in the version pill's popover. There is no permanent
+       button. One short form follows, and whether it is a bug or an idea is
+       read from the wording, not picked from a menu.
+     - **Attached:** version, edition (CE/EE), browser, OS and screen size,
+       shown before sending. Never host names, addresses, user names or
+       terminal content in the text. **A screenshot is included by default
+       (opt-out).**
+     - **Everything lands in GitHub Discussions** on the public mirror. A
+       Claude Code triage bot reads the list and promotes what is
+       actionable to issues.
+     - Still open: the transport and who holds which credential, how
+       screenshots are kept from showing private things publicly, abuse
+       limits, replies, authorship, and where promoted work is tracked.
+282. **VNC is a window kind of its own (owner, 2026-10-15, #223; extends
+     D200 V7 and D221):** besides being the fallback when our own capture
+     isn't available, VNC is offered generally as a window type for any
+     machine that speaks it: Proxmox/QEMU VM consoles, macOS Screen Sharing
+     and Linux desktops. It keeps D104's model (the server side holds the
+     session). Whether we use an existing Rust RFB library or build our own,
+     and whether RFB is re-encoded to video or decoded in the browser, comes
+     to the owner as measured candidates (#223). Either is acceptable to the
+     owner if it is the fastest.
+     - **Proxmox is zero-configuration through the infraternal agent on
+       the node:** the agent on a Proxmox node detects Proxmox, lists its
+       VMs and containers (and the cluster's other nodes) on its own, and
+       opens a VM's console as a VNC window locally, with no API token and
+       no setup by the person. Containers open as terminal windows. The
+       Proxmox API path is only for nodes without our agent.
