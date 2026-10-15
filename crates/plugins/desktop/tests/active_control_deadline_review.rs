@@ -82,7 +82,10 @@ connection.close()
 #[tokio::test]
 async fn active_helper_silent_status_retires_after_control_deadline() {
     // A relative private runtime keeps the owned helper socket within sun_path.
-    let runtime = PathBuf::from("target").join(format!("ac-{}", std::process::id()));
+    let target = PathBuf::from("target");
+    let remove_target_afterward = !target.exists();
+    fs::create_dir_all(&target).unwrap();
+    let runtime = target.join(format!("ac-{}", std::process::id()));
     fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
     let executable = runtime.join("silent-status.py");
     fs::write(&executable, SILENT_HELPER).unwrap();
@@ -143,6 +146,10 @@ async fn active_helper_silent_status_retires_after_control_deadline() {
     let pid = marker["pid"].as_u64().unwrap();
     let retired = !PathBuf::from(format!("/proc/{pid}")).exists();
     fs::remove_dir_all(runtime).unwrap();
+    // Keep parallel tests safe: remove only an empty parent that this test created.
+    if remove_target_afterward {
+        let _ = fs::remove_dir(target);
+    }
     assert!(retired, "explicit disable did not join the owned helper");
     assert!(
         bounded && active == 0,
