@@ -24,7 +24,7 @@ test.beforeAll(() => {
 });
 
 const config = (page: Page, data: Record<string, unknown>) => page.request.post("/__mock/appwin/config", { data });
-const machineState = async (page: Page) => (await page.request.get("/__mock/appwin/state")).json() as Promise<{ sessions: Array<{ id: string; width: number; height: number; controller: boolean }>; inputs: Array<{ input: { kind: string; state?: number } }>; sizes: Array<{ width: number; height: number }>; attaches: number }>;
+const machineState = async (page: Page) => (await page.request.get("/__mock/appwin/state")).json() as Promise<{ sessions: Array<{ id: string; width: number; height: number; controller: boolean }>; inputs: Array<{ input: { kind: string; state?: number; scalar?: number; keycode?: number; down?: boolean; modifiers?: number } }>; sizes: Array<{ width: number; height: number }>; attaches: number }>;
 
 async function openCanvas(page: Page, query = "&appwin=1", before: Record<string, unknown> = {}, fresh = true): Promise<void> {
   await page.request.post("/__mock/reset");
@@ -143,7 +143,7 @@ test("looking never moves the machine: the activating press and a hover send not
   await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
   await expect.poll(async () => (await machineState(page)).inputs.map((i) => `${i.input.kind}:${i.input.state ?? ""}`)).toEqual(expect.arrayContaining(["mouse:1", "mouse:2"]));
   await page.keyboard.type("a");
-  await expect.poll(async () => (await machineState(page)).inputs.filter((i) => i.input.kind === "key").length).toBe(2);
+  await expect.poll(async () => (await machineState(page)).inputs.filter((i) => i.input.kind === "text").map(i => i.input.scalar)).toEqual([97]);
   // Letting go: the badge is a button, and leaving the window releases what is held.
   await page.locator(".aw-control").click();
   await expect(page.locator(".aw-control")).toHaveCount(0);
@@ -214,4 +214,40 @@ test("the palette lists \"Open <app> on <machine>\" and opens it", async ({ page
   await page.keyboard.type("open editor");
   await page.getByRole("option", { name: /Open Editor on studio-mac/ }).click();
   await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
+});
+
+
+test("a viewing attachment survives the real resize authority contract", async ({ page }) => {
+  await openCanvas(page, "&appwin=1", { controlContract: true });
+  await openEditor(page);
+  await expect(appWindow(page)).toHaveAttribute("data-status", "live");
+  expect((await machineState(page)).sessions[0]?.controller).toBe(false);
+  await expect(page.locator(".aw-control")).toHaveCount(0);
+});
+
+test("letting go retires the native control lease while viewing continues", async ({ page }) => {
+  await openCanvas(page);
+  await openEditor(page);
+  await appWindow(page).locator(".aw-stage").click({ position: { x: 120, y: 100 } });
+  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
+  await page.locator(".aw-control").click();
+  await expect.poll(async () => (await machineState(page)).sessions[0]?.controller).toBe(false);
+  await expect(appWindow(page)).toHaveAttribute("data-status", "live");
+});
+
+test("layout text and a shortcut release reach the source without physical text remapping", async ({ page }) => {
+  await openCanvas(page);
+  await openEditor(page);
+  const stage = appWindow(page).locator(".aw-stage");
+  await stage.click({ position: { x: 120, y: 100 } });
+  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
+  await stage.evaluate(el => {
+    for (const [code, key] of [["KeyA", "a"], ["KeyE", "é"], ["KeyQ", "🐈"]] as const) {
+      for (const type of ["keydown", "keyup"]) el.dispatchEvent(new KeyboardEvent(type, { bubbles: true, code, key }));
+    }
+    el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, code: "KeyC", key: "c", ctrlKey: true }));
+    el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, code: "KeyC", key: "c" }));
+  });
+  await expect.poll(async () => (await machineState(page)).inputs.filter(i => i.input.kind === "text").map(i => i.input.scalar)).toEqual([97, 233, 128008]);
+  await expect.poll(async () => (await machineState(page)).inputs.filter(i => i.input.kind === "key").map(i => [i.input.keycode, i.input.down])).toEqual([[8, true], [8, false]]);
 });

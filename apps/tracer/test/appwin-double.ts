@@ -48,6 +48,8 @@ const config = {
   screenRecording: true,
   accessibility: true,
   viewOnly: false,
+  /** Enforce the real server resize lease and metadata/native-status split. */
+  controlContract: true,
   /** Remote input waits this long (the machine's local-input rule, D208 A3); the status reply reports it once. */
   inputPauseMs: 0,
   /** The next start is refused (the machine did not answer), once. */
@@ -176,7 +178,10 @@ export function appwinCall(socket: WebSocket, callId: number, action: string, in
       reply(socket, callId, true, { stopped: true });
       return true;
     }
-    case "desktop.session.status": {
+    case "desktop.session.status":
+    case "desktop.session.clock": {
+      // Native Status includes the clock; source.status is worker metadata only.
+      if (action === "desktop.session.status" && config.controlContract) { reply(socket, callId, true, { enabled: true, active_work: 1 }); return true; }
       const s = sessions.get(String(input.session_id));
       if (!s) { reply(socket, callId, false, { error: "unavailable" }); return true; }
       const wait = config.inputPauseMs;
@@ -219,6 +224,10 @@ export function appwinFrame(socket: WebSocket, streamId: number, frame: WireFram
   if (!v) return;
   if (m.kind === "repair") { repairs++; startViewer(v); return; }
   if (m.kind === "size") {
+    if (config.controlContract && (v.session.controller?.socket !== socket || v.session.controller.stream !== streamId)) {
+      socket.send(Buffer.from(encodeMuxedFrame(streamId, { type: "Close", code: 4404, reason: "viewer ended" })), { binary: true });
+      detach(v); return;
+    }
     sizes.push({ session: v.session.id, width: m.width, height: m.height, densityMilli: m.densityMilli });
     v.session.width = m.width; v.session.height = m.height;
     // A different shape is a different picture: the machine's window followed the size, and its encoder starts a new keyframe.
@@ -244,8 +253,8 @@ export async function appwinHttp(request: IncomingMessage, response: ServerRespo
   if (request.method === "POST" && pathname === "/__mock/appwin/config") {
     const body = await readJson(request) as Partial<typeof config> & { reset?: boolean } | undefined;
     if (!body || typeof body !== "object") { sendJson(response, 400, { error: "invalid request" }); return true; }
-    if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0 }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
-    for (const key of ["fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
+    if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0 }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
+    for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
     if (Array.isArray(body.windows)) config.windows = body.windows as Win[];
     sendJson(response, 200, { ok: true });
     return true;

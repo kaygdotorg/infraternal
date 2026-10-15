@@ -26,7 +26,8 @@ import type { Ctx, WinRec } from "../context";
 import type { SessionBinding } from "../sessions/adapter";
 import { coarse, el } from "../dom";
 import { paintStrip, type StripView } from "../../../../../packages/ui/src/window-strip";
-import { containedRect, framePoint, keyInput, modifierBits, movedEnough, scrollDelta, wireButton } from "./input";
+import { DesktopKeyboard } from "../../../../../packages/protocol/src/desktop-input";
+import { containedRect, framePoint, modifierBits, movedEnough, scrollDelta, wireButton } from "./input";
 import { controlLine, describe, type ControlState, type StateView, type StreamState } from "./status";
 import { AppStream } from "./stream";
 import type { AppTarget } from "./inventory";
@@ -72,12 +73,13 @@ export class AppBinding implements SessionBinding {
   private disposed = false;
   /** Set while the press that activated this window is still being dispatched: that press is not forwarded. */
   private justActivated = false;
-  /** Input waiting for control to be granted (bounded); discarded if it is refused. */
+  /** Input waiting for control to be approved (bounded); discarded if it is refused. */
   private queued: VideoInput[] = [];
   private move: { x: number; y: number } | undefined;
   private lastSent: { x: number; y: number } | undefined;
   private moveFrame = 0;
   private buttons = 0;
+  private readonly keyboard = new DesktopKeyboard();
   private touch: { id: number; x: number; y: number; t: number; mode: "tap" | "scroll" | "drag"; timer: number } | undefined;
   private removers: Array<() => void> = [];
 
@@ -260,6 +262,7 @@ export class AppBinding implements SessionBinding {
     this.moveFrame = 0;
     this.move = undefined;
     this.buttons = 0;
+    this.keyboard.release();
     this.queued.length = 0;
     window.clearTimeout(this.touch?.timer);
     this.touch = undefined;
@@ -331,7 +334,7 @@ export class AppBinding implements SessionBinding {
     }, { passive: false });
     const key = (down: boolean) => (e: KeyboardEvent): void => {
       if (!this.armed() || e.isComposing) return;
-      const input = keyInput(e, down);
+      const input = this.keyboard.input(e, down);
       if (!input) return;
       // Escape, Tab and the arrows are the machine's while the window has the keys; the canvas's own handlers see them defaultPrevented.
       e.preventDefault();

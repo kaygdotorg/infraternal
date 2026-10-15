@@ -1,9 +1,7 @@
 /**
  * Turns browser input into the wire's `VideoInput` messages (contracts/wire.md §9) for an app window or a screen.
  *
- * - Keys are physical: the wire carries the machine's own virtual key codes (0–127), so the keyboard layout of the
- *   machine decides what a key types, exactly as if the person sat at it. `KeyboardEvent.code` names the physical
- *   key, which is why this table is keyed by `code` and never by `key`.
+ * - Keyboard layout text and held shortcuts use the shared protocol DesktopKeyboard adapter.
  * - Pointer positions are millionths of the stream's frame (0–1,000,000), measured on the picture itself. The
  *   picture sits letterboxed inside the window when its shape differs (an app that refuses a size, D208 A2), and
  *   positions in the bands are still sent: the machine answers that a band takes no clicks.
@@ -12,32 +10,7 @@
  *
  * Pure functions, no DOM state: unit-tested in `input.test.ts`.
  */
-import type { VideoInput } from "../../../../../packages/protocol/src/desktop";
-
-/** macOS virtual key codes by `KeyboardEvent.code`. */
-export const MAC_KEYCODE: Readonly<Record<string, number>> = {
-  KeyA: 0, KeyS: 1, KeyD: 2, KeyF: 3, KeyH: 4, KeyG: 5, KeyZ: 6, KeyX: 7, KeyC: 8, KeyV: 9, IntlBackslash: 10, KeyB: 11, KeyQ: 12, KeyW: 13, KeyE: 14, KeyR: 15,
-  KeyY: 16, KeyT: 17, Digit1: 18, Digit2: 19, Digit3: 20, Digit4: 21, Digit6: 22, Digit5: 23, Equal: 24, Digit9: 25, Digit7: 26, Minus: 27, Digit8: 28, Digit0: 29,
-  BracketRight: 30, KeyO: 31, KeyU: 32, BracketLeft: 33, KeyI: 34, KeyP: 35, Enter: 36, KeyL: 37, KeyJ: 38, Quote: 39, KeyK: 40, Semicolon: 41, Backslash: 42,
-  Comma: 43, Slash: 44, KeyN: 45, KeyM: 46, Period: 47, Tab: 48, Space: 49, Backquote: 50, Backspace: 51, Escape: 53, MetaRight: 54, MetaLeft: 55, ShiftLeft: 56,
-  CapsLock: 57, AltLeft: 58, ControlLeft: 59, ShiftRight: 60, AltRight: 61, ControlRight: 62, NumpadDecimal: 65, NumpadMultiply: 67, NumpadAdd: 69, NumLock: 71,
-  NumpadDivide: 75, NumpadEnter: 76, NumpadSubtract: 78, NumpadEqual: 81, Numpad0: 82, Numpad1: 83, Numpad2: 84, Numpad3: 85, Numpad4: 86, Numpad5: 87, Numpad6: 88,
-  Numpad7: 89, Numpad8: 91, Numpad9: 92, IntlYen: 93, IntlRo: 94, F5: 96, F6: 97, F7: 98, F3: 99, F8: 100, F9: 101, F11: 103, F13: 105, F16: 106, F14: 107,
-  F10: 109, F12: 111, F15: 113, Help: 114, Insert: 114, Home: 115, PageUp: 116, Delete: 117, F4: 118, End: 119, F2: 120, PageDown: 121, F1: 122,
-  ArrowLeft: 123, ArrowRight: 124, ArrowDown: 125, ArrowUp: 126,
-};
-
-export const MOD_SHIFT = 1, MOD_CONTROL = 2, MOD_OPTION = 4, MOD_COMMAND = 8;
-
-export function modifierBits(e: Pick<KeyboardEvent, "shiftKey" | "ctrlKey" | "altKey" | "metaKey">): number {
-  return (e.shiftKey ? MOD_SHIFT : 0) | (e.ctrlKey ? MOD_CONTROL : 0) | (e.altKey ? MOD_OPTION : 0) | (e.metaKey ? MOD_COMMAND : 0);
-}
-
-/** The key message for a physical key, or undefined for a key the machine has no code for. */
-export function keyInput(e: Pick<KeyboardEvent, "code" | "shiftKey" | "ctrlKey" | "altKey" | "metaKey">, down: boolean): VideoInput | undefined {
-  const keycode = MAC_KEYCODE[e.code];
-  return keycode === undefined ? undefined : { kind: "key", keycode, down, modifiers: modifierBits(e) };
-}
+export { modifierBits } from "../../../../../packages/protocol/src/desktop-input";
 
 /** Where the picture sits inside its box: the largest rectangle of the frame's shape that fits (object-fit: contain). */
 export function containedRect(box: { width: number; height: number }, frame: { width: number; height: number }): { x: number; y: number; width: number; height: number } {
