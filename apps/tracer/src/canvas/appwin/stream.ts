@@ -13,7 +13,7 @@
  * - Input is sent only after control was granted, moves are coalesced to one per animation frame by the caller.
  *
  * The machine's own words about what is happening to a stream (the app quit, a permission was withdrawn, local input
- * pauses remote input) reach the page through `desktop.session.status`, polled only while control is in use; the shape
+ * pauses remote input) reach the page through `desktop.session.clock`, polled only while control is in use; the shape
  * it parses is documented at `parseStatus`. Everything else is derived from what the wire already says: the stream
  * closing, an action refusing, the socket dropping.
  */
@@ -70,7 +70,7 @@ export interface StreamOptions {
   makeWorker?: () => Worker;
 }
 
-/** What `desktop.session.status` says, reduced. All fields are optional; absent means "nothing to report". */
+/** What `desktop.session.clock` says, reduced. All fields are optional; absent means "nothing to report". */
 export interface MachineStatus {
   /** The window is gone, or the machine stopped sharing it. */
   gone?: boolean;
@@ -240,7 +240,6 @@ export class AppStream {
         // Attached again: a window that was live shows "reconnecting" until its first new picture; a paused one stays paused
         // until then; a window that never had a picture is still connecting.
         if (this.state.kind === "live" && this.hadPicture) this.setState({ kind: "reconnecting" });
-        this.pushSize(true);
       },
       onFrame: (frame) => this.frame(frame),
       onDisconnected: () => {
@@ -263,6 +262,8 @@ export class AppStream {
     this.o.connection.closeStream(id);
     this.worker?.postMessage({ t: "reset" } satisfies ToWorker);
     window.clearTimeout(this.statusTimer);
+    this.statusTimer = 0;
+    window.clearTimeout(this.pausedTimer);
   }
 
   private frame(frame: WireFrame): void {
@@ -363,12 +364,13 @@ export class AppStream {
     const next = chooseSize(css.width, css.height, css.density);
     if (!sizeChanged(this.size, next)) return;
     this.size = next;
-    this.pushSize(false);
+    // Resizing is an explicit control action; merely attaching uses Start's size.
+    if (this.control.kind === "controlled" || this.control.kind === "paused") this.pushSize();
+    else void this.takeControl();
   }
 
-  private pushSize(force: boolean): void {
-    if (!this.size || this.streamId === undefined || !this.attached) return;
-    void force;
+  private pushSize(): void {
+    if (!this.size || this.streamId === undefined || !this.attached || (this.control.kind !== "controlled" && this.control.kind !== "paused")) return;
     this.o.connection.send(this.streamId, { type: "Desktop", message: { kind: "size", width: this.size.width, height: this.size.height, densityMilli: densityMilli(this.size) } });
   }
 
@@ -393,6 +395,7 @@ export class AppStream {
       await this.o.connection.call("desktop.session.control", { stream_id: id });
       if (this.streamId !== id) return false;
       this.setControl({ kind: "controlled" });
+      this.pushSize();
       this.pollStatus();
       return true;
     } catch {
@@ -404,12 +407,18 @@ export class AppStream {
 
   /** The window lost focus: held keys and buttons are released on the machine, and the indicator goes quiet. */
   releaseControl(): void {
-    if (this.streamId !== undefined && this.attached && this.control.kind === "controlled") {
-      this.o.connection.send(this.streamId, { type: "Desktop", message: { kind: "input", input: { kind: "release" } } });
-    }
-    if (this.control.kind === "controlled" || this.control.kind === "paused") this.setControl({ kind: "none" });
+    const held = this.control.kind === "controlled" || this.control.kind === "paused" || this.control.kind === "requesting";
+    this.setControl({ kind: "none" });
     window.clearTimeout(this.statusTimer);
+    window.clearTimeout(this.pausedTimer);
     this.statusTimer = 0;
+    if (held) {
+      // Input::Release clears held keys but intentionally retains the native lease.
+      // Retire this viewer to withdraw the lease, then view the existing session
+      // under a new stream id so a late acquisition cannot regain control.
+      this.detach();
+      if (this.visible && this.session && !this.disposed) this.attach();
+    }
   }
 
   /** Whether the person may try to control again (the view-only state shows until the retry window passes). */
@@ -423,9 +432,11 @@ export class AppStream {
     const session = this.session;
     if (!session || !this.visible || this.statusBusy) return;
     this.statusBusy = true;
-    this.o.connection.call("desktop.session.status", { session_id: session.id }).then((reply) => {
+    const streamId = this.streamId;
+    const current = (): boolean => !this.disposed && this.session === session && this.streamId === streamId && (this.control.kind === "controlled" || this.control.kind === "paused");
+    this.o.connection.call("desktop.session.clock", { session_id: session.id }).then((reply) => {
       this.statusBusy = false;
-      if (this.disposed || this.session !== session) return;
+      if (!current()) return;
       const status = parseStatus(reply);
       if (status.gone) { this.setState({ kind: "closed" }); return; }
       if (status.permission) { this.setState({ kind: "permission", what: status.permission }); return; }
@@ -436,7 +447,7 @@ export class AppStream {
         this.pausedTimer = window.setTimeout(() => { if (this.control.kind === "paused") this.setControl({ kind: "controlled" }); }, status.inputPausedMs);
       } else if (this.control.kind === "paused") this.setControl({ kind: "controlled" });
       this.statusTimer = window.setTimeout(() => this.pollStatus(), STATUS_EVERY_MS);
-    }, () => { this.statusBusy = false; this.statusTimer = window.setTimeout(() => this.pollStatus(), STATUS_EVERY_MS * 4); });
+    }, () => { this.statusBusy = false; if (current()) this.statusTimer = window.setTimeout(() => this.pollStatus(), STATUS_EVERY_MS * 4); });
   }
 
   /** Try again after a failure or a missing permission. */

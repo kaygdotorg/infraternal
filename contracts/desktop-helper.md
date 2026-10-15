@@ -42,7 +42,7 @@ Monotonic timestamps mark the owned-pixel capture request in the native host clo
 | 65 | helper → daemon | Window inventory JSON |
 | 66 | helper → daemon | Geometry JSON: original/actual point frame, output pixel size, content rectangle, follow/letterbox reason |
 | 67 | helper → daemon | Input result JSON: accepted or local-input pause |
-| 68 | helper → daemon | Status/stop JSON |
+| 68 | helper → daemon | Status/stop JSON; Status includes read-only `input:{pause_remaining_ms,control_visible}` |
 | 69 | helper → daemon | Fixed public error JSON |
 | 70 | helper → daemon | Encoded frame (binary) |
 
@@ -84,6 +84,9 @@ mouse/keyboard activity pauses injection for 2 seconds; synthetic remote events
 are tagged so they never reset that clock. Show “Controlled from infraternal”
 in a small nonactivating panel while control is active. A status item alone is
 not sufficient: the system can omit it when the menu bar is full. The private
+Status reads the same local-input clock and indicator without acquiring control
+or injecting input. Its `input.pause_remaining_ms` is clamped to 0–2000;
+`desktop.session.clock` forwards this helper reply. The private
 Control acknowledgement adds `control_visible`; acquisition fails unless the
 indicator is visible before injection. Screen Recording and Accessibility
 must be granted by the person using the Mac; refusal produces a fixed error.

@@ -68,6 +68,12 @@ final class RemoteControl {
         clock?.onLocal = { [weak self] in self?.releaseHeld() }
     }
 
+    // Reading priority never acquires control, posts an event or starts a timer.
+    func status() -> [String: Any] {
+        ["pause_remaining_ms": min(2000, max(0, 2-localIdleSeconds())*1000),
+         "control_visible": indicator?.isVisible == true]
+    }
+
     private func flags(_ bits: UInt8) -> CGEventFlags {
         var value: CGEventFlags = []
         if bits & 1 != 0 { value.insert(.maskShift) }; if bits & 2 != 0 { value.insert(.maskControl) }

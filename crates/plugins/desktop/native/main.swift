@@ -122,9 +122,9 @@ private final class Session {
     }
 
     func state() -> [String: Any] {
-        if let geometry { return geometry.json().merging(["state":"on"]) { _,new in new } }
-        if let screen { return ["state":"on","actual":rectJSON(screen),"capture_rect":rectJSON(screen),"content_rect":rectJSON(fittedContent(screen,output)),"reason":"screen","width":output.width,"height":output.height,"source_backing_scale":backingScale(screen),"source_fps":sourceFrameRate(screen)] }
-        return ["state":"off"]
+        if let geometry { return geometry.json().merging(["state":"on","input":control.status()]) { _,new in new } }
+        if let screen { return ["state":"on","input":control.status(),"actual":rectJSON(screen),"capture_rect":rectJSON(screen),"content_rect":rectJSON(fittedContent(screen,output)),"reason":"screen","width":output.width,"height":output.height,"source_backing_scale":backingScale(screen),"source_fps":sourceFrameRate(screen)] }
+        return ["state":"off","input":control.status()]
     }
 }
 
