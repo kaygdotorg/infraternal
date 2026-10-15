@@ -2,8 +2,9 @@
 """Correlate bounded numeric host records with synthetic probe ranges [D270]."""
 import bisect
 import json
+import math
 from pathlib import Path
-from ppu_stages import read_header
+from ppu_stages import MARKER_RECEIPT, read_header
 
 
 def index_records(records):
@@ -18,6 +19,15 @@ def index_records(records):
 
 def correlate(probe, records, origin):
     """Require causal input/output ranges, not a nearest unrelated socket write."""
+    if 'send_before_s' not in probe or 'receive_active_s' not in probe:
+        raise ValueError('marker receipt clock bounds missing')
+    start, end, elapsed = probe['send_before_s'], probe['receive_active_s'], probe['rtt_ms']
+    if not all(math.isfinite(value) for value in (start, end, elapsed)) or end < start or elapsed < 0:
+        raise ValueError('invalid marker receipt clock bounds')
+    # The real echo starts before send and ends after this marker observation.
+    # Both use the same active clock; no tolerance or timing subtraction is needed.
+    if (end - start) * 1000 > elapsed:
+        raise ValueError('marker receipt span exceeds timed echo')
     session = origin + probe['session']
     groups = records if isinstance(records, dict) else index_records(records)
     def find(stage, predicate, after=0, fd=None):
@@ -64,6 +74,8 @@ def correlate(probe, records, origin):
 def report(root):
     """Reject dropped records or missing stages instead of summarizing partial data."""
     probes = json.loads((root / 'stage-probes.json').read_text())
+    if probes.get('marker_receipt') != MARKER_RECEIPT:
+        raise ValueError('legacy marker receipt requires a corrected capture')
     with (root / 'stages.log').open() as source:
         read_header(source)
     records = []

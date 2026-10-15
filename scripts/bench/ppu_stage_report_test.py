@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validate causal stage correlation, partial writes and cross-process bounds [D270]."""
 import unittest
-from ppu_stage_report import correlate
+from unittest.mock import MagicMock
+from ppu_stage_report import correlate, report
 
 
 def record(stage, stamp, offset=0, size=0, fd=3, extra=0):
@@ -11,7 +12,7 @@ def record(stage, stamp, offset=0, size=0, fd=3, extra=0):
 
 def fixture():
     probe = dict(session=7, number=2, writer=0, input_start=10, input_end=20, output_end=120,
-                 send_before_ns=0, receive_ns=9_000_000, completed_ns=10_000_000, rtt_ms=9)
+                 send_before_ns=0, receive_ns=9_000_000, completed_ns=10_000_000, rtt_ms=9, send_before_s=0, receive_active_s=.009)
     rows = [record(2, 1, 10, 10, fd=8), record(4, 2, 20, 10), record(5, 3, 100, 30),
             record(6, 4, 100, 30), record(14, 5, 100, fd=8),
             record(7, 6, 100, 30, fd=8, extra=43), record(8, 7, fd=8),
@@ -29,6 +30,23 @@ class CorrelationTests(unittest.TestCase):
         self.assertEqual(result['socket_syscall_ms'], 1)
         self.assertEqual(result['reader_delay_lower_ms'], 1)
         self.assertEqual(result['reader_delay_upper_ms'], 2)
+
+    def test_receipt_span_cannot_exceed_the_original_timed_echo(self):
+        probe, rows = fixture()
+        probe.update(send_before_s=0, receive_active_s=.009, rtt_ms=4)
+        with self.assertRaisesRegex(ValueError, 'receipt span exceeds timed echo'):
+            correlate(probe, rows, 10)
+
+    def test_legacy_or_nonfinite_marker_receipts_cannot_certify_causality(self):
+        root = MagicMock()
+        (root / 'stage-probes.json').read_text.return_value = '{}'
+        with self.assertRaisesRegex(ValueError, 'legacy marker receipt'):
+            report(root)
+        for value in (float('nan'), float('inf')):
+            probe, rows = fixture()
+            probe['receive_active_s'] = value
+            with self.assertRaisesRegex(ValueError, 'invalid marker receipt'):
+                correlate(probe, rows, 10)
 
     def test_partial_or_unrelated_socket_write_cannot_complete_the_frame(self):
         probe, rows = fixture()
