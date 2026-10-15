@@ -2,6 +2,8 @@
 #![allow(clippy::unwrap_used)]
 
 mod common;
+#[path = "install/streaming.rs"]
+mod streaming;
 
 use infraternal_plugin_ssh::{
     install::{Installation, JoinMaterial},
