@@ -79,7 +79,8 @@ test("network access: detected, shown by name, and the host lands in Console and
   // A closed sidebar stays untouched; opening it renders the current inventory.
   if (await page.locator("#sidebar").isHidden()) await page.locator("#sidebar-toggle").click();
   await expect(page.locator("#tree")).toContainText("remoternal");
-  await expect(page.locator(".toast, [role='status']").filter({ hasText: "remoternal is ready" })).toBeVisible();
+  // Setup news belongs to the machine pill; a ready toast can contradict a later failure (D255).
+  await expect(page.locator(".toast, [role='status']").filter({ hasText: "remoternal is ready" })).toHaveCount(0);
   await expect(wizard(page)).toHaveCount(0);
   await expect(page.locator(".ui-window[data-kind='flow']")).toHaveCount(0);
 });
