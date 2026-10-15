@@ -1,11 +1,43 @@
-/// Role: hand-checked SPS vectors plus full 840-AU fixture byte equivalence (#146).
+/// Role: bounded encoder SPS corpus plus full 840-AU fixture byte equivalence (#146).
 import Foundation
+
+private func sps(_ hex: String) -> Data {
+    let digits = Array(hex.utf8)
+    guard digits.count % 2 == 0 else { fatalError("odd SPS hex length") }
+    var bytes: [UInt8] = []
+    for offset in stride(from: 0, to: digits.count, by: 2) {
+        let pair = String(decoding: digits[offset..<offset + 2], as: UTF8.self)
+        guard let byte = UInt8(pair, radix: 16) else { fatalError("invalid SPS hex") }
+        bytes.append(byte)
+    }
+    return Data(bytes)
+}
+
 @main struct Test {
     static func main() throws {
         let original = Data([0x27,0x64,0x00,0x2a,0xac,0x56,0x80,0xf0,0x13,0x7e,0x54])
         let expected = Data([0x27,0x64,0x00,0x2a,0xac,0x56,0x80,0xf0,0x13,0x7e,0x58,0x06,0xd0,0x44,0x23,0x50])
+        let m2Max = sps("2764002aac1314501e0089f966a0404040f0804258")
+        guard try lowDelaySPS(m2Max) == m2Max else { fatalError("already no-reorder M2 SPS must remain byte-identical") }
         guard try lowDelaySPS(original) == expected else { fatalError("known SPS mismatch") }
         guard try lowDelaySPS(expected) == expected else { fatalError("SPS must be idempotent") }
+        // Each profile has an encoder SPS with restriction syntax, plus derived valid forms without restriction and without VUI.
+        let corpus: [(String, Data, Bool)] = [
+            ("baseline VUI restriction", sps("6742c028d940780227e5c044000003000400000300f03c60c960"), true),
+            ("baseline VUI no restriction", sps("6742c028d940780227e5c044000003000400000300f010"), false),
+            ("baseline no VUI", sps("6742c028d940780227e540"), false),
+            ("main VUI restriction", sps("674d4028d940780227e5c044000003000400000300f03c60c960"), true),
+            ("main VUI no restriction", sps("674d4028d940780227e5c044000003000400000300f010"), false),
+            ("main no VUI", sps("674d4028d940780227e540"), false),
+            ("high VUI restriction", sps("67640028acb280f0044fcb8088000003000800000301e078c192c0"), true),
+            ("high VUI no restriction", sps("67640028acb280f0044fcb8088000003000800000301e020"), false),
+            ("high no VUI", sps("67640028acb280f0044fca80"), false),
+        ]
+        for (name, input, alreadyNoReorder) in corpus {
+            let output = try lowDelaySPS(input)
+            guard output.count <= 1024, try lowDelaySPS(output) == output else { fatalError("invalid or non-idempotent \(name) SPS") }
+            guard (output == input) == alreadyNoReorder else { fatalError("unexpected byte preservation for \(name) SPS") }
+        }
         var unreferenced = original; unreferenced[0] = 0x07
         var reserved = original; reserved[2] = 0x01
         for invalid in [unreferenced, reserved, Data(repeating: 0, count: 1025)] {
@@ -48,6 +80,6 @@ import Foundation
         }
         output.append(contentsOf:remaining)
         guard count == 7, output == candidate else { fatalError("840-AU fixture differs beyond known SPS changes") }
-        print("PASS: exact SPS, idempotence, all11truncations, 7parameter-set changes; whole840-AU fixture bytes match retained candidate; cached original/restricted envelope and reset match")
+        print("PASS: exact no-reorder M2 SPS unchanged; 9-vector High/Main/Baseline VUI/restriction corpus idempotent; 24,000 bounded mutations; all 11 truncations; 840-AU fixture equivalence; cache envelope and reset")
     }
 }

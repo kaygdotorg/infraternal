@@ -1,4 +1,4 @@
-/// Role: constrain only the capture helper's known one-reference, progressive, no-reorder H.264 encoder output (#146).
+/// Role: constrain bounded progressive H.264 capture SPS values while preserving valid no-reorder bytes exactly (#146).
 /// This is not a general media transformer: callers must have disabled encoder frame reordering.
 import Foundation
 
@@ -88,7 +88,8 @@ func lowDelaySPS(_ nal: Data) throws -> Data {
     let order = try reader.ue()
     if order == 0 { guard try reader.ue() <= 12 else { throw SPSFailure.invalid } }
     else if order != 2 { throw SPSFailure.invalid }
-    guard try reader.ue() == 1 else { throw SPSFailure.invalid }
+    let maxNumRefFrames = try reader.ue()
+    guard maxNumRefFrames <= 16 else { throw SPSFailure.invalid }
     _ = try reader.read()
     guard try reader.ue() <= 255, try reader.ue() <= 255, try reader.read() == 1 else { throw SPSFailure.invalid }
     _ = try reader.read()
@@ -113,14 +114,21 @@ func lowDelaySPS(_ nal: Data) throws -> Data {
     }
     let restrictionFlag = reader.position
     var retained: [UInt32] = [1,2,1,16,16]
+    var sourceReorderFrames: UInt32?
+    var sourceFrameBuffer: UInt32?
     if hasVUI, try reader.read() == 1 {
         retained = [try reader.read(),try reader.ue(),try reader.ue(),try reader.ue(),try reader.ue()]
-        _ = try reader.ue(); _ = try reader.ue()
+        sourceReorderFrames = try reader.ue()
+        sourceFrameBuffer = try reader.ue()
+        guard let reorder = sourceReorderFrames, let buffer = sourceFrameBuffer,
+              reorder <= 16, buffer <= 16, reorder <= buffer, buffer >= maxNumRefFrames else { throw SPSFailure.invalid }
     }
     guard try reader.read() == 1 else { throw SPSFailure.invalid }
     // rbsp_stop_one_bit must be followed only by byte-alignment zeros, never hidden syntax.
     guard reader.bytes.count * 8 - reader.position < 8 else { throw SPSFailure.invalid }
     while reader.position < reader.bytes.count * 8 { guard try reader.read() == 0 else { throw SPSFailure.invalid } }
+    // A valid explicit no-reorder restriction already states the desired decoder contract; keep every source bit.
+    if sourceReorderFrames == 0 { return nal }
     var writer = SPSWriter()
     if hasVUI { writer.copy(rbsp,through:restrictionFlag) }
     else {
@@ -129,7 +137,8 @@ func lowDelaySPS(_ nal: Data) throws -> Data {
     }
     writer.bit(1); writer.bit(retained[0])
     for value in retained.dropFirst() { writer.ue(value) }
-    writer.ue(0); writer.ue(1); writer.bit(1)
+    let decoderBuffer = max(1, max(maxNumRefFrames, sourceFrameBuffer ?? 0))
+    writer.ue(0); writer.ue(decoderBuffer); writer.bit(1)
     while writer.count % 8 != 0 { writer.bit(0) }
     var result = Data([source[0]])
     zeros = 0
