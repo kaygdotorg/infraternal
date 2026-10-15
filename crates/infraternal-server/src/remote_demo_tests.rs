@@ -22,6 +22,14 @@ use tokio_tungstenite::{
 
 type Browser = WebSocketStream<tokio_openssl::SslStream<tokio::net::TcpStream>>;
 
+/// Copied process fixtures can run on the measurement host without a checkout.
+fn fixture_repository() -> PathBuf {
+    std::env::var_os("INFRATERNAL_REMOTE_FIXTURE_REPOSITORY").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        PathBuf::from,
+    )
+}
+
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
@@ -44,7 +52,7 @@ impl Drop for Directory {
         // Reuse the authenticated rendezvous cleanup; never match unrelated PIDs.
         let script = "import sys;sys.dont_write_bytecode=True;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))";
         let cleanup = Command::new("python3")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .current_dir(fixture_repository())
             .args(["-c", script])
             .arg(self.0.join("s"))
             .stdout(Stdio::null())
@@ -161,7 +169,18 @@ async fn next(browser: &mut Browser) -> bytes::Bytes {
             .unwrap()
             .unwrap()
         {
-            Message::Binary(bytes) => return bytes,
+            Message::Binary(bytes) => {
+                // The replacement server can prove browser liveness while host
+                // admission is pending. Answer it without issuing another open.
+                if let Ok(decoded) = decode_muxed_frame(&bytes)
+                    && decoded.stream_id == 0
+                    && let Frame::Ping { nonce, sent_us } = decoded.frame
+                {
+                    send(browser, 0, &Frame::Pong { nonce, sent_us }).await;
+                    continue;
+                }
+                return bytes;
+            }
             Message::Ping(bytes) => browser.send(Message::Pong(bytes)).await.unwrap(),
             Message::Close(_) => panic!("browser transport closed"),
             _ => {}
@@ -493,7 +512,7 @@ async fn browser_proof(fixture: &Fixture, host: uuid::Uuid, session: uuid::Uuid)
         return;
     }
     let mut child = tokio::process::Command::new("bun")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .current_dir(fixture_repository())
         .arg("scripts/verify-remote-browser.mjs")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -562,7 +581,7 @@ fn cli(binary: &Path, directory: &Directory, join: bool) -> Process {
         command
             .env(
                 "ZDOTDIR",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../infraternal/tests/profile"),
+                fixture_repository().join("crates/infraternal/tests/profile"),
             )
             .stdin(Stdio::piped())
             .stdout(

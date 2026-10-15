@@ -450,6 +450,7 @@ async fn release_transition_recovers_enrolled_host_after_long_outage() {
     cold_previous.0.wait().unwrap();
     let replacement = cold_cli(&new, &directory, &ca);
     wait_cli_listener(fixture.address, Instant::now()).await;
+    let ready = Instant::now();
     let mut recovered = super::browser(
         fixture.address,
         &fixture.root,
@@ -470,6 +471,7 @@ async fn release_transition_recovers_enrolled_host_after_long_outage() {
     .expect("infraternal agent did not reconnect after cold server replacement");
     assert!(child.0.try_wait().unwrap().is_none());
     process_threads(&child, "reconnected");
+    report_recovery(ready);
     locked_join(&fixture).await;
     println!("release_transition replacement_ca_locked=true infraternal_agent_reconnected=true");
     drop(recovered);
@@ -509,6 +511,16 @@ fn process_threads(child: &Process, phase: &str) {
         .find(|line| line.starts_with("Threads:"))
         .unwrap();
     println!("release_transition phase={phase} {}", threads.trim());
+    if std::env::var_os("INFRATERNAL_RECONNECT_MEASURE").is_some() {
+        let rss = status
+            .lines()
+            .find(|line| line.starts_with("VmRSS:"))
+            .unwrap();
+        println!(
+            "remote_reconnect phase={phase} {} scale=1 full_daemon=true",
+            rss.trim()
+        );
+    }
 }
 
 /// Stall userspace while TCP accepts, then model abrupt power loss and no route.
@@ -542,4 +554,15 @@ async fn interrupt_server(previous: &mut Process, child: &mut Process, endpoint:
     println!("release_transition outage_seconds={outage_seconds} process_alive=true");
     process_threads(child, "after_no_route");
     outage_network("restore").await;
+}
+
+/// Measurement mode is enabled only by the performance-VM runner.
+fn report_recovery(ready: Instant) {
+    if std::env::var_os("INFRATERNAL_RECONNECT_MEASURE").is_some() {
+        println!(
+            "remote_reconnect listener_ready_to_terminal_us={} load={}",
+            ready.elapsed().as_micros(),
+            std::fs::read_to_string("/proc/loadavg").unwrap().trim()
+        );
+    }
 }
