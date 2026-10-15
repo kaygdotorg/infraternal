@@ -3,8 +3,9 @@
 
 Build artifacts on infraternal-dev first. This wrapper never builds remotely,
 changes SSH trust, or counts an unsupported product path as success. The explicit
-two-hour phase holds the shared lock throughout; other phases release between
-runs. Use --smoke for driver validation, never as full-duration adoption evidence.
+two-hour phase freezes the same fixture between short shared-lock segments;
+other phases release between runs. Use --smoke for driver validation, never as
+full-duration adoption evidence.
 """
 import argparse
 import json
@@ -29,6 +30,7 @@ def stage(repo, args, remote):
     try:
         with tarfile.open(fileobj=receiver.stdin, mode='w|') as archive:
             for relative in ['scripts/bench/ppu_soak.py', 'scripts/agent_fixture.py',
+                             'scripts/bench/ppu_clock.py', 'scripts/bench/ppu_segment.py',
                              'scripts/latency_proxy.py', 'crates/infraternal/tests/profile',
                              'crates/infraternal-shim/tests/fixtures']:
                 archive.add(repo / relative, arcname=relative)
@@ -75,6 +77,13 @@ def command(args, phase, remote):
         if phase == 'faults' and args.panic_test_binary:
             inner += ['--panic-test-binary', f'{remote}/shim-tests']
     unit = f'ppu-soak-{args.run}-{phase}'
+    if phase in ('soak', 'corpus') and not args.smoke:
+        # Preserve the same shells/VT allocations for two active hours while
+        # releasing the shared machine between at most 29-minute segments.
+        invocation = ['python3', '-B', f'{remote}/scripts/bench/ppu_segment.py',
+                      '--unit', unit, '--receipts', f'{evidence}-segments',
+                      '--timeout', str(timeout), '--', *inner]
+        return f'cd {shlex.quote(remote)} && ' + shlex.join(invocation)
     # All fixture work stays in the named transient unit; no separate CPU load.
     invocation = ['flock', '-w', '3600', '/var/lock/perf-bench.lock',
                   'timeout', '--signal=TERM', '--kill-after=15', str(timeout),
@@ -119,7 +128,8 @@ def main():
         print(f'{phase}: exit={result.returncode}', flush=True)
         # Fetch receipts even after a failed phase. Never discard the failed run.
         directory = PHASE_DIRS.get(phase, phase)
-        fetch = (f'cd {shlex.quote(remote)} && find {directory} -type f -print0 | tar --null -T - -cf -'
+        paths = directory + (f' {directory}-segments' if phase in ('soak', 'corpus') and not args.smoke else '')
+        fetch = (f'cd {shlex.quote(remote)} && find {paths} -type f -print0 | tar --null -T - -cf -'
                  if phase in ('soak', 'corpus', 'faults', 'process-events', 'memory') else
                  f'cd {shlex.quote(remote)} && find . -maxdepth 1 -type f -name "fuzz-*" '
                  '-print0 | tar --null -T - -cf -')

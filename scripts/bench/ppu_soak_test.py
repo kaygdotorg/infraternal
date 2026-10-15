@@ -25,6 +25,15 @@ def rows():
 
 
 class Admission(unittest.TestCase):
+    def test_two_hour_run_preserves_one_fixture_between_short_lock_holds(self):
+        args = SimpleNamespace(smoke=False, source='fixture-source', run='owned',
+                               panic_test_binary=None)
+        command = shlex.split(runner.command(args, 'soak', '/owned'))
+        self.assertIn('/owned/scripts/bench/ppu_segment.py', command)
+        self.assertIn('/owned/scripts/bench/ppu_soak.py', command)
+        self.assertEqual(command[command.index('--seconds') + 1], '7200')
+        self.assertNotIn('flock', command, 'coordinator owns each lock segment')
+
     def test_optional_accounting_belongs_to_only_the_fixture_host(self):
         class Root:
             def mkdir(self, **unused):

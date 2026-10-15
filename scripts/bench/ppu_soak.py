@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 import threading
+from ppu_clock import now as clock_now
 
 MAX_FRAME = 1048576
 CAPS = 7  # SEQUENCED_INPUT | MULTI_WRITER | APPROXIMATE_SNAPSHOT in frozen v1.
@@ -196,7 +197,7 @@ class Peer:
                     searchable = self.tail + payload
                     for marker, future in list(self.waiters.items()):
                         if marker in searchable and not future.done():
-                            future.set_result(time.monotonic())
+                            future.set_result(clock_now())
                     # Search the entire frame before retaining a bounded suffix;
                     # burst output may place the marker outside the final 8 KiB.
                     self.tail = searchable[-8192:]
@@ -224,7 +225,7 @@ class Peer:
         future = asyncio.get_running_loop().create_future()
         self.waiters[marker] = future
         octal = ''.join(f'\\{byte:03o}' for byte in marker)
-        start = time.monotonic()
+        start = clock_now()
         try:
             await self.send(0x10, command + f"printf '{octal}\\n'\n".encode())
             end = await asyncio.wait_for(future, 30)
@@ -272,10 +273,10 @@ class Host:
         return self.root / 'sessions' / f'{self.origin + index:032x}.sock'
 
     async def ready(self):
-        until = time.monotonic() + 120
+        until = clock_now() + 120
         while not self.path(self.count - 1).exists():
             assert self.child.poll() is None, 'host exited during startup'
-            assert time.monotonic() < until, 'host startup timed out'
+            assert clock_now() < until, 'host startup timed out'
             await asyncio.sleep(.05)
         for index in range(self.count):
             peer = await Peer.connect(self.path(index))
@@ -339,7 +340,7 @@ class FaultSampler:
     def __init__(self, host, record, interval):
         self.host, self.record, self.interval = host, record, interval
         self.wakeups = Wakeups(host.pid)
-        self.start = time.monotonic()
+        self.start = clock_now()
         self.previous = sample(host.pid)
         self.previous_time = self.start
         self.number = 0
@@ -352,7 +353,7 @@ class FaultSampler:
         selected = live[-min(100, len(live)):]
         echoes = await asyncio.gather(*(peer.echo(f'fault-probe-{self.number}-{i}'.encode())
                                         for i, peer in selected))
-        now = time.monotonic()
+        now = clock_now()
         row = sample(self.host.pid)
         row.update(elapsed_s=now - self.start, echo_p99_ms=percentile(echoes, .99),
             echo_samples=len(echoes), cpu_percent=(row['cpu_ticks'] - self.previous['cpu_ticks']) /
@@ -379,7 +380,7 @@ class FaultSampler:
 
 
 async def soak(host, args, record, rng):
-    start = time.monotonic()
+    start = clock_now()
     active_count = max(1, host.count // 10)
     active = list(range(host.count - active_count, host.count))
     burst = set(active[-max(1, host.count // 100):])
@@ -389,7 +390,7 @@ async def soak(host, args, record, rng):
     churn_lock = asyncio.Lock()
     async def workload():
         iteration = 0
-        deadline = time.monotonic()
+        deadline = clock_now()
         try:
             while not stop.is_set():
                 await asyncio.gather(*(host.peers[i].echo(f'load-{i}-{iteration}'.encode(),
@@ -398,7 +399,7 @@ async def soak(host, args, record, rng):
                 # The confirmation itself is the light session's one line.
                 # Absolute pacing avoids adding probe duration to every second.
                 deadline += 1
-                await asyncio.sleep(max(0, deadline - time.monotonic()))
+                await asyncio.sleep(max(0, deadline - clock_now()))
         except Exception as error:
             errors.append(type(error).__name__ + ': ' + str(error))
             stop.set()
@@ -453,16 +454,17 @@ async def soak(host, args, record, rng):
     if args.mode == 'corpus':
         tasks.append(asyncio.create_task(corpus()))
     rows = []
+    ownership_requested = False
     previous = sample(host.pid)
     previous_time = start
     try:
         number = 0
-        while time.monotonic() - start < args.seconds and not stop.is_set():
+        while clock_now() - start < args.seconds and not stop.is_set():
             deadline = start + (number + 1) * args.interval
-            await asyncio.sleep(max(0, deadline - time.monotonic()))
+            await asyncio.sleep(max(0, deadline - clock_now()))
             echoes = await asyncio.gather(*(host.peers[i].echo(f'probe-{i}-{number}'.encode())
                                            for i in active))
-            now = time.monotonic()
+            now = clock_now()
             async with churn_lock:
                 row = sample(host.pid)
             row.update(elapsed_s=now - start, echo_p99_ms=percentile(echoes, .99),
@@ -474,10 +476,22 @@ async def soak(host, args, record, rng):
             row.update(wakeups.receipt())
             record.write('sample', **row)
             rows.append(row)
+            if getattr(args, 'ownership', False) and not ownership_requested and now - start >= args.warmup:
+                # Explicit diagnostic only. Request after the timed probe;
+                # never charge a 1000-session traversal to an ordinary run.
+                os.kill(host.pid, signal.SIGUSR2)
+                ownership_requested = True
+                record.write('ownership-request', fence='warmup', elapsed_s=now - start)
             previous, previous_time = row, now
             number += 1
             print(f'sample {number}: elapsed={now-start:.0f}s fds={row["fds"]} threads={row["threads"]}', flush=True)
         assert not errors, '; '.join(errors)
+        if getattr(args, 'ownership', False):
+            os.kill(host.pid, signal.SIGUSR2)
+            record.write('ownership-request', fence='end', elapsed_s=clock_now() - start)
+            # Fence the synchronous signal callback through a real wire request
+            # before cleanup can close the host and its numeric receipt.
+            await host.peers[-1].echo(b'ownership-end-fence')
         # Idle terminals must also accept input, not merely retain their PID.
         # Probe them after the timed mix so this census cannot alter idle load.
         confirmations = await asyncio.gather(*(peer.echo(f'final-{i}'.encode())
@@ -577,9 +591,9 @@ async def faults(host, args, record, rng):
                    'q.write_text(str(os.getpid())); q.replace(p); signal.pause()')
         import shlex
         await peer.send(0x10, f'python3 -c {shlex.quote(program)}\n'.encode())
-        deadline = time.monotonic() + 30
+        deadline = clock_now() + 30
         while not path.exists():
-            assert time.monotonic() < deadline, 'child did not install HUP disposition'
+            assert clock_now() < deadline, 'child did not install HUP disposition'
             await asyncio.sleep(.01)
         pid = int(path.read_text())
         status = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
@@ -736,13 +750,17 @@ async def run(args):
         nofile_soft=resource.getrlimit(resource.RLIMIT_NOFILE)[0], nofile_hard=hard_fds,
         binary_sha256=hashlib.sha256(args.binary.read_bytes()).hexdigest(),
         driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        source=args.source, load=Path('/proc/loadavg').read_text().split()[:3],
+        source=args.source, segmented=('PPU_PAUSE_CLOCK' in os.environ),
+        ownership_diagnostic=getattr(args, 'ownership', False), load=Path('/proc/loadavg').read_text().split()[:3],
         expected_idle=args.sessions - max(1, args.sessions // 10),
         expected_light=max(1, args.sessions // 10) - max(1, args.sessions // 100),
         expected_burst=max(1, args.sessions // 100))
     host = Host(args.binary, args.evidence / 'host', args.sessions, args.seed << 64,
-                scope=f'ppu-soak-memory-{os.getpid()}' if args.mode == 'memory' else None)
+                scope=f'ppu-soak-memory-{os.getpid()}' if args.mode == 'memory' else None,
+                accounting=args.evidence / 'ownership.log' if getattr(args, 'ownership', False) else None)
     loop = asyncio.get_running_loop()
+    if 'PPU_PAUSE_CLOCK' in os.environ:
+        loop.time = clock_now
     loop.add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     try:
         await host.ready()
@@ -799,6 +817,8 @@ def main():
     parser.add_argument('--interval', type=float, default=10)
     parser.add_argument('--warmup', type=float, default=600)
     parser.add_argument('--seed', type=int, default=270205)
+    parser.add_argument('--ownership', action='store_true',
+                        help='diagnostic: request per-session ownership after warmup and at completion')
     parser.add_argument('--memory-tolerance-kib', type=int, default=1024)
     parser.add_argument('--echo-ratio', type=float, default=1.25)
     args = parser.parse_args()
