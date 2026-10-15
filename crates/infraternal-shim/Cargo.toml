@@ -16,6 +16,7 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 [dependencies]
+clap = { workspace = true, optional = true }
 alacritty_terminal = { workspace = true, optional = true }
 vte.workspace = true
 # Reuse the server's pinned OpenSSL at the audited secure-allocation FFI boundary.
@@ -26,6 +27,7 @@ vt100 = { workspace = true, optional = true }
 
 # Comparison engines are never in the default production dependency graph.
 [features]
+cli = ["dep:clap"]
 # Executable images expose the callback-free Rust VT boundary only (D243).
 session-image = []
 # Audited transient process-transfer buffers are removed with the remote plugin.

@@ -1376,7 +1376,6 @@ name = "infraternal-fuzz"
 version = "0.1.0"
 dependencies = [
  "axum",
- "clap",
  "infraternal-agent",
  "infraternal-plugin-api",
  "infraternal-plugin-host-facts",
@@ -1572,6 +1571,7 @@ name = "infraternal-shim"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "clap",
  "libghostty-vt",
  "nix",
  "openssl",
