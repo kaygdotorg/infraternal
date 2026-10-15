@@ -358,6 +358,16 @@ impl ReadyMarks {
         // Start after input dispatch, never before a blocking poll. Cheap
         // replies share a turn; costly output yields without an idle timer.
         self.output_deadline = Some(now + INTERACTIVE_OUTPUT_TIME);
+        // A host-wide marker, never a peer identity. Sampling Instant precedes
+        // this receipt, so the reason bits below are authoritative for expiry.
+        trace_host!(
+            OutputRoundStart,
+            [0; 16],
+            -1,
+            u64::from(self.round),
+            usize::try_from(INTERACTIVE_OUTPUT_TIME.as_micros()).unwrap_or(usize::MAX),
+            INTERACTIVE_READS_PER_ROUND
+        );
     }
     fn read_interactive(&mut self, index: usize) -> bool {
         self.read_interactive_at(index, Instant::now())
@@ -367,6 +377,23 @@ impl ReadyMarks {
             || self.output_deadline.is_some_and(|deadline| now >= deadline)
             || !self.read_once(index)
         {
+            // Preserve the non-diagnostic branch exactly. Report only count
+            // or elapsed guards; a duplicate with allowance left is neither.
+            #[cfg(feature = "host-diagnostics")]
+            {
+                let count = self.interactive_reads == INTERACTIVE_READS_PER_ROUND;
+                let elapsed = self.output_deadline.is_some_and(|deadline| now >= deadline);
+                if count || elapsed {
+                    trace_host!(
+                        ReadBudgetDenied,
+                        [0; 16],
+                        -1,
+                        u64::try_from(index).unwrap_or(u64::MAX),
+                        self.interactive_reads,
+                        usize::from(count) | (usize::from(elapsed) << 1)
+                    );
+                }
+            }
             return false;
         }
         self.interactive_reads += 1;

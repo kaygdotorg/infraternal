@@ -26,6 +26,8 @@ pub(crate) enum Stage {
     ResizeStart = 12,
     ResizeDone = 13,
     FrameBuildStart = 14,
+    OutputRoundStart = 15,
+    ReadBudgetDenied = 16,
 }
 #[derive(Clone, Copy)]
 struct Record {
@@ -35,7 +37,9 @@ struct Record {
     fd: i32,
     bytes: usize,
     // Encoded queue bytes for FrameBuilt/SocketWriteDone; writer identity
-    // for InputQueued/PtyWriteDone. Other stages set this to zero.
+    // for InputQueued/PtyWriteDone. OutputRoundStart carries the count cap;
+    // ReadBudgetDenied carries reason bits (1=count, 2=elapsed). Other stages
+    // set this to zero.
     extra: usize,
     stage: Stage,
 }
