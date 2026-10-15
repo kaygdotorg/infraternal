@@ -34,6 +34,13 @@ class PeerInspection(unittest.TestCase):
 
 
 class SampleAccounting(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_close_invalidates_a_retained_socket_sample(self):
+        browser = fixture.Browser.__new__(fixture.Browser)
+        browser.queue = asyncio.Queue()
+        browser.queue.put_nowait((1, 0x0f, b''))
+        with self.assertRaisesRegex(AssertionError, 'terminal route retired'):
+            await browser.read()
+
     async def test_broken_socket_close_does_not_abort_fixture_teardown(self):
         browser = fixture.Browser.__new__(fixture.Browser)
         browser.task = asyncio.create_task(asyncio.sleep(3600))
