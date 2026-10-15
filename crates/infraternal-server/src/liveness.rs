@@ -3,14 +3,14 @@
 use std::{collections::VecDeque, time::Duration};
 use tokio::time::Instant;
 
-/// A short scheduling allowance keeps failure detection near one measured RTT.
-/// Pipelining avoids waiting another RTT before discovering a newly broken direction.
+/// Probe cadence is independent of response allowance: idle work stays unchanged.
 pub(crate) const TICK: Duration = Duration::from_millis(25);
-// One millisecond lets a ready client tick precede fallback. Take it from the
-// response margin, preserving the exact measured-RTT + 50ms total allowance.
+// One millisecond lets a ready client tick precede fallback.
 const SERIAL_GAP: Duration = Duration::from_millis(26);
-const SERIAL_RESPONSE: Duration = Duration::from_millis(24);
-const _: () = assert!(SERIAL_GAP.as_millis() + SERIAL_RESPONSE.as_millis() == TICK.as_millis() * 2);
+// The floor covers a 150ms local stall plus reply dispatch, without waiting for
+// transport timeouts. Slow routes instead follow their measured RTT and jitter.
+const RESPONSE_FLOOR: Duration = Duration::from_millis(250);
+const RESPONSE_MARGIN: Duration = Duration::from_millis(50);
 
 pub(crate) struct Liveness {
     origin: Instant,
@@ -18,6 +18,8 @@ pub(crate) struct Liveness {
     sent: u64,
     acked: u64,
     budget: Duration,
+    srtt: Option<Duration>,
+    rttvar: Duration,
     answer_paced: bool,
     issued: VecDeque<u64>,
 }
@@ -32,13 +34,14 @@ impl Liveness {
             acked: 0,
             issued: VecDeque::new(),
             answer_paced: false,
+            srtt: None,
+            rttvar: Duration::ZERO,
             // Before the first sample, allow greeting/replay and an unknown link RTT.
             budget: Duration::from_secs(2),
         }
     }
 
-    /// Serial probes divide the fixed silence allowance between idle and reply
-    /// time; pipelined routes retain their existing two-tick response floor.
+    /// Browser routes pace idle requests from their correlated answers.
     pub(crate) fn answer_paced() -> Self {
         Self {
             answer_paced: true,
@@ -52,6 +55,8 @@ impl Liveness {
         self.answered = Instant::now();
         self.acked = 0;
         self.budget = Duration::from_secs(2);
+        self.srtt = None;
+        self.rttvar = Duration::ZERO;
         self.issued.clear();
     }
 
@@ -93,19 +98,9 @@ impl Liveness {
         // Never move an outstanding deadline: pipelining cannot mask silence.
         if self.issued.is_empty() {
             let now = Instant::now();
-            if self.acked == 0 || self.answer_paced {
-                // Serial routes budget their idle gap separately; startup has
-                // no measured silence window until the first actual request.
-                self.answered = now;
-            } else {
-                // Keep the pipelined last-answer window, including its intended
-                // idle tick. Only a late local callback earns timing credit.
-                let due =
-                    (self.origin + Duration::from_micros(self.sent) + TICK).max(self.answered);
-                if now > due {
-                    self.answered += now - due;
-                }
-            }
+            // A peer cannot answer an unissued request. Account for local
+            // timer delay only here; sending again never renews silence.
+            self.answered = now;
         }
         self.sent = u64::try_from(self.origin.elapsed().as_micros())
             .unwrap_or(u64::MAX)
@@ -138,11 +133,17 @@ impl Liveness {
             self.issued.pop_front();
         }
         self.answered = now;
-        self.budget = if self.answer_paced {
-            rtt + SERIAL_RESPONSE
+        // Update variation against the previous SRTT (alpha=1/8, beta=1/4).
+        // Only the correlated, unexpired reply above can train either estimate.
+        let srtt = if let Some(previous) = self.srtt {
+            self.rttvar = (self.rttvar * 3 + previous.abs_diff(rtt)) / 4;
+            (previous * 7 + rtt) / 8
         } else {
-            (rtt + TICK).max(TICK * 2)
+            self.rttvar = rtt / 2;
+            rtt
         };
+        self.srtt = Some(srtt);
+        self.budget = (srtt + self.rttvar * 4 + RESPONSE_MARGIN).max(RESPONSE_FLOOR);
         true
     }
 
@@ -156,24 +157,97 @@ mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn pipelined_idle_gap_does_not_renew_the_sampled_lease() {
+    async fn healthy_reply_survives_a_150ms_server_stall() {
+        for mut route in [Liveness::new(), Liveness::answer_paced()] {
+            let (nonce, stamp) = route.ping();
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(route.pong(nonce, stamp));
+            tokio::time::advance(TICK).await;
+            let (nonce, stamp) = route.ping();
+            let deadline = route.response_deadline();
+            tokio::time::advance(Duration::from_millis(150)).await;
+            assert!(!route.expired(), "scheduler stalls are not peer loss");
+            assert_eq!(route.response_deadline(), deadline);
+            assert!(route.pong(nonce, stamp));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_dead_peer_expires_within_floor_plus_one_interval() {
+        let mut route = Liveness::answer_paced();
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(nonce, stamp));
+        let broken = Instant::now();
+        tokio::time::advance(SERIAL_GAP).await;
+        route.ping();
+        let deadline = route.response_deadline().expect("issued probe deadline");
+        assert_eq!(
+            deadline - Instant::now(),
+            Duration::from_millis(250) + Duration::from_nanos(1)
+        );
+        assert!(deadline - broken <= Duration::from_millis(277));
+        tokio::time::advance(deadline - Instant::now()).await;
+        assert!(route.expired());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn variation_uses_the_previous_smoothed_sample() {
+        let mut route = Liveness::answer_paced();
+        // Advance first so the nonce's nonzero sentinel adds no timestamp skew.
+        tokio::time::advance(TICK).await;
+        for rtt in [100, 200] {
+            let (nonce, stamp) = route.ping();
+            tokio::time::advance(Duration::from_millis(rtt)).await;
+            assert!(route.pong(nonce, stamp));
+        }
+        assert_eq!(route.srtt, Some(Duration::from_micros(112_500)));
+        assert_eq!(route.rttvar, Duration::from_micros(62_500));
+        assert_eq!(route.budget, Duration::from_micros(412_500));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn jitter_allowance_decays_after_the_link_settles() {
+        let mut route = Liveness::answer_paced();
+        for rtt in [100, 200, 100, 200] {
+            let (nonce, stamp) = route.ping();
+            tokio::time::advance(Duration::from_millis(rtt)).await;
+            assert!(route.pong(nonce, stamp));
+        }
+        // A single-sample estimator misses variance; smoothing preserves it.
+        assert!(route.budget > Duration::from_millis(300));
+        let jitter_budget = route.budget;
+        for _ in 0..100 {
+            let (nonce, stamp) = route.ping();
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(route.pong(nonce, stamp));
+        }
+        assert!(route.budget < jitter_budget);
+        assert_eq!(route.budget, Duration::from_millis(250));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pipelined_requests_do_not_renew_an_outstanding_deadline() {
         let mut route = Liveness::new();
         tokio::time::advance(TICK).await;
         let (nonce, stamp) = route.ping();
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(route.pong(nonce, stamp));
-        tokio::time::advance(TICK - Duration::from_millis(1)).await;
+        tokio::time::advance(TICK.checked_sub(Duration::from_millis(1)).unwrap()).await;
         route.ping();
-        tokio::time::advance(Duration::from_millis(26)).await;
-        assert!(
-            !route.expired(),
-            "the existing silence boundary is inclusive"
-        );
+        let deadline = route.response_deadline().unwrap();
+        tokio::time::advance(Duration::from_millis(150)).await;
+        route.ping();
+        assert_eq!(route.response_deadline(), Some(deadline));
+        tokio::time::advance(
+            (deadline - Instant::now())
+                .checked_sub(Duration::from_nanos(1))
+                .unwrap(),
+        )
+        .await;
+        assert!(!route.expired(), "the silence boundary is inclusive");
         tokio::time::advance(Duration::from_nanos(1)).await;
-        assert!(
-            route.expired(),
-            "the intended idle gap cannot renew readiness"
-        );
+        assert!(route.expired(), "another request cannot renew readiness");
     }
 
     #[tokio::test(start_paused = true)]
@@ -198,7 +272,7 @@ mod tests {
         route.pong(nonce, stamp);
         // Server-side authorization or writer work can postpone the next probe.
         // The peer cannot answer a probe that has not been issued yet.
-        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::time::advance(Duration::from_millis(1000)).await;
         assert!(!route.expired(), "all issued probes were answered");
         let (nonce, stamp) = route.ping();
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -216,7 +290,7 @@ mod tests {
         route.pong(nonce, stamp);
         assert!(!route.expired());
         route.ping();
-        tokio::time::advance(Duration::from_millis(175)).await;
+        tokio::time::advance(route.budget).await;
         route.ping();
         // A stale or unsolicited Pong cannot hide a one-direction failure.
         route.pong(nonce, stamp);
@@ -231,7 +305,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn serial_probe_deadline_includes_idle_gap_within_rtt_plus_fifty() {
+    async fn serial_probe_deadline_includes_only_one_gap_and_the_estimated_allowance() {
         for rtt in [1, 30, 150, 1200] {
             for phase in [0, 7, 20, 24, 25] {
                 let mut route = Liveness::answer_paced();
@@ -254,10 +328,7 @@ mod tests {
                 let Some(deadline) = route.response_deadline() else {
                     panic!("issued probe needs a deadline");
                 };
-                assert!(
-                    deadline - broken
-                        <= Duration::from_millis(rtt) + TICK * 2 + Duration::from_nanos(1)
-                );
+                assert!(deadline - broken <= route.budget + SERIAL_GAP + Duration::from_nanos(1));
                 tokio::time::advance(deadline - Instant::now()).await;
                 assert!(route.expired());
             }
