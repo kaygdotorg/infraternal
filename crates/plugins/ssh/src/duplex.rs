@@ -38,7 +38,7 @@ impl Duplex {
         let mut stderr = child.stderr.take().ok_or_else(unavailable)?;
         // Remote diagnostics are private and never retained or printed. Stop
         // draining at the existing helper bound; pipe backpressure bounds abuse.
-        let diagnostics = tokio::spawn(async move {
+        let diagnostics = crate::tasks::spawn(async move {
             let mut bytes = [0; 1024];
             let mut remaining = 8192;
             while remaining != 0 {
