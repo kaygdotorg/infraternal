@@ -184,3 +184,22 @@ fn exact_legacy_binding_upgrade_preserves_the_revision_fence() {
         "binding cannot hide an access change"
     );
 }
+
+#[test]
+fn explicit_off_can_replace_a_corrupt_public_snapshot() {
+    let directory = Directory::new();
+    let (store, _) = Store::open(&directory.0).expect("running component");
+    store.save(&revision(2)).expect("accepted intent");
+    std::fs::write(directory.0.join("mesh-public.json"), b"unexpected input")
+        .expect("interrupted public snapshot fixture");
+    store
+        .save(&State {
+            enabled: false,
+            config: None,
+            backend: None,
+        })
+        .expect("explicit off must replace invalid retained data");
+    let (_, persisted) = Store::open(&directory.0).expect("disabled snapshot");
+    assert!(!persisted.enabled);
+    assert!(persisted.config.is_none());
+}
