@@ -2714,3 +2714,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      within noise on hardware without AVX-512. A gate check fails the build
      if a future OpenSSL brings the AVX-512 AES-GCM code back. It merges
      after the switch-over, once its review's P2 fixes pass.
+273. **Host removal, list stability, session manager and the + picker
+     (owner, 2026-10-15; #215, #212):**
+     - **Removing a host uninstalls the infraternal agent.** We clean up
+       after ourselves: the infraternal agent is small and the server holds
+       all configuration, so there is no "keep it installed" option.
+     - **Lists stay put while open.** Rows may be added or removed in the
+       sidebar, but the list never moves under the person's focus.
+     - **The session manager gets a Delete button** beside Rename; F2
+       renames in place.
+     - **The shortcuts panel lists F2, Delete and ⌘I.**
+     - **The + picker lists every host that has been added,** reachable or
+       not, each with its online/offline state.
+     - **`/docs/privileges` is written** (Astro Starlight per item 44). It
+       explains what the privileged infraternal agent can do and how to take
+       the privilege back. Before any of it is built, the privileged-password
+       handling goes through a design round with the owner.
