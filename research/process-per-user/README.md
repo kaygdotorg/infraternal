@@ -5,8 +5,10 @@ Status: D270 selects this design for hardening. The prototype remains opt-in;
 D13's default process per terminal is unchanged. D268 Q20 and D270 authorize
 measurement and hardening, without changing D7/D13/D128/D240/D247. No new
 terminal engine or foundational dependency was selected.
-The r6 work fixes inherited child-exit notification loss, but has not admitted
-the mixed-soak latency or whole-host upgrade path. Passing focused tests and the cold-history footprint does not
+The r6 work fixes inherited child-exit notification loss. The r7 reactor bounds
+the shared short-output cohort and can combine an ordered input Ack with ready
+output. Mixed-soak latency and whole-host upgrade survival have separate
+admission gates. Passing focused tests and the cold-history footprint does not
 authorize adoption. Current results and failures are recorded on issue #205.
 
 ## Boundary and identity
@@ -60,8 +62,11 @@ add a core role. No work starts when this feature is compiled out.
 ## State and idle behavior
 
 One thread waits on indexed readiness for listeners, PTY masters and peer sockets. A session gets
-one bounded PTY read budget per reactor round. Incoming input and promoted
-short replies use at most 4 KiB; a rotating bulk turn reads at most 16 KiB across
+one bounded PTY read budget per reactor round. Ready input is dispatched before
+readable-byte classification. Across the host, incoming input and promoted
+short replies share at most 64 4-KiB read budgets per round, with a 500-µs
+active-output deadline checked before each attempt; unread output
+retains a rotating continuation. A separate bulk turn reads at most 16 KiB across
 four nonblocking attempts, then feeds the parser and ring once. Ready input/control
 requests precede that queue; a global one-bulk-session quantum rotates through
 sessions so 1,000 flooding PTYs cannot monopolize one round.
@@ -71,8 +76,14 @@ syscall. Read-attempt deduplication prevents a promoted session from spending
 another budget through an older bulk entry. Slot-indexed membership uses one
 byte for queued/cancelled bulk work and retention-timer membership, plus a
 four-byte read generation per session.
-Generation wrap clears old read marks before reuse. A promoted entry can be
-revived in place; cancelled entries are discarded when popped, without scanning
+The output deadline starts after ready input dispatch and includes byte-hint
+classification. It is an elapsed-work bound checked between operations, not a
+preemption guarantee for a single native call. It adds no timer or idle wakeup.
+Only a granted short-read attempt cancels its older bulk entry; denied
+promotions retain their rotating turn. One host-wide counter and deadline track
+the short allowance, with no per-session allocation or timer. Generation wrap clears old
+read marks and restores the allowance. A promoted entry can be revived in place;
+cancelled entries are discarded when popped, without scanning
 the whole bulk backlog on every turn. PTY and viewer backpressure keep bulk
 producers from allocating an unbounded transmit queue.
 
@@ -89,6 +100,16 @@ each housekeeping visit shares a 32-KiB/four-write budget across pending, state
 and output frames. Partial frames retain their byte cursor and ordering; logical
 replay work keeps writable interest after an inline frame has drained. Large
 completed repaint buffers release storage before an indefinite idle wait.
+A fresh input Ack for a subscribed data viewer at the current output head can
+remain logical while the reactor prepares a bounded read. Available output
+shares the existing ordered Ack/output batch. Fresh input retains writable
+fallback interest. Once readable output is queued,
+a held logical data Ack alone does not request writable polling; actual pending
+wire bytes and non-coalescible replies still do. The queued read always finishes
+the Ack, including an empty attempt. A later writable visit without readable
+output sends a fresh Ack, so a silent program does not hold input confirmation. Input-only viewers, state fences,
+pending replay/snapshot/deferred work and ended sessions retain prompt replies.
+The final settle after a read sends the Ack even when that read is empty.
 Retained output is borrowed across physical ring wrap and encoded directly
 into that peer's reusable wire buffer. A partial frame keeps stable bytes while
 the ring changes; no borrowed ring pointer survives the housekeeping visit.
