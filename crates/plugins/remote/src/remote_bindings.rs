@@ -98,10 +98,10 @@ impl PeerBinding {
         {
             peer.backup = enabled;
             if !enabled {
-                peer.recent.cancel_copies();
+                peer.recent_mut().cancel_copies();
                 if peers
                     .iter_mut()
-                    .all(|peer| peer.recent.deadline().is_none())
+                    .all(|peer| peer.recent().deadline().is_none())
                     && let Ok(mut clock) = self.bindings.copies.lock()
                 {
                     if peers.iter_mut().all(|peer| !peer.backup) {
@@ -178,7 +178,7 @@ impl Bindings {
                     clock.clear();
                 } else if peers
                     .iter_mut()
-                    .all(|peer| peer.recent.deadline().is_none())
+                    .all(|peer| peer.recent().deadline().is_none())
                 {
                     clock.cancel_timer();
                 }
@@ -204,7 +204,7 @@ impl Bindings {
                             binding: lease,
                             local: received.dst_ip,
                         });
-                        if let Some(at) = peer.recent.mesh_ready()
+                        if let Some(at) = peer.recent_mut().mesh_ready()
                             && let Ok(mut clock) = self.copies.lock()
                         {
                             clock.arm(at);
@@ -222,7 +222,7 @@ impl Bindings {
                             // history drains through the endpoint's existing
                             // fair send budget after QUIC receives this batch.
                             // Each completed return consumes its original.
-                            if let Some(at) = peer.recent.replay(received.dst_ip)
+                            if let Some(at) = peer.recent_mut().replay(received.dst_ip)
                                 && let Ok(mut clock) = self.copies.lock()
                             {
                                 clock.arm(at);
@@ -263,7 +263,7 @@ impl Bindings {
         let mut peers = self.peers.lock().map_err(|_| io::ErrorKind::Other)?;
         let mut total = [0; 4];
         for peer in peers.iter_mut() {
-            for (sum, value) in total.iter_mut().zip(peer.recent.history()) {
+            for (sum, value) in total.iter_mut().zip(peer.recent().history()) {
                 *sum += value;
             }
         }
@@ -307,12 +307,12 @@ impl Bindings {
             for peer in peers.iter_mut() {
                 if peer.mesh.is_some_and(|route| route.binding == Some(id)) {
                     peer.mesh = None;
-                    peer.recent.cancel_mesh_replies();
+                    peer.recent_mut().cancel_mesh_replies();
                 }
             }
             if peers
                 .iter_mut()
-                .all(|peer| peer.recent.deadline().is_none())
+                .all(|peer| peer.recent().deadline().is_none())
                 && let Ok(mut clock) = self.copies.lock()
             {
                 clock.cancel_timer();
@@ -440,12 +440,14 @@ impl AsyncUdpSocket for Bindings {
             && let Some(peer) = peer
         {
             let at = if peer.physical != peer.logical {
-                peer.recent.keep_copying(transmit, peer.backup)
+                let backup = peer.backup;
+                peer.recent_mut().keep_copying(transmit, backup)
             } else if peer.backup {
                 // Primary enrolled success is independent of this optional
                 // immediate mesh reply. It shares the same bounded history
                 // and cannot evict pending enrolled recovery.
-                peer.recent.mesh_reply(transmit, peer.mesh.is_some())
+                let ready = peer.mesh.is_some();
+                peer.recent_mut().mesh_reply(transmit, ready)
             } else {
                 None
             };
@@ -902,7 +904,7 @@ mod tests {
                 .unwrap()
                 .get_mut(logical)
                 .unwrap()
-                .recent
+                .recent_mut()
                 .keep_copying(
                     &Transmit {
                         destination: logical,
@@ -948,7 +950,7 @@ mod tests {
                     .unwrap()
                     .get_mut(busy)
                     .unwrap()
-                    .recent
+                    .recent_mut()
                     .keep_copying(
                         &Transmit {
                             destination: busy,
@@ -972,9 +974,10 @@ mod tests {
             .iter_mut()
             .filter(|peer| peer.logical != busy)
         {
+            let logical = peer.logical;
             assert!(
-                peer.recent
-                    .copies(bindings.primary.as_ref(), peer.logical, true, &mut 0)
+                peer.recent_mut()
+                    .copies(bindings.primary.as_ref(), logical, true, &mut 0)
                     .is_none(),
                 "an idle peer's original copy was starved by the busy slot"
             );
@@ -1324,7 +1327,7 @@ mod tests {
                 .unwrap()
                 .get(logical)
                 .unwrap()
-                .recent
+                .recent()
                 .deadline()
                 .is_none()
         );
@@ -1393,7 +1396,7 @@ mod tests {
             let peers = bindings.peers.lock().unwrap();
             let selected = peers.get(logical).unwrap();
             assert!(selected.mesh.is_none());
-            assert!(selected.recent.deadline().is_none());
+            assert!(selected.recent().deadline().is_none());
             assert_eq!(selected.physical, logical);
         }
         let mut buffers = [IoSliceMut::new(&mut bytes)];
@@ -1490,14 +1493,14 @@ mod tests {
             let at = {
                 let mut peers = bindings.peers.lock().unwrap();
                 let survivor = peers.get_mut(survivor_logical).unwrap();
-                survivor.recent.keep(&Transmit {
+                survivor.recent_mut().keep(&Transmit {
                     destination: survivor_logical,
                     contents: b"surviving-return",
                     ecn: None,
                     segment_size: None,
                     src_ip: None,
                 });
-                survivor.recent.replay(None).unwrap()
+                survivor.recent_mut().replay(None).unwrap()
             };
             bindings.copies.lock().unwrap().arm(at);
             if retire_peer {
@@ -1550,14 +1553,14 @@ mod tests {
                 let at = {
                     let mut peers = bindings.peers.lock().unwrap();
                     let queued = peers.get_mut(survivor_logical).unwrap();
-                    queued.recent.keep(&Transmit {
+                    queued.recent_mut().keep(&Transmit {
                         destination: survivor_logical,
                         contents: b"surviving-return",
                         ecn: None,
                         segment_size: None,
                         src_ip: None,
                     });
-                    queued.recent.replay(None).unwrap()
+                    queued.recent_mut().replay(None).unwrap()
                 };
                 bindings.copies.lock().unwrap().arm(at);
             }

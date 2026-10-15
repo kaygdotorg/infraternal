@@ -320,9 +320,19 @@ pub(super) struct Peer {
     /// Last real ingress on the trusted alternative, including duplicates.
     /// This never replaces the primary reply hint.
     pub mesh: Option<MeshRoute>,
-    pub recent: Recent,
+    recent: Recent,
     pub seen: Seen,
     pub backup: bool,
+}
+impl Peer {
+    /// Retained ciphertext belongs to this peer's bounded queue.
+    pub fn recent(&self) -> &Recent {
+        &self.recent
+    }
+    /// Keep externally initiated queue mutations at one peer boundary.
+    pub fn recent_mut(&mut self) -> &mut Recent {
+        &mut self.recent
+    }
 }
 /// Both trusted tuple keys share one bounded slot. Use the same address/u64
 /// map representation as reply routing rather than monomorphising separate
