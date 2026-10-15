@@ -2928,3 +2928,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      offline, timeout and several machines; the inline password sealed to
      the host; the tooltip kept clear of the field. The downgrade flow
      (D274) is still to be mocked up.
+287. **When a paid licence ends, only the first person keeps working
+     (owner, 2026-10-15, #216):** after a paid licence (Homelab, Team,
+     Enterprise) ends without a new key, the first person (the account
+     that set up the server) keeps everything Community gives. Everyone
+     else cannot sign in until a valid key is entered, and their data,
+     sessions and settings are kept, not deleted. The warning starts
+     before the end date and names how many people will lose access.
