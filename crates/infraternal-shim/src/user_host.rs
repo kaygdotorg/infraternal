@@ -753,6 +753,10 @@ mod reactor;
 mod child_checks;
 
 #[cfg(test)]
+#[path = "../tests/unit/ppu_lazy_bench.rs"]
+mod lazy_bench;
+
+#[cfg(test)]
 mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
