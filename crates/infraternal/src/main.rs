@@ -1465,16 +1465,7 @@ fn run_remote_agent(
                 "Keep this process running to maintain the connection.",
             );
         }
-        let result = runtime.block_on(async move {
-            // Isolate link panics so they reach the same bounded shutdown path
-            // as a returned error, rather than waiting in Runtime::drop.
-            tokio::spawn(async move { remote::run(&data, state).await })
-                .await
-                .map_err(|_| {
-                    std::io::Error::other("Infraternal agent server link task ended unexpectedly")
-                })?
-        });
-        remote_service::stopped(runtime, result)
+        remote_service::run(runtime, remote::run(&data, state))
     })();
     if result.is_ok() {
         if enroll_only {
