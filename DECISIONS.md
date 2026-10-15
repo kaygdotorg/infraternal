@@ -2857,3 +2857,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - Still open: the transport and who holds which credential, how
        screenshots are kept from showing private things publicly, abuse
        limits, replies, authorship, and where promoted work is tracked.
+282. **VNC is a window kind of its own (owner, 2026-10-15, #223; extends
+     D200 V7 and D221):** besides being the fallback when our own capture
+     isn't available, VNC is offered generally as a window type for any
+     machine that speaks it: Proxmox/QEMU VM consoles, macOS Screen Sharing
+     and Linux desktops. It keeps D104's model (the server side holds the
+     session). Whether we use an existing Rust RFB library or build our own,
+     and whether RFB is re-encoded to video or decoded in the browser, comes
+     to the owner as measured candidates (#223). Either is acceptable to the
+     owner if it is the fastest.
