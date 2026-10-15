@@ -17,6 +17,8 @@ export function windowLabel(m: WindowModel, inventory?: SessionInventory): [name
   // A settings window is named by its section. The title comes from the section list by the window's id (`s-<section>`),
   // so a window rebuilt without its host field (a restored layout) is still titled, never blank.
   if (m.kind === "settings") return [m.host || SETTINGS_SECTIONS.find((s) => `s-${s.id}` === m.id)?.title || "Settings", m.session ?? ""];
+  // An app window or a screen is named by what it shows ("Safari · Inbox"), with the machine as its detail.
+  if (m.kind === "app" || m.kind === "screen") return [m.session || m.host, m.host];
   if (m.kind !== "terminal") return [m.host || m.kind, m.session ?? ""];
   const who = m.user ? `${m.user}@${m.host}` : m.host;
   const session = m.sessionId ? inventory?.get(m.host, m.sessionId) : undefined;

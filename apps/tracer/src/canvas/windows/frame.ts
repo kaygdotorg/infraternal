@@ -15,7 +15,7 @@ import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResi
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
-import { isTerminal, makeBody } from "../views/body";
+import { isInteractive, isTerminal, makeBody } from "../views/body";
 import { beginMove } from "./move";
 import { coarse } from "../dom";
 import { scrollerOf } from "../layout/columns";
@@ -38,8 +38,10 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
     actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
   }
   if (m.kind !== "node" && m.kind !== "settings" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
-  const title = { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
-  const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: (locked) => {
+  // An app window or a screen is named by what it shows ("Notebook · Today"); the machine it lives on is the quiet part that gives
+  // way first in a narrow pill, with its OS mark in front (D208). A terminal is the other way round: the machine, then its session.
+  const title = m.kind === "app" || m.kind === "screen" ? { host: m.session ?? m.host, session: m.host } : { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
+  const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : m.kind === "app" || m.kind === "screen" ? "connecting" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: (locked) => {
     // The lock icon on the window is the input lock (the padlock): one lock at a time, on this window.
     const held = cx.inputLock.state;
     if (locked) {
@@ -66,6 +68,15 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   rec.cleanup = () => { unwatch(); bodyCleanup?.(); };
   if (rec.binding) cx.visibility.watch(rec);
   return rec;
+}
+
+/**
+ * A press on the pill that did not move the window. A terminal's pill opens its details (#127). An app window's or a screen's pill
+ * is its machine's pill: it opens the machine's list of windows to add (D208 A1), narrowed to that machine, from the pill.
+ */
+function pillPress(cx: Ctx, rec: WinRec, how: "pointer" | "keyboard"): void {
+  if ((rec.model.kind === "app" || rec.model.kind === "screen") && cx.appWindows?.active) { cx.appWindows.togglePicker(rec.card.pill, how, rec.model.host); return; }
+  cx.details?.toggle(rec, how);
 }
 
 /** A window made active counts as used: it moves to the front of its view's recency list (#121). */
@@ -99,12 +110,12 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   root.addEventListener("pointerdown", () => setActive(cx, rec), { signal, capture: true });
   // A tap in a terminal window types into it (the key row of the toolbar then shows).
   root.addEventListener("click", (e) => {
-    if (!isTerminal(rec) || (e.target as Element).closest(".ui-window-head, .ui-window-lock, .ui-window-resize, .cl-sx-strip, .cl-sx-badge")) return;
+    if (!isInteractive(rec) || (e.target as Element).closest(".ui-window-head, .ui-window-lock, .ui-window-resize, .cl-sx-strip, .cl-sx-badge, .aw-action")) return;
     rec.binding?.focus();
   }, { signal });
   // The pill moves the window, and a press that does not move opens the details popover (#127). A pointer opens on release
   // (the press is then known not to be a drag); Enter or Space on the focused pill is a click with no pointer (detail 0).
-  pill.addEventListener("click", (e) => { e.preventDefault(); if (e.detail === 0 && camera.lod !== "thumb") cx.details?.toggle(rec, "keyboard"); }, { signal });
+  pill.addEventListener("click", (e) => { e.preventDefault(); if (e.detail === 0 && camera.lod !== "thumb") pillPress(cx, rec, "keyboard"); }, { signal });
   pill.style.touchAction = "none";
   pill.dataset.grab = "";
   let press: { id: number; x: number; y: number; timer: number; touch: boolean } | undefined;
@@ -126,7 +137,7 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     if (!press || e.pointerId !== press.id) return;
     window.clearTimeout(press.timer);
     press = undefined;
-    if (e.type === "pointerup") cx.details?.toggle(rec, "pointer");
+    if (e.type === "pointerup") pillPress(cx, rec, "pointer");
   };
   pill.addEventListener("pointerup", release, { signal });
   pill.addEventListener("pointercancel", release, { signal });

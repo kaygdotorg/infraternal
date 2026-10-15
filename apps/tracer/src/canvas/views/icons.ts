@@ -59,5 +59,5 @@ export const SECTION_ICON: Record<string, string> = {
 
 /** The icon in a window's pill: the host's OS mark for a terminal (the machine glyph until the system is known; never a terminal glyph), a glyph for the other kinds. */
 export const iconFor = (m: WindowModel): string =>
-  m.kind === "terminal" ? hostIconMarkup(m.os ?? "unknown", "ui-host-mark")
+  m.kind === "terminal" || m.kind === "app" || m.kind === "screen" ? hostIconMarkup(m.os ?? "unknown", "ui-host-mark")
     : m.kind === "settings" ? lineIcon(SECTION_ICON[m.id.slice(2)] ?? viewIcon("settings")) : m.kind === "containers" ? lineIcon(ICON.containers) : m.kind === "logs" ? lineIcon(ICON.logs) : m.kind === "flow" ? lineIcon(ICON.plus) : lineIcon(ICON.node);

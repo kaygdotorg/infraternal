@@ -12,6 +12,7 @@ import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { createPerfSink } from "./perf-sink";
+import { appwinCall, appwinEnabled, appwinFrame, appwinHosts, appwinHttp, appwinSocketClosed } from "./appwin-double";
 
 const HOST = "localhost";
 // The browser connects to TRACER_TEST_PORT; the TCP latency proxy reaches this private upstream port.
@@ -77,6 +78,10 @@ interface Connection {
   /** Active session inventory subscriptions receive full snapshots, including after reconnects. */
   sessionInventorySubscriptions: Set<number>;
   welcomed: boolean;
+  /** The client declared the desktop video capability in its Hello (app-window double only). */
+  desktopCap?: boolean;
+  /** Client streams that carry desktop viewers (app-window double only). */
+  desktopStreams?: Set<number>;
   resumeAccepted: boolean;
   resumeExpected: boolean;
   welcomeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -196,8 +201,10 @@ webSockets.on("connection", (socket, request) => {
       socket.close(1002, "invalid test-double wire frame");
     }
   });
-  socket.on("close", () => {
+  socket.on("close", (code, reason) => {
     socketCloseCount += 1;
+    appwinSocketClosed(socket);
+    if (appwinEnabled) process.stdout.write(`socket closed ${code} ${reason.toString().slice(0, 80)}\n`);
     if (connection.welcomeTimer) clearTimeout(connection.welcomeTimer);
     if (connection.livenessTimer) clearTimeout(connection.livenessTimer);
     connections.delete(connection);
@@ -218,6 +225,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     return sendJson(response, 200, { ok: true });
   }
   if (url.pathname === "/__perf") return perfSink(request, response);
+  if (await appwinHttp(request, response, url.pathname, readJson, sendJson)) return;
   if (await handleBootstrapHttp(request, response, url.pathname, sameOrigin(request) || request.method === "GET" ? isAuthenticated(request) : false)) return;
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
     return sendJson(response, 200, { hosts: prototypeHosts });
@@ -763,6 +771,12 @@ function handleWire(connection: Connection, streamId: number, frame: WireFrame, 
   }
   if (streamId === 0) {
     handleControlFrame(connection, frame);
+  } else if (appwinEnabled && (frame.type === "Desktop" || connection.desktopStreams?.has(streamId))) {
+    // A desktop viewer needs the capability the client declared in its Hello; without it the socket is refused, as the server does.
+    if (!connection.desktopCap) { connection.socket.close(1002, "desktop video was not declared"); return; }
+    (connection.desktopStreams ??= new Set()).add(streamId);
+    if (frame.type === "Close") connection.desktopStreams.delete(streamId);
+    appwinFrame(connection.socket, streamId, frame);
   } else if (connection.goneStreams.has(streamId)) {
     // Like the server: frames that crossed the final Close are dropped, and the client's own Close ends the entry.
     if (frame.type === "Close") connection.goneStreams.delete(streamId);
@@ -778,13 +792,14 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   switch (frame.type) {
     case "Hello":
       connection.resumeExpected = (frame.caps & 1n) !== 0n;
+      connection.desktopCap = (frame.caps & 8n) !== 0n;
       if (!connection.resumeExpected) {
         // A connection without Resume creates a fresh writer; its input cursor
         // starts at zero even though accepted_input_bytes remains cumulative.
         connection.inputCursor = 0n;
         connection.session.writtenInput = 0n;
       }
-      sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: 0n, clientInfo: "infraternal-mock-test-double/0.1" });
+      sendFrame(connection.socket, 0, { type: "Hello", version: 1, caps: appwinEnabled ? 8n : 0n, clientInfo: "infraternal-mock-test-double/0.1" });
       connection.welcomeTimer = setTimeout(() => sendWelcome(connection), 0);
       return;
     case "Resume":
@@ -804,8 +819,13 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       return;
     case "Call": {
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "remote.host.list") {
-        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"hosts":[],"next":null}') });
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: appwinHosts(), next: null })) });
         return;
+      }
+      if (connection.welcomed && frame.callId > 0 && appwinEnabled && frame.actionId.startsWith("desktop.")) {
+        let input: Record<string, unknown> = {};
+        try { input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as Record<string, unknown>; } catch { /* an empty input */ }
+        if (appwinCall(connection.socket, frame.callId, frame.actionId, input)) return;
       }
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read") {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"os":"Linux"}') });

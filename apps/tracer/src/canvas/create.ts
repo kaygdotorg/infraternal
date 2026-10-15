@@ -10,6 +10,7 @@
  * The 60 fps rule lives in the camera; the instant-work rule here: every handler does at most a layout read and a
  * transform write, and everything else (saving, the tree, arrows) is coalesced to a microtask, a frame or a timer.
  */
+import { installAppWindows } from "./appwin/hook";
 import { mountToast } from "../../../../packages/ui/src/toast";
 import type { CoreScreen } from "../core-screen";
 import { createMemory } from "./memory";
@@ -130,6 +131,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   cx.tree = createTree(cx);
   if (options.adapters.mesh) cx.mesh = createMesh(cx, options.adapters.mesh);
   if (options.adapters.sharing) cx.sharing = createSharingHandle(cx, options.adapters.sharing);
+  const appWindows = installAppWindows(cx);
+  if (appWindows) cx.appWindows = appWindows;
   cx.toolbar = createToolbar(cx);
   installGestures(cx);
   const removeShortcuts = installShortcuts(cx);
@@ -212,6 +215,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       cx.toolbar.dispose();
       cx.tree.dispose();
       cx.sessionUi?.dispose();
+      cx.appWindows?.dispose();
       cx.pill.dispose();
       cx.sharing?.dispose();
       cx.mesh?.dispose();

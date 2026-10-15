@@ -43,6 +43,8 @@ import type { ToolbarModule } from "./toolbar/row";
 import type { SessionUi } from "./windows/session-hooks";
 import type { SettingsSource } from "./views/settings-body.on-demand";
 import type { RecentList } from "./recency";
+import type { AppWindowsAdapter } from "./appwin/adapter";
+import type { AppWindowsHook } from "./appwin/hook";
 
 /** One window on the canvas: its card, its model and the things that must be undone when it goes. */
 export interface WinRec {
@@ -133,6 +135,8 @@ export interface Adapters {
   addHost?: () => void;
   /** The lock on host connections (D168, D217): its state, the palette row and Settings → Hosts; absent when the server has none. */
   authority?: import("./addhost/authority-unlock").AuthorityControl;
+  /** Streams of app windows and screens from machines (D207, D208); absent in mockups, and the feature is then not offered at all. */
+  appWindows?: AppWindowsAdapter;
 }
 
 export interface Ctx {
@@ -179,4 +183,6 @@ export interface Ctx {
   toolbar: ToolbarModule;
   mesh?: MeshModule;
   sharing?: SharingModule;
+  /** App windows and screens; exists only with an `appWindows` adapter. */
+  appWindows?: AppWindowsHook;
 }

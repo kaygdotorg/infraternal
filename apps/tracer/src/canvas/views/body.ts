@@ -8,8 +8,11 @@ import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
 import { onDemand } from "../../on-demand";
 
-/** True for kinds whose window is a terminal session: the only kind that can split or take input. */
+/** True for kinds whose window is a terminal session: the only kind that can split. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
+
+/** True for windows that take the person's keys and pointer: a terminal, and an app window or a screen (D208). The input lock can hold only these. */
+export const isInteractive = (rec: WinRec): boolean => isTerminal(rec) || rec.model.kind === "app" || rec.model.kind === "screen";
 
 export function makeBody(cx: Ctx, rec: WinRec): void {
   const m = rec.model;
@@ -39,6 +42,20 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     }, refused: (message) => cx.sessionUi?.refused(rec, message) ?? false });
     rec.binding = binding;
     if (binding.connected === false) rec.card.setStatus("connecting");
+    binding.mount(body);
+    return;
+  }
+  if (m.kind === "app" || m.kind === "screen") {
+    // The stream's code loaded before this window could be opened (only it opens one); without it the window explains itself.
+    const binding = cx.adapters.appWindows ? cx.appWindows?.bindingFor(rec) : undefined;
+    if (!binding) {
+      const box = el("div", "cl-noaccess");
+      box.innerHTML = '<p class="cl-noaccess-title">App windows are off</p><p class="cl-noaccess-hint">Turn them on in Settings, Hosts, then open this window again.</p>';
+      body.append(box);
+      return;
+    }
+    rec.binding = binding;
+    rec.card.setStatus("connecting");
     binding.mount(body);
     return;
   }

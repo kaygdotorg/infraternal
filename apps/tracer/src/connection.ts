@@ -109,7 +109,16 @@ export interface ConnectionConfig {
   onRecoveryPending?: (readyAt: number | undefined) => void;
   /** Connection state: true once a stream attached, false when the socket closes. */
   onConnectionChange?: (connected: boolean) => void;
+  /**
+   * Asked at every socket open: true advertises the desktop video capability (bit 3, contracts/wire.md §9) in the
+   * client's Hello, so the server may open app-window and screen streams on this socket. It is read at connect time,
+   * so a person who turns the feature on needs the next connection for it to take effect; the flag is off by default.
+   */
+  desktop?: () => boolean;
 }
+
+/** Capability bit the server advertises (and a client echoes) for desktop video streams. */
+export const DESKTOP_VIDEO_CAP = 8n;
 
 interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 
@@ -136,6 +145,8 @@ export class MuxConnection {
   private readonly subscriptions = new Map<number, Subscription>();
   private readonly welcomeListeners = new Set<() => void>();
   private readonly attachListeners = new Set<() => void>();
+  private readonly capListeners = new Set<(caps: bigint) => void>();
+  private serverCapsValue: bigint | undefined;
   private nextSubscription = FIRST_FEATURE_SUBSCRIPTION;
   private readonly sendScratch = new Uint8Array(SEND_BUFFER_SIZE);
   private nextStream = 1;
@@ -250,6 +261,16 @@ export class MuxConnection {
     this.welcomeListeners.add(listener);
     if (this.isWelcomed) listener();
     return () => { this.welcomeListeners.delete(listener); };
+  }
+
+  /** The capability bits the server last advertised, or undefined before its Hello arrives. */
+  get serverCaps(): bigint | undefined { return this.serverCapsValue; }
+
+  /** Runs `listener` now when the server's capabilities are known, and again whenever a Hello states them. */
+  onServerCaps(listener: (caps: bigint) => void): () => void {
+    this.capListeners.add(listener);
+    if (this.serverCapsValue !== undefined) listener(this.serverCapsValue);
+    return () => { this.capListeners.delete(listener); };
   }
 
   /**
@@ -367,6 +388,7 @@ export class MuxConnection {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.capListeners.clear();
     this.clearRetryTimer();
     this.stopRetryHintListeners();
     this.resetPings();
@@ -403,7 +425,8 @@ export class MuxConnection {
       const resumable = sessionsToResume && credentials !== undefined && Date.now() < credentials.deadline;
       this.resumeSent = resumable;
       // RESUME_NEXT tells the server to wait for the adjacent Resume before issuing Welcome.
-      const hello: WireFrame = { type: "Hello", version: VERSION, caps: resumable ? 1n : 0n, clientInfo: "infraternal-tracer/0.1" };
+      const wantsDesktop = this.config.desktop?.() === true;
+      const hello: WireFrame = { type: "Hello", version: VERSION, caps: (resumable ? 1n : 0n) | (wantsDesktop ? DESKTOP_VIDEO_CAP : 0n), clientInfo: "infraternal-tracer/0.1" };
       let length = encodeMuxedFrameInto(CONTROL_STREAM, hello, this.sendScratch);
       if (resumable && credentials) {
         length += encodeMuxedFrameInto(CONTROL_STREAM, { type: "Resume", connectionId: credentials.connectionId, resumeToken: credentials.resumeToken }, this.sendScratch, length);
@@ -536,7 +559,10 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
-        if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
+        if (frame.version !== VERSION) { this.fail("server uses an unsupported wire version"); return; }
+        // What the server can do is its own statement; features show themselves only when it says so.
+        this.serverCapsValue = frame.caps;
+        for (const l of [...this.capListeners]) l(frame.caps);
         return;
       case "Welcome":
         this.stopRetryHintListeners();

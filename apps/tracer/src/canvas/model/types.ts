@@ -6,8 +6,11 @@
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 
-/** What a window shows. A `flow` window holds a short guided task (add a host); it is never saved and closes itself when done. Only a `terminal` window is bound to a session and can split. */
-export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings" | "flow";
+/**
+ * What a window shows. A `flow` window holds a short guided task (add a host); it is never saved and closes itself when done. Only a `terminal` window is bound to a session and can split.
+ * An `app` window streams one app window of a machine and a `screen` window streams a whole display (D208); neither is saved (see `WindowModel.stream`).
+ */
+export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings" | "flow" | "app" | "screen";
 
 /** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
 export type ViewId = string;
@@ -43,6 +46,11 @@ export interface WindowModel {
   row?: number;
   /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
   noAccess?: boolean;
+  /**
+   * An `app` or `screen` window: what the machine streams into it (D208). The machine's window identity lives only as long
+   * as the window does, so these windows are not part of the saved layout.
+   */
+  stream?: { target: import("../appwin/inventory").AppTarget; appName: string; title: string; bundleId?: string };
 }
 
 /** A column. `half` names the two halves of one split (D212): closing one returns its width to the other. Runtime only. */

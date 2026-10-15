@@ -69,14 +69,20 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     set: (group, option) => { if (group === "phone") writeSize("phone", option as PhoneSize); else writeSize("desktop", option as DesktopSize); },
     onChange(listener) { window.addEventListener(SIZE_EVENT, listener); return () => window.removeEventListener(SIZE_EVENT, listener); },
   };
-  const hosts: HostsApi = {
+  const hostsApi = (): HostsApi => ({
     switches: [{
       id: "extended-info", title: "Details", label: "Extended info", hint: "System, resources and access facts in each window's details",
       get: readExtendedInfo, set: writeExtendedInfo,
       onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
-    }],
+    },
+    // Offered only when the server says it can stream (D208): a server without the feature never shows a switch that does nothing.
+    ...(cx.appWindows?.serverCan ? [{
+      id: "app-windows", title: "App windows", label: "Stream app windows", hint: "Open an app window or a whole screen from a Mac on the canvas",
+      get: () => cx.appWindows?.pref ?? false, set: (on: boolean) => cx.appWindows?.setWanted(on),
+      onChange: (listener: () => void) => cx.appWindows?.onChange(listener) ?? (() => undefined),
+    }] : [])],
     ...(cx.adapters.authority ? { statuses: [authorityPref(cx.adapters.authority)] } : {}),
-  };
+  });
   const pane = el("div", "ui-settings-pane");
   pane.setAttribute("role", "region");
   pane.setAttribute("aria-label", section);
@@ -85,7 +91,13 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
     switch (section) {
       case "appearance": return renderAppearance(pane, appearance);
       case "windows": return renderWindowSizes(pane, windowSizes);
-      case "hosts": return renderHosts(pane, hosts);
+      case "hosts": {
+        // The Settings windows are drawn at load, before the server has said what it can do: the panel draws again when that
+        // changes, so the app-windows switch appears (and only then) without a reload.
+        let can = cx.appWindows?.serverCan, stop = renderHosts(pane, hostsApi());
+        const off = cx.appWindows?.onChange(() => { if (cx.appWindows?.serverCan === can) return; can = cx.appWindows?.serverCan; stop(); stop = renderHosts(pane, hostsApi()); });
+        return () => { off?.(); stop(); };
+      }
       case "toolbar": return core.settingsPanels.toolbar.render(pane);
       case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
       case "about": return core.settingsPanels.about.render(pane);
