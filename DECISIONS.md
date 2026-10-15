@@ -2751,3 +2751,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        privilege is taken back (proposed: a "Full access" line in the
        host's details that returns it to the rootless agent; removing the
        host also removes it).
+275. **The wheel scrolls what is under it (owner, 2026-10-15; refines D177,
+     #215):** today a snapped canvas sends every wheel to window navigation,
+     so a window's own list (Access) cannot scroll without the input lock.
+     - **Split by direction.** Vertical wheel scrolls what is under the
+       pointer: a list, a log, or the focused terminal's scrollback (or its
+       running program, as terminals do). Horizontal (sideways trackpad
+       swipe, Shift+wheel) moves between windows. ⌘/Ctrl+wheel zooms.
+     - **An unfocused terminal** behaves like any other window that does
+       not scroll: the wheel over it belongs to the canvas.
+     - **The input lock keeps its other job:** all input, keys included,
+       stays in one window and the canvas never moves.
+     - **Touch:** one finger up/down scrolls the content and a sideways
+       swipe moves between windows. Two fingers pan and pinch the canvas as
+       before.
+     - Still open: how the wheel moves up and down a column of stacked
+       windows.
