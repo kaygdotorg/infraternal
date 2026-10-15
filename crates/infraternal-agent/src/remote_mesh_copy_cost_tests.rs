@@ -741,6 +741,12 @@ async fn measure_mesh_probe_and_copy_cost(
         connections.push(connection.unwrap());
     }
     let accepted = accepting.await.unwrap();
+    // This transport-only fixture owns admitted TLS peers directly. Match the
+    // production link's responder lifetime before proving any physical path.
+    let _proofs: Vec<_> = accepted
+        .iter()
+        .map(|connection| bindings.connection_proof(connection).unwrap())
+        .collect();
     // Completion order differs from socket creation order. Path watchers must
     // own the socket with the connection's actual local UDP port.
     connections.sort_by_key(|(index, _)| *index);
