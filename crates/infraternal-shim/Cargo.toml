@@ -48,3 +48,8 @@ required-features = ["bench-vt"]
 [[example]]
 name = "ppu_host_fixture"
 required-features = ["process-per-user"]
+
+# Native observers keep probe CPU independent of the workload driver.
+[[example]]
+name = "ppu_wire_probe"
+required-features = ["process-per-user"]
