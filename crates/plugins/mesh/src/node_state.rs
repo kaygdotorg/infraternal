@@ -94,7 +94,10 @@ impl Store {
             .open(self.path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
         let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
             .map_err(|(_, error)| error)?;
-        if let (Some(previous), Some(next)) = (read_public::<State>(&self.path)?, &state.config)
+        // Disabled/unconfigured intent carries no access revision. It must
+        // remain publishable even if the retained public snapshot is unreadable.
+        if let Some(next) = &state.config
+            && let Some(previous) = read_public::<State>(&self.path)?
             && let Some(old) = previous.config
         {
             if next.version < old.version {
