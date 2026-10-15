@@ -220,3 +220,31 @@ path = "fuzz_targets/remote_path_probe_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "desktop_helper_decode"
+path = "fuzz_targets/desktop_helper_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "desktop_wire_decode"
+path = "fuzz_targets/desktop_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "desktop_source_json"
+path = "fuzz_targets/desktop_source_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "desktop_parameter_sets"
+path = "fuzz_targets/desktop_parameter_sets.rs"
+test = false
+doc = false
+bench = false
