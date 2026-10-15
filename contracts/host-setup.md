@@ -126,8 +126,8 @@ raw diagnostic text. SSH control-socket admission remains the sign-in proof.
 ## Optional session payload (D255, D198)
 
 A release may supply `infraternal-<architecture>-session-musl` beside the full
-host payload. It is the same executable built with the session and SSH component
-only, using the same shim, rendezvous protocol and terminal dispatcher. These
+host payload. It is a private executable sharing the shim, rendezvous protocol and
+terminal dispatcher with the installed host. These
 paths cannot be selected by target requests. The default server authenticates
 the session image against its exact-version signed release manifest on both
 architectures (D224/D225). Only an authenticated omission permits full-payload
@@ -181,15 +181,18 @@ unknown capabilities, root setup and later retries retain negotiation. No
 check-time hint authorizes installation or bypasses ownership, digest, terminal
 proof or commit checks.
 
-The session image is built with the internal `session-payload` feature, which
-selects the private SSH and shim entrypoints when server/transport/host-facts
-components are absent. The same shim option record, defaults and runner remain
-shared with the full build. Its argv decoder accepts only the canonical shape
-emitted by the session launcher, including readiness and detach suffixes; it
-never executes fuzzed or unknown invocation shapes. Operator commands and
-inherited-fd startup belong to the installed full image. The cross-build oracle
-therefore names that full image when it adopts the original shim. Full and
-all-component builds retain the public CLI.
+The session image is built as `infraternal-session`. Its two private entrypoints
+share the canonical shim startup decoder and SSH bridge with the installed host.
+The original authenticated session is its complete namespace: it advertises no
+node action capability, refuses terminal creation and cannot attach another
+session, including one owned by the same UID. Refused actions leave the original
+terminal usable. No node worker or background component starts in this image.
+The argv decoder accepts only canonical startup shapes, including readiness
+and detach suffixes; unknown invocation shapes produce no protocol bytes or
+state changes. Operator commands and inherited-fd startup belong to the
+installed full image. The cross-build oracle therefore names that full image
+when it adopts the original shim. Older internal `session-payload` builds remain
+compatible; default and all-component builds retain the public CLI.
 
 After publication, installed facts and the private terminal canary may run
 concurrently. Each independently waits for installed authority and checks owner

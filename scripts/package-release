@@ -25,11 +25,9 @@ if [[ "${3:-}" != --built ]]; then
         CARGO_TARGET_DIR="$host_target" scripts/static-cargo build --locked --release -p infraternal \
             --no-default-features --features plugin-host-facts,remote,ssh \
             --target "$arch-unknown-linux-musl"
-        # The early shell needs the same shim and SSH bridge, before enrollment
-        # and host components are installed. Feature removal keeps those APIs
-        # out of this artifact without selecting a different session engine.
-        CARGO_TARGET_DIR="$session_target" scripts/static-cargo build --locked --release -p infraternal \
-            --no-default-features --features session-payload --target "$arch-unknown-linux-musl"
+        # The early executable keeps only the verified shim and SSH bridge.
+        CARGO_TARGET_DIR="$session_target" scripts/static-cargo build --locked --release -p infraternal-session \
+            --target "$arch-unknown-linux-musl"
     done
 fi
 # Validate the complete set before publishing; a partial directory is never a release.
@@ -37,7 +35,7 @@ server="$target/$architecture-unknown-linux-musl/release/infraternal"
 files=("$server")
 for arch in x86_64 aarch64; do
     files+=("$host_target/$arch-unknown-linux-musl/release/infraternal")
-    files+=("$session_target/$arch-unknown-linux-musl/release/infraternal")
+    files+=("$session_target/$arch-unknown-linux-musl/release/infraternal-session")
 done
 for file in "${files[@]}"; do
     if [[ ! -x "$file" ]]; then printf 'Missing static release executable at %s\n' "$file" >&2; exit 1; fi
@@ -49,7 +47,7 @@ staging="$(mktemp -d "$(dirname -- "$output")/.release.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
 for arch in x86_64 aarch64; do
     install -m 755 "$host_target/$arch-unknown-linux-musl/release/infraternal" "$staging/infraternal-$arch-musl"
-    install -m 755 "$session_target/$arch-unknown-linux-musl/release/infraternal" "$staging/infraternal-$arch-session-musl"
+    install -m 755 "$session_target/$arch-unknown-linux-musl/release/infraternal-session" "$staging/infraternal-$arch-session-musl"
 done
 install -m 755 "$server" "$staging/infraternal"
 (cd "$staging" && sha256sum infraternal infraternal-*-musl > SHA256SUMS)

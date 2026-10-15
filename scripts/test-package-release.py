@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory(prefix='package-', dir=scratch) as work:
     assert (bundle / 'infraternal').read_bytes() == (target / 'x86_64-unknown-linux-musl/release/infraternal').read_bytes()
     for arch in ('x86_64', 'aarch64'):
         assert (bundle / f'infraternal-{arch}-musl').read_bytes() == (target / f'bootstrap/{arch}-unknown-linux-musl/release/infraternal').read_bytes()
-        assert (bundle / f'infraternal-{arch}-session-musl').read_bytes() == (target / f'session/{arch}-unknown-linux-musl/release/infraternal').read_bytes()
+        assert (bundle / f'infraternal-{arch}-session-musl').read_bytes() == (target / f'session/{arch}-unknown-linux-musl/release/infraternal-session').read_bytes()
     assert all((bundle / name).stat().st_mode & 0o111 for name in ['infraternal', 'infraternal-x86_64-musl', 'infraternal-aarch64-musl', 'infraternal-x86_64-session-musl', 'infraternal-aarch64-session-musl'])
     # A missing session profile is a partial release even when all traditional
     # host payloads are present. Symlinks here reference only built public test artifacts.
@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='package-', dir=scratch) as work:
         'x86_64-unknown-linux-musl/release/infraternal',
         'bootstrap/x86_64-unknown-linux-musl/release/infraternal',
         'bootstrap/aarch64-unknown-linux-musl/release/infraternal',
-        'session/x86_64-unknown-linux-musl/release/infraternal',
+        'session/x86_64-unknown-linux-musl/release/infraternal-session',
     ):
         link = partial_target / relative
         link.parent.mkdir(parents=True, exist_ok=True)
