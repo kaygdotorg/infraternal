@@ -179,6 +179,78 @@ async fn enrolled_copy_replies_cannot_keep_a_dead_mesh_path_alive() {
     server.close(0u32.into(), b"");
 }
 
+/// Invalid packets at the selected tuple must not borrow authenticated progress
+/// from the enrolled backup to satisfy a mesh-path proof (#201, D215).
+#[tokio::test]
+#[ignore = "Perf VM only: real socket scheduling and path-response deadline."]
+async fn review_invalid_mesh_packets_cannot_borrow_enrolled_authentication() {
+    let ca = root();
+    let server = quinn::Endpoint::server(
+        server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate)).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let logical = server.local_addr().unwrap();
+    let socket = quinn::TokioRuntime
+        .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+        .unwrap();
+    let path = PathSocket::new(socket, logical);
+    let mut client = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        None,
+        path.clone(),
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
+    client.set_default_client_config(client_config(&leaf(&ca, false), &[ca.certificate]).unwrap());
+    let (dial, accept) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+        server.accept().await.unwrap().await
+    });
+    let dial = dial.unwrap();
+    let accept = accept.unwrap();
+    let invalid = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+    path.use_mesh(invalid.local_addr().unwrap());
+    path.set_backup(true);
+    let reflected = tokio::spawn(async move {
+        let mut packet = vec![0; 65536];
+        loop {
+            let (_, source) = invalid.recv_from(&mut packet).await.unwrap();
+            // These bytes are never a valid encrypted QUIC response. Do not
+            // echo ciphertext: that would obscure which path authenticates.
+            invalid.send_to(&[0; 32], source).await.unwrap();
+        }
+    });
+    let before = authenticated_frames(&dial);
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        path_interrupted(
+            &dial,
+            &path,
+            Duration::from_millis(20),
+            Duration::from_millis(300),
+        ),
+    )
+    .await;
+    reflected.abort();
+    let _ = reflected.await;
+    assert!(
+        path.mesh_datagrams() > 0,
+        "invalid-path control did not deliver UDP"
+    );
+    assert_ne!(
+        before,
+        authenticated_frames(&dial),
+        "enrolled backup did not authenticate"
+    );
+    assert!(dial.close_reason().is_none() && accept.close_reason().is_none());
+    client.close(0u32.into(), b"");
+    server.close(0u32.into(), b"");
+    assert!(
+        matches!(result, Ok(Err(ref error)) if error.kind() == io::ErrorKind::TimedOut),
+        "invalid mesh packets combined with enrolled authentication satisfied the path guard: {result:?}"
+    );
+}
+
 /// Test-only causal reordering: every held mesh packet is released only after
 /// its identical ciphertext has crossed the enrolled receive boundary. Nothing
 /// is forged, discarded, or promoted into authenticated routing authority.
