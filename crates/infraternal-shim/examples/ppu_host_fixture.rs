@@ -2,7 +2,22 @@
 use infraternal_shim::{Config, run_host};
 use std::{io, path::PathBuf};
 
+extern "C" fn child_notification(_: nix::libc::c_int) {}
+
 fn main() -> io::Result<()> {
+    if std::env::var("PPU_RELIABILITY_CHILD_HANDLER").as_deref() == Ok("1") {
+        let action = nix::sys::signal::SigAction::new(
+            nix::sys::signal::SigHandler::Handler(child_notification),
+            nix::sys::signal::SaFlags::SA_NOCLDWAIT,
+            nix::sys::signal::SigSet::empty(),
+        );
+        // SAFETY: single-threaded fixture startup; the static handler neither
+        // allocates nor accesses runtime state. This also exercises removal of
+        // inherited auto-reaping flags, independently of SIG_IGN.
+        #[allow(unsafe_code)]
+        unsafe { nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGCHLD, &action) }
+            .map_err(io::Error::from)?;
+    }
     let root = std::env::var_os("PPU_RELIABILITY_STATE")
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
     let configs = (1_u128..=2)

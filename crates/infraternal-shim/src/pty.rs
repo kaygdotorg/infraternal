@@ -26,6 +26,24 @@ fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
 
+/// Establish waitable child ownership for the shared host before its first PTY.
+/// The caller has validated single-threaded startup and blocked SIGCHLD. A
+/// blocked ignored disposition (or `SA_NOCLDWAIT`) still lets the kernel discard
+/// exit status; replacing the entire action removes both auto-reaping forms.
+#[cfg(feature = "process-per-user")]
+pub(crate) fn reset_host_child_notifications() -> io::Result<()> {
+    let action = nix::sys::signal::SigAction::new(
+        nix::sys::signal::SigHandler::SigDfl,
+        nix::sys::signal::SaFlags::empty(),
+        nix::sys::signal::SigSet::empty(),
+    );
+    // SAFETY: no user handler is installed; the caller has one thread, blocks
+    // SIGCHLD, and has not created children. sigaction copies the valid action.
+    unsafe { nix::sys::signal::sigaction(Signal::SIGCHLD, &action) }
+        .map(|_| ())
+        .map_err(errno)
+}
+
 /// Classify already-ready PTY output without consuming or reordering bytes.
 /// The shared reactor uses this hint to read short interactive replies before
 /// bulk output. Read readiness remains authoritative if the hint changes.

@@ -84,6 +84,14 @@ struct Host {
 
 impl Host {
     fn new() -> Self {
+        Self::with_ignored_child_notifications(false)
+    }
+
+    fn with_ignored_child_notifications(ignored: bool) -> Self {
+        Self::with_child_notifications(ignored, false)
+    }
+
+    fn with_child_notifications(ignored: bool, handler: bool) -> Self {
         // Leave enough room for the 32-digit session ID in Linux sun_path.
         let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
             ".cache/codex-scratch/ppu-soak/r{}-{}",
@@ -91,8 +99,23 @@ impl Host {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.parent().unwrap()).unwrap();
-        let child = Command::new(fixture_binary())
+        let mut command = if ignored {
+            // Ignored dispositions survive exec. Confine this policy to the
+            // standalone fixture rather than mutate the threaded test process.
+            let mut launcher = Command::new("python3");
+            launcher
+                .args(["-c", "import os, signal, sys; signal.signal(signal.SIGCHLD, signal.SIG_IGN); os.execv(sys.argv[1], sys.argv[1:])"])
+                .arg(fixture_binary());
+            launcher
+        } else {
+            Command::new(fixture_binary())
+        };
+        let child = command
             .env("PPU_RELIABILITY_STATE", &root)
+            .env(
+                "PPU_RELIABILITY_CHILD_HANDLER",
+                if handler { "1" } else { "0" },
+            )
             .env(
                 "ZDOTDIR",
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../infraternal/tests/profile"),
@@ -246,4 +269,72 @@ fn terminal_corpus_and_unusual_output_leave_both_sessions_accepting_input() {
     );
     input_and_marker(&mut sibling, b"", b"sibling-after-corpus");
     assert!(host.child.try_wait().unwrap().is_none());
+}
+
+// A launch which cannot retain child status must refuse before publishing PTYs.
+#[test]
+fn review_ignored_child_notifications_do_not_lose_terminal_exit() {
+    let mut host = Host::with_ignored_child_notifications(true);
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = host.child.try_wait().unwrap() {
+            assert!(
+                !status.success(),
+                "invalid startup must be an explicit refusal"
+            );
+            let sessions = host.root.join("sessions");
+            assert!(
+                !sessions.exists() || fs::read_dir(sessions).unwrap().next().is_none(),
+                "refused startup left session rendezvous files"
+            );
+            return;
+        }
+        if host.root.join("sessions").exists() {
+            break;
+        }
+        assert!(Instant::now() < until, "startup did not complete or refuse");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut victim = host.connect(1);
+    let mut sibling = host.connect(2);
+    input_and_marker(&mut victim, b"stty -echo; ", b"child-status-ready");
+    input_and_marker(&mut sibling, b"stty -echo; ", b"child-status-sibling");
+    send(&mut victim, &Frame::Input(b"exit 7\n".to_vec()));
+    loop {
+        if let Frame::Exited(status, _) = read(&mut victim) {
+            assert_eq!(status, 7, "exit status must survive the host launch policy");
+            break;
+        }
+    }
+    input_and_marker(&mut sibling, b"", b"after-child-status");
+}
+
+// A caught disposition is installed inside main: exec would reset it before
+// reaching run_host and would leave the custom-handler case untested.
+#[test]
+fn inherited_child_dispositions_are_reset_before_sessions_start() {
+    for (ignored, handler) in [(true, false), (false, true)] {
+        let mut host = Host::with_child_notifications(ignored, handler);
+        let mut victim = host.connect(1);
+        let mut sibling = host.connect(2);
+        let status = fs::read_to_string(format!("/proc/{}/status", host.child.id())).unwrap();
+        for field in ["SigIgn:", "SigCgt:"] {
+            let mask = status
+                .lines()
+                .find_map(|line| line.strip_prefix(field))
+                .unwrap();
+            let mask = u64::from_str_radix(mask.trim(), 16).unwrap();
+            assert_eq!(mask & (1 << (nix::libc::SIGCHLD - 1)), 0, "{field}");
+        }
+        input_and_marker(&mut victim, b"stty -echo; ", b"reset-ready");
+        input_and_marker(&mut sibling, b"stty -echo; ", b"reset-sibling");
+        send(&mut victim, &Frame::Input(b"exit 7\n".to_vec()));
+        loop {
+            if let Frame::Exited(status, _) = read(&mut victim) {
+                assert_eq!(status, 7);
+                break;
+            }
+        }
+        input_and_marker(&mut sibling, b"", b"reset-after-exit");
+    }
 }

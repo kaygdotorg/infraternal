@@ -758,6 +758,7 @@ pub fn run_host_accounted(
         mask.add(Signal::SIGUSR2);
     }
     mask.thread_block().map_err(io::Error::from)?;
+    crate::pty::reset_host_child_notifications()?;
     let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
         .map_err(io::Error::from)?;
     let history = (HOST_HISTORY_BYTES / configs.len()).min(17 * 1024 * 1024);
