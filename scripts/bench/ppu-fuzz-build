@@ -8,6 +8,8 @@ import subprocess
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--scratch', type=Path, required=True)
 parser.add_argument('--toolchain', default='nightly')
+parser.add_argument('--compact-history', action='store_true',
+                    help='exercise the optional exact cold-page codec as well as parser limits')
 args = parser.parse_args()
 repo = Path(__file__).resolve().parents[2]
 scratch = args.scratch.resolve()
@@ -51,5 +53,7 @@ for name, data in [('long-osc', b'\x1b]0;' + b'x' * 65536 + b'\x07'),
                    ('utf8', b'\xff\xfe\xc0\xaf\xf0\x80\x80\x80'),
                    ('carry', b'\x1b]8;;https://example.org\x1b\\x\x1b[31;')]:
     (corpus / name).write_bytes(data)
-raise SystemExit(subprocess.run(['cargo', f'+{args.toolchain}', 'fuzz', 'build',
-    '--fuzz-dir', str(scratch), 'ppu_terminal'], cwd=repo).returncode)
+command = ['cargo', f'+{args.toolchain}', 'fuzz', 'build', '--fuzz-dir', str(scratch)]
+if args.compact_history:
+    command += ['--features', 'compact-history']
+raise SystemExit(subprocess.run([*command, 'ppu_terminal'], cwd=repo).returncode)
