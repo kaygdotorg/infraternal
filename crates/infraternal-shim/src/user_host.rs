@@ -277,7 +277,12 @@ impl Session {
             + self.path.0.capacity()
             + std::mem::size_of::<Self>()
     }
-    fn record_memory(&self, index: usize, writer: &mut impl Write) -> io::Result<()> {
+    fn record_memory(
+        &self,
+        index: usize,
+        writer: &mut impl Write,
+        reactor: Option<std::fmt::Arguments<'_>>,
+    ) -> io::Result<()> {
         let state = self.terminal.state.borrow();
         let (ordinary, pages, resident, encoded, carry) = state
             .terminal
@@ -287,10 +292,16 @@ impl Session {
             .terminal
             .as_ref()
             .map_or(0, |t| t.retained_history_rows());
-        writeln!(
+        write!(
             writer,
-            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"native_history_rows\":{history_rows},\"carry_bytes\":{carry},\"prefix_bytes\":{},\"geometry_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}}}",
+            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"native_history_rows\":{history_rows},\"carry_bytes\":{carry},\"struct_bytes\":{},\"path_bytes\":{},\"config_path_bytes\":{},\"prefix_bytes\":{},\"geometry_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}",
             self.allocated_bytes(),
+            std::mem::size_of::<Self>(),
+            self.path.0.capacity(),
+            self.config
+                .state
+                .as_ref()
+                .map_or(0, std::path::PathBuf::capacity),
             state.prefix.capacity(),
             state.resizes.capacity() * std::mem::size_of::<(usize, u16, u16)>(),
             self.ring.allocated_bytes(),
@@ -298,7 +309,11 @@ impl Session {
             self.cursors.allocated_bytes(),
             self.peer_bytes(),
             self.peers.capacity() * std::mem::size_of::<Peer>()
-        )
+        )?;
+        if let Some(reactor) = reactor {
+            write!(writer, ",\"reactor\":{reactor}")?;
+        }
+        writeln!(writer, "}}")
     }
     fn can_read(&self) -> bool {
         !self.drained

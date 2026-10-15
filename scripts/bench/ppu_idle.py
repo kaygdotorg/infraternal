@@ -120,6 +120,7 @@ async def host_row(args, count, repeat):
         after = sample(host.pid)
         return dict(kind='host', sessions=count, repeat=repeat, before=before, after=after,
                     mappings=mappings(host.pid),
+                    reactor_ownership=next((row['reactor'] for row in ownership if 'reactor' in row), None),
                     owned_bytes={key: sum(row[key] for row in ownership) for key in ownership[0]
                                  if key.endswith('_bytes')},
                     idle_cpu_ticks=after['cpu_ticks'] - before['cpu_ticks'])

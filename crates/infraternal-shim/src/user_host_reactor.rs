@@ -418,7 +418,43 @@ pub(super) fn run(
                     .and_then(|value| Signal::try_from(value).ok());
                 match signal {
                     Some(Signal::SIGCHLD) => child_exit = true,
-                    Some(Signal::SIGUSR2) => record_ownership(&slots, &mut accounting),
+                    Some(Signal::SIGUSR2) => {
+                        // Publish requested vector capacities, not a second PSS
+                        // estimate. Hash capacity is usable entries; its private
+                        // bucket/control allocation is measured independently.
+                        record_ownership(
+                            &slots,
+                            &mut accounting,
+                            Some(format_args!(
+                                "{{\"slots_capacity\":{},\"slot_size\":{},\"registry_vectors_bytes\":{},\"registry_capacity\":{},\"registry_pair_size\":{},\"ready_rows_bytes\":{},\"ready_indices_bytes\":{},\"ready_spill_bytes\":{},\"membership_bytes\":{},\"event_bytes\":{},\"bulk_bytes\":{},\"control_bytes\":{},\"small_read_bytes\":{},\"deadline_bytes\":{}}}",
+                                slots.capacity(),
+                                std::mem::size_of::<Option<Session>>(),
+                                registry.owned.capacity() * std::mem::size_of::<Vec<RawFd>>()
+                                    + registry
+                                        .owned
+                                        .iter()
+                                        .map(|fds| fds.capacity() * std::mem::size_of::<RawFd>())
+                                        .sum::<usize>(),
+                                registry.by_fd.capacity(),
+                                std::mem::size_of::<(RawFd, Registration)>(),
+                                work.rows.capacity() * std::mem::size_of::<Ready>(),
+                                work.active.capacity() * std::mem::size_of::<usize>(),
+                                work.rows
+                                    .iter()
+                                    .map(|ready| ready.more.capacity()
+                                        * std::mem::size_of::<(u64, EpollFlags)>())
+                                    .sum::<usize>(),
+                                marks.queued.capacity()
+                                    + marks.read.capacity() * std::mem::size_of::<u32>(),
+                                events.capacity() * std::mem::size_of::<EpollEvent>(),
+                                bulk.capacity() * std::mem::size_of::<usize>(),
+                                controls.capacity() * std::mem::size_of::<(usize, bool)>(),
+                                small_reads.capacity() * std::mem::size_of::<(usize, usize)>(),
+                                timers.capacity()
+                                    * std::mem::size_of::<Reverse<(Instant, usize)>>(),
+                            )),
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -624,12 +660,19 @@ pub(super) fn run(
 
 /// A profiling failure closes only the optional receipt, never live sessions.
 /// Numeric ownership is sampled between native calls on the reactor thread.
-fn record_ownership(slots: &[Option<Session>], accounting: &mut Option<std::fs::File>) {
+fn record_ownership(
+    slots: &[Option<Session>],
+    accounting: &mut Option<std::fs::File>,
+    reactor: Option<std::fmt::Arguments<'_>>,
+) {
     let result = accounting.as_mut().map(|file| -> io::Result<()> {
         let mut writer = io::BufWriter::new(file);
+        let mut reactor = reactor;
         for (index, session) in slots.iter().enumerate() {
             if let Some(session) = session {
-                session.record_memory(index, &mut writer)?;
+                // Put shared facts on the first live row without adding a new
+                // row kind or multiplying shared bytes into each session total.
+                session.record_memory(index, &mut writer, reactor.take())?;
             }
         }
         writer.flush()
@@ -644,6 +687,72 @@ fn record_ownership(slots: &[Option<Session>], accounting: &mut Option<std::fs::
 mod tests {
     //! Closed descriptor numbers never give stale readiness to a replacement peer.
     use super::*;
+    #[test]
+    fn ownership_receipt_separates_session_components_and_shared_capacities() {
+        let state = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/l{}",
+            std::process::id()
+        ));
+        let mut sessions = Vec::new();
+        for id in [17_u8, 18] {
+            let mut config = crate::Config::new([id; 16], nix::unistd::Uid::effective().as_raw());
+            config.state = Some(state.clone());
+            config.readiness = true;
+            let mut session = Session::new(config, 65536).unwrap();
+            session.terminal.process(b"prompt").unwrap();
+            session.ring.append(b"prompt").unwrap();
+            sessions.push(Some(session));
+        }
+        sessions.insert(0, None);
+        let mut receipt = Some(std::fs::File::create(state.join("receipt")).unwrap());
+        record_ownership(
+            &sessions,
+            &mut receipt,
+            Some(format_args!(
+                "{{\"slots_capacity\":{}}}",
+                sessions.capacity()
+            )),
+        );
+        let text = std::fs::read_to_string(state.join("receipt")).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(text.matches("\"reactor\":").count(), 1);
+        assert!(text.lines().next().unwrap().contains("\"session\":1,"));
+        for row in text.lines() {
+            let number = |name: &str| -> usize {
+                row.split_once(&format!("\"{name}\":"))
+                    .unwrap()
+                    .1
+                    .split(|character: char| !character.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
+            assert_eq!(number("struct_bytes"), std::mem::size_of::<Session>());
+            assert_eq!(
+                number("total_bytes"),
+                [
+                    "struct_bytes",
+                    "path_bytes",
+                    "config_path_bytes",
+                    "prefix_bytes",
+                    "geometry_bytes",
+                    "ring_bytes",
+                    "input_bytes",
+                    "writer_bytes",
+                    "peer_bytes",
+                    "peer_slots_bytes",
+                ]
+                .map(number)
+                .iter()
+                .sum::<usize>()
+            );
+        }
+        drop(receipt);
+        drop(sessions);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
     #[test]
     fn readiness_storage_registration_is_at_most_sixteen_bytes() {
         assert!(
@@ -975,7 +1084,7 @@ mod tests {
                 .open("/dev/full")
                 .unwrap(),
         );
-        record_ownership(&slots, &mut accounting);
+        record_ownership(&slots, &mut accounting, None);
         assert!(accounting.is_none());
         assert!(
             slots[0]
@@ -987,7 +1096,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        record_ownership(&slots, &mut accounting);
+        record_ownership(&slots, &mut accounting, None);
         drop(slots);
         std::fs::remove_dir_all(state).unwrap();
     }
