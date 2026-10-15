@@ -1,5 +1,6 @@
 //! Uses owner-selected quinn/BBR and mTLS, binding native streams to durable server writer ids before terminal frames [11][64][130], #78.
 
+pub use crate::remote_path_proof::path_probe_header;
 use crate::remote_tls::Identity;
 use openssl::x509::X509;
 use std::{io, sync::Arc};
@@ -343,6 +344,34 @@ pub async fn path_interrupted(
     interval: std::time::Duration,
     margin: std::time::Duration,
 ) -> io::Result<()> {
+    if matches!(path.path(), crate::remote_path_socket::Path::Mesh(address) if address != path.logical())
+    {
+        return authenticated_path_interrupted(connection, path, interval, margin).await;
+    }
+    // One physical tuple needs only the existing adaptive QUIC health guard.
+    // Keep its ordinary 100 ms probe cadence at the design point rather than
+    // flooding the shared receiver with the alias path's low-latency probes.
+    let mut freshness = PeerFreshness::new(connection);
+    let mut interrupted = std::pin::pin!(freshness.interrupted_adaptive(connection));
+    let mut probes = tokio::time::interval(std::time::Duration::from_millis(100));
+    probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = interrupted.as_mut() => return result,
+            _ = probes.tick() => probe_liveness(connection),
+        }
+    }
+}
+
+// Kept for the one-tuple case and emission regressions: authenticated counters
+// are path-specific only when no distinct physical response can be normalized.
+#[cfg(test)]
+pub(crate) async fn quic_path_interrupted(
+    connection: &quinn::Connection,
+    path: &crate::remote_path_socket::PathSocket,
+    interval: std::time::Duration,
+    margin: std::time::Duration,
+) -> io::Result<()> {
     let mut freshness = PeerFreshness::new(connection);
     let mut ticks = tokio::time::interval(interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -401,6 +430,63 @@ pub async fn path_interrupted(
                     return Err(io::ErrorKind::TimedOut.into());
                 }
                 pending = None;
+            }
+        }
+    }
+}
+
+/// A distinct mesh tuple must answer its own session-authenticated challenge.
+/// Enrolled stream progress, raw mesh UDP and old replies are all insufficient.
+async fn authenticated_path_interrupted(
+    connection: &quinn::Connection,
+    path: &crate::remote_path_socket::PathSocket,
+    interval: std::time::Duration,
+    margin: std::time::Duration,
+) -> io::Result<()> {
+    let _epoch = path.proof_epoch(connection)?;
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending = None;
+    let mut local_delay = std::time::Duration::ZERO;
+    let mut closed = std::pin::pin!(connection.closed());
+    loop {
+        tokio::select! {
+            _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
+            expected = ticks.tick() => {
+                // Scheduling a local task late is not evidence that the remote
+                // path failed. Keep the measured delay, decaying after healthy
+                // scheduling, and combine it with this tuple's authenticated RTT.
+                local_delay = (local_delay * 7 / 8)
+                    .max(expected.elapsed().saturating_mul(4))
+                    .min(std::time::Duration::from_millis(200));
+                let allowance = path.proof_allowance(connection.rtt(), margin) + local_delay;
+                // This response supplies its own authenticated RTT sample.
+                // Ordinary QUIC keepalive remains owned by the connection;
+                // sending a second probe here would duplicate every idle poll.
+                if pending.is_some_and(|(sent, _)| path.mesh_authenticated_since(sent)) {
+                    pending = None;
+                }
+                if pending.is_some_and(|(_, sent): (std::time::Instant, tokio::time::Instant)| sent.elapsed() >= allowance) {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                // A repeated challenge retains its sequence and first physical
+                // clock, so retransmission cannot postpone a failed path forever.
+                match path.send_proof() {
+                    Ok(sent) if pending.is_none() => {
+                        // Physical observations use one monotonic clock across
+                        // endpoint runtimes; the owned async deadline also follows
+                        // virtual time in functional cancellation tests.
+                        let now = tokio::time::Instant::now();
+                        pending = Some((sent, now.checked_sub(sent.elapsed()).unwrap_or(now)));
+                    },
+                    Ok(_) => {},
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                    Err(error) => return Err(error),
+                }
+                // Busy paths amortize probes over their measured response budget;
+                // a quiet LAN keeps its original interval and byte-delivery gains.
+                let cadence = interval.max((allowance / 4).min(std::time::Duration::from_millis(100)));
+                ticks.reset_after(cadence);
             }
         }
     }

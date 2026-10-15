@@ -61,6 +61,7 @@ pub struct Bindings {
     peers: Mutex<Peers>,
     peer_count: AtomicUsize,
     copies: Mutex<CopyClock>,
+    proofs: Mutex<HashMap<SocketAddr, Vec<(u64, crate::remote_path_proof::PathKey)>>>,
 }
 
 impl fmt::Debug for Bindings {
@@ -80,6 +81,26 @@ pub struct LeasedBinding {
 impl Drop for LeasedBinding {
     fn drop(&mut self) {
         self.bindings.remove(self.id);
+    }
+}
+
+/// An admitted QUIC connection owns its responder independently of mesh leases.
+/// Dropping an older generation cannot erase a replacement connection's key.
+pub struct ConnectionProof {
+    bindings: Arc<Bindings>,
+    logical: SocketAddr,
+    id: u64,
+}
+impl Drop for ConnectionProof {
+    fn drop(&mut self) {
+        if let Ok(mut proofs) = self.bindings.proofs.lock()
+            && let Some(keys) = proofs.get_mut(&self.logical)
+        {
+            keys.retain(|(id, _)| *id != self.id);
+            if keys.is_empty() {
+                proofs.remove(&self.logical);
+            }
+        }
     }
 }
 
@@ -140,6 +161,37 @@ impl Bindings {
             peers: Mutex::default(),
             peer_count: AtomicUsize::new(0),
             copies: Mutex::default(),
+            proofs: Mutex::default(),
+        })
+    }
+
+    /// Register only after durable admission, retaining enrolled path proofs
+    /// after mesh disable. The caller owns this lease with its live transport.
+    /// # Errors
+    /// Refuses unavailable key export, poisoned state or the admitted-host bound.
+    pub fn connection_proof(
+        self: &Arc<Self>,
+        connection: &quinn::Connection,
+    ) -> io::Result<ConnectionProof> {
+        let key = crate::remote_path_proof::PathKey::from_connection(connection)?;
+        let logical = connection.remote_address();
+        let id = self.next_lease.fetch_add(1, Ordering::Relaxed);
+        let mut proofs = self.proofs.lock().map_err(|_| io::ErrorKind::Other)?;
+        if proofs.len() >= 10_000 && !proofs.contains_key(&logical) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        // One UDP tuple may carry multiple admitted QUIC connections while a
+        // replacement is queued. Keep their keys independently: cancelling a
+        // newer admission must not erase the still-active older session.
+        let keys = proofs.entry(logical).or_default();
+        if keys.len() >= 4 {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        keys.push((id, key));
+        Ok(ConnectionProof {
+            bindings: self.clone(),
+            logical,
+            id,
         })
     }
 
@@ -186,6 +238,54 @@ impl Bindings {
         }
     }
 
+    // The actual receiving socket answers a verified challenge. No ordinary
+    // QUIC send, route mutation or replacement lease is involved. Keys belong
+    // to admitted connections; aliases only map a physical tuple to that key.
+    fn answer_probes(
+        &self,
+        socket: &dyn AsyncUdpSocket,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) {
+        for (buf, received) in bufs.iter_mut().zip(meta.iter_mut()) {
+            // Most receives contain only QUIC; avoid routing/key locks entirely.
+            if !crate::remote_path_proof::contains_probes(&buf[..received.len], received.stride) {
+                continue;
+            }
+            let logical = if self.peer_count.load(Ordering::Acquire) == 0 {
+                received.addr
+            } else {
+                self.peers
+                    .lock()
+                    .ok()
+                    .and_then(|mut peers| peers.by_physical(received.addr).map(|peer| peer.logical))
+                    .unwrap_or(received.addr)
+            };
+            let physical = received.addr;
+            let local = received.dst_ip;
+            received.len = crate::remote_path_proof::receive_probes(
+                &mut buf[..received.len],
+                received.stride,
+                |packet| {
+                    let response = self.proofs.lock().ok().and_then(|proofs| {
+                        proofs
+                            .get(&logical)
+                            .and_then(|keys| keys.iter().find_map(|(_, key)| key.response(packet)))
+                    });
+                    if let Some(response) = response {
+                        let _ = socket.try_send(&Transmit {
+                            destination: physical,
+                            src_ip: local,
+                            ecn: None,
+                            contents: &response,
+                            segment_size: None,
+                        });
+                    }
+                },
+            );
+        }
+    }
+
     /// Normalize only leased tuples and replay encrypted data when the physical
     /// path changes. Packet numbers, not routing hints, own deduplication.
     fn receive_peer(&self, lease: Option<u64>, bufs: &[IoSliceMut<'_>], meta: &mut [RecvMeta]) {
@@ -195,6 +295,9 @@ impl Bindings {
         }
         if let Ok(mut peers) = self.peers.lock() {
             for (index, received) in meta.iter_mut().enumerate() {
+                if received.len == 0 {
+                    continue;
+                }
                 let physical = received.addr;
                 if let Some(peer) = peers.by_physical(physical) {
                     let logical = peer.logical;
@@ -348,6 +451,9 @@ impl Bindings {
             return;
         };
         for received in meta {
+            if received.len == 0 {
+                continue;
+            }
             match lease {
                 Some(lease) => {
                     if routes.len() >= MAX_ROUTES && !routes.contains_key(&received.addr) {
@@ -497,6 +603,7 @@ impl AsyncUdpSocket for Bindings {
             };
             match socket.poll_recv(cx, bufs, meta) {
                 Poll::Ready(Ok(count)) => {
+                    self.answer_probes(socket.as_ref(), bufs, &mut meta[..count]);
                     self.receive_peer(lease, bufs, &mut meta[..count]);
                     return Poll::Ready(Ok(count));
                 }
@@ -588,6 +695,110 @@ mod tests {
     //! Real UDP sockets: replies follow the address a peer was last heard on.
     use super::*;
     use quinn::Runtime as _;
+
+    #[tokio::test]
+    async fn admitted_path_proofs_survive_mesh_retirement_and_old_key_lease_drop() {
+        use crate::{
+            remote_path_socket::PathSocket,
+            remote_quic,
+            remote_tls::tests::{leaf, root},
+        };
+        let ca = root();
+        let bindings = Bindings::new(bound("127.0.0.1:0"));
+        let logical = bindings.local_addr().unwrap();
+        let mesh = SocketAddr::new("127.0.0.2".parse().unwrap(), logical.port());
+        let mesh_lease = bindings.lease(bound(&mesh.to_string())).unwrap();
+        let server = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(
+                remote_quic::server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate))
+                    .unwrap(),
+            ),
+            bindings.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .unwrap();
+        let path = PathSocket::new(bound("127.0.0.1:0"), logical);
+        let mut client = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            path.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .unwrap();
+        client.set_default_client_config(
+            remote_quic::client_config(&leaf(&ca, false), &[ca.certificate]).unwrap(),
+        );
+        let (dial, accepted) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+            server.accept().await.unwrap().await
+        });
+        let dial = dial.unwrap();
+        let accepted = accepted.unwrap();
+        let old = bindings.connection_proof(&accepted).unwrap();
+        // Both QUIC connections deliberately share one source tuple. A
+        // cancelled replacement must not remove the other session's key.
+        let (replacement, accepted_replacement) =
+            tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+                server.accept().await.unwrap().await
+            });
+        let replacement = replacement.unwrap();
+        let accepted_replacement = accepted_replacement.unwrap();
+        assert_eq!(
+            accepted.remote_address(),
+            accepted_replacement.remote_address()
+        );
+        let cancelled = bindings.connection_proof(&accepted_replacement).unwrap();
+        drop(cancelled);
+        assert_eq!(
+            bindings
+                .proofs
+                .lock()
+                .unwrap()
+                .get(&accepted.remote_address())
+                .unwrap()
+                .len(),
+            1
+        );
+        let current = bindings.connection_proof(&accepted_replacement).unwrap();
+        drop(old);
+        assert_eq!(bindings.proofs.lock().unwrap().len(), 1);
+        path.prepare_proof(&replacement).unwrap();
+        path.use_mesh(mesh);
+        let identities = (dial.stable_id(), accepted.stable_id());
+        for mesh in [true, false] {
+            if !mesh {
+                // Only the mesh socket retires; the admitted native transport
+                // still owns enrolled proof service without a new connection.
+                path.use_enrolled();
+            }
+            let since = std::time::Instant::now();
+            path.send_path_proof(mesh).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !path.path_authenticated_since(since, mesh) {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!((dial.stable_id(), accepted.stable_id()), identities);
+        }
+        drop(mesh_lease);
+        path.use_enrolled();
+        let since = std::time::Instant::now();
+        path.send_path_proof(false).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !path.path_authenticated_since(since, false) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!((dial.stable_id(), accepted.stable_id()), identities);
+        drop(current);
+        assert!(bindings.proofs.lock().unwrap().is_empty());
+        client.close(0u32.into(), b"");
+        server.close(0u32.into(), b"");
+    }
 
     fn bound(address: &str) -> Arc<dyn AsyncUdpSocket> {
         quinn::TokioRuntime

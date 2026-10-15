@@ -67,9 +67,16 @@ impl AsyncUdpSocket for HeldSocket {
 #[tokio::test]
 async fn a_queued_probe_cannot_expire_before_the_socket_emits_it() {
     let ca = root();
-    let server = quinn::Endpoint::server(
-        server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate)).unwrap(),
-        "127.0.0.1:0".parse().unwrap(),
+    let bindings = crate::remote_bindings::Bindings::new(
+        quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap(),
+    );
+    let server = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        Some(server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate)).unwrap()),
+        bindings.clone(),
+        Arc::new(quinn::TokioRuntime),
     )
     .unwrap();
     let physical = server.local_addr().unwrap();
@@ -96,6 +103,7 @@ async fn a_queued_probe_cannot_expire_before_the_socket_emits_it() {
     });
     let dial = dial.unwrap();
     let accept = accept.unwrap();
+    let _proof = bindings.connection_proof(&accept).unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     *until.lock().unwrap() = tokio::time::Instant::now() + Duration::from_millis(200);
     let result = tokio::time::timeout(
@@ -220,6 +228,18 @@ async fn review_invalid_mesh_packets_cannot_borrow_enrolled_authentication() {
             invalid.send_to(&[0; 32], source).await.unwrap();
         }
     });
+    // Authentication is deliberately independent of the path guard's probe
+    // implementation: the enrolled peer continues emitting valid traffic.
+    let enrolled = accept.clone();
+    let enrolled_progress = tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(Duration::from_millis(20));
+        loop {
+            ticks.tick().await;
+            enrolled
+                .send_datagram(bytes::Bytes::from_static(&[1]))
+                .unwrap();
+        }
+    });
     let before = authenticated_frames(&dial);
     let result = tokio::time::timeout(
         Duration::from_secs(2),
@@ -231,6 +251,8 @@ async fn review_invalid_mesh_packets_cannot_borrow_enrolled_authentication() {
         ),
     )
     .await;
+    enrolled_progress.abort();
+    let _ = enrolled_progress.await;
     reflected.abort();
     let _ = reflected.await;
     assert!(
@@ -340,9 +362,12 @@ impl AsyncUdpSocket for CopyFirstSocket {
             }
         }
         let ready = state.held.as_ref().is_some_and(|(packet, bytes)| {
-            bytes
-                .chunks(packet.stride.max(1))
-                .all(|datagram| state.enrolled.contains(datagram))
+            // The gate orders identical QUIC ciphertext; an independent path
+            // challenge has no enrolled twin and must retain ordinary delivery.
+            bytes.starts_with(b"\x80ip1")
+                || bytes
+                    .chunks(packet.stride.max(1))
+                    .all(|datagram| state.enrolled.contains(datagram))
         });
         if !ready {
             state.reader = Some(cx.waker().clone());
@@ -351,7 +376,9 @@ impl AsyncUdpSocket for CopyFirstSocket {
         let (packet, bytes) = state.held.take().unwrap();
         bufs[0][..bytes.len()].copy_from_slice(&bytes);
         meta[0] = packet;
-        state.delivered += 1;
+        if !bytes.starts_with(b"\x80ip1") {
+            state.delivered += 1;
+        }
         drop(state);
         Poll::Ready(Ok(1))
     }
@@ -370,8 +397,8 @@ async fn copy_first_real_mesh_originals_do_not_strand_the_authenticated_mesh_gua
     copy_first_guard(false, None).await;
 }
 
-/// Receiving probe DATAGRAMs sends no application response: progress here must
-/// come from QUIC acknowledgements and the existing alternative-path copies.
+/// Retained legacy emission control: progress comes from QUIC acknowledgements
+/// and encrypted copies. Production physical health uses session-bound replies.
 #[tokio::test]
 #[ignore = "Physical 15ms/30ms guard comparison on the perf VM under its benchmark lock."]
 async fn copy_first_ack_only_probes_keep_authenticated_mesh_guard_live() {
@@ -459,6 +486,7 @@ async fn copy_first_guard(ack_only: bool, requested_ack_delay: Option<Duration>)
         )
         .unwrap();
     peer.set_backup(true);
+    let _proof = bindings.connection_proof(&accepted).unwrap();
     path.use_mesh(mesh);
     path.set_backup(true);
     dial.send_datagram(bytes::Bytes::from_static(b"initial-mesh-proof"))
@@ -503,12 +531,25 @@ async fn copy_first_guard(ack_only: bool, requested_ack_delay: Option<Duration>)
         }
     };
     // Production backed-path constants: do not extend its detection budget.
-    let guard = path_interrupted(
-        &dial,
-        &path,
-        Duration::from_millis(15),
-        Duration::from_millis(30),
-    );
+    let guard = async {
+        if ack_only {
+            quic_path_interrupted(
+                &dial,
+                &path,
+                Duration::from_millis(15),
+                Duration::from_millis(30),
+            )
+            .await
+        } else {
+            path_interrupted(
+                &dial,
+                &path,
+                Duration::from_millis(15),
+                Duration::from_millis(30),
+            )
+            .await
+        }
+    };
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::select! {
             biased;

@@ -42,8 +42,11 @@ struct Paths {
     resend: Recent,
     mesh_heard: Option<Instant>,
     /// First receive boundary and most recent successful physical emission.
+    #[cfg(test)]
     mesh_sent: Option<(Instant, Instant)>,
+    #[cfg(test)]
     probe_generation: u64,
+    #[cfg(test)]
     probe_queued: Option<(u64, Instant)>,
     enrolled_heard: Option<Instant>,
 }
@@ -60,11 +63,14 @@ pub struct PathSocket {
     mesh_datagrams: AtomicU64,
     /// Successful connection transmits, excluding replay/copies beneath QUIC.
     /// The dedicated client endpoint owns exactly one connection.
+    #[cfg(test)]
     transmits: AtomicU64,
     heard: tokio::sync::Notify,
+    #[cfg(test)]
     sent: tokio::sync::Notify,
     backup: AtomicBool,
     copies: Mutex<CopyClock>,
+    proof: Mutex<crate::remote_path_proof::Probe>,
 }
 
 impl fmt::Debug for PathSocket {
@@ -86,10 +92,12 @@ pub enum Path {
 
 /// Owns one pending probe's first successful physical send. Replacing or
 /// dropping this request retires its observation without retaining the socket.
+#[cfg(test)]
 pub struct MeshTransmission<'a> {
     path: &'a PathSocket,
     generation: u64,
 }
+#[cfg(test)]
 impl MeshTransmission<'_> {
     /// Confirm a newly constructed ack-eliciting DATAGRAM has left the socket.
     /// Quinn counts transmits when constructed, including one buffered behind
@@ -97,6 +105,7 @@ impl MeshTransmission<'_> {
     /// prevents an older ACK-only transmit from starting the response deadline.
     /// Connection statistics must be read here, outside the socket callback:
     /// Quinn holds its connection mutex while calling `try_send`.
+    #[cfg(test)]
     pub(crate) async fn probe_sent(
         &self,
         connection: &quinn::Connection,
@@ -156,6 +165,7 @@ impl MeshTransmission<'_> {
         }
     }
 }
+#[cfg(test)]
 impl Drop for MeshTransmission<'_> {
     fn drop(&mut self) {
         if let Ok(mut paths) = self.path.paths.lock()
@@ -167,6 +177,20 @@ impl Drop for MeshTransmission<'_> {
             paths.mesh_sent = None;
             drop(paths);
             self.path.sent.notify_waiters();
+        }
+    }
+}
+
+/// One borrowed proof epoch owns its pending sequence. Cancellation retires
+/// only that epoch, never a newer proof started on the same live socket.
+pub struct PathProofEpoch<'a> {
+    path: &'a PathSocket,
+    generation: u64,
+}
+impl Drop for PathProofEpoch<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut proof) = self.path.proof.lock() {
+            proof.retire(self.generation);
         }
     }
 }
@@ -220,17 +244,23 @@ impl PathSocket {
                 mesh: None,
                 resend: Recent::default(),
                 mesh_heard: None,
+                #[cfg(test)]
                 mesh_sent: None,
+                #[cfg(test)]
                 probe_generation: 0,
+                #[cfg(test)]
                 probe_queued: None,
                 enrolled_heard: None,
             }),
             mesh_datagrams: AtomicU64::new(0),
+            #[cfg(test)]
             transmits: AtomicU64::new(0),
             heard: tokio::sync::Notify::new(),
+            #[cfg(test)]
             sent: tokio::sync::Notify::new(),
             backup: AtomicBool::new(false),
             copies: Mutex::default(),
+            proof: Mutex::default(),
         })
     }
 
@@ -254,6 +284,9 @@ impl PathSocket {
     /// Send every following datagram to `mesh`. The caller then triggers a
     /// transmission (see [`PathSocket::alias`]) and waits for [`PathSocket::heard_since`].
     pub fn use_mesh(&self, mesh: SocketAddr) {
+        if let Ok(mut proof) = self.proof.lock() {
+            proof.cancel();
+        }
         // An IPv6 socket reaches an IPv4 mesh address through its mapped form,
         // and reports replies from it the same way.
         let mesh = match (self.logical, mesh) {
@@ -267,11 +300,15 @@ impl PathSocket {
                 paths.mesh_heard = None;
             }
             paths.mesh = Some(mesh);
-            paths.mesh_sent = None;
-            paths.probe_queued = None;
+            #[cfg(test)]
+            {
+                paths.mesh_sent = None;
+                paths.probe_queued = None;
+            }
             paths.resend.clear();
             self.on_mesh.store(true, Ordering::Release);
         }
+        #[cfg(test)]
         self.sent.notify_waiters();
     }
 
@@ -291,16 +328,23 @@ impl PathSocket {
     /// Return to the enrolled address and resend the bounded recent mesh history.
     /// The mesh address stays mapped, so its late replies are still accepted.
     pub fn use_enrolled(&self) {
+        if let Ok(mut proof) = self.proof.lock() {
+            proof.cancel();
+        }
         self.set_backup(false);
         let pending = match self.paths.lock() {
             Ok(mut paths) => {
                 self.on_mesh.store(false, Ordering::Release);
-                paths.mesh_sent = None;
-                paths.probe_queued = None;
+                #[cfg(test)]
+                {
+                    paths.mesh_sent = None;
+                    paths.probe_queued = None;
+                }
                 paths.resend.take()
             }
             Err(_) => return,
         };
+        #[cfg(test)]
         self.sent.notify_waiters();
         for sent in pending {
             // Best effort: a full socket buffer leaves the rest to QUIC's own recovery.
@@ -321,6 +365,97 @@ impl PathSocket {
             paths.mesh = None;
             paths.mesh_heard = None;
         }
+    }
+
+    /// Own a fresh challenge epoch; dropping its future retires pending replies.
+    /// # Errors
+    /// Propagates unavailable key export, poisoned state or generation exhaustion.
+    pub fn proof_epoch(&self, connection: &quinn::Connection) -> io::Result<PathProofEpoch<'_>> {
+        let mut proof = self.proof.lock().map_err(|_| io::ErrorKind::Other)?;
+        proof.prepare(connection)?;
+        let generation = proof.begin()?;
+        Ok(PathProofEpoch {
+            path: self,
+            generation,
+        })
+    }
+
+    /// Arm session-specific authentication before probing the physical mesh tuple.
+    /// # Errors
+    /// Propagates exporter and socket-state errors.
+    pub fn prepare_proof(&self, connection: &quinn::Connection) -> io::Result<()> {
+        self.proof
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)?
+            .prepare(connection)
+    }
+
+    /// Send a fixed authenticated challenge directly, without copying it to enrolled.
+    /// # Errors
+    /// Propagates physical send errors; no network clock starts on backpressure.
+    pub fn send_proof(&self) -> io::Result<Instant> {
+        self.send_path_proof(true)
+    }
+
+    /// Probe a selected physical tuple without copying its challenge elsewhere.
+    /// # Errors
+    /// Propagates authentication, state and physical socket errors.
+    pub fn send_path_proof(&self, mesh: bool) -> io::Result<Instant> {
+        let destination = if mesh {
+            self.paths
+                .lock()
+                .map_err(|_| io::ErrorKind::Other)?
+                .mesh
+                .ok_or(io::ErrorKind::NotConnected)?
+        } else {
+            self.logical
+        };
+        let mut proof = self.proof.lock().map_err(|_| io::ErrorKind::Other)?;
+        let packet = proof.request(destination)?;
+        self.socket.try_send(&Transmit {
+            destination,
+            ecn: None,
+            contents: &packet,
+            segment_size: None,
+            src_ip: None,
+        })?;
+        let sent = Instant::now();
+        proof.sent(sent);
+        Ok(sent)
+    }
+
+    /// An exact physical tuple, current challenge and valid session MAC are all required.
+    #[must_use]
+    pub fn path_authenticated_since(&self, since: Instant, mesh: bool) -> bool {
+        let destination = if mesh {
+            self.paths.lock().ok().and_then(|paths| paths.mesh)
+        } else {
+            Some(self.logical)
+        };
+        destination.is_some_and(|destination| {
+            self.proof
+                .lock()
+                .is_ok_and(|proof| proof.answered_since(since, destination))
+        })
+    }
+
+    /// Only this mesh tuple's authenticated response can renew its health.
+    #[must_use]
+    pub fn mesh_authenticated_since(&self, since: Instant) -> bool {
+        self.path_authenticated_since(since, true)
+    }
+
+    /// Response allowance follows this physical path's authenticated RTT and
+    /// variance, rather than the connection's possibly enrolled-copy RTT.
+    #[must_use]
+    pub fn proof_allowance(
+        &self,
+        fallback: std::time::Duration,
+        margin: std::time::Duration,
+    ) -> std::time::Duration {
+        self.proof
+            .lock()
+            .map_or(fallback + margin, |proof| proof.allowance(fallback, margin))
     }
 
     /// Whether a datagram arrived from the mesh address at or after `since`.
@@ -372,6 +507,7 @@ impl PathSocket {
     ///
     /// # Errors
     /// Returns a socket-state error if routing state is unavailable.
+    #[cfg(test)]
     pub fn mesh_transmitted_after(&self, queued: Instant) -> io::Result<MeshTransmission<'_>> {
         let mut paths = self.paths.lock().map_err(|_| io::ErrorKind::Other)?;
         paths.probe_generation = paths.probe_generation.wrapping_add(1);
@@ -380,6 +516,7 @@ impl PathSocket {
         let generation = paths.probe_generation;
         drop(paths);
         // A superseded request must observe cancellation even if no packet follows.
+        #[cfg(test)]
         self.sent.notify_waiters();
         Ok(MeshTransmission {
             path: self,
@@ -400,6 +537,7 @@ impl PathSocket {
     fn keep(&self, transmit: &Transmit<'_>) {
         // Record the successful send boundary before waiting for routing/history
         // locks; their scheduling delay must not move the response deadline.
+        #[cfg(test)]
         let now = Instant::now();
         if let Ok(mut paths) = self.paths.lock() {
             if let Some(at) = paths
@@ -409,6 +547,7 @@ impl PathSocket {
             {
                 clock.arm(at);
             }
+            #[cfg(test)]
             if paths.probe_queued.is_some_and(|(_, queued)| now >= queued) {
                 let first = paths.mesh_sent.map_or(now, |(first, _)| first);
                 paths.mesh_sent = Some((first, now));
@@ -426,7 +565,9 @@ impl AsyncUdpSocket for PathSocket {
         if transmit.destination != self.logical || !self.on_mesh.load(Ordering::Acquire) {
             self.socket.try_send(transmit)?;
             if transmit.destination == self.logical {
+                #[cfg(test)]
                 self.transmits.fetch_add(1, Ordering::Release);
+                #[cfg(test)]
                 self.sent.notify_waiters();
             }
             return Ok(());
@@ -444,7 +585,9 @@ impl AsyncUdpSocket for PathSocket {
         self.keep(transmit);
         // Publish completion after its clock: an observed count can never
         // pair the newly flushed probe with an older ACK-only timestamp.
+        #[cfg(test)]
         self.transmits.fetch_add(1, Ordering::Release);
+        #[cfg(test)]
         self.sent.notify_waiters();
         Ok(())
     }
@@ -480,7 +623,27 @@ impl AsyncUdpSocket for PathSocket {
         let mut enrolled = false;
         // Only the exact trusted mesh tuple is normalized; any other source
         // stays foreign to the client connection, which drops it.
-        for received in &mut meta[..count] {
+        for (index, received) in meta[..count].iter_mut().enumerate() {
+            if Some(received.addr) == paths.mesh || received.addr == self.logical {
+                // Authentication uses the physical tuple before normalization.
+                // A forged enrolled reply can never renew the mesh proof.
+                if crate::remote_path_proof::contains_probes(
+                    &bufs[index][..received.len],
+                    received.stride,
+                ) {
+                    let physical = received.addr;
+                    let mut proof = self.proof.lock().ok();
+                    received.len = crate::remote_path_proof::receive_probes(
+                        &mut bufs[index][..received.len],
+                        received.stride,
+                        |packet| {
+                            if let Some(proof) = proof.as_mut() {
+                                proof.receive(packet, physical);
+                            }
+                        },
+                    );
+                }
+            }
             if Some(received.addr) == paths.mesh {
                 received.addr = self.logical;
                 heard = true;
@@ -872,7 +1035,7 @@ mod tests {
 
         // Poll the production watcher: its immediate tick arms the request
         // and queues a fresh DATAGRAM behind Quinn's retained ACK-only transmit.
-        let mut watcher = std::pin::pin!(crate::remote_quic::path_interrupted(
+        let mut watcher = std::pin::pin!(crate::remote_quic::quic_path_interrupted(
             &dial,
             &path,
             Duration::from_millis(15),
