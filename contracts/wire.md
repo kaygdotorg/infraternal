@@ -364,7 +364,6 @@ writer. Malformed requests retire their own stream. Owned supervisors and
 preparation/write tasks are cancelled on link retirement, component down or
 actor shutdown; the parked transport grants no additional session authority.
 
-
 ### Native leg-B encrypted path copies (#201, D215, D263)
 
 `REMOTE_PATH_BACKUP` is additive Hello bit 6, advertised by native peers.
@@ -379,7 +378,7 @@ unchanged, and no capability replaces mTLS, ledger admission or writer binding.
 The transport reuses its existing recent history, bounded to 64 datagrams and
 64 KiB of ciphertext per peer. One clock belongs to each endpoint socket,
 never a detached task. Ordinary mesh-to-enrolled copies each become eligible
-20 ms after their original transmission; another entry's earlier deadline
+10 ms after their original transmission; another entry's earlier deadline
 must not copy younger entries early. Each endpoint receive poll permits at
 most 32 copy send calls, shared across peers. A segmented send call can carry
 multiple UDP datagrams. Due work beyond this budget remains pending for the
@@ -403,8 +402,8 @@ layout, version, capability bit or authority.
 For negotiated bit 6 peers, an enrolled primary reply remains immediate.
 The same encrypted datagram may additionally be sent to the admitted mesh
 alternative without changing that primary route. This alternative is eligible
-immediately, rather than adding a second 20 ms delay; ordinary mesh-to-enrolled
-copies retain their individual 20 ms deadlines. Both kinds of copy share the
+immediately, rather than adding a second 10 ms delay; ordinary mesh-to-enrolled
+copies retain their individual 10 ms deadlines. Both kinds of copy share the
 existing bounded history, endpoint clock and 32-send budget, within the same
 64-datagram / 64-KiB limits. Redundant alternative admission must not evict or
 displace pending enrolled-return work; backpressure must not discard that
