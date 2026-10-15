@@ -2915,5 +2915,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        connections are never picked automatically. The detection signals,
        the outside check and the capacity rule come to the owner with
        measurements. Relays carry only their own mesh's encrypted traffic.
-     - Still open: when to add port prediction for pairs where both sides
-       are behind hard NAT (explained to the owner; D196 relays them first).
+     - **Relay first, measure every trick (owner):** pairs where both
+       sides are behind hard NAT are relayed from day one. Every NAT
+       traversal trick we come across (port prediction, the many-ports
+       "birthday" technique, router port mapping and others) is measured on
+       real NAT types, and each relayed pair records why it was relayed. A
+       trick is built when its measured success and its cost (packets,
+       time, side effects such as intrusion alarms) justify it.
