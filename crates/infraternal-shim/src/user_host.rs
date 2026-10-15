@@ -345,8 +345,14 @@ impl Session {
         }
         Ok(())
     }
-    #[allow(clippy::too_many_lines)]
     fn housekeeping(&mut self) -> io::Result<bool> {
+        self.housekeeping_coalesced(false)
+    }
+    /// Keep an ordinary data Ack logical while its caller prepares a read.
+    /// The caller must retain writable interest and settle without deferral
+    /// when no PTY data is ready; explicit state and input-only links are immediate.
+    #[allow(clippy::too_many_lines)]
+    fn housekeeping_coalesced(&mut self, coalesce_ack: bool) -> io::Result<bool> {
         #[cfg(feature = "host-diagnostics")]
         crate::host_trace::context(self.config.session, self.pty.master.as_raw_fd());
         if self.drained {
@@ -413,7 +419,19 @@ impl Session {
             wire_bytes = wire_bytes - before + current;
             before = current;
             let mut queued_reply = false;
+            // Only a subscribed data peer at the current head may combine a
+            // fresh Ack with its next read. State fences, replay/snapshot
+            // requests, deferred input and ended sessions retain prompt replies.
+            let defer_ack = coalesce_ack
+                && !self.drained
+                && self.exit.is_none()
+                && matches!(p.input_reply, Some(InputReply::Ack))
+                && p.cursor == Some(self.ring.head())
+                && p.request.is_none()
+                && p.deferred.is_none()
+                && p.trailing.is_empty();
             if p.pending.is_empty()
+                && !defer_ack
                 && let Some(reply) = p.input_reply.take()
             {
                 let state = self.cursors.get(p.writer)?;
@@ -867,6 +885,90 @@ mod lazy_bench;
 mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
+
+    fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
+        let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/process-per-user/a{tag:x}{}",
+            std::process::id()
+        ));
+        let mut config = Config::new([tag; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&session.path.0).unwrap();
+        session
+            .step(PollFlags::POLLIN, PollFlags::empty(), &[], false)
+            .unwrap();
+        session.housekeeping().unwrap();
+        client.read_exact(&mut [0; 63]).unwrap();
+        client.set_nonblocking(true).unwrap();
+        let peer = &mut session.peers[0];
+        peer.attached = true;
+        peer.caps = SEQUENCED_INPUT;
+        peer.cursor = Some(0);
+        peer.input_reply = Some(InputReply::Ack);
+        (session, client, state)
+    }
+
+    #[test]
+    fn data_ack_can_wait_for_a_writable_visit_without_requiring_output() {
+        let (mut session, mut client, state) = ack_fixture(29);
+        session.housekeeping_coalesced(true).unwrap();
+        assert!(
+            session.can_write(&session.peers[0]),
+            "logical Ack must retain writable interest"
+        );
+        assert!(
+            matches!(client.read(&mut [0; 64]), Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+            "a fresh data Ack should leave room for the next available output"
+        );
+        session.housekeeping().unwrap();
+        let expected = Frame::InputAck(0).encode().unwrap();
+        let mut received = vec![0; expected.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, expected, "a silent program must not hold the Ack");
+        drop(client);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn deferred_data_ack_and_available_output_share_one_ordered_batch() {
+        let (mut session, mut client, state) = ack_fixture(30);
+        session.housekeeping_coalesced(true).unwrap();
+        session.ring.append(b"reply").unwrap();
+        session.housekeeping_coalesced(true).unwrap();
+        let mut expected = Frame::InputAck(0).encode().unwrap();
+        expected.extend(Frame::Output(0, b"reply".to_vec()).encode().unwrap());
+        let mut received = vec![0; expected.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, expected);
+        assert_eq!(session.peers[0].pending, [] as [u8; 0]);
+        drop(client);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn state_fences_and_input_only_acks_bypass_coalescing() {
+        for (tag, state_reply) in [(31, true), (32, false)] {
+            let (mut session, mut client, state) = ack_fixture(tag);
+            let expected = if state_reply {
+                session.peers[0].input_reply = Some(InputReply::State);
+                Frame::InputState(0, 0).encode().unwrap()
+            } else {
+                session.peers[0].cursor = None;
+                Frame::InputAck(0).encode().unwrap()
+            };
+            session.housekeeping_coalesced(true).unwrap();
+            let mut received = vec![0; expected.len()];
+            client.read_exact(&mut received).unwrap();
+            assert_eq!(received, expected);
+            drop(client);
+            drop(session);
+            fs::remove_dir_all(state).unwrap();
+        }
+    }
 
     #[test]
     fn steady_replay_needs_no_payload_allocation() {
