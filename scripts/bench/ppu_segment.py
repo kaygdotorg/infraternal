@@ -143,7 +143,7 @@ def run(args):
 
     def record(kind, **fields):
         row = dict(kind=kind, wall_utc=datetime.datetime.now(
-            datetime.timezone.utc).isoformat(), **fields)
+            datetime.timezone.utc).isoformat(), monotonic_ns=time.monotonic_ns(), **fields)
         log.write(json.dumps(row, sort_keys=True) + '\n')
         log.flush()
         if kind.startswith('lock-wait'):

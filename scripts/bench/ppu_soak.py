@@ -467,8 +467,11 @@ async def soak(host, args, record, rng):
             now = clock_now()
             async with churn_lock:
                 row = sample(host.pid)
+            # Preserve the same timed cohort for exact segment percentiles.
+            # Receipt serialization starts only after every echo completed.
             row.update(elapsed_s=now - start, echo_p99_ms=percentile(echoes, .99),
-                echo_samples=len(echoes), cpu_percent=(row['cpu_ticks'] - previous['cpu_ticks']) /
+                echo_p50_ms=percentile(echoes, .50), echo_ms=echoes,
+                monotonic_ns=time.monotonic_ns(), echo_samples=len(echoes), cpu_percent=(row['cpu_ticks'] - previous['cpu_ticks']) /
                 os.sysconf('SC_CLK_TCK') / (now - previous_time) * 100,
                 context_switches_per_s=(row['voluntary_switches'] - previous['voluntary_switches']) /
                 (now - previous_time),
