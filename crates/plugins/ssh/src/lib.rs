@@ -11,6 +11,8 @@ pub mod credentials;
 pub mod duplex;
 pub mod install;
 mod lifecycle;
+#[cfg(feature = "session-bridge")]
+pub mod session_bridge;
 pub mod setup;
 pub mod stdio;
 

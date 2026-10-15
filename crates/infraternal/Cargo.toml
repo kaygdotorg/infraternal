@@ -20,7 +20,7 @@ tokio = { workspace = true, optional = true }
 infraternal-shim = { workspace = true, features = ["session-image", "cli"] }
 infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false, optional = true }
 infraternal-mesh = { path = "../infraternal-mesh", version = "0.1.0", optional = true }
-infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true, features = ["session-bridge"] }
 infraternal-plugin-relay = { path = "../plugins/relay", version = "0.1.0", optional = true }
 infraternal-plugin-backup = { path = "../plugins/backup", version = "0.1.0", optional = true }
 thiserror.workspace = true

@@ -1498,6 +1498,7 @@ name = "infraternal-plugin-ssh"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "infraternal-agent",
  "infraternal-plugin-api",
  "infraternal-shim",
  "nix",

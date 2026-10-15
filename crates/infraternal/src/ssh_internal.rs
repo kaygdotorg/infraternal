@@ -47,14 +47,12 @@ fn connect(args: &[OsString]) -> Option<ExitCode> {
 }
 
 fn session(args: &[OsString]) -> Option<ExitCode> {
-    let (state, session) = match args {
-        [flag, state] if flag == "--state" => (state, None),
-        [flag, state, option, id] if flag == "--state" && option == "--session" => {
-            (state, Some(uuid::Uuid::parse_str(id.to_str()?).ok()?))
-        }
-        _ => return None,
-    };
-    Some(crate::ssh_session::run(state.into(), session))
+    let options = infraternal_plugin_ssh::session_bridge::Options::decode(args)?;
+    Some(if options.run().is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 #[cfg(test)]

@@ -7,22 +7,48 @@ use infraternal_agent::{
 };
 use infraternal_plugin_api::channel::Channel;
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
-use std::{io, os::fd::AsRawFd, path::PathBuf, process::ExitCode};
+use std::{io, os::fd::AsRawFd, path::PathBuf};
+
+/// Only the authenticated internal startup shapes may enter the session bridge.
+pub struct Options {
+    state: PathBuf,
+    session: Option<uuid::Uuid>,
+}
+
+impl Options {
+    /// Decode the exact launcher shape before any filesystem or process work.
+    #[must_use]
+    pub fn decode(arguments: &[std::ffi::OsString]) -> Option<Self> {
+        let (state, session) = match arguments {
+            [flag, state] if flag == "--state" => (state, None),
+            [flag, state, option, id] if flag == "--state" && option == "--session" => {
+                (state, Some(uuid::Uuid::parse_str(id.to_str()?).ok()?))
+            }
+            _ => return None,
+        };
+        Some(Self {
+            state: state.into(),
+            session,
+        })
+    }
+
+    /// Enter the same authenticated dispatcher as the installed executable.
+    /// # Errors
+    /// Returns runtime, private-state, shim admission or bridge failures.
+    pub fn run(self) -> io::Result<()> {
+        run(self.state, self.session)
+    }
+}
 
 /// Internal authenticated SSH command; all protocol output goes to its pipe.
 /// No public shell, arbitrary command or login identity is accepted from argv.
-pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> ExitCode {
-    let result = tokio::runtime::Builder::new_current_thread()
+/// # Errors
+/// Returns runtime, private-state, shim admission or authenticated bridge failures.
+pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()
-        .and_then(|runtime| {
-            infraternal_agent::block_on_io(&runtime, Box::pin(bridge(state, session)))
-        });
-    if result.is_ok() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+        .build()?;
+    infraternal_agent::block_on_io(&runtime, Box::pin(bridge(state, session)))
 }
 async fn bridge(state: PathBuf, existing: Option<uuid::Uuid>) -> io::Result<()> {
     let state = sessions::state(Some(state))?;
@@ -35,7 +61,7 @@ async fn bridge(state: PathBuf, existing: Option<uuid::Uuid>) -> io::Result<()> 
     } else {
         sessions::launch(&exe, &state, Manager::detect().await, uid, 80, 24).await?
     };
-    let pipes = infraternal_plugin_ssh::stdio::Stdio::inherited()?;
+    let pipes = crate::stdio::Stdio::inherited()?;
     let session_id = session.id;
     // The daemon discovers this exact shim through its ordinary authenticated
     // rendezvous. Neither this bridge nor SSH starts a shell outside the shim.
@@ -61,7 +87,7 @@ async fn bridge(state: PathBuf, existing: Option<uuid::Uuid>) -> io::Result<()> 
 
 /// Copy both directions until either side closes; frames pass through unparsed.
 async fn relay_pipes(
-    pipes: &infraternal_plugin_ssh::stdio::Stdio,
+    pipes: &crate::stdio::Stdio,
     socket: tokio::net::UnixStream,
     session: [u8; 16],
 ) -> io::Result<()> {

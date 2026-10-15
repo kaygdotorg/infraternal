@@ -12,7 +12,7 @@ cargo-fuzz = true
 [dependencies]
 infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/release", default-features = false }
 serde_json.workspace = true
-infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh" }
+infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh", features = ["session-bridge"] }
 infraternal-agent = { version = "0.1.0", path = "../crates/infraternal-agent", default-features = false, features = ["remote"] }
 infraternal-server = { version = "0.1.0", path = "../crates/infraternal-server", default-features = false, features = ["remote"] }
 axum.workspace = true

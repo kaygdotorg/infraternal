@@ -25,4 +25,9 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(options.exit_retention_ms, 600_000);
         assert!(arguments.len() <= 12);
     }
+    if infraternal_plugin_ssh::session_bridge::Options::decode(&arguments).is_some() {
+        let mut extended = arguments;
+        extended.push("--unexpected".into());
+        assert!(infraternal_plugin_ssh::session_bridge::Options::decode(&extended).is_none());
+    }
 });

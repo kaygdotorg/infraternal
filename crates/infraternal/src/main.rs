@@ -34,8 +34,6 @@ mod restart_image;
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
 mod ssh_internal;
-#[cfg(feature = "ssh")]
-mod ssh_session;
 
 #[cfg(feature = "plugin-server")]
 mod install;
@@ -314,7 +312,11 @@ fn run_ssh_session(matches: &ArgMatches) -> ExitCode {
     let Ok(session) = session else {
         return ExitCode::FAILURE;
     };
-    ssh_session::run(PathBuf::from(state), session)
+    if infraternal_plugin_ssh::session_bridge::run(PathBuf::from(state), session).is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn missing_action(json_output: bool) -> ExitCode {
