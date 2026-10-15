@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "ppu_wire_probe/passive.rs"]
+mod passive;
+
 struct Peer {
     stream: UnixStream,
     decoder: Decoder,
@@ -23,6 +26,7 @@ struct Peer {
     tail: Vec<u8>,
     started: Instant,
     elapsed: Option<Duration>,
+    watch: Option<passive::Observer>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -84,6 +88,7 @@ impl Peer {
             tail: Vec::new(),
             started: Instant::now(),
             elapsed: None,
+            watch: None,
         })
     }
 
@@ -95,6 +100,9 @@ impl Peer {
             .head
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| invalid("offset exhausted"))?;
+        if let Some(watch) = &mut self.watch {
+            return watch.feed(bytes);
+        }
         self.tail.extend_from_slice(bytes);
         if self.elapsed.is_none()
             && self
@@ -154,6 +162,9 @@ fn session_path(state: &Path, origin: u128, index: usize) -> io::Result<PathBuf>
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if arguments.first().is_some_and(|mode| mode == "watch") {
+        return passive::run(&arguments[1..]);
+    }
     if arguments.len() != 6 {
         return Err("usage: ppu_wire_probe STATE ORIGIN_HEX FIRST COUNT NUMBER WRITER".into());
     }
@@ -256,6 +267,7 @@ mod tests {
             tail: Vec::new(),
             started: Instant::now(),
             elapsed: None,
+            watch: None,
         };
         peer.output(10, b"noise probe-")?;
         assert!(peer.elapsed.is_none());
