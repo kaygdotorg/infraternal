@@ -28,6 +28,22 @@ for arg in "$@"; do
         # D244/#154 requires it in the shipping static binaries. Remove only
         # this exact argument, leaving OpenSSL sources and all other flags intact.
         -DOPENSSL_NO_SECURE_MEMORY) ;;
+        -DENGINESDIR=*|-DMODULESDIR=*)
+            directory="${arg#*=}"
+            directory="${directory#\"}"
+            directory="${directory%\"}"
+            # These are build-only installation paths, never deployed assets.
+            # Keep them absolute and inert; explicit runtime locations and the
+            # system configuration directory remain unchanged. This removes
+            # checkout/target paths from native version and directory metadata.
+            case "${arg%%=*}:$directory" in
+                "-DENGINESDIR:$target_root"/*/install/lib/engines-3)
+                    args+=('-DENGINESDIR="/infraternal/build-only/engines-3"') ;;
+                "-DMODULESDIR:$target_root"/*/install/lib/ossl-modules)
+                    args+=('-DMODULESDIR="/infraternal/build-only/ossl-modules"') ;;
+                *) args+=("$arg") ;;
+            esac
+            ;;
         --target="$TARGET") ;;
         --target=*) printf 'unexpected C target override
 ' >&2; exit 1 ;;
