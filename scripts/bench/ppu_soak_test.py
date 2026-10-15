@@ -91,6 +91,56 @@ class Admission(unittest.TestCase):
                 self.assertFalse(ppu.stability(data, 30, 1024, 1.25)['pass_'])
 
 
+class ReceiptClock(unittest.IsolatedAsyncioTestCase):
+    async def test_echo_timestamp_precedes_resource_sampling(self):
+        # Counter reads can be delayed across a frozen boundary. Segment
+        # assignment belongs to completed echoes, not later receipt work.
+        import random
+        clock = SimpleNamespace(active=0, ns=1_000_000_000, samples=0)
+        original_sleep = asyncio.sleep
+        async def sleep(delay):
+            clock.active += delay
+            await original_sleep(0)
+        class Peer:
+            bytes = 0
+            async def echo(self, *unused):
+                return 1.0
+            async def send(self, *unused):
+                pass
+            async def close(self):
+                pass
+        class Wakeups:
+            def __init__(self, unused):
+                pass
+            def receipt(self):
+                return dict(wakeups=0, wakeup_trace_overruns=0)
+            def close(self):
+                pass
+        def sample(unused):
+            clock.samples += 1
+            if clock.samples == 2:
+                clock.ns += 1_000_000_000
+            return dict(pss_kib=1, cpu_ticks=0, voluntary_switches=0,
+                        fds=1, threads=1)
+        host = SimpleNamespace(count=2, peers=[Peer(), Peer()], pid=42,
+            closed_output_bytes=0, child=SimpleNamespace(poll=lambda: None),
+            path=lambda index: str(index))
+        records = []
+        recorder = SimpleNamespace(write=lambda kind, **fields: records.append((kind, fields)))
+        args = SimpleNamespace(mode='soak', seconds=10, interval=10, warmup=0,
+                               memory_tolerance_kib=1024, echo_ratio=1.25)
+        with patch.object(ppu, 'sample', sample), patch.object(ppu, 'Wakeups', Wakeups), \
+             patch.object(ppu, 'clock_now', lambda: clock.active), \
+             patch.object(ppu.time, 'monotonic_ns', lambda: clock.ns), \
+             patch.object(ppu.asyncio, 'sleep', sleep), \
+             patch.object(ppu.Peer, 'connect', AsyncMock(return_value=Peer())):
+            await ppu.soak(host, args, recorder, random.Random(270205))
+        samples = [fields for kind, fields in records if kind == 'sample']
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]['monotonic_ns'], 1_000_000_000)
+        self.assertEqual(samples[0]['echo_ms'], [1.0])
+
+
 class Framing(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_or_zero_frame_rejected_before_payload(self):
         for length in (0, ppu.MAX_FRAME + 1):
