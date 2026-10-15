@@ -34,6 +34,7 @@ use std::{
 };
 
 const PREFIX_LIMIT: usize = 4096;
+const RESIZE_LIMIT: usize = 32;
 // A global output quantum keeps one thousand ready PTYs from postponing input.
 const OUTPUTS_PER_ROUND: usize = 1;
 const INTERACTIVE_READ_BYTES: usize = 4096;
@@ -53,6 +54,10 @@ struct LazyTerminal {
 struct LazyState {
     terminal: Option<Box<Terminal>>,
     prefix: Vec<u8>,
+    origin: (u16, u16),
+    // Offsets refer to the complete prefix. Reflow and incomplete parser
+    // sequences must occur at their original positions, never after replay.
+    resizes: Vec<(usize, u16, u16)>,
     #[cfg(test)]
     panic_next_process: bool,
 }
@@ -62,6 +67,8 @@ impl LazyTerminal {
             state: RefCell::new(LazyState {
                 terminal: None,
                 prefix: Vec::new(),
+                origin: (cols, rows),
+                resizes: Vec::new(),
                 #[cfg(test)]
                 panic_next_process: false,
             }),
@@ -74,19 +81,27 @@ impl LazyTerminal {
         let mut state = self.state.borrow_mut();
         if state.terminal.is_none() {
             let mut terminal = Box::new(Terminal::with_history_budget(
-                self.cols,
-                self.rows,
+                state.origin.0,
+                state.origin.1,
                 self.history,
             )?);
-            terminal.process(&state.prefix);
+            let mut start = 0;
+            for &(end, cols, rows) in &state.resizes {
+                terminal.process(&state.prefix[start..end]);
+                terminal.resize(cols, rows)?;
+                start = end;
+            }
+            terminal.process(&state.prefix[start..]);
             state.terminal = Some(terminal);
             state.prefix = Vec::new();
+            state.resizes = Vec::new();
         }
         Ok(())
     }
     fn allocated_bytes(&self) -> usize {
         let state = self.state.borrow();
         state.prefix.capacity()
+            + state.resizes.capacity() * std::mem::size_of::<(usize, u16, u16)>()
             + state
                 .terminal
                 .as_ref()
@@ -136,7 +151,17 @@ impl SessionTerminal for LazyTerminal {
         if (cols, rows) == (self.cols, self.rows) && self.state.get_mut().terminal.is_none() {
             return Ok(());
         }
-        // Materialize at the historical geometry before applying reflow.
+        let state = self.state.get_mut();
+        if state.terminal.is_none() && state.resizes.len() < RESIZE_LIMIT {
+            // Geometry alone need not allocate screen pools. The bounded
+            // transcript preserves every reflow at its historical byte offset.
+            state.resizes.push((state.prefix.len(), cols, rows));
+            self.cols = cols;
+            self.rows = rows;
+            return Ok(());
+        }
+        // Reaching either transcript bound materializes the original state
+        // before applying this resize. A failed replay leaves it retryable.
         self.materialize()?;
         self.state
             .get_mut()
@@ -243,9 +268,10 @@ impl Session {
             .map_or(0, |t| t.retained_history_rows());
         writeln!(
             writer,
-            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"native_history_rows\":{history_rows},\"carry_bytes\":{carry},\"prefix_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}}}",
+            "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"native_history_rows\":{history_rows},\"carry_bytes\":{carry},\"prefix_bytes\":{},\"geometry_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}}}",
             self.allocated_bytes(),
             state.prefix.capacity(),
+            state.resizes.capacity() * std::mem::size_of::<(usize, u16, u16)>(),
             self.ring.allocated_bytes(),
             self.input.capacity(),
             self.cursors.allocated_bytes(),
@@ -1158,6 +1184,67 @@ mod tests {
         let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
         eager.process(b"prompt \x1b[31mred\x1b[0m\r\n");
         eager.resize(80, 24).unwrap();
+        assert_same_state(&lazy, &eager);
+    }
+
+    #[test]
+    fn quiet_geometry_changes_remain_lazy_and_replay_in_order() {
+        let mut lazy = LazyTerminal::new(80, 24, 65536);
+        let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        for (bytes, cols, rows) in [
+            (b"\x1bcquiet\r\n".as_slice(), 81, 24),
+            (b"\x1b[31mnext\x1b[0m\r\n".as_slice(), 12, 6),
+            (b"unfinished\x1b]0;ti".as_slice(), 80, 24),
+            (b"tle\x1b\\\r\n".as_slice(), 80, 25),
+        ] {
+            lazy.process(bytes).unwrap();
+            eager.process(bytes);
+            lazy.resize(cols, rows).unwrap();
+            eager.resize(cols, rows).unwrap();
+            assert!(
+                lazy.state.borrow().terminal.is_none(),
+                "a bounded quiet prefix must retain geometry without native VT"
+            );
+        }
+        assert_same_state(&lazy, &eager);
+        lazy.process(b"after-materialization\r\n").unwrap();
+        eager.process(b"after-materialization\r\n");
+        assert_same_state(&lazy, &eager);
+    }
+
+    #[test]
+    fn geometry_transcript_materializes_at_its_event_bound() {
+        let mut lazy = LazyTerminal::new(80, 24, 65536);
+        let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        for number in 0..=RESIZE_LIMIT {
+            let bytes = format!("row-{number}\r\n");
+            lazy.process(bytes.as_bytes()).unwrap();
+            eager.process(bytes.as_bytes());
+            let cols = 79 + u16::try_from(number % 2).unwrap();
+            lazy.resize(cols, 24).unwrap();
+            eager.resize(cols, 24).unwrap();
+            let state = lazy.state.borrow();
+            assert!(state.resizes.len() <= RESIZE_LIMIT);
+            assert_eq!(state.terminal.is_some(), number == RESIZE_LIMIT);
+        }
+        assert_eq!(lazy.state.borrow().resizes.capacity(), 0);
+        assert_eq!(lazy.state.borrow().prefix.capacity(), 0);
+        assert_same_state(&lazy, &eager);
+    }
+
+    #[test]
+    fn output_bound_replays_retained_geometry_before_new_bytes() {
+        let mut lazy = LazyTerminal::new(80, 24, 65536);
+        let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+        lazy.process(b"\x1bcseed\r\n").unwrap();
+        eager.process(b"\x1bcseed\r\n");
+        lazy.resize(40, 12).unwrap();
+        eager.resize(40, 12).unwrap();
+        let bytes = vec![b'x'; PREFIX_LIMIT + 1];
+        lazy.process(&bytes).unwrap();
+        eager.process(&bytes);
+        assert!(lazy.state.borrow().terminal.is_some());
+        assert_eq!(lazy.state.borrow().resizes.capacity(), 0);
         assert_same_state(&lazy, &eager);
     }
     #[test]
