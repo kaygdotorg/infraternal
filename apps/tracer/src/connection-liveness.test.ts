@@ -68,7 +68,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     advance(100);
     expect(connection.isWelcomed).toBe(true);
     forwarding = false;
-    advance(51);
+    advance(276);
     expect(disconnected).toBe(1);
     expect(connection.isWelcomed).toBe(false);
     advance(10);

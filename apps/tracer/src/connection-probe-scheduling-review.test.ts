@@ -51,7 +51,7 @@ for (const attached of [false, true]) test(`a fully answered browser route survi
     // No outstanding reply exists. Advance the clock without executing timers,
     // then deliver the delayed timer as a browser event loop would. This is a
     // deterministic scheduling oracle, never a host latency measurement.
-    now = 100;
+    now = 1000;
     const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0]!;
     timers.delete(next[0]);
     next[1].callback();

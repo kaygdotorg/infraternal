@@ -73,11 +73,11 @@ for (const rtt of [1, 150]) for (const streams of [1, 28]) test(`healthy idle pr
     const maximum = Math.ceil(1000 / Math.max(25, rtt + 10));
     expect(f.probes - probes).toBeLessThanOrEqual(maximum);
     expect(f.wakeups - wakeups).toBeLessThanOrEqual(maximum + 1);
-    // Missing both directions must still retire the socket within RTT + 50ms.
+    // Missing both directions must retire within the estimated allowance plus one tick.
     f.stopForwarding();
     // Drain replies already in flight before starting the silence oracle.
     f.advance(rtt);
-    f.advance(rtt + 50);
+    f.advance(Math.max(250, rtt + 50) + 26);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -110,7 +110,7 @@ for (const rtt of [1, 30, 150]) for (const phase of [0, 7, 20, 39]) test(`idle s
     f.advance(1000 + phase);
     f.stopForwarding();
     f.advance(rtt); // Allow only the already issued exact replies to drain.
-    f.advance(rtt + 50);
+    f.advance(Math.max(250, rtt + 50) + 26);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
@@ -166,7 +166,60 @@ for (const streams of [1, 28]) test(`a late timer on a fully answered route pres
     expect(f.connection.isWelcomed).toBe(true);
     f.stopForwarding();
     f.advance(20);
-    f.advance(70);
+    f.advance(276);
     expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+for (const streams of [1, 28]) test(`a healthy browser route survives 150ms scheduler delay across ${streams} streams`, () => {
+  const f = fixture(1, streams);
+  try {
+    f.advance(1000);
+    f.setRoundTrip(151);
+    f.advance(500);
+    expect(f.disconnects).toBe(0);
+    expect(f.connection.isWelcomed).toBe(true);
+  } finally { f.dispose(); }
+});
+
+test("a quiet dead browser peer is detected within 250ms plus one probe interval", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(200);
+    expect(f.connection.isWelcomed).toBe(true);
+    f.advance(76);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("browser jitter allowance decays after a stable link returns", () => {
+  const f = fixture(100, 1);
+  try {
+    f.advance(2000);
+    for (const rtt of [200, 100, 200, 100]) { f.setRoundTrip(rtt); f.advance(1000); }
+    expect(f.disconnects).toBe(0);
+    f.setRoundTrip(1);
+    f.advance(10_000);
+    f.stopForwarding();
+    f.advance(1); // Drain an already issued correlated reply.
+    f.advance(276);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("a queued healthy reply survives a 150ms browser event-loop stall", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1000);
+    const issued = f.probes;
+    while (f.probes === issued) f.advance(1);
+    // A request is outstanding; only local callbacks are held. The queued
+    // correlated reply may precede the delayed liveness timer on resume.
+    f.suspend(150);
+    f.advance(0);
+    expect(f.disconnects).toBe(0);
+    expect(f.connection.isWelcomed).toBe(true);
   } finally { f.dispose(); }
 });
