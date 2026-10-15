@@ -26,6 +26,8 @@ use nix::{
     unistd::Uid,
 };
 use std::cell::RefCell;
+#[cfg(feature = "host-diagnostics")]
+use std::os::fd::AsRawFd;
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
@@ -345,6 +347,8 @@ impl Session {
     }
     #[allow(clippy::too_many_lines)]
     fn housekeeping(&mut self) -> io::Result<bool> {
+        #[cfg(feature = "host-diagnostics")]
+        crate::host_trace::context(self.config.session, self.pty.master.as_raw_fd());
         if self.drained {
             self.observe_exit()?;
         }
@@ -433,7 +437,21 @@ impl Session {
                     Request::Read(seq) => p.cursor = Some(seq),
                     Request::Snapshot => {
                         if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
+                            trace_host!(
+                                SnapshotStart,
+                                self.config.session,
+                                p.stream.as_raw_fd(),
+                                self.ring.head(),
+                                0
+                            );
                             p.snapshot(&self.terminal, self.ring.head())?;
+                            trace_host!(
+                                SnapshotDone,
+                                self.config.session,
+                                p.stream.as_raw_fd(),
+                                self.ring.head(),
+                                p.pending.len()
+                            );
                         } else {
                             p.queue(&Frame::Error(1, "session memory budget exhausted".into()))?;
                             p.cursor = None;
@@ -452,12 +470,33 @@ impl Session {
                         // Logical writable readiness resumes the repaint after
                         // the preceding control frame has completed.
                     } else if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
+                        trace_host!(
+                            SnapshotStart,
+                            self.config.session,
+                            p.stream.as_raw_fd(),
+                            self.ring.head(),
+                            0
+                        );
                         p.snapshot(&self.terminal, self.ring.head())?;
+                        trace_host!(
+                            SnapshotDone,
+                            self.config.session,
+                            p.stream.as_raw_fd(),
+                            self.ring.head(),
+                            p.pending.len()
+                        );
                     } else {
                         p.queue(&Frame::Error(1, "session memory budget exhausted".into()))?;
                         p.cursor = None;
                     }
                 } else if seq < self.ring.head() {
+                    trace_host!(
+                        FrameBuildStart,
+                        self.config.session,
+                        p.stream.as_raw_fd(),
+                        seq,
+                        0
+                    );
                     let (first, second) = self
                         .ring
                         .read_slices(seq, CHUNK)
@@ -468,6 +507,14 @@ impl Session {
                         Frame::output_slices_into::<false>(seq, first, second, &mut p.pending)?;
                         p.written = 0;
                     }
+                    trace_host!(
+                        FrameBuilt,
+                        self.config.session,
+                        p.stream.as_raw_fd(),
+                        seq,
+                        first.len() + second.len(),
+                        p.pending.len()
+                    );
                     p.cursor = Some(seq + (first.len() + second.len()) as u64);
                 } else if !queued_reply
                     && self.drained
@@ -535,6 +582,8 @@ impl Session {
         peers: &[PollFlags],
         read_budget: usize,
     ) -> io::Result<()> {
+        #[cfg(feature = "host-diagnostics")]
+        crate::host_trace::context(self.config.session, self.pty.master.as_raw_fd());
         if listener.contains(PollFlags::POLLIN)
             && let Ok((stream, _)) = self.listener.accept()
         {
@@ -584,6 +633,13 @@ impl Session {
         }
         if master.contains(PollFlags::POLLOUT) {
             let (first, second) = self.input.as_slices();
+            trace_host!(
+                PtyWriteStart,
+                self.config.session,
+                self.pty.master.as_raw_fd(),
+                0,
+                self.input.len()
+            );
             match self
                 .pty
                 .master
@@ -633,7 +689,21 @@ impl Session {
             // One parser/ring append per bounded batch also amortizes native
             // ownership walks and cold-page work, preserving byte order.
             if used > 0 {
+                trace_host!(
+                    PtyRead,
+                    self.config.session,
+                    self.pty.master.as_raw_fd(),
+                    self.ring.head(),
+                    used
+                );
                 self.terminal.process(&bytes[..used])?;
+                trace_host!(
+                    ParseDone,
+                    self.config.session,
+                    self.pty.master.as_raw_fd(),
+                    self.ring.head(),
+                    used
+                );
                 self.ring.append(&bytes[..used])?;
             }
         }
@@ -655,22 +725,25 @@ impl Session {
                     Ok(n) if retained + p.decoder.growth_bound(n) + 2 * CHUNK > PEER_BYTES => {
                         disconnect = true;
                     }
-                    Ok(n) => match consume_peer(
-                        &bytes[..n],
-                        p,
-                        &mut self.pty,
-                        &mut self.terminal,
-                        &self.ring,
-                        &mut self.config,
-                        &mut self.input,
-                        &mut self.cursors,
-                        self.exit.is_some() && self.drained,
-                        oldest.is_some(),
-                        &mut self.next_deferred,
-                    ) {
-                        Ok((false, used)) => p.trailing.extend_from_slice(&bytes[used..n]),
-                        _ => disconnect = true,
-                    },
+                    Ok(n) => {
+                        trace_host!(PeerRead, self.config.session, p.stream.as_raw_fd(), 0, n);
+                        match consume_peer(
+                            &bytes[..n],
+                            p,
+                            &mut self.pty,
+                            &mut self.terminal,
+                            &self.ring,
+                            &mut self.config,
+                            &mut self.input,
+                            &mut self.cursors,
+                            self.exit.is_some() && self.drained,
+                            oldest.is_some(),
+                            &mut self.next_deferred,
+                        ) {
+                            Ok((false, used)) => p.trailing.extend_from_slice(&bytes[used..n]),
+                            _ => disconnect = true,
+                        }
+                    }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(_) => disconnect = true,
                 }
@@ -751,11 +824,17 @@ pub fn run_host_accounted(
             "shared host requires single-threaded startup",
         ));
     }
+    #[cfg(feature = "host-diagnostics")]
+    let mut accounting = accounting;
+    #[cfg(feature = "host-diagnostics")]
+    crate::host_trace::initialize(accounting.as_mut())?;
     umask(Mode::from_bits_truncate(0o077));
     let mut mask = SigSet::empty();
     mask.add(Signal::SIGCHLD);
     if accounting.is_some() {
         mask.add(Signal::SIGUSR2);
+        #[cfg(feature = "host-diagnostics")]
+        mask.add(Signal::SIGUSR1);
     }
     mask.thread_block().map_err(io::Error::from)?;
     crate::pty::reset_host_child_notifications()?;

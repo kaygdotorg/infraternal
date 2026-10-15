@@ -4,6 +4,25 @@
 //! forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+#[cfg(feature = "host-diagnostics")]
+mod host_trace;
+// All arguments disappear from normal builds, including timestamp calls.
+macro_rules! trace_host {
+    ($stage:ident, $session:expr, $fd:expr, $offset:expr, $bytes:expr) => {
+        trace_host!($stage, $session, $fd, $offset, $bytes, 0);
+    };
+    ($stage:ident, $session:expr, $fd:expr, $offset:expr, $bytes:expr, $extra:expr) => {
+        #[cfg(feature = "host-diagnostics")]
+        crate::host_trace::record(
+            crate::host_trace::Stage::$stage,
+            $session,
+            $fd,
+            $offset,
+            $bytes,
+            $extra,
+        );
+    };
+}
 pub mod ended;
 pub mod frame;
 mod locale;

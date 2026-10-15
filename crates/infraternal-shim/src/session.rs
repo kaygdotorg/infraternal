@@ -20,6 +20,8 @@ use nix::{
     unistd::Uid,
 };
 use std::fmt::Write as _;
+#[cfg(feature = "host-diagnostics")]
+use std::os::fd::AsRawFd;
 use std::{
     collections::VecDeque,
     fs::{self, DirBuilder},
@@ -238,11 +240,25 @@ impl Peer {
         pty.resize(cols, rows, px_w, px_h)?;
         // Origin bytes alone cannot certify history at a changed geometry;
         // the terminal independently verifies provenance before reconstructing.
+        trace_host!(
+            ResizeStart,
+            config.session,
+            pty.master.as_raw_fd(),
+            ring.head(),
+            0
+        );
         let resized = if ring.start() == 0 {
             terminal.resize_with_ring(cols, rows, Some(ring))
         } else {
             terminal.resize(cols, rows)
         };
+        trace_host!(
+            ResizeDone,
+            config.session,
+            pty.master.as_raw_fd(),
+            ring.head(),
+            0
+        );
         if resized.is_err() {
             pty.resize(config.cols, config.rows, 0, 0)?;
             // Do not retry the refused geometry on the next accepted key.
@@ -287,11 +303,26 @@ impl Peer {
         while self.written < self.pending.len() && *bytes > 0 && *attempts > 0 {
             let end = self.pending.len().min(self.written.saturating_add(*bytes));
             *attempts -= 1;
+            trace_host!(
+                SocketWriteStart,
+                [0; 16],
+                self.stream.as_raw_fd(),
+                self.cursor.unwrap_or(0),
+                end - self.written
+            );
             match self.stream.write(&self.pending[self.written..end]) {
                 Ok(0) => return Err(io::ErrorKind::BrokenPipe.into()),
                 Ok(n) => {
                     self.written += n;
                     *bytes -= n;
+                    trace_host!(
+                        SocketWriteDone,
+                        [0; 16],
+                        self.stream.as_raw_fd(),
+                        u64::try_from(self.written).map_err(io::Error::other)?,
+                        n,
+                        self.pending.len()
+                    );
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -922,6 +953,15 @@ fn handle<'a>(
             return Err(io::ErrorKind::WouldBlock.into());
         }
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
+        trace_host!(
+            InputQueued,
+            config.session,
+            p.stream.as_raw_fd(),
+            accepted,
+            usize::try_from(cursors.get(p.writer)?.accepted - accepted)
+                .map_err(io::Error::other)?,
+            writer as usize
+        );
         if cursors.get(p.writer)?.accepted > accepted {
             // Only newly accepted input changes the active size [74]. Replayed
             // duplicate bytes cannot steal the last typist's terminal geometry.
@@ -941,6 +981,13 @@ fn handle<'a>(
         // immediately so batching output never adds a keystroke round trip.
         let (first, _) = input.as_slices();
         if !first.is_empty() {
+            trace_host!(
+                PtyWriteStart,
+                config.session,
+                pty.master.as_raw_fd(),
+                0,
+                first.len()
+            );
             match pty.master.write(first) {
                 Ok(n) => {
                     input.drain(..n);

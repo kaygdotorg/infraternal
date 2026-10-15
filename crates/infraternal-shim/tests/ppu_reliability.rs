@@ -55,10 +55,14 @@ fn fixture_binary() -> &'static PathBuf {
             "--example",
             "ppu_host_fixture",
             "--features",
-            if cfg!(feature = "compact-history") {
-                "compact-history"
-            } else {
-                "process-per-user"
+            match (
+                cfg!(feature = "compact-history"),
+                cfg!(feature = "host-diagnostics"),
+            ) {
+                (true, true) => "compact-history,host-diagnostics",
+                (false, true) => "host-diagnostics",
+                (true, false) => "compact-history",
+                (false, false) => "process-per-user",
             },
             "--target",
             &target,
@@ -92,6 +96,10 @@ impl Host {
     }
 
     fn with_child_notifications(ignored: bool, handler: bool) -> Self {
+        Self::with_launch(ignored, handler, false)
+    }
+
+    fn with_launch(ignored: bool, handler: bool, trace: bool) -> Self {
         // Leave enough room for the 32-digit session ID in Linux sun_path.
         let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
             ".cache/codex-scratch/ppu-soak/r{}-{}",
@@ -112,6 +120,7 @@ impl Host {
         };
         let child = command
             .env("PPU_RELIABILITY_STATE", &root)
+            .env("PPU_RELIABILITY_TRACE", if trace { "1" } else { "0" })
             .env(
                 "PPU_RELIABILITY_CHILD_HANDLER",
                 if handler { "1" } else { "0" },
@@ -337,4 +346,30 @@ fn inherited_child_dispositions_are_reset_before_sessions_start() {
         }
         input_and_marker(&mut sibling, b"", b"reset-after-exit");
     }
+}
+
+// The collector's signal is accepted only in an explicitly instrumented image.
+#[cfg(feature = "host-diagnostics")]
+#[test]
+fn diagnostic_flush_records_numeric_stages_without_terminal_content() {
+    let mut host = Host::with_launch(false, false, true);
+    let mut peer = host.connect(1);
+    input_and_marker(&mut peer, b"stty -echo; ", b"private-diagnostic-marker");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(host.child.id().try_into().unwrap()),
+        nix::sys::signal::Signal::SIGUSR1,
+    )
+    .unwrap();
+    // The signal is consumed before a later input fence in the same reactor.
+    input_and_marker(&mut peer, b"", b"diagnostic-flush-fence");
+    let text = fs::read_to_string(host.root.join("stages.log")).unwrap();
+    assert!(text.starts_with("{\"kind\":\"stage-format\",\"version\":1,"));
+    for stage in [2, 4, 5, 6, 7, 8, 9, 14] {
+        assert!(
+            text.contains(&format!("\"stage\":{stage},")),
+            "missing numeric stage {stage}"
+        );
+    }
+    assert!(!text.contains("private-diagnostic-marker"));
+    assert!(!text.contains("printf"));
 }

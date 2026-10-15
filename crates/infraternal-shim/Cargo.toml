@@ -28,6 +28,8 @@ vt100 = { workspace = true, optional = true }
 [features]
 # Research-only shared-process reactor; never selected by production defaults.
 process-per-user = ["nix/uio", "nix/event"]
+# Numeric stage tracing changes scheduling; excluded from all admission builds.
+host-diagnostics = ["process-per-user"]
 # Research-only exact cold-history representation; measured before adoption.
 compact-history = ["process-per-user"]
 # Audited transient process-transfer buffers are removed with the remote plugin.

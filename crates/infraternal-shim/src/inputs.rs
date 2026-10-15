@@ -229,6 +229,8 @@ impl Inputs {
                 .written
                 .checked_add(used as u64)
                 .ok_or_else(super::invalid_input)?;
+            #[cfg(feature = "host-diagnostics")]
+            crate::host_trace::credit(*writer, state.written, used);
             *count -= used;
             bytes -= used;
             if *count == 0 {
@@ -243,6 +245,30 @@ impl Inputs {
 mod tests {
     //! Verify writer ownership at actual partial-write boundaries and retained identity limits.
     use super::*;
+    #[cfg(feature = "host-diagnostics")]
+    #[test]
+    fn diagnostic_credits_follow_partial_writes_across_writers() {
+        let mut inputs = Inputs::default();
+        let mut pending = VecDeque::new();
+        for writer in [1, 2] {
+            inputs.select(writer, (80, 24, 0, 0)).unwrap();
+        }
+        inputs.accept(1, 0, b"one", &mut pending).unwrap();
+        inputs.accept(2, 0, b"xy", &mut pending).unwrap();
+        inputs.accept(1, 3, b"more", &mut pending).unwrap();
+        crate::host_trace::enable(true).unwrap();
+        crate::host_trace::dump(&mut io::sink()).unwrap();
+        crate::host_trace::context([8; 16], 55);
+        inputs.advance(4).unwrap();
+        assert_eq!(crate::host_trace::credited_ranges(), [(1, 3, 3), (2, 1, 1)]);
+        inputs.advance(5).unwrap();
+        assert_eq!(
+            crate::host_trace::credited_ranges(),
+            [(1, 3, 3), (2, 1, 1), (2, 2, 1), (1, 7, 4)]
+        );
+        crate::host_trace::enable(false).unwrap();
+    }
+
     #[cfg(feature = "process-per-user")]
     #[test]
     fn host_legacy_writer_needs_no_heap_table() {

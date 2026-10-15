@@ -44,6 +44,25 @@ pub(crate) fn reset_host_child_notifications() -> io::Result<()> {
         .map_err(errno)
 }
 
+/// Read the same kernel monotonic clock used by numeric scheduler receipts.
+#[cfg(feature = "host-diagnostics")]
+pub(crate) fn monotonic_ns() -> io::Result<u64> {
+    let mut stamp = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: the kernel synchronously fills this valid timespec. CLOCK_MONOTONIC
+    // needs no process authority and retains no pointer after the call.
+    if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC, &raw mut stamp) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    u64::try_from(stamp.tv_sec)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|ns| ns.checked_add(u64::try_from(stamp.tv_nsec).ok()?))
+        .ok_or_else(|| io::Error::other("monotonic clock overflow"))
+}
+
 /// Classify already-ready PTY output without consuming or reordering bytes.
 /// The shared reactor uses this hint to read short interactive replies before
 /// bulk output. Read readiness remains authoritative if the hint changes.

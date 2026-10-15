@@ -442,6 +442,14 @@ pub(super) fn run(
                     .and_then(|value| Signal::try_from(value).ok());
                 match signal {
                     Some(Signal::SIGCHLD) => child_exit = true,
+                    #[cfg(feature = "host-diagnostics")]
+                    Some(Signal::SIGUSR1) => {
+                        let result = accounting.as_mut().map(crate::host_trace::flush);
+                        if result.is_some_and(|result| result.is_err()) {
+                            let _ = crate::host_trace::enable(false);
+                            accounting = None;
+                        }
+                    }
                     Some(Signal::SIGUSR2) => {
                         // Publish requested vector capacities, not a second PSS
                         // estimate. Hash capacity is usable entries; its private
@@ -704,6 +712,8 @@ fn record_ownership(
     });
     if let Some(Err(error)) = result {
         *accounting = None;
+        #[cfg(feature = "host-diagnostics")]
+        let _ = crate::host_trace::enable(false);
         eprintln!("shared-host accounting stopped: {error}");
     }
 }
