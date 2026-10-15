@@ -440,8 +440,13 @@ export class AppStream {
 
   /** Try again after a failure or a missing permission. */
   retry(css: { width: number; height: number; density: number }): void {
+    const previousSession = this.session?.id;
+    // Invalidate an in-flight Start before it can publish a session over this retry. Viewer Close only detaches;
+    // the server retains its capture, so request Stop while the old session identity is still available.
+    this.generation++;
     this.detach();
     this.session = undefined;
+    void this.stopSession(previousSession);
     void this.open(css);
   }
 

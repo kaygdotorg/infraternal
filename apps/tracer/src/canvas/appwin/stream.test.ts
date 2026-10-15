@@ -30,6 +30,7 @@ async function fixture(deferControl = false) {
   const frames: Array<{ id: number; frame: WireFrame }> = [];
   const actions: string[] = [];
   const closed: number[] = [];
+  const worker = { postMessage() {}, terminate() {}, onerror: null as ((event: Event) => void) | null };
   const connection: StreamOptions["connection"] = {
     isWelcomed: true, onWelcome: () => () => undefined,
     async call(action, input) {
@@ -48,12 +49,26 @@ async function fixture(deferControl = false) {
   };
   const stream = new AppStream({ connection, hostId: "host", target: { type: "screen", displayId: 1 }, coarse: false,
     events: { state() {}, control() {}, picture() {}, surface() {} },
-    makeWorker: () => ({ postMessage() {}, terminate() {} }) as unknown as Worker });
+    makeWorker: () => worker as unknown as Worker });
   await stream.open({ width: 800, height: 600, density: 1 });
   stream.setVisible(true);
   await Promise.resolve();
-  return { stream, frames, actions, closed, handlers, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
+  return { stream, frames, actions, closed, handlers, worker, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
 }
+
+test("retry after a decoder failure stops the previous native session", async () => {
+  const f = await fixture();
+  try {
+    f.worker.onerror?.(new Event("error"));
+    expect(f.stream.current.kind).toBe("failed");
+    f.stream.retry({ width: 800, height: 600, density: 1 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions.filter(action => action === "desktop.session.start")).toHaveLength(2);
+    // Viewer Close only detaches: the server retains capture independently.
+    // A retry must retire the old source before replacing its only session ID.
+    expect(f.actions.filter(action => action === "desktop.session.stop")).toHaveLength(1);
+  } finally { f.stream.dispose(); }
+});
 
 test("viewing never sends controller-only resize before acquisition", async () => {
   const f = await fixture();
