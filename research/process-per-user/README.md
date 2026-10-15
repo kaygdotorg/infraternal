@@ -5,12 +5,20 @@ Status: D270 selects this design for hardening. The prototype remains opt-in;
 D13's default process per terminal is unchanged. D268 Q20 and D270 authorize
 measurement and hardening, without changing D7/D13/D128/D240/D247. No new
 terminal engine or foundational dependency was selected.
+The r4 measurements have not admitted the mixed-soak latency or whole-host
+upgrade path. Passing focused tests and the cold-history footprint does not
+authorize adoption. Current results and failures are recorded on issue #205.
 
 ## Boundary and identity
 
 `cargo build -p infraternal --features process-per-user` adds the hidden
 `__shim --host-sessions N` option, with N from 1 through 1,000. The same binary
 hosts the batch; normal `__shim` calls still create one process per session.
+Launch must occur in a single-threaded process. The research entry checks
+`/proc/self/task` before changing signal masks, binding sockets or creating
+PTYs: an unblocked sibling thread could consume process-directed SIGCHLD
+instead of the reactor's signalfd. Reliability tests launch the real host through
+a standalone feature-gated example, outside the threaded test harness.
 Every session retains its own mode-0600 socket under the mode-0700 runtime
 sessions directory. The production decoder, SO_PEERCRED check, wire layouts,
 capabilities, input cursors, writer handling, and PTY launcher are reused.
@@ -47,20 +55,40 @@ add a core role. No work starts when this feature is compiled out.
 ## State and idle behavior
 
 One thread waits on indexed readiness for listeners, PTY masters and peer sockets. A session gets
-at most one 4-KiB PTY read attempt per reactor round. Ready input/control
-requests precede the rotating bulk queue; a global one-read quantum rotates through sessions
-so 1,000 flooding PTYs cannot monopolize one round.
+one bounded PTY read budget per reactor round. Incoming input and promoted
+short replies use at most 4 KiB; a rotating bulk turn reads at most 16 KiB across
+four nonblocking attempts, then feeds the parser and ring once. Ready input/control
+requests precede that queue; a global one-bulk-session quantum rotates through
+sessions so 1,000 flooding PTYs cannot monopolize one round.
 Attached PTYs with at most 1 KiB waiting are promoted ahead of that queue using
 a non-consuming readiness hint. Detached producers avoid that classification
 syscall. Read-attempt deduplication prevents a promoted session from spending
-another budget through an older bulk entry. PTY and viewer backpressure keep
-bulk producers from allocating an unbounded transmit queue.
+another budget through an older bulk entry. Slot-indexed membership uses one
+byte for queued/cancelled bulk work and a four-byte read generation per session.
+Generation wrap clears old read marks before reuse. A promoted entry can be
+revived in place; cancelled entries are discarded when popped, without scanning
+the whole bulk backlog on every turn. PTY and viewer backpressure keep bulk
+producers from allocating an unbounded transmit queue.
+
+A session's first ready descriptor stays inline; additional descriptors use a
+bounded spill list. Registration updates and peer readiness borrow arrays sized
+by the existing 32-peer admission cap. Healthy peer sockets flush immediately:
+each housekeeping visit shares a 32-KiB/four-write budget across pending, state
+and output frames. Partial frames retain their byte cursor and ordering; logical
+replay work keeps writable interest after an inline frame has drained. Large
+completed repaint buffers release storage before an indefinite idle wait.
+Retained output is borrowed across physical ring wrap and encoded directly
+into that peer's reusable wire buffer. A partial frame keeps stable bytes while
+the ring changes; no borrowed ring pointer survives the housekeeping visit.
+Ready-session tables and work lists reuse bounded host-wide capacity between
+turns instead of allocating a fresh copy for each readiness batch.
 Blocked/drained PTYs are omitted to prevent level-triggered HUP spin. Live
 idle sessions have no timers: the readiness wait sleeps indefinitely until socket, PTY or
 child-exit readiness. Exited sessions alone use the existing ten-minute
 retention ceiling. Only coalesced child-exit readiness reconciles all owned children. Other events
-visit ready sessions; unique registration keys prevent a reused descriptor from
-inheriting a closed peer's readiness. Retired exit timers are discarded before
+visit ready sessions; live child status is polled only on exit readiness or a
+drained PTY. One descriptor index carries generation-checked registration keys,
+preventing a reused descriptor from inheriting a closed peer's readiness. Retired exit timers are discarded before
 waiting, so live idle sessions do not inherit stale deadlines.
 
 VT is initially absent. A complete origin prefix up to 4 KiB is retained.
@@ -88,7 +116,9 @@ Small shares reserve their full bounded capacity after the first 4 KiB of
 output; this settles residency during activity rather than touching more ring
 pages gradually over hours. Larger rings grow lazily within the same limit.
 Empty appends allocate nothing, and the last viewer's removal releases vacant
-peer slots. First attachment reserves only the next peer record.
+peer slots. First attachment reserves only the next peer record. After binding,
+the socket owns its full pathname; the session releases its separate startup
+directory copy.
 
 ## Ownership diagnosis and idle bookkeeping
 
@@ -112,12 +142,22 @@ The byte ledger and paired before/after PSS receipts are on issue #205.
 ## Compact cold history experiment
 
 `compact-history` is a separate build feature that requires `process-per-user`;
-both remain disabled by default. Cold pages store UTF-8 text runs and
-run-length raw cell attributes. Nontext union bits, wide cells, graphemes,
+both remain disabled by default. Cold pages store bounded UTF-8 blocks and
+run-length raw cell attributes. Reversible codepoint deltas between
+physical rows and XOR against canonical row offsets expose repetition to the
+existing codec while preserving arbitrary row permutations. Codepoint deltas
+are used only when every delta is a valid Unicode scalar. A bounded outer
+compression pass uses spare caller scratch and never nests on decode. Nontext union bits, wide cells, graphemes,
 styles, links, protection and opaque native metadata remain exact. Invalid
 text falls back to the existing codec. Allocation-free decoding rejects bad
 dimensions, run counts, UTF-8, truncation and trailing bytes; native tests
 include a coverage-guided malformed-input target.
+The outer envelope is eight bytes and accepts at most 32 KiB of plain codec
+data. Larger pages can still use the plain bounded format. Sparse native pool
+mappings request `MADV_NOHUGEPAGE` before publication: touching one live page
+must not promote an otherwise cold reservation into a huge resident page.
+This hint changes neither allocation addresses nor their charged reservation;
+failure leaves correctness intact. Ordinary heap allocations are unaffected.
 
 Encoded copies have a separate charged history share. An opportunistic
 encoding refusal keeps the original page and its exact-state certificate.
@@ -134,6 +174,38 @@ fixture checks Unicode, styles and links before and after future input. The
 paired resident increment excludes the raw wire ring. Its comparison with
 the published reference, allocator/header breakdown and limitations are on
 issue #205; no reference-memory parity is assumed.
+These direct-terminal fixtures use a 17-MiB history share for each terminal.
+They do not use the shared host's divided 64-MiB pool; that smaller per-session
+share must be disclosed when interpreting real-host retention and viewer costs.
+The standalone `scripts/bench/ppu-fuzz-build --compact-history` option enables
+the codec in the existing bounded real-terminal parser fuzz harness. Build it
+through the build slot into job scratch, then run its campaign on the perf VM.
+
+`scripts/bench/ppu_idle.py` independently measures host PSS at 1/10/100/1,000
+sessions and separates fixed image residency from the session slope. It records
+native ownership, zero-work idle windows and a separately fenced raw-kernel PTY
+probe. Requested bytes and allocator resident pages are distinct measurements.
+`scripts/bench/ppu_trace.py` records only numeric scheduler transitions and
+syscall names/timestamps in a private trace instance, flags overflow, and labels
+its runs diagnostic. Tracing changes the workload's timing and cannot be used
+for admission. `ppu_raw_echo.py` compares the same synthetic shell markers over
+direct masters; its different reader prevents treating that result as a hard
+latency lower bound. The unchanged two-hour `ppu-run --phase soak` remains the
+admission workload. Before/after tables and raw receipts live on #205.
+
+The native `ppu_wire_probe` example is a diagnostic observer. It opens additional
+viewer sockets with a distinct durable writer, finishes setup before timing,
+and checks output offsets and shell-generated markers. Those extra connections
+change the workload, so it cannot replace the original soak's admission result.
+
+The long soak runner now retains the same fixture across short locked segments.
+An external coordinator confirms that its private cgroup is fully frozen,
+releases the perf lock, then reacquires it before thawing. A shared numeric clock
+subtracts only the certified frozen interval from fixture deadlines and probes.
+The receipt preserves wall times and every freeze/thaw; the active duration is
+not uninterrupted wall time. No workload runs while another job owns the lock.
+Resume transitions remain visible when interpreting latency. A failed
+coordinator thaws and retires only its own named scope, never another job's.
 
 `scripts/bench/ppu_viewers.py` measures additional native viewers with 50
 filled terminals. Each viewer has one distinct writer/socket on every
@@ -153,12 +225,16 @@ its own killed shell; an uninterruptible child exit can stall that reactor.
 Adoption needs a nonblocking child reaper. A panic hook must never include PTY output or input in diagnostics.
 
 Shared terminals own every native allocation through a stable boxed allocator.
-The hard per-terminal reservation ceiling is **8 MiB**, including transient
+The ordinary hard per-terminal reservation ceiling is **8 MiB**, including transient
 allocations, intrusive ownership headers and mapping prefixes. Ordinary native
 payload/metadata allocations share a **256 KiB** ceiling; explicitly tagged
 page-pool allocations use the remaining reservation. Size/alignment alone
 cannot identify a page request. Native page backing is zero-filled anonymous
 memory, and its complete mapping is charged before allocation.
+With `compact-history`, the reservation ceiling additionally permits twice the
+configured history share for cold-page virtual mappings and exact restore.
+Encoded bytes still have their separate charged history share. This larger
+virtual reservation is bounded and is not resident-memory savings by itself.
 
 OSC, DCS, APC, PM and SOS strings forward at most **4 KiB** to the native
 parser. Excess payload is discarded until the true terminator. The limiter
