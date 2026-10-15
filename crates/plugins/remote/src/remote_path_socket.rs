@@ -371,8 +371,8 @@ impl PathSocket {
     /// # Errors
     /// Propagates unavailable key export, poisoned state or generation exhaustion.
     pub fn proof_epoch(&self, connection: &quinn::Connection) -> io::Result<PathProofEpoch<'_>> {
+        self.prepare_proof(connection)?;
         let mut proof = self.proof.lock().map_err(|_| io::ErrorKind::Other)?;
-        proof.prepare(connection)?;
         let generation = proof.begin()?;
         Ok(PathProofEpoch {
             path: self,
@@ -384,10 +384,31 @@ impl PathSocket {
     /// # Errors
     /// Propagates exporter and socket-state errors.
     pub fn prepare_proof(&self, connection: &quinn::Connection) -> io::Result<()> {
-        self.proof
+        self.prepare_proof_with(connection.stable_id(), || {
+            crate::remote_path_proof::PathKey::from_connection(connection)
+        })
+    }
+
+    fn prepare_proof_with(
+        &self,
+        id: usize,
+        export: impl FnOnce() -> io::Result<crate::remote_path_proof::PathKey>,
+    ) -> io::Result<()> {
+        if !self
+            .proof
             .lock()
             .map_err(|_| io::ErrorKind::Other)?
-            .prepare(connection)
+            .has_key(id)
+        {
+            // Export locks the connection. Its send callback may need paths,
+            // while receive holds paths before proof: never hold proof here.
+            let key = export()?;
+            self.proof
+                .lock()
+                .map_err(|_| io::ErrorKind::Other)?
+                .install_key(id, key);
+        }
+        Ok(())
     }
 
     /// Send a fixed authenticated challenge directly, without copying it to enrolled.
@@ -768,6 +789,26 @@ mod tests {
             seen[index] = true;
         }
         assert!(seen.into_iter().all(|received| received));
+    }
+
+    #[tokio::test]
+    async fn exporting_path_keys_never_holds_the_receive_proof_lock() {
+        let socket = quinn::TokioRuntime
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let path = PathSocket::new(socket, "127.0.0.1:9".parse().unwrap());
+        let result = path.prepare_proof_with(1, || {
+            // Export acquires the engine's connection lock; a simultaneous
+            // receive must remain free to consume proof packets and release
+            // its path lock while an encrypted send waits for that path lock.
+            assert!(
+                path.proof.try_lock().is_ok(),
+                "key export holds the receive proof lock and permits a connection/path/proof cycle"
+            );
+            Err(io::ErrorKind::PermissionDenied.into())
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(!path.proof.lock().unwrap().has_key(1));
     }
 
     #[derive(Debug)]

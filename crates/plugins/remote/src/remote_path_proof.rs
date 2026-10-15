@@ -119,21 +119,18 @@ pub(crate) struct Probe {
     timing: Option<(Duration, Duration)>,
 }
 impl Probe {
-    pub fn prepare(&mut self, connection: &quinn::Connection) -> io::Result<()> {
-        if self
-            .key
-            .as_ref()
-            .is_none_or(|(id, _)| *id != connection.stable_id())
-        {
-            self.key = Some((
-                connection.stable_id(),
-                PathKey::from_connection(connection)?,
-            ));
+    pub fn has_key(&self, id: usize) -> bool {
+        self.key.as_ref().is_some_and(|(current, _)| *current == id)
+    }
+    pub fn install_key(&mut self, id: usize, key: PathKey) {
+        // A concurrent exporter for this same connection must not reset the
+        // pending sequence or authenticated timing installed by the winner.
+        if !self.has_key(id) {
+            self.key = Some((id, key));
             self.pending = None;
             self.answered = None;
             self.timing = None;
         }
-        Ok(())
     }
     pub fn begin(&mut self) -> io::Result<u64> {
         self.generation = self.generation.checked_add(1).ok_or(io::ErrorKind::Other)?;
