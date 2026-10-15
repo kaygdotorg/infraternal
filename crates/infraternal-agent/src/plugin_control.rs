@@ -111,6 +111,11 @@ impl Registry {
             }))),
         }
     }
+    /// Receiver closure fences replacement: no old callback can still execute.
+    #[cfg(feature = "remote")]
+    pub(crate) fn ended(&self) -> bool {
+        self.sender.is_closed()
+    }
     fn start(&self) -> Result<(), PluginError> {
         // An inactive control surface needs no thread or its resident startup
         // code. Serialize the first call so concurrent local/server callers

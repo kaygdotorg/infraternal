@@ -68,7 +68,12 @@ async fn run_inner(
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
+    // A link cancellation cannot cancel synchronous plugin/kernel work. Keep
+    // its sole owner and local listener across watchdog resets; only a closed
+    // receiver proves the worker has ended and can safely be replaced.
+    let service = Mutex::new(None::<crate::plugin_control::Service>);
     supervisor::run(|connected| {
+        let service = &service;
         let state = state.clone();
         async move {
             // Invalid enrollment creates no local state or plugin work. A clock or
@@ -79,22 +84,27 @@ async fn run_inner(
                 crate::remote_renewal::require_current(&identity.identity)?;
             }
             let state = crate::sessions::state(state.clone())?;
-            // The local control surface lives across reconnects, but a watchdog
-            // restart also recreates a failed plugin worker and its private socket.
-            let service = crate::plugin_control::Service::start(
-                &state,
-                crate::plugins::ExecutionMode::Remote,
-                installation,
-            )
-            .await?;
-            server_path::run(
-                identity,
-                state,
-                renewal,
-                service.registry.clone(),
-                connected,
-            )
-            .await
+            let mut local = service.lock().await;
+            if local.as_ref().is_some_and(|local| local.registry.ended()) {
+                local.take();
+            }
+            if local.is_none() {
+                *local = Some(
+                    crate::plugin_control::Service::start(
+                        &state,
+                        crate::plugins::ExecutionMode::Remote,
+                        installation,
+                    )
+                    .await?,
+                );
+            }
+            let plugins = local
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .registry
+                .clone();
+            drop(local);
+            server_path::run(identity, state, renewal, plugins, connected).await
         }
     })
     .await

@@ -370,3 +370,30 @@ mod durable_state {
         }
     }
 }
+
+#[tokio::test]
+async fn terminated_factory_is_replaced_without_overlapping_live_workers() {
+    let directory = StateDirectory::new();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let ready = started.clone();
+    let task = enrolled(
+        Arc::new(move || {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(PluginError::Rejected);
+            }
+            ready.notify_one();
+            Ok(PluginRegistry::default())
+        }),
+        directory.0.clone(),
+    );
+    tokio::time::timeout(Duration::from_secs(30), started.notified())
+        .await
+        .unwrap();
+    assert_eq!(observed.load(Ordering::SeqCst), 2);
+    assert!(!task.is_finished());
+    task.abort();
+    let _ = task.await;
+    tokio::task::yield_now().await;
+}
