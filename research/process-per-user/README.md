@@ -91,10 +91,14 @@ drained PTY. One descriptor index carries generation-checked registration keys,
 preventing a reused descriptor from inheriting a closed peer's readiness. Retired exit timers are discarded before
 waiting, so live idle sessions do not inherit stale deadlines.
 
-VT is initially absent. A complete origin prefix up to 4 KiB is retained.
-Before its limit is exceeded, before snapshot, and before resize, the selected
-production engine is allocated and fed the prefix at its historical geometry.
-Materialization releases the prefix. Snapshot still retains unfinished parser
+VT is initially absent. A complete origin prefix up to 4 KiB and at most 32
+ordered resize events are retained. Reaching either bound or requesting a
+snapshot allocates the selected production engine at the original geometry,
+then replays each byte range and resize in order. A quiet terminal can therefore
+change geometry without allocating native screen pools. Materialization releases
+both transcript buffers. Their capacities are charged to the session budget;
+numeric receipts expose resize-event capacity as `geometry_bytes`.
+Snapshot still retains unfinished parser
 sequences. State never becomes an evicting raw-byte approximation. VT remains
 allocated once materialized; dropping it would require exact state export.
 
@@ -188,7 +192,12 @@ probe. Requested bytes and allocator resident pages are distinct measurements.
 `scripts/bench/ppu_trace.py` records only numeric scheduler transitions and
 syscall names/timestamps in a private trace instance, flags overflow, and labels
 its runs diagnostic. Tracing changes the workload's timing and cannot be used
-for admission. `ppu_raw_echo.py` compares the same synthetic shell markers over
+for admission. `ppu_delivery.py` correlates successful sends to the fixture's
+own sockets with those same probes. It decodes decimal event fields and the
+syscall printer's hexadecimal fields separately, discards raw arguments, and
+refuses a run with no correlated writes. Its conservative reader-delay bounds
+cannot be subtracted from admission latency.
+`ppu_raw_echo.py` compares the same synthetic shell markers over
 direct masters; its different reader prevents treating that result as a hard
 latency lower bound. The unchanged two-hour `ppu-run --phase soak` remains the
 admission workload. Before/after tables and raw receipts live on #205.
