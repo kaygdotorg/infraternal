@@ -89,3 +89,29 @@ terminal admission for the individual trial. Copied fixtures can locate cleanup
 scripts and the isolated shell profile with
 `INFRATERNAL_REMOTE_FIXTURE_REPOSITORY`; namespace UID/GID overrides select an
 existing fixture account. Results and raw receipts are recorded on #225.
+
+## What would identify a future stalled link
+
+The exact field wait is still unverified. The isolated half-open TCP sequence
+proves a failure mechanism, but descriptor enumeration on the reported field
+process was denied. One thread and namespace-wide TCP tables cannot identify
+that process's wait. A restart by itself therefore proves recovery only.
+
+After the owner restarts an affected host with the updated binary, retain its
+service journal around any recurrence and correlate it with server admission:
+
+- `Infraternal agent server link ended (Some(TimedOut)); retrying` followed by
+  admission supports transport liveness detection. It does not alone identify
+  which read or write timed out.
+- `Infraternal agent has had no server link for 5 minutes; restarting its link`
+  proves the offline watchdog fired. It does not prove an established idle TCP
+  socket was the original wait: an established link has no offline deadline.
+- `Infraternal agent server link task ended unexpectedly` or an unexpected link
+  stop followed by a nonzero service exit supports the task-completion recovery
+  path. Correlate the exit and service-manager restart with the server record.
+
+If the symptom recurs without those lines, the owner/orchestrator can collect
+content-free privileged wait-channel, thread-state and socket-ownership metadata
+before restarting. No credentials, command arguments, descriptor contents or
+terminal data are needed. Record the binary revision and whether the server was
+locked. No proposed check requires changing a real host in this job.
