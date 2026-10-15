@@ -114,9 +114,9 @@ async def soak(host, args, record, rng):
         return await ORIGINAL_SOAK(host, args, record, rng)
     finally:
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
         try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
             os.kill(host.pid, signal.SIGUSR1)
             await host.peers[-1].echo(b'stage-final-fence')
         finally:

@@ -35,6 +35,19 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
                 await stages.soak(host, args, None, None)
         scheduler.close.assert_called_once()
 
+    async def test_failed_periodic_signal_still_closes_private_scheduler(self):
+        scheduler = Mock()
+        async def workload(*_):
+            await asyncio.sleep(0)
+        host = SimpleNamespace(pid=123)
+        args = SimpleNamespace(mode='soak', seconds=1)
+        with patch.object(stages.trace, 'Trace', return_value=scheduler), \
+             patch.object(stages, 'ORIGINAL_SOAK', workload), \
+             patch.object(stages.os, 'kill', side_effect=ProcessLookupError):
+            with self.assertRaises(ProcessLookupError):
+                await stages.soak(host, args, None, None)
+        scheduler.close.assert_called_once()
+
     async def test_fragmented_marker_has_the_original_output_offset(self):
         reader = object()
         first = b'prefixprobe-900-'
