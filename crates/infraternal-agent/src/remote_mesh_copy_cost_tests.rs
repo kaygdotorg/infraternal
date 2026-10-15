@@ -448,6 +448,7 @@ impl SocketTrial {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Explicit socket-configuration diagnostic on the perf VM; ordinary scale gates stay unchanged."]
 async fn socket_configuration_trial_at_one_thousand_transports() {
+    assert!(std::env::var_os("INFRATERNAL_MESH_TRIAL_RUNTIME").is_none());
     run_socket_configuration_trial().await;
 }
 
@@ -458,6 +459,11 @@ fn runtime_configuration_trial_at_one_thousand_transports() {
     let mode = std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME").unwrap();
     let mut builder = match mode.as_str() {
         "current_thread" => tokio::runtime::Builder::new_current_thread(),
+        "split_server" | "split_server_fair" => {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(3);
+            builder
+        }
         "four_workers_default" | "four_workers_fair" => {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             builder.worker_threads(4);
@@ -465,7 +471,7 @@ fn runtime_configuration_trial_at_one_thousand_transports() {
         }
         _ => panic!("explicit supported runtime control required"),
     };
-    if mode == "four_workers_fair" {
+    if matches!(mode.as_str(), "four_workers_fair" | "split_server_fair") {
         builder.global_queue_interval(1).event_interval(1);
     }
     builder
@@ -532,6 +538,53 @@ async fn run_socket_configuration_trial() {
     }
 }
 
+/// Keep server IO and its tasks on one owned current-thread reactor. The
+/// split control uses three client workers plus this one server worker, the
+/// same four-worker budget as the shared control. Nothing survives the cohort.
+struct OwnedServerRuntime {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl OwnedServerRuntime {
+    async fn start<T: Send + 'static>(make: impl FnOnce() -> T + Send + 'static) -> (Self, T) {
+        let (sent, ready) = tokio::sync::oneshot::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                // Socket registration must happen here, not on the client
+                // reactor before moving the accepting future to this thread.
+                assert!(sent.send(make()).is_ok(), "server setup receipt refused");
+                let _ = stopped.await;
+            });
+        });
+        let owner = Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        };
+        let resources = ready
+            .await
+            .expect("owned server reactor failed during setup");
+        (owner, resources)
+    }
+}
+impl Drop for OwnedServerRuntime {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+            && !std::thread::panicking()
+        {
+            panic!("owned server reactor failed during the cohort");
+        }
+    }
+}
+
 /// Retain the original same-cohort diagnostic and measure a separately labelled
 /// fresh cohort without changing its connections, windows, or health criteria.
 #[allow(clippy::too_many_lines)]
@@ -557,48 +610,63 @@ async fn measure_mesh_probe_and_copy_cost(
     if let Some(diagnostic) = &diagnostic {
         diagnostic.server_addresses(&[enrolled, mesh]);
     }
-    let bindings = Bindings::new(counted_server(
-        quinn::TokioRuntime.wrap_udp_socket(primary).unwrap(),
-        &server_traffic,
-        diagnostic.as_ref(),
-        0,
-        record_sends,
-    ));
     let mesh_socket = std::net::UdpSocket::bind(mesh).unwrap();
     let mesh_capacity = socket_trial.map(|trial| trial.capacity(&mesh_socket));
-    let lease = bindings
-        .lease(counted_server(
-            quinn::TokioRuntime.wrap_udp_socket(mesh_socket).unwrap(),
-            &server_traffic,
-            diagnostic.as_ref(),
-            1,
+    let server_config =
+        remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+            .unwrap();
+    let server_diagnostic = diagnostic.clone();
+    let server_counter = server_traffic.clone();
+    let make_server = move || {
+        let bindings = Bindings::new(counted_server(
+            quinn::TokioRuntime.wrap_udp_socket(primary).unwrap(),
+            &server_counter,
+            server_diagnostic.as_ref(),
+            0,
             record_sends,
-        ))
+        ));
+        let lease = bindings
+            .lease(counted_server(
+                quinn::TokioRuntime.wrap_udp_socket(mesh_socket).unwrap(),
+                &server_counter,
+                server_diagnostic.as_ref(),
+                1,
+                record_sends,
+            ))
+            .unwrap();
+        let server = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            bindings.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )
         .unwrap();
-    let server = quinn::Endpoint::new_with_abstract_socket(
-        quinn::EndpointConfig::default(),
-        Some(
-            remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
-                .unwrap(),
-        ),
-        bindings.clone(),
-        Arc::new(quinn::TokioRuntime),
-    )
-    .unwrap();
-    let listener = server.clone();
-    let accepting = tokio::spawn(async move {
-        let mut handshakes = tokio::task::JoinSet::new();
-        let mut connections = Vec::new();
-        while connections.len() < CONNECTIONS {
-            tokio::select! {
-                incoming = listener.accept(), if handshakes.len() < 64 => {
-                    handshakes.spawn(async move { incoming.unwrap().await.unwrap() });
+        let listener = server.clone();
+        let accepting = tokio::spawn(async move {
+            let mut handshakes = tokio::task::JoinSet::new();
+            let mut connections = Vec::new();
+            while connections.len() < CONNECTIONS {
+                tokio::select! {
+                    incoming = listener.accept(), if handshakes.len() < 64 => {
+                        handshakes.spawn(async move { incoming.unwrap().await.unwrap() });
+                    }
+                    result = handshakes.join_next(), if !handshakes.is_empty() => connections.push(result.unwrap().unwrap()),
                 }
-                result = handshakes.join_next(), if !handshakes.is_empty() => connections.push(result.unwrap().unwrap()),
             }
-        }
-        connections
-    });
+            connections
+        });
+        (bindings, lease, server, accepting)
+    };
+    let separate_server = socket_trial.is_some()
+        && std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME")
+            .is_ok_and(|mode| matches!(mode.as_str(), "split_server" | "split_server_fair"));
+    let (_server_runtime, resources) = if separate_server {
+        let (owner, resources) = OwnedServerRuntime::start(make_server).await;
+        (Some(owner), resources)
+    } else {
+        (None, make_server())
+    };
+    let (bindings, lease, server, accepting) = resources;
     let config =
         remote_quic::client_config(&client_identity, std::slice::from_ref(&ca.certificate))
             .unwrap();
@@ -843,6 +911,21 @@ async fn measure_mesh_probe_and_copy_cost(
     }
     let mut report = serde_json::json!({"scope":"1000_authenticated_quic_transports_loopback_not_daemons_or_kernel_mesh_nodes","connections":CONNECTIONS,"windows_per_profile":WINDOWS,"window_ms":WINDOW.as_millis(),"clock_ticks_per_second":ticks_per_second,"page_size_bytes":page_size,"machine":std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(),"load":std::fs::read_to_string("/proc/loadavg").unwrap().trim(),"udp_counters":"successful_physical_adapter_sends_including_primary_and_copy_payloads_GSO_segments","udp_bytes_exclude_ip_udp_headers":true,"instrumentation":"process_proc_reads_once_per_window_and_two_relaxed_counter_updates_per_send_plus_two_for_enrolled","baseline_watcher":"current_path_interrupted_with_previous_100ms_probe_constants_not_old_adaptive_watcher","backup_enable":"explicit_peer_and_path_API_flags_after_real_mutual_TLS_not_daemon_Hello_negotiation","profile_order":if fresh_copy && profiles == [false] { "fresh_no_copy_only_new_cohort" } else if fresh_copy { "fresh_copy_only_new_cohort" } else { "no_copy_then_copy_same_retained_cohort" },"fresh_copy_cohort":fresh_copy && profiles.contains(&true),"fresh_alias_cohort":fresh_copy,"explicit_fresh_no_copy_control":fresh_copy && profiles == [false],"peer_binding_birth":if fresh_copy { "after_all_mutual_TLS_before_any_mesh_selection_backup_enabled_immediately" } else { "before_TLS_with_profile_flags_later" },"limitations":["loopback_without_injected_latency_or_loss_or_kernel_mesh",if fresh_copy { "correlated_windows_of_one_fresh_cohort_no_previous_profile" } else { "correlated_windows_of_one_cohort_in_fixed_order_RSS_retains_prior_allocations" },"CPU_includes_both_ends_and_adapter_counter_instrumentation"],"profiles":reports,"result":if healthy { "PASS" } else { "FAIL" }});
     report["physical_send_counters_enabled"] = serde_json::json!(record_sends);
+    let client_workers = if separate_server {
+        3
+    } else if std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME").as_deref() == Ok("current_thread") {
+        1
+    } else {
+        4
+    };
+    report["runtime_ownership"] = serde_json::json!({
+        "separate_server":separate_server,
+        "server_runtime":if separate_server { "owned_current_thread" } else { "shared_with_clients" },
+        "configured_workers":client_workers+usize::from(separate_server),
+        "client_workers":client_workers,
+        "server_workers":usize::from(separate_server),
+        "scope":"explicit split diagnostic; ordinary shared controls unchanged"
+    });
     report["explicit_runtime_control"] = serde_json::json!(
         std::env::var("INFRATERNAL_MESH_TRIAL_RUNTIME")
             .unwrap_or_else(|_| "four_workers_macro".into())
