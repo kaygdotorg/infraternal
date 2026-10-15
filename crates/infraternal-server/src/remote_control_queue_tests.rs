@@ -248,7 +248,7 @@ async fn saturated_native_control_queue_does_not_hide_primary_terminal_output() 
         Ok(Some(TerminalOutput::Snapshot { .. })) => "snapshot",
         Ok(Some(TerminalOutput::Event { .. })) => "event",
         Ok(Some(TerminalOutput::Ack { .. })) => "ack",
-        Ok(Some(TerminalOutput::Pong { .. })) => "pong",
+        Ok(Some(TerminalOutput::RouteExpired)) => "route expired",
         Ok(Some(TerminalOutput::Reconnecting)) => "reconnecting",
         Ok(Some(TerminalOutput::Closed { .. })) => "closed",
     };

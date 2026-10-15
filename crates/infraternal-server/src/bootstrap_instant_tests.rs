@@ -36,8 +36,8 @@ impl EarlyTerminal {
                 self.received.extend_from_slice(&bytes);
             },
             TerminalOutput::Ack {in_seq_acked} => self.confirmed = self.confirmed.max(in_seq_acked),
-            TerminalOutput::Event {..} => {},
-            TerminalOutput::Closed {..} => panic!("the original early session closed during handover"),
+            TerminalOutput::Event {..} | TerminalOutput::Reconnecting => {},
+            TerminalOutput::Closed {..} | TerminalOutput::RouteExpired => panic!("the original early session closed or expired during handover"),
         }
     }
     async fn command(&mut self, command: &[u8], marker: &[u8]) {

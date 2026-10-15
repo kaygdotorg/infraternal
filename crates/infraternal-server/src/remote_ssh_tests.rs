@@ -252,6 +252,20 @@ async fn component_off_retires_ssh_fallback_after_installed_admission() {
     replacement(false, true).await;
 }
 
+/// Rebinding emits control/status notices before its authoritative writer Ack.
+/// Keep one deadline across those notices; data and final Close still fail the oracle.
+async fn writer_frame(output: &mut tokio::sync::mpsc::Receiver<TerminalOutput>) -> TerminalOutput {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match output.recv().await.unwrap() {
+                TerminalOutput::Reconnecting => {}
+                frame => return frame,
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
 #[allow(
     clippy::too_many_lines,
     reason = "Keep admission, reattachment and retirement ordered in the real peer lifecycle."
