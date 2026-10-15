@@ -3,6 +3,20 @@ use super::*;
 use crate::remote_tls::tests::{leaf, root};
 use infraternal_protocol::Frame;
 
+/// Reserve both fixture transports before publishing their common address.
+/// The protocols allocate ports independently, so either reservation can collide.
+async fn reserve_transport_pair() -> (tokio::net::TcpListener, tokio::net::UdpSocket) {
+    for _ in 0..16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        match tokio::net::UdpSocket::bind(listener.local_addr().unwrap()).await {
+            Ok(socket) => return (listener, socket),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("cannot reserve the fixture UDP socket: {error}"),
+        }
+    }
+    panic!("fixture transport reservations collided repeatedly");
+}
+
 struct StateDirectory(PathBuf);
 impl StateDirectory {
     fn new() -> Self {
@@ -162,16 +176,8 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
         "127.0.0.1:0".parse().unwrap(),
     )
     .unwrap();
-    // TCP and UDP allocate ephemeral ports independently. Reserve both before
-    // publishing the address; a UDP allocation alone cannot reserve TCP.
-    let (tcp, socket) = loop {
-        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        match tokio::net::UdpSocket::bind(tcp.local_addr().unwrap()).await {
-            Ok(socket) => break (tcp, std::sync::Arc::new(socket)),
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
-            Err(error) => panic!("cannot reserve the fixture UDP socket: {error}"),
-        }
-    };
+    let (tcp, socket) = reserve_transport_pair().await;
+    let socket = std::sync::Arc::new(socket);
     let (proxy_address, proxy) =
         crate::transport_diagnostics::udp_proxy_on(socket, server.local_addr().unwrap());
     let identity = RemoteIdentity {
@@ -594,14 +600,18 @@ async fn server_path_capability_is_advertised_on_native_and_fallback_transports(
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
     for native in [true, false] {
-        let server = quinn::Endpoint::server(
-            remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
-                .unwrap(),
-            "127.0.0.1:0".parse().unwrap(),
+        let (listener, socket) = reserve_transport_pair().await;
+        let address = listener.local_addr().unwrap();
+        let server = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(
+                remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+                    .unwrap(),
+            ),
+            socket.into_std().unwrap(),
+            std::sync::Arc::new(quinn::TokioRuntime),
         )
         .unwrap();
-        let address = server.local_addr().unwrap();
-        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
         let tls =
             remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
                 .unwrap();
