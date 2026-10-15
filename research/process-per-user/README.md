@@ -5,8 +5,8 @@ Status: D270 selects this design for hardening. The prototype remains opt-in;
 D13's default process per terminal is unchanged. D268 Q20 and D270 authorize
 measurement and hardening, without changing D7/D13/D128/D240/D247. No new
 terminal engine or foundational dependency was selected.
-The r5 measurements have not admitted the mixed-soak latency or whole-host
-upgrade path. Passing focused tests and the cold-history footprint does not
+The r6 work fixes inherited child-exit notification loss, but has not admitted
+the mixed-soak latency or whole-host upgrade path. Passing focused tests and the cold-history footprint does not
 authorize adoption. Current results and failures are recorded on issue #205.
 
 ## Boundary and identity
@@ -19,6 +19,11 @@ Launch must occur in a single-threaded process. The research entry checks
 PTYs: an unblocked sibling thread could consume process-directed SIGCHLD
 instead of the reactor's signalfd. Reliability tests launch the real host through
 a standalone feature-gated example, outside the threaded test harness.
+After blocking SIGCHLD and before creating any PTY, startup replaces its entire
+disposition with the default action and no flags. An inherited ignore or
+SA_NOCLDWAIT handler would otherwise let the kernel discard child exit status.
+Real-process regressions cover both dispositions, including a custom handler
+installed inside the fixture after exec.
 Every session retains its own mode-0600 socket under the mode-0700 runtime
 sessions directory. The production decoder, SO_PEERCRED check, wire layouts,
 capabilities, input cursors, writer handling, and PTY launcher are reused.
@@ -196,6 +201,11 @@ receipts and private off-CPU tracing. `ppu_stage_report.py` matches probes by
 writer/input range, PTY output range and socket identity, refusing missing or
 dropped records. Traced profiles are diagnostic only: no stage percentile or
 reader-delay estimate can be subtracted from the uninstrumented soak's budget.
+Release profiles correlate the same slow probe with scheduler transitions of
+the host, its shell and the reader. They expose runnable delays across this
+path, rather than assigning the entire written-to-read span to VT parsing.
+Scheduler-priority, CPU grouping and independent-session comparisons remain
+diagnostics: none supplied an admitted fix or changed runtime scheduling.
 
 ## Compact cold history experiment
 
@@ -363,6 +373,15 @@ Replacing the **session host itself** requires an all-or-nothing handoff:
    Only one reactor may read/write any PTY at a time.
 5. Reconnect viewers with their existing output/input cursors. Define child-exit
    status ownership explicitly: a replacement is not the shells' waitpid parent.
+
+The isolated [carry checkpoint candidate](vt-carry/README.md) preserves the
+selected Rust parser algorithm's private logical state, including partial UTF-8,
+grouped parameters and bounded control strings. It has no application
+dependency. Its component tests and measurements cannot certify exact native
+terminal state or a host transaction. For same-process exec, the kernel would
+preserve shell-parent ownership and queued PTY/socket bytes; the replacement
+still needs every userspace queue and exact terminal state before that boundary.
+Arbitrary process loss additionally needs a surviving descriptor owner.
 
 `send_masters`/`receive_masters` implement and test descriptor-lifetime transfer
 with CLOEXEC through private datagrams, across multiple batches. They do not
