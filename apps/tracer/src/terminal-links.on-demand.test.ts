@@ -146,6 +146,43 @@ test("re-detects a wrapped URL in scrollback using cached wrap flags", () => {
   }
 });
 
+test("does not expose a valid prefix when scrollback wrap history is unknown", () => {
+  const target = "https://scroll.example.test/a-long-path";
+  const first = { ...row(target.slice(0, 24), 0), wrapKnown: false };
+  const continuation = { ...row(target.slice(24), 1, true), wrapKnown: false };
+  const visibleRows = [first, continuation, row("next", 2), row("away", 3), row("last", 4)];
+  const callbacks: Array<() => void> = [];
+  const originalWindow = (globalThis as unknown as { window?: Window }).window;
+  const fakeWindow = {
+    requestIdleCallback(callback: () => void) { callbacks.push(callback); return callbacks.length; },
+    cancelIdleCallback() {},
+    setTimeout,
+    clearTimeout,
+  } as unknown as Window;
+  (globalThis as unknown as { window?: Window }).window = fakeWindow;
+  const host = { addEventListener() {}, removeEventListener() {} } as unknown as HTMLElement;
+  const canvas = { style: {}, getBoundingClientRect: () => new DOMRect(0, 0, 80, 40) } as unknown as HTMLCanvasElement;
+  const controller = createTerminalLinkController({
+    host,
+    canvas,
+    getBufferLength: () => visibleRows.length,
+    getVisibleRange: () => ({ first: 0, last: 2 }),
+    getRow: (y) => visibleRows.find((candidate) => candidate.y === y),
+    getCellMetrics: () => ({ width: 1, height: 1 }),
+    paint: () => undefined,
+    open: () => undefined,
+  });
+  try {
+    controller.updateVisibleRows();
+    callbacks.shift()?.();
+    expect(controller.linksOnScreen().map((link) => link.target)).toEqual([target]);
+  } finally {
+    controller.dispose();
+    if (originalWindow === undefined) delete (globalThis as unknown as { window?: Window }).window;
+    else (globalThis as unknown as { window?: Window }).window = originalWindow;
+  }
+});
+
 test("waits for a wrapped URL to leave the visible edge before offering it", () => {
   const target = "https://scroll.example.test/a-long-path";
   const visibleRows = [row(target.slice(0, 15), 0), row(target.slice(15, 30), 1, true), row(target.slice(30), 2, true)];

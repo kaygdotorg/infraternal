@@ -229,8 +229,9 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     const changed = !previous || previous.fingerprint !== fingerprint ||
       (next.wrapKnown !== false && previous.wrapped !== next.wrapped);
     if (changed) changedRows?.add(y);
-    const wrapped = next.wrapKnown === false
-      ? Boolean(cached && previous?.wrapped)
+    // Missing wrap history is not an unwrapped boundary; preserve the buffer row's flag for this scan.
+    const wrapped = next.wrapKnown === false && cached && previous
+      ? previous.wrapped
       : next.wrapped;
     const row = next.wrapKnown === false
       ? { ...next, wrapped, wrapKnown: cached }
