@@ -2935,3 +2935,27 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      else cannot sign in until a valid key is entered, and their data,
      sessions and settings are kept, not deleted. The warning starts
      before the end date and names how many people will lose access.
+288. **`infraternal mux`: sessions are automatable from inside a session
+     (owner, 2026-10-15; extends D241):**
+     - **A deliberate command, never an escape sequence (Q1):** `infraternal
+       mux …` talks to the local infraternal agent over a socket that only
+       the calling session can reach. Printed output can never open or
+       control windows.
+     - **Fully automatable like tmux and zellij (Q2):** list, open, type
+       into, read output, monitor, rename and close sessions, and open
+       windows on the person's canvas (the agent relays to the server, which
+       pushes to their open devices).
+     - **Hard gate across hosts and accounts:** within the person's own
+       sessions on the same host and account, there is full control with no
+       prompt. Anything that crosses a host or account boundary (a session
+       on build-01 opening a shell on nas, typing into a root session) is
+       impossible unless an access rule allows it AND it is approved. The
+       approval can be set globally. The rule syntax and the approval UX are
+       being designed with the owner.
+     - **Unattended (Q2c):** with no approval available, cross-boundary
+       requests are denied with a clear message.
+     - **AI tools learn it (Q3):** a tmux-compatible subset for zero setup;
+       a skill offered once per detected AI tool and installed only on the
+       person's click; a built-in MCP server (`infraternal mux mcp`).
+     - **Every command and subcommand of ours ships a well-written, concise
+       skill** describing what it does, its commands and its safety rules.
