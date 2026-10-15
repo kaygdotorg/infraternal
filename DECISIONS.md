@@ -2730,3 +2730,24 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        explains what the privileged infraternal agent can do and how to take
        the privilege back. Before any of it is built, the privileged-password
        handling goes through a design round with the owner.
+274. **Privileged access: how the password is handled (owner, 2026-10-15;
+     round 1 of the design pass from D273, #215):**
+     - **The privilege model stays D18 and D163:** consent upgrades the
+       host's rootless infraternal agent to the root infraternal agent.
+       There is no separate root helper. Each person's sessions already run
+       in that person's own process (D229, D270), so the code that faces
+       terminals does not run as root.
+     - **The password never reaches the server in readable form.** The
+       browser seals it to that host's infraternal agent key. The server
+       forwards bytes it cannot read.
+     - **The way in is detected and has no menu,** in this order: sudo
+       without a password (consent only, no field), then sudo or doas (the
+       person's own password), then the root password (su).
+     - **Every privileged action is recorded** in the host's activity log
+       and the Inbox: what ran, who asked and when, never secrets. A failed
+       attempt shows in the Inbox at once.
+     - Still open: whether the password is kept anywhere (proposed: used
+       once for the upgrade, then wiped, never stored), and how the
+       privilege is taken back (proposed: a "Full access" line in the
+       host's details that returns it to the rootless agent; removing the
+       host also removes it).
