@@ -170,6 +170,33 @@ pages, shell processes and kernel PTYs are distinct costs; total host PSS
 divided by session count cannot identify the incremental idle-session floor.
 The byte ledger and paired before/after PSS receipts are on issue #205.
 
+## Numeric stage diagnostics
+
+`host-diagnostics` is a separate, non-default build feature requiring
+`process-per-user`. With a `--host-accounting` file, SIGUSR1 flushes a bounded
+65,536-record numeric stage buffer; SIGUSR2 retains the ownership receipt.
+The collector records monotonic times, session IDs, descriptors,
+input/output byte offsets and sizes. It records no terminal bytes. File errors
+stop profiling; live sessions continue. No collector is compiled into ordinary
+or admission images, and the diagnostic build's memory/scheduling costs must
+be reported separately.
+Each flush marks its own synchronous I/O span so a recorder stall remains
+visible in the diagnosis. The driver validates the private format header
+before sending SIGUSR1 and limits a diagnostic profile to 300 seconds.
+
+Input credit is recorded inside the existing per-writer ledger, including
+partial writes across ownership segments. Output records distinguish PTY read,
+VT completion, frame construction and socket writes. Full encoded queue size
+and write cursor certify a complete frame rather than a nearby partial write.
+A post-write timestamp can be recorded after the reader has already run; reader
+delay therefore has explicit lower/upper bounds, never a negative duration.
+
+`scripts/bench/ppu_stages.py` runs the original mixed workload with these extra
+receipts and private off-CPU tracing. `ppu_stage_report.py` matches probes by
+writer/input range, PTY output range and socket identity, refusing missing or
+dropped records. Traced profiles are diagnostic only: no stage percentile or
+reader-delay estimate can be subtracted from the uninstrumented soak's budget.
+
 ## Compact cold history experiment
 
 `compact-history` is a separate build feature that requires `process-per-user`;
