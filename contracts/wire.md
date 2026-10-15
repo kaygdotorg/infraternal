@@ -421,8 +421,43 @@ routing hints, including differently batched GRO input. A suffix collision
 keeps a route hint rather than admitting or dropping data. A duplicate mesh
 original received after its enrolled copy must not promote the primary route;
 the alternative reply does not change this rule. The mesh liveness
-probe requires physical mesh arrival plus newly authenticated traffic:
-authenticated enrolled copies alone must not keep a dead mesh path selected.
+probe requires that physical path's own session-authenticated response.
+Authenticated enrolled copies and unrelated mesh UDP cannot jointly prove mesh health.
+
+#### Session-bound physical path proof (#201)
+
+The native UDP socket accepts a fixed 45-byte probe envelope alongside QUIC:
+`0x00 "ip1"`, direction byte (`0` request, `1` response), big-endian `u64`
+sequence and a 32-byte HMAC-SHA256 tag over the preceding 13 bytes. The existing
+QUIC session exports 32 key bytes with label `EXPORTER-infraternal-path-v1`
+and empty context. Exporter bytes are cleared after native key import.
+This adds no terminal frame, protocol version, connection, writer or authority.
+
+A server responder is registered only for an admitted live QUIC connection.
+Its key lease is independent of mesh routing leases, so enrolled proofs keep
+working after mesh disable. Alternative tuples resolve only through admitted
+peer leases. Replies use the actual receiving socket and local address, never
+a replacement socket or a UDP-learned arbitrary destination. Connection/key
+retirement removes the responder; an older lease cannot erase its replacement.
+Up to four admitted connection keys may share an exact UDP tuple during queued
+replacement; cancelling any one removes only that key. The registry retains at
+most 10,000 exact tuples, matching native host admission's existing bound.
+
+A client accepts only the outstanding sequence, response direction, valid MAC
+and exact probed physical source tuple. Each new challenge advances the socket's
+sequence; retransmission preserves both sequence and first successful-send
+clock. Replies cannot answer another direction or session, and an accepted
+reply cannot refresh health twice. Backup copying never copies these probes.
+Datagram aggregation preserves each independent envelope. Unknown formats,
+wrong lengths and invalid authentication do not advance health.
+
+The response allowance follows this physical path's authenticated smoothed RTT
+and variation, with its configured scheduling margin and measured local timer
+lateness. A single-tuple connection reuses ordinary adaptive QUIC health;
+connection-wide counters are insufficient when distinct tuples are normalized.
+Probe work is owned by the selected path's existing future and stops when it
+is cancelled. Older peers that cannot answer keep enrolled service rather than
+satisfying a mesh proof with ambiguous connection-wide progress.
 
 ## 9. Route liveness (D265, #199)
 
