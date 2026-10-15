@@ -1675,8 +1675,22 @@ async fn process_command(
                     let _ = reply.send(Err(AgentError::Protocol));
                     return true;
                 }
-                // A resumed browser may reclaim its writer even if a full command
-                // queue prevented the old handle's best-effort Detach notification.
+                // A resumed browser may reclaim its writer before the old
+                // handle's best-effort Detach arrives. Retire the remote route
+                // too: shared dispatch rejects Attach on an already-open stream.
+                if !write_frame(
+                    connection,
+                    stream_id,
+                    &Frame::Close {
+                        code: 1000,
+                        reason: "writer reattached",
+                    },
+                )
+                .await
+                {
+                    let _ = reply.send(Err(AgentError::Unavailable));
+                    return false;
+                }
                 attachments.remove(&previous);
                 routes.remove(&stream_id);
             }
