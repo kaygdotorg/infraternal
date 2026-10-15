@@ -2,11 +2,11 @@
 #![cfg(feature = "server")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_plugin_api::streams::Authority;
-use infraternal_plugin_desktop::session::{Error, Grants, HostCommand, Session, Video};
+use infraternal_plugin_desktop::session::{AccessRules, Error, HostCommand, Session, Video};
 use infraternal_protocol::desktop::Input;
 use std::sync::Arc;
 struct Owner;
-impl Grants for Owner {
+impl AccessRules for Owner {
     fn may_view(&self, u: &str, _h: &str, o: &str) -> bool {
         u == o
     }

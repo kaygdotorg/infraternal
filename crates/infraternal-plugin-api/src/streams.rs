@@ -123,7 +123,7 @@ pub struct WireProviderEntry {
     pub provider: Arc<dyn WireProvider>,
 }
 
-/// The host resolves immutable identity through its existing grant/admission
+/// The host resolves immutable identity through its existing access/admission
 /// path. A plugin cannot acquire another user's host by supplying wire IDs.
 /// This interface does not create a node, server, listener or certificate.
 #[cfg(any(test, feature = "native-wire"))]

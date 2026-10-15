@@ -3,7 +3,7 @@ use crate::{
     protocol::Start,
     registry::Registry,
     server_manifest::DESCRIPTOR,
-    session::{Error, Grants, Session, SessionId},
+    session::{AccessRules, Error, Session, SessionId},
 };
 use bytes::Bytes;
 use infraternal_plugin_api::{
@@ -35,8 +35,8 @@ pub use crate::wire::WIRE;
 // The current enrolled-host authority is owner-only, matching terminal host
 // selection. Each viewer separately retains its own login projection in Session.
 // Host revocation withdraws this shared admission without per-frame SQLite reads.
-struct HostGrants(Arc<dyn NodeHost>);
-impl Grants for HostGrants {
+struct HostAccessRules(Arc<dyn NodeHost>);
+impl AccessRules for HostAccessRules {
     fn may_view(&self, user: &str, host: &str, owner: &str) -> bool {
         user == owner && owner == self.0.owner_id() && host == self.0.id() && self.0.permits()
     }
@@ -116,7 +116,7 @@ impl DesktopServer {
             })),
         }
     }
-    /// Server-generated identities are prepared by a granted start action; Attach
+    /// Server-generated identities are prepared by an authorized start action; Attach
     /// is solely a lookup and can never cause capture on an unknown identity.
     /// # Errors
     /// Refuses disabled state, host admission, invalid geometry or helper failure.
@@ -143,7 +143,7 @@ impl DesktopServer {
             id,
             host.id().to_owned(),
             host.owner_id().to_owned(),
-            Arc::new(HostGrants(host.clone())),
+            Arc::new(HostAccessRules(host.clone())),
         );
         let (prepared, result) = tokio::sync::oneshot::channel();
         {
@@ -249,7 +249,7 @@ impl DesktopServer {
     }
     /// Attach is fail-closed and retains the originating viewer's login lease.
     /// # Errors
-    /// Refuses unknown sessions and current view grant or login failures.
+    /// Refuses unknown sessions and current view access rule or login failures.
     pub fn attach(
         &self,
         id: &SessionId,
@@ -829,7 +829,7 @@ fn validate_prepared(bytes: &[u8], id: SessionId) -> Result<(), Error> {
 mod viewer_tests {
     use super::*;
     struct Owner;
-    impl Grants for Owner {
+    impl AccessRules for Owner {
         fn may_view(&self, user: &str, _: &str, owner: &str) -> bool {
             user == owner
         }
@@ -920,7 +920,7 @@ mod slow_action_tests {
     use super::*;
     use infraternal_plugin_api::streams::{Authority, WireLane, WireStreamDef};
     struct Owner;
-    impl Grants for Owner {
+    impl AccessRules for Owner {
         fn may_view(&self, user: &str, _: &str, owner: &str) -> bool {
             user == owner
         }

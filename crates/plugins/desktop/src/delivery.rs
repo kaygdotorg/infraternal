@@ -14,7 +14,7 @@ pub enum Sent {
     Stale,
 }
 /// One caller owns the dedicated video lane and one reusable encoded buffer.
-/// The existing authenticated connection and grant admission stay with its owner.
+/// The existing authenticated connection and access rule admission stay with its owner.
 pub enum Sender<'a> {
     Reliable(&'a mut quinn::SendStream),
     Datagram {
@@ -207,7 +207,7 @@ impl ReliableReader {
             }
             if self.prefix == 0 {
                 // Ask the shared codec to validate the prefix; no separate untrusted
-                // length parser chooses allocation policy in this transport.
+                // length parser chooses allocation bounds in this transport.
                 match decode_frame(&self.buffer[..self.filled]) {
                     Err(DecodeError::Incomplete) => {}
                     _ => return Err(io::ErrorKind::InvalidData.into()),

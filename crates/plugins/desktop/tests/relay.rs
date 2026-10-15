@@ -8,7 +8,7 @@ use infraternal_plugin_api::{
 };
 use infraternal_plugin_desktop::{
     relay,
-    session::{Grants, Session},
+    session::{AccessRules, Session},
 };
 use infraternal_protocol::{
     Frame, decode_frame,
@@ -22,7 +22,7 @@ use std::sync::{
 use tokio::sync::{Mutex, mpsc};
 
 struct Owner;
-impl Grants for Owner {
+impl AccessRules for Owner {
     fn may_view(&self, user: &str, _host: &str, owner: &str) -> bool {
         user == owner
     }

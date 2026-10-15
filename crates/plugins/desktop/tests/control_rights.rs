@@ -1,7 +1,7 @@
 //! Control refusal and queued revocation checks for all desktop input forms on the real server session [D208,D232].
 #![cfg(feature = "server")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use infraternal_plugin_desktop::session::{Error, Grants, HostCommand, Session};
+use infraternal_plugin_desktop::session::{AccessRules, Error, HostCommand, Session};
 use infraternal_protocol::desktop::Input;
 use std::sync::{
     Arc,
@@ -9,7 +9,7 @@ use std::sync::{
 };
 
 struct Rights(AtomicBool);
-impl Grants for Rights {
+impl AccessRules for Rights {
     fn may_view(&self, user: &str, host: &str, owner: &str) -> bool {
         host == "mac" && owner == "owner" && matches!(user, "owner" | "reader")
     }

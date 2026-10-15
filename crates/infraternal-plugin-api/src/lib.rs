@@ -118,7 +118,7 @@ pub trait SocketHost: Send + Sync {
     /// Withdraw the socket projection before aborting its workers.
     #[cfg(feature = "native-streams")]
     fn retire(&self) {}
-    /// Resolve only hosts granted to this authenticated user. A disabled or
+    /// Resolve only hosts accessible to this authenticated user. A disabled or
     /// unsupported adapter opens no listener and returns no host lease.
     #[cfg(any(test, feature = "native-streams"))]
     fn node<'a>(&'a self, _id: &'a str) -> Operation<'a, Option<Arc<dyn streams::NodeHost>>> {

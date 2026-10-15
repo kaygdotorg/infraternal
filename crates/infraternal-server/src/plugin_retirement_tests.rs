@@ -270,7 +270,7 @@ impl infraternal_plugin_api::streams::WireLane for WindowLane {
 }
 #[cfg(feature = "desktop")]
 #[tokio::test]
-async fn queued_viewer_video_is_withdrawn_when_its_host_grant_ends() {
+async fn queued_viewer_video_is_withdrawn_when_its_host_access_ends() {
     use infraternal_plugin_desktop::{
         protocol::{Size, Start, Target},
         server::DesktopServer,
@@ -330,7 +330,7 @@ async fn queued_viewer_video_is_withdrawn_when_its_host_grant_ends() {
     node.0.store(false, std::sync::atomic::Ordering::Release);
     assert!(
         socket.accept(video, &mut encode).is_none(),
-        "retained video crossed a withdrawn host grant"
+        "retained video crossed withdrawn host access"
     );
     runtime.set_enabled("desktop", false).await.unwrap();
 }
@@ -490,7 +490,7 @@ async fn duplicate_native_opening_retires_only_that_viewer_and_keeps_its_sibling
             {
                 assert!(
                     ok,
-                    "duplicate opening withdrew the sibling's current viewer grant"
+                    "duplicate opening withdrew the sibling's current viewer access"
                 );
                 break;
             }

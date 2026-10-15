@@ -36,7 +36,7 @@ fn main() {
         .args([
             "-O",
             "-whole-module-optimization",
-            "native/CapturePolicy.swift",
+            "native/CaptureState.swift",
             "native/Inventory.swift",
             "native/Geometry.swift",
             "native/Input.swift",

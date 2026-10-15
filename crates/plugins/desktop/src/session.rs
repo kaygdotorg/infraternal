@@ -8,13 +8,13 @@ use std::{
 use tokio::sync::{mpsc, watch};
 
 pub use crate::media::{ASSEMBLY_TIMEOUT, Error, SessionId, Video};
-/// Every authority decision is supplied by the existing server grant adapter.
-/// Implementations check grants against the session's actual host; each socket
+/// Every authority decision is supplied by the existing server access rule adapter.
+/// Implementations check access against the session's actual host; each socket
 /// adapter additionally supplies its own live login through `attach_authorized`.
-/// IDs carried by the viewer never establish a grant or a host binding.
+/// IDs carried by the viewer never establish an access rule or a host binding.
 /// Checks are nonblocking and must not reenter Session; adapters use the existing
 /// event-driven authority projection rather than per-frame database queries.
-pub trait Grants: Send + Sync {
+pub trait AccessRules: Send + Sync {
     fn may_view(&self, user: &str, host: &str, owner: &str) -> bool;
     fn may_control(&self, user: &str, host: &str, owner: &str) -> bool;
     /// Guard the actual viewer write through the host's live admission lease.
@@ -82,7 +82,7 @@ pub struct Session {
     id: SessionId,
     host: String,
     owner: String,
-    grants: Arc<dyn Grants>,
+    access: Arc<dyn AccessRules>,
     state: Mutex<State>,
     frames: watch::Sender<Option<Arc<Video>>>,
     commands: mpsc::Sender<HostCommand>,
@@ -96,7 +96,7 @@ impl Session {
         id: SessionId,
         host: String,
         owner: String,
-        grants: Arc<dyn Grants>,
+        access: Arc<dyn AccessRules>,
     ) -> (Arc<Self>, mpsc::Receiver<HostCommand>) {
         let (commands, receiver) = mpsc::channel(8);
         (
@@ -104,7 +104,7 @@ impl Session {
                 id,
                 host,
                 owner,
-                grants,
+                access,
                 state: Mutex::new(State {
                     keyframe: None,
                     last_sequence: 0,
@@ -138,7 +138,7 @@ impl Session {
         }
         Ok(())
     }
-    /// Attach checks the current grant; the fifth viewer bound protects frame and transport buffers.
+    /// Attach checks the current access rule; the fifth viewer bound protects frame and transport buffers.
     /// # Errors
     /// Refuses ended sessions, revoked access, exhausted IDs or capacity.
     pub fn attach(self: &Arc<Self>, user: String) -> Result<Viewer, Error> {
@@ -165,7 +165,7 @@ impl Session {
         {
             return Err(Error::Forbidden);
         }
-        if !self.grants.may_view(&user, &self.host, &self.owner) {
+        if !self.access.may_view(&user, &self.host, &self.owner) {
             return Err(Error::Forbidden);
         }
         let mut state = self.state.lock().map_err(|_| Error::Unavailable)?;
@@ -267,15 +267,15 @@ impl Session {
                 .as_ref()
                 .is_none_or(|authority| authority.permits())
             && self
-                .grants
+                .access
                 .may_view(&principal.user, &self.host, &self.owner)
             && self
-                .grants
+                .access
                 .may_control(&principal.user, &self.host, &self.owner))
     }
 
     /// Cancel an actual pending input/resize write when its originating login,
-    /// controller lease or session ends. Subscribe before the final grant check
+    /// controller lease or session ends. Subscribe before the final access rule check
     /// so a handover cannot be missed, including a quick handover back. Callers
     /// must retire a partially written native lane when this waiter completes.
     pub async fn command_cancelled(&self, command: HostCommand) {
@@ -352,7 +352,7 @@ impl Session {
         }
     }
 
-    /// Checkpoint geometry only after the granted native write succeeds. Input
+    /// Checkpoint geometry only after the authorized native write succeeds. Input
     /// is deliberately never retained: reconnect cannot replay a click or key.
     pub(crate) fn checkpoint_size(&self, command: HostCommand) -> Result<(), Error> {
         if let HostCommand::Size {
@@ -460,11 +460,11 @@ impl Viewer {
         let session = &self.session;
         let allowed = if control {
             session
-                .grants
+                .access
                 .may_control(&self.user, &session.host, &session.owner)
         } else {
             session
-                .grants
+                .access
                 .may_view(&self.user, &session.host, &session.owner)
         };
         if allowed {
@@ -476,7 +476,7 @@ impl Viewer {
     /// Receive one decodable access unit; missed deltas trigger one coalesced repair.
     /// Cached IDR is returned first, then only a fresh IDR can start current deltas.
     /// # Errors
-    /// Refuses ended sessions or withdrawn grants before exposing any bytes.
+    /// Refuses ended sessions or withdrawn access before exposing any bytes.
     pub async fn next(&mut self) -> Result<Arc<Video>, Error> {
         loop {
             self.allowed(false)?;
@@ -526,7 +526,7 @@ impl Viewer {
     }
     /// Handover is explicit and releases held input before replacing the controller.
     /// # Errors
-    /// Refuses withdrawn grants or an overloaded host control lane.
+    /// Refuses withdrawn access or an overloaded host control lane.
     pub fn take_control(&self) -> Result<(), Error> {
         self.allowed(false)?;
         self.allowed(true)?;
@@ -554,7 +554,7 @@ impl Viewer {
     /// Input is forwarded only under current control authority, never replayed.
     /// The native helper enforces local-input priority using its own clock.
     /// # Errors
-    /// Refuses invalid input, revoked grants, another controller or queue overload.
+    /// Refuses invalid input, revoked access, another controller or queue overload.
     pub fn input(&self, input: Input) -> Result<(), Error> {
         self.session
             .commands
@@ -600,7 +600,7 @@ impl Viewer {
     }
     /// The controlling viewer's actual pixel needs drive the single encoder.
     /// # Errors
-    /// Refuses invalid dimensions, withdrawn grants, missing control or overload.
+    /// Refuses invalid dimensions, withdrawn access, missing control or overload.
     pub fn resize(&self, width: u16, height: u16, density_milli: u16) -> Result<(), Error> {
         infraternal_protocol::desktop::Message::Size {
             width,
@@ -628,7 +628,7 @@ impl Viewer {
     }
     /// A writer that discarded a stale frame seals deltas until the next IDR.
     /// # Errors
-    /// Refuses withdrawn grants or an overloaded control lane.
+    /// Refuses withdrawn access or an overloaded control lane.
     pub fn request_keyframe(&mut self) -> Result<(), Error> {
         self.allowed(false)?;
         self.waiting_keyframe = true;
@@ -667,7 +667,7 @@ impl Drop for Viewer {
 }
 
 // Queue leases carry the original viewer identity; its removal seals already
-// encoded packets before a later sink can expose bytes under a different grant.
+// encoded packets before a later sink can expose bytes under a different access rule.
 struct ViewerDelivery {
     session: Arc<Session>,
     id: u64,
@@ -679,7 +679,7 @@ impl Authority for ViewerDelivery {
         self.login.as_ref().is_none_or(|login| login.permits())
             && self
                 .session
-                .grants
+                .access
                 .may_view(&self.user, &self.session.host, &self.session.owner)
             && self
                 .session
@@ -716,7 +716,7 @@ impl Authority for ViewerDelivery {
                 result = operation => if self.permits() { result } else { Err(()) },
             }
         });
-        let operation = self.session.grants.authorized_view(
+        let operation = self.session.access.authorized_view(
             &self.user,
             &self.session.host,
             &self.session.owner,

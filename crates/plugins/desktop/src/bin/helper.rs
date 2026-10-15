@@ -100,7 +100,7 @@ async fn run() -> std::io::Result<()> {
         }
         Ok(())
     }.await;
-    // Keep the inert companion at a stable path so macOS permission grants
+    // Keep the inert companion at a stable path so macOS permission approvals
     // address the same executable on later starts. Disabling leaves no process.
     result
 }

@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_plugin_desktop::{
     datagram::{FRAGMENT_BYTES, Reassembler, fragments},
-    session::{Error, Grants, HostCommand, Session, Video},
+    session::{AccessRules, Error, HostCommand, Session, Video},
 };
 use infraternal_protocol::desktop::{Input, Message};
 use std::{
@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 struct Access(AtomicBool);
-impl Grants for Access {
+impl AccessRules for Access {
     fn may_view(&self, user: &str, _host: &str, owner: &str) -> bool {
         self.0.load(Ordering::Acquire) && (user == owner || user == "watcher")
     }
@@ -35,9 +35,9 @@ fn session() -> (
     tokio::sync::mpsc::Receiver<HostCommand>,
     Arc<Access>,
 ) {
-    let grants = Arc::new(Access(AtomicBool::new(true)));
-    let (session, commands) = Session::new([1; 16], "mac".into(), "owner".into(), grants.clone());
-    (session, commands, grants)
+    let access = Arc::new(Access(AtomicBool::new(true)));
+    let (session, commands) = Session::new([1; 16], "mac".into(), "owner".into(), access.clone());
+    (session, commands, access)
 }
 #[tokio::test]
 async fn cached_idr_is_immediate_but_current_deltas_wait_for_fresh_idr() {
@@ -86,8 +86,8 @@ async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_de
     assert_eq!(reconnect.next().await.unwrap().sequence, 11);
 }
 #[tokio::test]
-async fn viewer_cap_live_grants_handover_and_disable_are_enforced() {
-    let (session, mut commands, grants) = session();
+async fn viewer_cap_live_access_rules_handover_and_disable_are_enforced() {
+    let (session, mut commands, access) = session();
     let viewers: Vec<_> = (0..5)
         .map(|_| session.attach("owner".into()).unwrap())
         .collect();
@@ -133,7 +133,7 @@ async fn viewer_cap_live_grants_handover_and_disable_are_enforced() {
             density_milli: 2000
         })
     );
-    grants.0.store(false, Ordering::Release);
+    access.0.store(false, Ordering::Release);
     assert_eq!(viewers[1].input(key), Err(Error::Forbidden));
     assert_eq!(viewers[1].resize(960, 600, 2000), Err(Error::Forbidden));
     session.close();
@@ -221,8 +221,8 @@ fn missing_frame_expires_once_and_deltas_wait_for_idr() {
 }
 
 #[tokio::test]
-async fn queued_commands_cannot_inherit_a_replacement_controller_or_revoked_grant() {
-    let (session, mut commands, grants) = session();
+async fn queued_commands_cannot_inherit_a_replacement_controller_or_revoked_access_rule() {
+    let (session, mut commands, access) = session();
     let first = session.attach("owner".into()).unwrap();
     commands.recv().await.unwrap();
     first.take_control().unwrap();
@@ -249,9 +249,9 @@ async fn queued_commands_cannot_inherit_a_replacement_controller_or_revoked_gran
         .unwrap();
     let queued = commands.recv().await.unwrap();
     assert!(session.command_allowed(queued).unwrap());
-    grants.0.store(false, Ordering::SeqCst);
+    access.0.store(false, Ordering::SeqCst);
     assert!(!session.command_allowed(queued).unwrap());
-    grants.0.store(true, Ordering::SeqCst);
+    access.0.store(true, Ordering::SeqCst);
     drop(second);
     assert!(!session.command_allowed(queued).unwrap());
     session.close();
@@ -262,7 +262,7 @@ async fn queued_commands_cannot_inherit_a_replacement_controller_or_revoked_gran
 fn registry_disable_clears_retention_and_ends_existing_viewers() {
     use infraternal_plugin_desktop::registry::Registry;
     let registry = Registry::new(1);
-    let (session, _commands, _grants) = session();
+    let (session, _commands, _access_rules) = session();
     assert_eq!(registry.insert(session.clone()), Err(Error::Unavailable));
     registry.set_enabled(true).unwrap();
     registry.insert(session.clone()).unwrap();

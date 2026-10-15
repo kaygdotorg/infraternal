@@ -10,7 +10,7 @@ func windowSnapshot() -> [[String: Any]] {
               let raw = entry[kCGWindowBounds as String] as? [String: CGFloat],
               let x = raw["X"], let y = raw["Y"], let w = raw["Width"], let h = raw["Height"], w > 0, h > 0 else { return nil }
         let app = NSRunningApplication(processIdentifier: pid)
-        // No activation-policy exclusion: dialogs, menu-bar apps and off-screen windows remain selectable [A5].
+        // Dialogs, menu-bar apps and off-screen windows remain selectable [A5].
         return ["window_id": id, "owner_pid": pid,
                 "bundle_id": app?.bundleIdentifier as Any? ?? NSNull(),
                 "app_name": app?.localizedName as Any? ?? NSNull(),

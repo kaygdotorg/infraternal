@@ -6,7 +6,7 @@ helper/client, and scripts into `~/infraternal-bench/app-windows` on a test Mac.
 Acquire the shared Mac lock from the local host first and install an EXIT trap
 that terminates your helper, fixture, occluder and any TextEdit process you
 opened, removes only this directory, and releases the lock. Never exceed the
-45-minute lease or change existing privacy entries. These fixtures do not grant
+45-minute lease or change existing privacy entries. These fixtures do not approve
 permissions or alter settings.
 
 Compile `marker.swift` to `fixture`, `local-event.swift` to `local-event`, and

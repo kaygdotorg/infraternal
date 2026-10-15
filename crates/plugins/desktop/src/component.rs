@@ -38,7 +38,7 @@ impl DesktopComponent {
         component.once = true;
         component
     }
-    /// Keep native permission grants attached to one trusted, stable directory
+    /// Keep native permission approvals attached to one trusted, stable directory
     /// while each source leg gets its own private IPC endpoint.
     #[must_use]
     pub fn with_companion_runtime(mut self, runtime: PathBuf) -> Self {

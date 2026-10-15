@@ -43,7 +43,7 @@ impl Registry {
         Ok(())
     }
     /// Register a session only after the existing host transport verifies its
-    /// principal, host binding and grant source. Duplicate IDs never replace a
+    /// principal, host binding and access rule source. Duplicate IDs never replace a
     /// live capture; reconnect reuses the existing object and its sequence clock.
     /// # Errors
     /// Refuses disabled state, duplicate IDs or the declared capacity.
@@ -62,9 +62,9 @@ impl Registry {
         Ok(())
     }
     /// A lookup cannot establish authority: `Session::attach` rechecks live view
-    /// grants against the immutable host and owner stored at producer admission.
+    /// access against the immutable host and owner stored at producer admission.
     /// # Errors
-    /// Refuses unknown/disabled captures, withdrawn grants or viewer capacity.
+    /// Refuses unknown/disabled captures, withdrawn access or viewer capacity.
     pub fn attach(&self, id: &SessionId, user: String) -> Result<Viewer, Error> {
         let state = self.state.lock().map_err(|_| Error::Unavailable)?;
         if !state.enabled {

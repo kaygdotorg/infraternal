@@ -21,7 +21,7 @@ const CLOCK: &[&str] = &[
 const START: &[&str] = &[
     "List the selected host's current app windows and displays.",
     "Select a fresh window or display identity and output dimensions.",
-    "Choose the reliable or datagram measurement candidate explicitly.",
+    "Choose reliable or datagram delivery explicitly.",
     "Start a server-held session and attach a viewer to its returned identity.",
 ];
 const STOP: &[&str] = &[

@@ -37,7 +37,7 @@ export type StreamState =
 /** Who is driving the machine, as far as this window knows. */
 export type ControlState =
   | { kind: "none" }
-  /** Control was asked for and not yet granted. */
+  /** Control was asked for and not yet approved. */
   | { kind: "requesting" }
   | { kind: "controlled" }
   /** The person may watch but not control (no control right, or another viewer holds control). */
