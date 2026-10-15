@@ -426,9 +426,16 @@ Authenticated enrolled copies and unrelated mesh UDP cannot jointly prove mesh h
 
 #### Session-bound physical path proof (#201)
 
+`REMOTE_PATH_PROOF` is additive native Hello bit 7. Both regular and parked
+native greetings advertise it. A client keeps an enrolled path in place until
+the server advertises support; the server allocates responder state only after
+admitting a client that advertises the bit. Withdrawal retires mesh selection.
+
 The native UDP socket accepts a fixed 45-byte probe envelope alongside QUIC:
-`0x00 "ip1"`, direction byte (`0` request, `1` response), big-endian `u64`
-sequence and a 32-byte HMAC-SHA256 tag over the preceding 13 bytes. The existing
+`0x80 "ip1"`, direction byte (`0` request, `1` response), big-endian `u64`
+sequence and a 32-byte HMAC-SHA256 tag over the preceding 13 bytes. In QUIC
+long-header interpretation, prefix plus direction selects unsupported versions
+`0x69703100` or `0x69703101`; valid negotiated QUIC packets cannot share it. The existing
 QUIC session exports 32 key bytes with label `EXPORTER-infraternal-path-v1`
 and empty context. Exporter bytes are cleared after native key import.
 This adds no terminal frame, protocol version, connection, writer or authority.
