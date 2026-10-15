@@ -69,7 +69,9 @@ class Bridge(Writer):
             receipt.extend(self.sock.recv(1))
         assert receipt.startswith(b'SESSION ') and len(receipt) == 45, 'invalid session receipt'
         self.id = uuid.UUID(receipt[8:-1].decode())
-        assert self.read()[:2] == (0, 0), 'bridge hello missing'
+        hello = self.read()
+        assert hello[:2] == (0, 0), 'bridge hello missing'
+        self.hello_caps = struct.unpack('<Q', hello[2][2:10])[0]
         self.send(0, 0, struct.pack('<HQ', 1, 0) + varint(6) + b'tracer')
         self.ping(0, 0)
 

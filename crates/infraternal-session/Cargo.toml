@@ -1,0 +1,14 @@
+# The signed private first-prompt image; operator roles belong to the installed binary.
+[package]
+name = "infraternal-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+infraternal-shim = { workspace = true, features = ["session-image"] }
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", features = ["session-bridge"] }
+nix.workspace = true
+
+[lints]
+workspace = true

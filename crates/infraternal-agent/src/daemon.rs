@@ -134,6 +134,7 @@ async fn writer(
     mut control: Option<mpsc::Receiver<Message>>,
     greeting: bool,
     renewal: bool,
+    node_caps: u64,
 ) -> io::Result<()> {
     let mut tx = Transmit::default();
     if greeting {
@@ -142,7 +143,9 @@ async fn writer(
             0,
             &Frame::Hello {
                 version: 1,
-                caps: hello_capabilities(socket.native_stream_id().is_some(), renewal),
+                caps: (hello_capabilities(socket.native_stream_id().is_some(), renewal)
+                    & !infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS)
+                    | node_caps,
                 client_info: "infraternal agent",
             },
         )
@@ -306,7 +309,15 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
         None,
     )
     .await?;
-    run_channel(&socket, state, None, None, service.registry.clone()).await
+    run_channel::<false>(
+        &socket,
+        state,
+        None,
+        None,
+        Some(service.registry.clone()),
+        None,
+    )
+    .await
 }
 
 /// Dispatch an admitted SSH or enrolled connection through the same session and shim path.
@@ -321,6 +332,31 @@ pub async fn run_authenticated(
     execution_uid: u32,
 ) -> io::Result<()> {
     dispatch_authenticated(channel, state, execution_uid, None, None).await
+}
+
+/// Run the first-prompt image without retaining node actions or opening other sessions.
+/// The caller supplies the already authenticated, shim-owned session; all data,
+/// writer cursors, credit and replay use the ordinary terminal dispatcher.
+/// # Errors
+/// Refuses transport identity, original-session lifetime or wire protocol failures.
+pub async fn run_session_image(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+    session: Session,
+) -> io::Result<()> {
+    validate_authenticated(channel, execution_uid)?;
+    let state = sessions::state(state)?;
+    let _retire = RetireChannel(channel);
+    run_channel::<true>(
+        channel,
+        state,
+        Some(execution_uid),
+        None,
+        None,
+        Some(session),
+    )
+    .await
 }
 
 /// Dispatch remote terminal and bounded certificate control actions on one authenticated channel.
@@ -391,6 +427,23 @@ pub(crate) async fn run_authenticated_with_plugins(
     renewal: Option<&RenewalIdentity>,
     plugins: crate::plugin_control::Registry,
 ) -> io::Result<()> {
+    validate_authenticated(channel, execution_uid)?;
+    // Cancellation retires the authenticated channel as well as its task set;
+    // a caller cannot reuse it with detached readers or unfinished wire writes.
+    let _retire = RetireChannel(channel);
+    run_channel::<false>(
+        channel,
+        state,
+        Some(execution_uid),
+        renewal,
+        Some(plugins),
+        None,
+    )
+    .await
+}
+
+/// Reject identity and writer mismatches before state creation or channel IO.
+fn validate_authenticated(channel: &impl Channel, execution_uid: u32) -> io::Result<()> {
     if channel.native_stream_id().is_some_and(|writer| writer != 0)
         || execution_uid != nix::unistd::Uid::effective().as_raw()
     {
@@ -398,10 +451,7 @@ pub(crate) async fn run_authenticated_with_plugins(
             "enrolled uid differs from infraternal agent uid",
         ));
     }
-    // Cancellation retires the authenticated channel as well as its task set;
-    // a caller cannot reuse it with detached readers or unfinished wire writes.
-    let _retire = RetireChannel(channel);
-    run_channel(channel, state, Some(execution_uid), renewal, plugins).await
+    Ok(())
 }
 
 struct RetireChannel<'a, C: Channel>(&'a C);
@@ -412,16 +462,29 @@ impl<C: Channel> Drop for RetireChannel<'_, C> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_channel(
+async fn run_channel<const SESSION_ONLY: bool>(
     socket: &impl Channel,
     state: PathBuf,
     execution_uid: Option<u32>,
     renewal: Option<&RenewalIdentity>,
-    plugins: crate::plugin_control::Registry,
+    plugins: Option<crate::plugin_control::Registry>,
+    original: Option<Session>,
 ) -> io::Result<()> {
-    let mut events = plugins.subscribe();
-    let (plugin_replies, mut results) = mpsc::channel(8);
-    let worker = crate::plugin_control::Worker::start(plugins.clone(), plugin_replies);
+    // The dedicated image supplies no node registry. Const specialization keeps
+    // action admission, workers and their receive branches out of that image;
+    // the installed host retains this same loop with its ordinary registry.
+    // A None argument alone leaves the factory in an opaque future's poll
+    // function. Keep it behind the const branch so the image cannot retain it.
+    let (plugins, mut events, worker, mut results) = if SESSION_ONLY {
+        (None, None, None, None)
+    } else if let Some(plugins) = plugins {
+        let events = plugins.subscribe();
+        let (plugin_replies, results) = mpsc::channel(8);
+        let worker = crate::plugin_control::Worker::start(plugins.clone(), plugin_replies);
+        (Some(plugins), Some(events), Some(worker), Some(results))
+    } else {
+        (None, None, None, None)
+    };
     let running = std::env::current_exe()?;
     // A sealed/deleted image has no install pathname for an indirect init
     // launcher. Use the existing detached shim mode and direct kernel image.
@@ -438,19 +501,32 @@ async fn run_channel(
             .map_err(|_| sessions::invalid("init manager was already selected"))?;
         PathBuf::from("/proc/self/exe")
     } else {
-        let warm = manager.clone();
-        tokio::spawn(async move {
-            warm.get_or_init(Manager::detect).await;
-        });
+        if !SESSION_ONLY {
+            let warm = manager.clone();
+            tokio::spawn(async move {
+                warm.get_or_init(Manager::detect).await;
+            });
+        }
         running
     };
     let retirements = sessions::SessionEvents::new(&state)?;
     let mut registry = crate::lifecycle::Registry::default();
-    for session in sessions::discover(&state).await? {
+    let original_id = if SESSION_ONLY {
+        let session = original.ok_or_else(|| sessions::invalid("original session required"))?;
+        // Startup already proved this rendezvous. Never scan unrelated sessions
+        // or hold the original unfunded data peer while greeting the browser.
+        let id = session.id;
         registry.insert(&session)?;
-        // Startup discovery authenticates identity, but does not stall unviewed PTYs.
         drop(session);
-    }
+        Some(id)
+    } else {
+        for session in sessions::discover(&state).await? {
+            registry.insert(&session)?;
+            // Startup discovery authenticates identity, but does not stall unviewed PTYs.
+            drop(session);
+        }
+        None
+    };
     let (tx, rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
     let dispatch = async {
@@ -497,14 +573,26 @@ async fn run_channel(
                     drop(capacity.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?);
                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                 }
-                result=results.recv()=> {
+                result=async {
+                    if let Some(results) = results.as_mut() {
+                        results.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if !SESSION_ONLY => {
                     let (call_id,result)=result.ok_or_else(||sessions::invalid("plugin worker stopped"))?;
                     match result {
                         Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
                         Err(_)=>reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
                     }
                 }
-                event=events.recv()=> {
+                event=async {
+                    if let Some(events) = events.as_mut() {
+                        events.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if !SESSION_ONLY => {
                     let event=match event {
                         Ok(event)=>event,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>b"{\"type\":\"plugin.event\",\"id\":\"plugins.resync\"}".to_vec(),
@@ -567,7 +655,7 @@ async fn run_channel(
                                 renewals.spawn_blocking(move || (call_id, renewal.action(&action, &input)));
                             }
                         }
-                        Frame::Call {call_id, action_id: "terminal.open", input_json} if execution_uid.is_none() || stream == 0 => {
+                        Frame::Call {call_id, action_id: "terminal.open", input_json} if !SESSION_ONLY && (execution_uid.is_none() || stream == 0) => {
                             use infraternal_plugin_api::admission::OpenRefusal;
                             registry.refresh();
                             census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
@@ -577,7 +665,7 @@ async fn run_channel(
                                 && input.cols > 0 && input.rows > 0 && usize::from(input.cols) * usize::from(input.rows) <= 200_000 {
                                 let exe = exe.clone(); let state = state.clone();
                                 let manager = manager.clone();
-                                let plugins = plugins.clone(); let context = registry.context();
+                                let plugins = plugins.as_ref().ok_or_else(|| sessions::invalid("missing node registry"))?.clone(); let context = registry.context();
                                 // Admission shares mutable plugin settings with actions, but
                                 // waiting for its worker never parks terminal dispatch.
                                 opens.spawn(async move {
@@ -595,14 +683,22 @@ async fn run_channel(
                                 reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
                             }
                         }
-                        Frame::Call {call_id, action_id, input_json} if stream == 0 => {
+                        Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && stream == 0 => {
+                            let worker = worker.as_ref().ok_or_else(|| sessions::invalid("missing node worker"))?;
                             registry.refresh();
                             census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                             if input_json.len()>infraternal_plugin_api::MAX_ACTION_BYTES || action_id.len()>128 || worker.sender.try_send(crate::plugin_control::Request {call_id,action:action_id.to_owned(),input:input_json.to_vec(),context:registry.context()}).is_err() {
                                 reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?;
                             }
                         }
+                        Frame::Call {call_id, ..} if SESSION_ONLY && stream == 0 => {
+                            reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"This action is unavailable during host provisioning.\"}".to_vec()))?;
+                        }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {
+                            if SESSION_ONLY && original_id.is_some_and(|id| session_id != &id) {
+                                reply(&control, Message::Ended(stream))?;
+                                continue;
+                            }
                             if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS || streams.contains_key(&stream) {
                                 return Err(sessions::invalid("terminal stream already attached or limit reached"));
                             }
@@ -664,7 +760,12 @@ async fn run_channel(
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some()) => result }
+    let node_caps = if SESSION_ONLY {
+        0
+    } else {
+        infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+    };
+    tokio::select! { result = dispatch => result, result = writer(socket, rx, Some(control_rx), true, renewal.is_some(), node_caps) => result }
 }
 
 /// Run one authenticated, capability-bound native terminal using the common shim relay.
@@ -772,7 +873,7 @@ async fn run_bound_terminal_mode(
             }
         }
     };
-    let writer = writer(channel, rx, None, false, false);
+    let writer = writer(channel, rx, None, false, false, 0);
     tokio::pin!(writer);
     tokio::select! {
         result = dispatch => result,

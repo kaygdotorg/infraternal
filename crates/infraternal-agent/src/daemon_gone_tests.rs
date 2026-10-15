@@ -74,7 +74,15 @@ async fn a_vanished_session_gets_a_final_close_and_the_channel_stays_up() {
             None,
         )
         .await?;
-        run_channel(&socket, task_state, None, None, service.registry.clone()).await
+        run_channel::<false>(
+            &socket,
+            task_state,
+            None,
+            None,
+            Some(service.registry.clone()),
+            None,
+        )
+        .await
     });
     let mut peer = tokio::net::UnixStream::from_std(server).unwrap();
 

@@ -1568,6 +1568,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-session"
+version = "0.1.0"
+dependencies = [
+ "infraternal-plugin-ssh",
+ "infraternal-shim",
+ "nix",
+]
+
+[[package]]
 name = "infraternal-shim"
 version = "0.1.0"
 dependencies = [

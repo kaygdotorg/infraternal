@@ -38,6 +38,13 @@ impl Options {
     pub fn run(self) -> io::Result<()> {
         run(self.state, self.session)
     }
+
+    /// Attach only the original session, without retaining node action workers.
+    /// # Errors
+    /// Returns runtime, private-state, shim admission or bridge failures.
+    pub fn run_image(self) -> io::Result<()> {
+        run_mode::<true>(self.state, self.session)
+    }
 }
 
 /// Internal authenticated SSH command; all protocol output goes to its pipe.
@@ -45,12 +52,22 @@ impl Options {
 /// # Errors
 /// Returns runtime, private-state, shim admission or authenticated bridge failures.
 pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> io::Result<()> {
+    run_mode::<false>(state, session)
+}
+
+fn run_mode<const SESSION_ONLY: bool>(
+    state: PathBuf,
+    session: Option<uuid::Uuid>,
+) -> io::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    infraternal_agent::block_on_io(&runtime, Box::pin(bridge(state, session)))
+    infraternal_agent::block_on_io(&runtime, Box::pin(bridge::<SESSION_ONLY>(state, session)))
 }
-async fn bridge(state: PathBuf, existing: Option<uuid::Uuid>) -> io::Result<()> {
+async fn bridge<const SESSION_ONLY: bool>(
+    state: PathBuf,
+    existing: Option<uuid::Uuid>,
+) -> io::Result<()> {
     let state = sessions::state(Some(state))?;
     let uid = nix::unistd::Uid::effective().as_raw();
     let exe = std::env::current_exe()?;
@@ -65,7 +82,8 @@ async fn bridge(state: PathBuf, existing: Option<uuid::Uuid>) -> io::Result<()> 
     let session_id = session.id;
     // The daemon discovers this exact shim through its ordinary authenticated
     // rendezvous. Neither this bridge nor SSH starts a shell outside the shim.
-    drop(session);
+    // The image-only dispatcher consumes this authenticated session directly;
+    // full builds keep ordinary namespace discovery after dropping its data peer.
     // The dispatcher runs on the same socket channel type as the embedded
     // infraternal agent; a private socketpair relays the SSH pipes to it.
     // One more local copy on a temporary link buys one shared dispatcher
@@ -80,7 +98,14 @@ async fn bridge(state: PathBuf, existing: Option<uuid::Uuid>) -> io::Result<()> 
     let socket = Socket::inherited(dispatch.as_raw_fd())?;
     let relay = tokio::net::UnixStream::from_std(relay.into())?;
     tokio::select! {
-        result = daemon::run_authenticated(&socket, Some(state), uid) => result,
+        result = async {
+            if SESSION_ONLY {
+                daemon::run_session_image(&socket, Some(state), uid, session).await
+            } else {
+                drop(session);
+                daemon::run_authenticated(&socket, Some(state), uid).await
+            }
+        } => result,
         result = relay_pipes(&pipes, relay, session_id) => result,
     }
 }
