@@ -305,7 +305,16 @@ pub(super) fn run(
     // All ordinary PTYs/listeners fit this batch at the requested 1000-session
     // scale; control readiness is not hidden behind many small bulk-only waits.
     let mut events = vec![EpollEvent::empty(); 2048];
+    // These are host-wide high-water buffers, not per-session idle storage.
+    // Retain their bounded capacity across turns instead of fragmenting the
+    // allocator with a fresh readiness table and two work lists per syscall.
+    let mut work: HashMap<usize, Ready> = HashMap::new();
+    let mut controls = Vec::new();
+    let mut small_reads = Vec::new();
     while live > 0 {
+        work.clear();
+        controls.clear();
+        small_reads.clear();
         marks.next_round();
         while timers
             .peek()
@@ -331,7 +340,6 @@ pub(super) fn run(
             Err(nix::errno::Errno::EINTR) => continue,
             Err(e) => return Err(e.into()),
         };
-        let mut work: HashMap<usize, Ready> = HashMap::new();
         let mut child_exit = false;
         let mut signal_ready = false;
         for event in &events[..count] {
@@ -382,8 +390,6 @@ pub(super) fn run(
                 work.entry(index).or_default();
             }
         }
-        let mut controls = Vec::new();
-        let mut small_reads = Vec::new();
         for (&index, ready) in &work {
             let Some(session) = slots[index].as_ref() else {
                 continue;
@@ -458,7 +464,7 @@ pub(super) fn run(
                 live -= 1;
             }
         }
-        for (index, incoming) in controls {
+        for (index, incoming) in controls.iter().copied() {
             if slots[index].is_none() {
                 continue;
             }
@@ -523,7 +529,7 @@ pub(super) fn run(
                 outputs += 1;
             }
         }
-        for (index, read_budget) in small_reads {
+        for (index, read_budget) in small_reads.drain(..) {
             if !marks.read_once(index) {
                 continue;
             }
