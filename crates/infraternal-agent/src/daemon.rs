@@ -117,6 +117,7 @@ pub(crate) fn hello_capabilities(native: bool, renewal: bool) -> u64 {
             infraternal_plugin_api::channel::REMOTE_WRITER_BINDING
                 | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
                 | infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                | infraternal_plugin_api::channel::REMOTE_PATH_PROOF
         } else {
             0
         }

@@ -31,6 +31,21 @@ async fn run(
     .await
 }
 
+// Manual-control fixtures use this module's current authenticated server. Their
+// pending session future does not consume Hello, so publish its known support
+// explicitly; the no-opt-in regression withdraws it to model an older peer.
+async fn connect(
+    identity: &RemoteIdentity,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    address: SocketAddr,
+    kind: ServerLinkKind,
+    prove: bool,
+) -> io::Result<Link> {
+    let link = super::connect(identity, renewal, address, kind, prove).await?;
+    link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_PROOF);
+    Ok(link)
+}
+
 const ACTION: ActionDef = ActionDef {
     id: "path.configure",
     summary: "Set fixture destination",
@@ -243,16 +258,19 @@ impl Server {
         let connection_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connections = connection_count.clone();
         let (notices, accepted) = tokio::sync::mpsc::channel(8);
+        let responder = bindings.clone();
         let task = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
             while let Some(incoming) = listen.accept().await {
                 while sessions.try_join_next().is_some() {}
                 let notices = notices.clone();
                 let connections = connections.clone();
+                let responder = responder.clone();
                 sessions.spawn(async move {
                     let Ok(connection) = incoming.await else {
                         return;
                     };
+                    let _proof = responder.connection_proof(&connection).unwrap();
                     connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Ok((send, receive)) = connection.accept_bi().await else {
                         return;
@@ -282,7 +300,8 @@ impl Server {
                             0,
                             &Frame::Hello {
                                 version: 1,
-                                caps: remote_quic::REMOTE_WRITER_BINDING,
+                                caps: remote_quic::REMOTE_WRITER_BINDING
+                                    | infraternal_plugin_api::channel::REMOTE_PATH_PROOF,
                                 client_info: "fixture",
                             },
                         )
@@ -696,7 +715,10 @@ async fn retry_during_enrolled_proof(late_hint: bool, backup: bool) {
     let path = link.path.as_ref().expect("fixture requires native QUIC");
     // The authenticated session normally publishes this negotiated flag.
     if backup {
-        link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+        link.negotiated(
+            infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                | infraternal_plugin_api::channel::REMOTE_PATH_PROOF,
+        );
     }
     let mesh_socket = server.reserved.as_ref().unwrap().try_clone().unwrap();
     mesh_socket.set_nonblocking(true).unwrap();
@@ -874,7 +896,10 @@ async fn backup_published_during_candidate_proof_keeps_enrolled_control_live() {
         active.as_mut(),
     ));
     start_mesh_candidate(steering.as_mut(), path).await;
-    link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+    link.negotiated(
+        infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+            | infraternal_plugin_api::channel::REMOTE_PATH_PROOF,
+    );
     // Publication synchronously applies backup through the production method.
     // Only subsequent datagrams need copies; no older queued packet is replayed.
     std::future::poll_fn(|cx| {
@@ -1564,7 +1589,10 @@ async fn backed_candidate_fixture() -> (
     mesh_socket.set_nonblocking(true).unwrap();
     let mesh = tokio::net::UdpSocket::from_std(mesh_socket).unwrap();
     preference(&registry, Some(mesh.local_addr().unwrap().ip())).await;
-    link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
+    link.negotiated(
+        infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+            | infraternal_plugin_api::channel::REMOTE_PATH_PROOF,
+    );
     (server, identity, registry, link, mesh, control, accepted)
 }
 
@@ -1641,7 +1669,7 @@ async fn backed_candidate_refusal_keeps_new_datagrams_on_mesh_discovery() {
 #[tokio::test]
 async fn backed_discovery_keeps_control_cancellation_and_udp_recovery_bounded() {
     use std::future::Future as _;
-    for change in 0..4 {
+    for change in 0..5 {
         let (server, identity, registry, link, _mesh, _control, _accepted) =
             backed_candidate_fixture().await;
         if change == 2 {
@@ -1681,9 +1709,11 @@ async fn backed_discovery_keeps_control_cancellation_and_udp_recovery_bounded() 
         if change == 0 {
             preference(&registry, None).await;
         } else if change == 1 {
-            link.negotiated(0);
+            link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_PROOF);
         } else if change == 3 {
             preference(&registry, Some("127.0.0.3".parse().unwrap())).await;
+        } else if change == 4 {
+            link.negotiated(infraternal_plugin_api::channel::REMOTE_PATH_BACKUP);
         } else {
             // Every proof epoch is shorter than this virtual step. Even if a
             // final pre-cut ACK is observed at the first boundary, it must not
@@ -1764,4 +1794,43 @@ async fn backed_discovery_ends_with_its_owned_session() {
         std::task::Poll::Ready(())
     })
     .await;
+}
+
+/// A live older peer must keep its enrolled transport rather than entering an
+/// unsupported proof and forcing a reconnect. No elapsed-time oracle is needed.
+#[tokio::test]
+async fn unadvertised_path_proof_keeps_the_existing_enrolled_connection() {
+    use std::future::Future as _;
+    let ca = root();
+    let mut server = Server::new(
+        &leaf(&ca, true),
+        std::slice::from_ref(&ca.certificate),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let enrolled = server.endpoint.local_addr().unwrap();
+    let mesh = server.lease("127.0.0.2");
+    let identity = identity(&ca, enrolled);
+    let link = connect(&identity, None, enrolled, ServerLinkKind::Fallback, false)
+        .await
+        .unwrap();
+    link.negotiated(0);
+    let registry = registry();
+    preference(&registry, Some(mesh.ip())).await;
+    let path = link.path.as_ref().unwrap();
+    let mut active = std::pin::pin!(std::future::pending::<io::Result<()>>());
+    let mut reason = ServerLinkReason::Connecting;
+    let mut steering = std::pin::pin!(steer(
+        &link,
+        &identity,
+        &registry,
+        false,
+        &mut reason,
+        active.as_mut()
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(steering.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(path.path(), Path::Enrolled);
 }

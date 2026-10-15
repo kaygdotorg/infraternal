@@ -48,7 +48,8 @@ struct Link {
     address: SocketAddr,
     /// Dialing creates this once; the owning run loop moves it into the session.
     proof: Option<super::ProvedControl>,
-    standby: tokio::sync::watch::Sender<u64>,
+    // None is pre-Hello; Some(0) is an authenticated peer without extensions.
+    standby: tokio::sync::watch::Sender<Option<u64>>,
 }
 impl Drop for Link {
     fn drop(&mut self) {
@@ -69,7 +70,7 @@ impl Link {
         if let Some(path) = &self.path {
             path.set_backup(caps & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0);
         }
-        self.standby.send_replace(caps);
+        self.standby.send_replace(Some(caps));
     }
     /// The path actually carrying traffic now, which a QUIC link can change.
     fn current(&self) -> (ServerLinkKind, SocketAddr) {
@@ -149,7 +150,7 @@ async fn connect(
         path,
         address,
         proof: None,
-        standby: tokio::sync::watch::channel(0).0,
+        standby: tokio::sync::watch::channel(None).0,
     };
     if prove {
         // Only QUIC mesh candidates need pre-admission control proof. TCP
@@ -258,7 +259,9 @@ pub(super) async fn answered(
     since: tokio::time::Instant,
     mesh: bool,
 ) -> bool {
-    let mut freshness = remote_quic::PeerFreshness::new(connection);
+    let Ok(_epoch) = path.proof_epoch(connection) else {
+        return false;
+    };
     let deadline = connection
         .rtt()
         .saturating_mul(2)
@@ -282,19 +285,17 @@ pub(super) async fn answered(
         let mut probes = tokio::time::interval(BACKUP_PROBE_INTERVAL);
         probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let heard = if mesh {
-                path.heard_since(since.into_std())
-            } else {
-                path.enrolled_heard_since(since.into_std())
-            };
-            // Quinn decrypts after the socket reports a datagram. Require an
-            // actual frame change: this observer starts after `since`, so its
-            // younger silence clock alone cannot prove authenticated progress.
-            if heard && freshness.observe_change(connection) {
+            let heard = if mesh { path.heard_since(since.into_std()) } else { path.enrolled_heard_since(since.into_std()) };
+            if path.path_authenticated_since(since.into_std(), mesh) {
                 return;
             }
             tokio::select! {
-                _ = probes.tick() => remote_quic::probe_liveness(connection),
+                _ = probes.tick() => {
+                    // Retransmit the outstanding sequence; a new sequence
+                    // must not overtake its response on a WAN.
+                    let _ = path.send_path_proof(mesh);
+                    remote_quic::probe_liveness(connection);
+                },
                 () = path.mesh_heard(since.into_std()), if mesh && !heard => {},
                 () = tokio::time::sleep(Duration::from_millis(if heard || !mesh { 1 } else { 5 })) => {},
             }
@@ -351,15 +352,17 @@ async fn candidate(
     connection: &quinn::Connection,
     path: &PathSocket,
     proposals: &mut tokio::sync::watch::Receiver<Option<std::net::IpAddr>>,
-    capabilities: &mut tokio::sync::watch::Receiver<u64>,
+    capabilities: &mut tokio::sync::watch::Receiver<Option<u64>>,
 ) -> Candidate {
     // This observer outlives individual mesh proof epochs. Resetting it with
     // every unanswered candidate would strand both-dead UDP until QUIC expiry.
     let mut alive = remote_quic::PeerFreshness::new(connection);
     loop {
-        let mut backed = *capabilities.borrow_and_update()
-            & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
-            != 0;
+        let caps = (*capabilities.borrow_and_update()).unwrap_or_default();
+        if caps & infraternal_plugin_api::channel::REMOTE_PATH_PROOF == 0 {
+            return Candidate::Refused;
+        }
+        let mut backed = caps & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0;
         let proof = answered(connection, path, tokio::time::Instant::now(), true);
         tokio::pin!(proof);
         let moved = loop {
@@ -369,9 +372,10 @@ async fn candidate(
                     if changed.is_err() {
                         return Candidate::Refused;
                     }
-                    let next = *capabilities.borrow_and_update()
-                        & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0;
-                    if backed && !next {
+                    let caps = (*capabilities.borrow_and_update()).unwrap_or_default();
+                    let next = caps & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0;
+                    if caps & infraternal_plugin_api::channel::REMOTE_PATH_PROOF == 0
+                        || (backed && !next) {
                         return Candidate::Refused;
                     }
                     backed = next;
@@ -380,9 +384,18 @@ async fn candidate(
             }
         };
         if moved {
+            // A reply and capability withdrawal can become ready together.
+            // Admission follows the current contract, regardless of select order.
+            let caps = (*capabilities.borrow_and_update()).unwrap_or_default();
+            if caps & infraternal_plugin_api::channel::REMOTE_PATH_PROOF == 0
+                || (backed && caps & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP == 0)
+            {
+                return Candidate::Refused;
+            }
             return Candidate::Proven;
         }
-        if *capabilities.borrow_and_update() & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+        if (*capabilities.borrow_and_update()).unwrap_or_default()
+            & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
             == 0
         {
             return Candidate::Refused;
@@ -391,7 +404,7 @@ async fn candidate(
             return Candidate::Unreachable;
         }
         // Keep copies and ciphertext history intact. A new answered epoch
-        // requires a new authenticated counter change and keeps probing on its
+        // requires a fresh tuple-bound response and keeps probing on its
         // existing clock; an old reply cannot become proof through elapsed time.
     }
 }
@@ -417,12 +430,24 @@ async fn steer(
     loop {
         let proposed = (*proposals.borrow_and_update())
             .map(|ip| SocketAddr::new(ip, identity.endpoint.port()));
+        let Some(caps) = *capabilities.borrow_and_update() else {
+            // A retained mesh dial is already authenticated, but its active
+            // session must consume Hello before missing bits mean refusal.
+            tokio::select! {
+                _ = &mut active => return Steered::Ended,
+                changed = capabilities.changed() => if changed.is_err() { return Steered::Ended },
+                changed = proposals.changed() => if changed.is_err() { return Steered::Ended },
+            }
+            continue;
+        };
+        let supports_proof = caps & infraternal_plugin_api::channel::REMOTE_PATH_PROOF != 0;
         match path.path() {
             Path::Enrolled => {
-                let Some(mesh) = proposed else {
+                let Some(mesh) = proposed.filter(|_| supports_proof) else {
                     tokio::select! {
                         _ = &mut active => return Steered::Ended,
                         changed = proposals.changed() => if changed.is_err() { return Steered::Ended },
+                        changed = capabilities.changed() => if changed.is_err() { return Steered::Ended },
                     }
                     continue;
                 };
@@ -436,7 +461,7 @@ async fn steer(
                 }
                 path.use_mesh(mesh);
                 path.set_backup(
-                    *capabilities.borrow_and_update()
+                    (*capabilities.borrow_and_update()).unwrap_or_default()
                         & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
                         != 0,
                 );
@@ -476,7 +501,7 @@ async fn steer(
                     if latest.is_none() {
                         path.forget_mesh();
                     }
-                    let backed = *capabilities.borrow_and_update()
+                    let backed = (*capabilities.borrow_and_update()).unwrap_or_default()
                         & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
                         != 0;
                     not_before = tokio::time::Instant::now();
@@ -488,7 +513,7 @@ async fn steer(
                 report(registry, Some(link), *reason);
             }
             Path::Mesh(current) => {
-                let backup = *capabilities.borrow_and_update()
+                let backup = (*capabilities.borrow_and_update()).unwrap_or_default()
                     & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
                     != 0;
                 path.set_backup(backup);
@@ -497,9 +522,11 @@ async fn steer(
                 } else {
                     (MESH_PROBE_INTERVAL, MESH_PROBE_MARGIN)
                 };
-                if proposed.is_some_and(|proposed| {
-                    proposed.ip().to_canonical() == current.ip().to_canonical()
-                }) {
+                if supports_proof
+                    && proposed.is_some_and(|proposed| {
+                        proposed.ip().to_canonical() == current.ip().to_canonical()
+                    })
+                {
                     let interrupted = tokio::select! {
                         _ = &mut active => return Steered::Ended,
                         changed = proposals.changed() => {
