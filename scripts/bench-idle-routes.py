@@ -181,6 +181,9 @@ class Browser:
     async def read(self):
         message = await asyncio.wait_for(self.queue.get(), 20)
         assert message is not None, 'fixture browser retired'
+        # The final control proof drains earlier route events too. A live socket
+        # cannot make a dropped terminal count as a healthy idle attachment.
+        assert message[1] != 0x0f, 'fixture terminal route retired'
         return message
 
     async def close(self):
