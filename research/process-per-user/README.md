@@ -102,12 +102,15 @@ replay work keeps writable interest after an inline frame has drained. Large
 completed repaint buffers release storage before an indefinite idle wait.
 A fresh input Ack for a subscribed data viewer at the current output head can
 remain logical while the reactor prepares a bounded read. Available output
-shares the existing ordered Ack/output batch. Fresh input retains writable
-fallback interest. Once readable output is queued,
-a held logical data Ack alone does not request writable polling; actual pending
-wire bytes and non-coalescible replies still do. The queued read always finishes
-the Ack, including an empty attempt. A later writable visit without readable
-output sends a fresh Ack, so a silent program does not hold input confirmation. Input-only viewers, state fences,
+shares the existing ordered Ack/output batch. Fresh input gets one deduplicated
+local next-turn continuation, using a spare bit in the existing slot membership
+byte. The host collects kernel readiness and dispatches ready input before
+servicing it. A due continuation finishes the Ack even when more input arrives,
+so a silent program cannot renew its deferral indefinitely. The host queue is
+bounded by admitted slots and its capacity is recorded as `ack_fallback_bytes`.
+Neither a fresh held logical Ack nor one waiting for a queued PTY read requests
+writable polling. Actual pending wire bytes and non-coalescible replies still
+do. The queued read always finishes the Ack, including an empty attempt. Input-only viewers, state fences,
 pending replay/snapshot/deferred work and ended sessions retain prompt replies.
 The final settle after a read sends the Ack even when that read is empty.
 Retained output is borrowed across physical ring wrap and encoded directly
