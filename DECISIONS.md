@@ -2902,3 +2902,18 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **The pill (Q6):** unchanged (picture, name, username), plus one amber
        mark when something needs attention, such as an unchecked recovery
        key or a passkey on only one device.
+285. **NAT traversal details (owner, 2026-10-15, #220; extends D196,
+     D131, D166):**
+     - **Server down:** machines already in the mesh, with valid
+       certificates, keep opening direct paths to each other using their
+       last-known addresses and relays. New machines cannot join until the
+       server is back.
+     - **Automatic relays only on datacenter machines:** a node becomes a
+       relay automatically only when it is detected as being in a
+       datacenter (datacenter or cloud IP), proven reachable from outside,
+       and has spare capacity. Machines on home or possibly metered
+       connections are never picked automatically. The detection signals,
+       the outside check and the capacity rule come to the owner with
+       measurements. Relays carry only their own mesh's encrypted traffic.
+     - Still open: when to add port prediction for pairs where both sides
+       are behind hard NAT (explained to the owner; D196 relays them first).
