@@ -237,6 +237,30 @@ mod tests {
     }
 
     #[test]
+    fn fixed_header_mac_matches_independent_sha256_vectors() {
+        let key = fixture_key(1);
+        for (direction, tag) in [
+            (
+                0,
+                [
+                    116, 251, 251, 212, 136, 16, 119, 238, 103, 4, 33, 150, 160, 175, 91, 216, 238,
+                    54, 148, 170, 138, 132, 255, 99, 54, 68, 1, 222, 110, 177, 111, 236,
+                ],
+            ),
+            (
+                1,
+                [
+                    168, 44, 221, 68, 229, 180, 64, 251, 207, 23, 141, 106, 106, 151, 82, 211, 167,
+                    183, 17, 51, 227, 96, 39, 97, 188, 211, 160, 210, 234, 181, 126, 45,
+                ],
+            ),
+        ] {
+            let packet = key.packet(direction, 42).unwrap();
+            assert_eq!(&packet[HEADER..], tag);
+        }
+    }
+
+    #[test]
     fn only_current_session_response_answers_a_sent_probe() {
         let key = fixture_key(1);
         let mut probe = Probe {
