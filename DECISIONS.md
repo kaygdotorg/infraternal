@@ -2766,5 +2766,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Touch:** one finger up/down scrolls the content and a sideways
        swipe moves between windows. Two fingers pan and pinch the canvas as
        before.
-     - Still open: how the wheel moves up and down a column of stacked
-       windows.
+     - **Moving along a column of stacked windows:** a vertical wheel
+       moves the column whenever the thing under the pointer cannot scroll
+       that way (the window's pill, the gap between windows, a window with
+       nothing to scroll, an unfocused terminal). At a list's top or bottom,
+       a fresh gesture (about 150 ms of wheel quiet) moves to the
+       neighbouring window. A fling's momentum stops at the end and never
+       carries over. The input lock is how a person prevents the handoff.
+     - **Neighbours peek in at the top and bottom** by a few pixels, the
+       way they do at the sides. There is no new indicator, and no
+       appearance setting turns peeking off: a window's full-screen view
+       is the way to see one window alone.
