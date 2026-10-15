@@ -1247,6 +1247,30 @@ mod tests {
         assert_eq!(lazy.state.borrow().resizes.capacity(), 0);
         assert_same_state(&lazy, &eager);
     }
+
+    #[test]
+    fn geometry_transcript_property_cases_match_eager_native_state() {
+        let sample =
+            b"\x1bc\x1b[31mwide \xe7\x95\x8c \xf0\x9f\x8c\x90\x1b[0m\r\n\x1b]0;title\x1b\\";
+        for seed in 0..64_u32 {
+            let mut lazy = LazyTerminal::new(80, 24, 65536);
+            let mut eager = Terminal::with_history_budget(80, 24, 65536).unwrap();
+            let mut value = seed + 1;
+            let mut offset = 0;
+            for _ in 0..40 {
+                value = value.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let end = (offset + 1 + value as usize % 7).min(sample.len());
+                lazy.process(&sample[offset..end]).unwrap();
+                eager.process(&sample[offset..end]);
+                offset = if end == sample.len() { 0 } else { end };
+                let cols = 4 + u16::try_from(value % 97).unwrap();
+                let rows = 3 + u16::try_from((value >> 8) % 22).unwrap();
+                lazy.resize(cols, rows).unwrap();
+                eager.resize(cols, rows).unwrap();
+            }
+            assert_same_state(&lazy, &eager);
+        }
+    }
     #[test]
     fn prefix_threshold_preserves_unfinished_sequences() {
         let mut lazy = LazyTerminal::new(80, 24, 65536);
