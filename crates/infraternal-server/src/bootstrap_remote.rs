@@ -300,7 +300,12 @@ impl Backend for RemoteBackend {
             .await
             .map_err(|_| unavailable())?;
             self.hosts
-                .admit(guard, crate::remote_link::RemoteLink::ssh(channel, session))
+                .admit(
+                    guard,
+                    crate::remote_link::RemoteLink::ssh(channel, session)
+                        .await
+                        .map_err(|_| unavailable())?,
+                )
                 .await
                 .map_err(|_| unavailable())?;
             // Insert only under the same live owner capability; browser attach

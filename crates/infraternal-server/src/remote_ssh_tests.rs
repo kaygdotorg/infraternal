@@ -36,17 +36,24 @@ fn alive(pid: u32) -> bool {
         .is_ok_and(|record| infraternal_agent::sessions::process_birth_ticks(&record).is_some())
 }
 fn pipe_peer(pidfile: &std::path::Path) -> Duplex {
+    pipe_peer_greeting(pidfile, 0, &[])
+}
+fn pipe_peer_greeting(pidfile: &std::path::Path, caps: u64, suffix: &[u8]) -> Duplex {
     let mut hello = Vec::new();
     infraternal_protocol::encode_muxed_frame_into(
         0,
         &Frame::Hello {
             version: 1,
-            caps: 0,
+            caps,
             client_info: "pipe fixture",
         },
         &mut hello,
     )
     .unwrap();
+    hello.extend_from_slice(suffix);
+    pipe_peer_bytes(pidfile, &hello)
+}
+fn pipe_peer_bytes(pidfile: &std::path::Path, hello: &[u8]) -> Duplex {
     let mut ack = Vec::new();
     infraternal_protocol::encode_muxed_frame_into(2, &Frame::Ack { in_seq_acked: 0 }, &mut ack)
         .unwrap();
@@ -75,14 +82,159 @@ except EOFError: pass
         .arg("-c")
         .arg(script)
         .arg(pidfile)
-        .arg(hex(&hello))
+        .arg(hex(hello))
         .arg(hex(&ack));
     Duplex::spawn(&mut command).unwrap()
 }
 
 /// Reuse the real pipe transport for bootstrap admission-order regressions.
-pub(crate) fn pipe_link(pidfile: &std::path::Path) -> RemoteLink {
+pub(crate) async fn pipe_link(pidfile: &std::path::Path) -> RemoteLink {
     RemoteLink::ssh(pipe_peer(pidfile), Arc::new(Master(Arc::default())))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn ssh_bridge_does_not_invent_node_path_capabilities() {
+    let scratch = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+        || {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".cache/codex-scratch/addhost-instant")
+        },
+        PathBuf::from,
+    );
+    let root = scratch.join(format!("ssh-caps-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let link = pipe_link(&root.join("pid")).await;
+    let advertised = link.supports_server_paths();
+    let mut prefix = bytes::BytesMut::new();
+    let mut scratch = [0; 1024];
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(decoded) = infraternal_protocol::decode_muxed_frame(&prefix) {
+                assert!(matches!(
+                    decoded.frame,
+                    Frame::Hello {
+                        version: 1,
+                        caps: 0,
+                        ..
+                    }
+                ));
+                break;
+            }
+            assert!(link.read(&mut prefix, &mut scratch).await.unwrap() != 0);
+        }
+    })
+    .await
+    .unwrap();
+    drop(link);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        !advertised,
+        "A session-only SSH greeting cannot advertise node path actions"
+    );
+}
+
+#[tokio::test]
+async fn ssh_greeting_keeps_full_capabilities_and_coalesced_frames() {
+    let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+        ".cache/codex-scratch/addhost-instant/ssh-prefix-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut suffix = Vec::new();
+    infraternal_protocol::encode_muxed_frame_into(
+        0,
+        &Frame::Ping {
+            nonce: 99,
+            sent_us: 7,
+        },
+        &mut suffix,
+    )
+    .unwrap();
+    let link = RemoteLink::ssh(
+        pipe_peer_greeting(
+            &root.join("pid"),
+            infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS,
+            &suffix,
+        ),
+        Arc::new(Master(Arc::default())),
+    )
+    .await
+    .unwrap();
+    assert!(link.supports_server_paths());
+    let mut received = bytes::BytesMut::new();
+    let mut scratch = [0; 1024];
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(first) = infraternal_protocol::decode_muxed_frame(&received)
+                && let Ok(second) =
+                    infraternal_protocol::decode_muxed_frame(&received[first.wire_len..])
+            {
+                assert!(matches!(first.frame, Frame::Hello { version: 1, .. }));
+                assert!(matches!(
+                    second.frame,
+                    Frame::Ping {
+                        nonce: 99,
+                        sent_us: 7
+                    }
+                ));
+                break;
+            }
+            assert!(link.read(&mut received, &mut scratch).await.unwrap() != 0);
+        }
+    })
+    .await
+    .unwrap();
+    drop(link);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn ssh_greeting_refuses_invalid_first_frames_and_releases_its_master() {
+    let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+        ".cache/codex-scratch/addhost-instant/ssh-invalid-{}",
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let frames = [
+        (
+            2,
+            Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "wrong stream",
+            },
+        ),
+        (
+            0,
+            Frame::Hello {
+                version: 2,
+                caps: 0,
+                client_info: "wrong version",
+            },
+        ),
+        (
+            0,
+            Frame::Ping {
+                nonce: 0,
+                sent_us: 0,
+            },
+        ),
+    ];
+    for (index, (stream, frame)) in frames.into_iter().enumerate() {
+        let mut bytes = Vec::new();
+        infraternal_protocol::encode_muxed_frame_into(stream, &frame, &mut bytes).unwrap();
+        let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = RemoteLink::ssh(
+            pipe_peer_bytes(&root.join(index.to_string()), &bytes),
+            Arc::new(Master(retired.clone())),
+        )
+        .await;
+        assert!(matches!(result, Err(error) if error.kind() == std::io::ErrorKind::InvalidData));
+        assert!(retired.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -128,7 +280,9 @@ async fn replacement(refuse: bool, component_off: bool) {
     hosts
         .admit(
             guard,
-            RemoteLink::ssh(channel, Arc::new(Master(retired.clone()))),
+            RemoteLink::ssh(channel, Arc::new(Master(retired.clone())))
+                .await
+                .unwrap(),
         )
         .await
         .unwrap();

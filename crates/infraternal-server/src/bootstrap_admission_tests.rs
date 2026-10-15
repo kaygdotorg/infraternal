@@ -40,7 +40,7 @@ async fn installed_admission_waits_for_the_active_route() {
     hosts
         .admit(
             guard.clone(),
-            ssh_bridge::pipe_link(&directory.0.join("pid")),
+            ssh_bridge::pipe_link(&directory.0.join("pid")).await,
         )
         .await
         .unwrap();

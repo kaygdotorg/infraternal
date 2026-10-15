@@ -27,6 +27,7 @@ enum LinkTransport {
     Ssh {
         channel: infraternal_plugin_ssh::duplex::Duplex,
         _session: Arc<dyn infraternal_plugin_ssh::transport::SshSession>,
+        prefix: Mutex<Option<Bytes>>,
     },
     Tcp {
         channel: TcpTls,
@@ -191,18 +192,65 @@ impl RemoteLink {
     }
 
     #[cfg(feature = "ssh")]
-    pub(crate) fn ssh(
+    pub(crate) async fn ssh(
         channel: infraternal_plugin_ssh::duplex::Duplex,
         session: Arc<dyn infraternal_plugin_ssh::transport::SshSession>,
-    ) -> Self {
-        Self {
+    ) -> io::Result<Self> {
+        // Publication already carries Hello behind the session receipt in one
+        // write. Read that same flight before admitting capabilities, retaining
+        // every coalesced byte for the actor's ordinary greeting and replay.
+        let mut prefix = BytesMut::with_capacity(256);
+        let peer_caps = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut scratch = [0; 1024];
+            loop {
+                match infraternal_protocol::decode_muxed_frame(&prefix) {
+                    Ok(decoded) => {
+                        if decoded.stream_id != 0 {
+                            return Err(io::ErrorKind::InvalidData.into());
+                        }
+                        let Frame::Hello {
+                            version: 1, caps, ..
+                        } = decoded.frame
+                        else {
+                            return Err(io::ErrorKind::InvalidData.into());
+                        };
+                        return Ok::<_, io::Error>(caps);
+                    }
+                    Err(infraternal_protocol::DecodeError::Incomplete) => {}
+                    Err(_) => return Err(io::ErrorKind::InvalidData.into()),
+                }
+                // Two canonical u32 varints add at most ten prefix bytes; keep
+                // the wire's existing frame bound, including long client info.
+                let remaining =
+                    (infraternal_protocol::MAX_FRAME_LEN + 10).saturating_sub(prefix.len());
+                if remaining == 0 {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                let limit = remaining.min(scratch.len());
+                let count = channel.read(&mut scratch[..limit]).await?;
+                if count == 0 {
+                    return Err(io::ErrorKind::UnexpectedEof.into());
+                }
+                prefix.extend_from_slice(&scratch[..count]);
+            }
+        })
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        Ok(Self {
+            path_proof: None,
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            diagnostic_peer: None,
             transport: LinkTransport::Ssh {
                 channel,
                 _session: session,
+                prefix: Mutex::new(Some(prefix.freeze())),
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-        }
+            peer_caps,
+            greeting_sent: false,
+            priming: Arc::new(std::sync::Mutex::new(None)),
+        })
     }
 
     #[cfg(test)]
@@ -328,7 +376,13 @@ impl RemoteLink {
     ) -> io::Result<usize> {
         match &self.transport {
             #[cfg(feature = "ssh")]
-            LinkTransport::Ssh { channel, .. } => {
+            LinkTransport::Ssh {
+                channel, prefix, ..
+            } => {
+                if let Some(prefix) = prefix.lock().await.take() {
+                    target.extend_from_slice(&prefix);
+                    return Ok(prefix.len());
+                }
                 let count = channel.read(scratch).await?;
                 target.extend_from_slice(&scratch[..count]);
                 Ok(count)
