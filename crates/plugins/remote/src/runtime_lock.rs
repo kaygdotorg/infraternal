@@ -141,17 +141,42 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
     checked_lock(file, &at(&directory, LOCK))
 }
 
+// Only the seven kernel columns are whitespace-separated. The remaining
+// socket name is opaque: a home-directory space cannot shorten its identity.
+fn legacy_row(row: &str) -> io::Result<Option<(u32, &str)>> {
+    let mut rest = row;
+    let mut inode = "";
+    for _ in 0..7 {
+        let field = rest.trim_ascii_start();
+        let end = field
+            .as_bytes()
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(field.len());
+        inode = &field[..end];
+        rest = &field[end..];
+    }
+    let name = rest.trim_ascii_start();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((inode.parse().map_err(|_| refused())?, name)))
+}
+
 // Legacy runtimes did not hold the lifetime lock. A refused connect alone is
 // insufficient before listen. Ask the kernel for candidate ownership instead
 // of inspecting private process descriptors, which cannot establish absence.
 #[cold]
 #[inline(never)]
-fn legacy_bound(runtime: &Path) -> io::Result<bool> {
+fn legacy_bound(runtime: &Path, expected: &fs::Metadata) -> io::Result<bool> {
     let rows = fs::read_to_string("/proc/net/unix")?;
     for row in rows.lines().skip(1) {
-        let mut fields = row.split_whitespace();
-        let Some(inode) = fields.nth(6) else { continue };
-        let Some(name) = fields.next() else { continue };
+        let Some((inode, name)) = legacy_row(row)? else {
+            continue;
+        };
+        if name.starts_with('@') {
+            continue;
+        }
         let saved = Path::new(name);
         if !(saved.starts_with(runtime)
             || (!saved.is_absolute()
@@ -161,43 +186,57 @@ fn legacy_bound(runtime: &Path) -> io::Result<bool> {
         {
             continue;
         }
-        let inode = inode.parse::<u32>().map_err(|_| refused())?;
-        if socket_uid(inode)? == nix::unistd::Uid::effective().as_raw() {
+        if socket_matches(inode, expected)? {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-// Linux unix_diag.h fixed exact-query ABI: only UID is requested. A response
-// outside this known layout is uncertain, never permission to remove a socket.
-fn diagnostic_uid(data: &[u8], inode: u32) -> io::Result<u32> {
-    if data.len() != 48
-        || data[0..4] != 48_u32.to_ne_bytes()
+// Linux unix_diag.h exact-query ABI: UID and VFS identity are requested.
+// A bound kernel entry retains state only when it belongs to this owned file.
+#[derive(Debug, PartialEq, Eq)]
+struct SocketOwner {
+    uid: u32,
+    inode: u32,
+    device: u32,
+}
+fn diagnostic_owner(data: &[u8], inode: u32) -> Option<SocketOwner> {
+    if data.len() != 60
+        || data[0..4] != 60_u32.to_ne_bytes()
         || data[4..6] != 20_u16.to_ne_bytes()
         || data[6..8] != 0_u16.to_ne_bytes()
         || data[8..12] != 1_u32.to_ne_bytes()
         || data[16] != 1
         || data[20..24] != inode.to_ne_bytes()
-        || data[32..34] != 5_u16.to_ne_bytes()
-        || data[34..36] != 6_u16.to_ne_bytes()
-        || data[40..42] != 8_u16.to_ne_bytes()
-        || data[42..44] != 7_u16.to_ne_bytes()
+        || data[32..34] != 12_u16.to_ne_bytes()
+        || data[34..36] != 1_u16.to_ne_bytes()
+        || data[44..46] != 5_u16.to_ne_bytes()
+        || data[46..48] != 6_u16.to_ne_bytes()
+        || data[52..54] != 8_u16.to_ne_bytes()
+        || data[54..56] != 7_u16.to_ne_bytes()
     {
-        return Err(refused());
+        return None;
     }
-    Ok(u32::from_ne_bytes([data[44], data[45], data[46], data[47]]))
+    Some(SocketOwner {
+        uid: u32::from_ne_bytes([data[56], data[57], data[58], data[59]]),
+        inode: u32::from_ne_bytes([data[36], data[37], data[38], data[39]]),
+        device: u32::from_ne_bytes([data[40], data[41], data[42], data[43]]),
+    })
 }
 /// Internal property-test entry; never inspects the host.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 #[must_use]
 pub fn check_diagnostic_record(data: &[u8], inode: u32) -> Option<u32> {
-    diagnostic_uid(data, inode).ok()
+    if let Ok(row) = std::str::from_utf8(data) {
+        let _ = std::hint::black_box(legacy_row(row));
+    }
+    diagnostic_owner(data, inode).map(|owner| owner.uid)
 }
 #[cold]
 #[inline(never)]
-fn socket_uid(inode: u32) -> io::Result<u32> {
+fn socket_matches(inode: u32, expected: &fs::Metadata) -> io::Result<bool> {
     use nix::sys::socket::{
         MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
     };
@@ -220,7 +259,7 @@ fn socket_uid(inode: u32) -> io::Result<u32> {
     request[16] = 1; // AF_UNIX
     request[20..24].copy_from_slice(&u32::MAX.to_ne_bytes());
     request[24..28].copy_from_slice(&inode.to_ne_bytes());
-    request[28..32].copy_from_slice(&0x40_u32.to_ne_bytes()); // UDIAG_SHOW_UID
+    request[28..32].copy_from_slice(&0x42_u32.to_ne_bytes()); // UDIAG_SHOW_UID | UDIAG_SHOW_VFS
     request[32..40].fill(0xff); // No prior socket cookie.
     if sendto(
         query.as_raw_fd(),
@@ -236,7 +275,18 @@ fn socket_uid(inode: u32) -> io::Result<u32> {
     if !source.is_some_and(|source| source.pid() == 0 && source.groups() == 0) {
         return Err(refused());
     }
-    diagnostic_uid(&response[..count], inode)
+    let owner = diagnostic_owner(&response[..count], inode).ok_or_else(refused)?;
+    // The kernel VFS record projects inode/device to 32 bits. This scopes an
+    // already-bound entry to the probed file; a match only preserves state.
+    // New runtimes use the lifetime lock instead of this legacy fallback.
+    let device =
+        (nix::sys::stat::major(expected.dev()) << 20) | nix::sys::stat::minor(expected.dev());
+    if device > u64::from(u32::MAX) {
+        return Err(refused());
+    }
+    Ok(owner.uid == expected.uid()
+        && u64::from(owner.device) == device
+        && u64::from(owner.inode) == expected.ino() & u64::from(u32::MAX))
 }
 #[cold]
 #[inline(never)]
@@ -269,7 +319,7 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
         }
         let resolved =
             fs::read_link(format!("/proc/self/fd/{}", runtime.as_raw_fd())).map_err(|_| 77)?;
-        if legacy_bound(&resolved).map_err(|_| 77)? {
+        if legacy_bound(&resolved, &before).map_err(|_| 77)? {
             return Err(73);
         }
     }

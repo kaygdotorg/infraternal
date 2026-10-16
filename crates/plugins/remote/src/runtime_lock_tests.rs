@@ -115,40 +115,63 @@ fn unavailable_lock_support_does_not_claim_a_live_holder() {
 
 /// Exact kernel replies validate lengths and identity before reading the owner.
 #[test]
-fn diagnostic_uid_rejects_unexpected_fixed_records() {
+fn diagnostic_owner_rejects_unexpected_fixed_records() {
     let inode = 1234_u32;
-    let mut record = [0_u8; 48];
-    for (offset, value) in [(0, 48), (8, 1), (20, inode), (44, 1001)] {
+    let mut record = [0_u8; 60];
+    for (offset, value) in [
+        (0, 60),
+        (8, 1),
+        (20, inode),
+        (36, 4321),
+        (40, 123),
+        (56, 1001),
+    ] {
         record[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
     }
-    for (offset, value) in [(4, 20_u16), (32, 5), (34, 6), (40, 8), (42, 7)] {
+    for (offset, value) in [
+        (4, 20_u16),
+        (32, 12),
+        (34, 1),
+        (44, 5),
+        (46, 6),
+        (52, 8),
+        (54, 7),
+    ] {
         record[offset..offset + 2].copy_from_slice(&value.to_ne_bytes());
     }
     record[16] = 1;
-    assert_eq!(diagnostic_uid(&record, inode).unwrap(), 1001);
+    assert_eq!(
+        diagnostic_owner(&record, inode),
+        Some(SocketOwner {
+            uid: 1001,
+            inode: 4321,
+            device: 123
+        })
+    );
     for length in 0..record.len() {
-        assert!(diagnostic_uid(&record[..length], inode).is_err());
+        assert!(diagnostic_owner(&record[..length], inode).is_none());
     }
     let mut extended = record.to_vec();
     for _ in 0..64 {
         extended.push(0);
-        assert!(diagnostic_uid(&extended, inode).is_err());
+        assert!(diagnostic_owner(&extended, inode).is_none());
     }
     for offset in [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 20, 21, 22, 23, 32, 33, 34, 35, 40, 41, 42, 43,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 20, 21, 22, 23, 32, 33, 34, 35, 44, 45, 46, 47,
+        52, 53, 54, 55,
     ] {
         let mut changed = record;
         changed[offset] ^= 0x80;
-        assert!(diagnostic_uid(&changed, inode).is_err());
+        assert!(diagnostic_owner(&changed, inode).is_none());
     }
     for byte in 0..=255 {
-        assert!(diagnostic_uid(&[byte; 48], inode).is_err());
+        assert!(diagnostic_owner(&[byte; 60], inode).is_none());
     }
 }
 
 /// Kernel ownership remains observable when a runtime makes descriptors private.
 #[test]
-fn diagnostic_uid_matches_a_real_bound_socket() {
+fn diagnostic_owner_matches_a_real_bound_socket() {
     let fixture = Fixture::new();
     let path = fixture.state().join("plugins.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -158,9 +181,29 @@ fn diagnostic_uid_matches_a_real_bound_socket() {
         .find(|row| row.ends_with(path.to_str().unwrap()))
         .unwrap();
     let inode = row.split_whitespace().nth(6).unwrap().parse().unwrap();
-    assert_eq!(
-        socket_uid(inode).unwrap(),
-        nix::unistd::Uid::effective().as_raw()
-    );
+    assert!(socket_matches(inode, &fs::metadata(&path).unwrap()).unwrap());
+    let other = fixture.state().join("other.sock");
+    drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
+    assert!(!socket_matches(inode, &fs::metadata(other).unwrap()).unwrap());
     drop(listener);
+}
+
+/// Whitespace separates kernel columns, never pieces of the socket name.
+#[test]
+fn legacy_rows_preserve_names_and_refuse_unclear_identity() {
+    for name in [
+        "sessions/plugins.sock",
+        "/home/test user/.local/share/infraternal/sessions/plugins.sock",
+        "/home/test /user/.local/share/infraternal/sessions/plugins.sock",
+        "/home/tést user/.local/share/infraternal/sessions/plugins.sock",
+    ] {
+        let row = format!("00000000: 00000002 00000000 00010000 0001 01 1234 {name}");
+        assert_eq!(legacy_row(&row).unwrap(), Some((1234, name)));
+    }
+    assert!(legacy_row("00000000: 2 0 0 1 1 unknown sessions/plugins.sock").is_err());
+    assert_eq!(legacy_row("00000000: 2 0 0 1 1 1234").unwrap(), None);
+    for length in 0..128 {
+        let row = " ".repeat(length);
+        assert_eq!(legacy_row(&row).unwrap(), None);
+    }
 }
