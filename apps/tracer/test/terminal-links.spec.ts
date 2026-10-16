@@ -1,5 +1,6 @@
 /** Exercises terminal links through the production tracer and its real VT renderer. */
 import { expect, test } from "playwright/test";
+import type { TerminalLink } from "../src/terminal-links.on-demand";
 
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 const baseURL = `http://localhost:${port}`;
@@ -28,6 +29,174 @@ async function terminalLinkPoint(page: import("playwright/test").Page, prefix: s
     return { x: rect.left + (col + 2) * metrics.cellWidth, y: rect.top + (row + 0.5) * metrics.cellHeight, cols: metrics.cols };
   }, prefix);
 }
+
+async function linkTooltipLayout(
+  page: import("playwright/test").Page,
+  target: string,
+  point: { x: number; y: number },
+): Promise<{
+  target: string;
+  text: string;
+  rows: number;
+  labelWidth: number;
+  labelClientWidth: number;
+  labelScrollWidth: number;
+  labelHeight: number;
+  labelScrollHeight: number;
+  lineHeight: number;
+  tooltipRect: { x: number; y: number; width: number; height: number };
+  linkRowsRect: { top: number; bottom: number };
+  labelInsideTooltip: boolean;
+  tooltipIntersectsLinkRows: boolean;
+  tooltipIntersectsPointer: boolean;
+}> {
+  return page.evaluate(({ expected, pointer }) => {
+    const link = window.__tracerProductTestDouble?.terminalLinks().find((item) => item.target === expected) as TerminalLink | undefined;
+    const metrics = window.__tracerProductTestDouble?.rendererMetrics();
+    const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
+    const tooltip = document.querySelector<HTMLElement>(".tip");
+    const label = document.querySelector<HTMLElement>(".tip-label:not(.is-leaving)");
+    if (!link || !metrics || !canvas || !tooltip || !label) throw new Error("link tooltip layout is unavailable");
+
+    const text = window.__tracerProductTestDouble?.screenText() ?? "";
+    const firstRow = text.split("\n").findIndex((line) => line.includes(link.visibleText.slice(0, 24)));
+    if (firstRow < 0) throw new Error("terminal link rows are not painted");
+    const canvasRect = canvas.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const labelRect = label.getBoundingClientRect();
+    const rowCount = link.range.end.y - link.range.start.y + 1;
+    const linkRows = {
+      left: canvasRect.left,
+      right: canvasRect.right,
+      top: canvasRect.top + firstRow * metrics.cellHeight,
+      bottom: canvasRect.top + (firstRow + rowCount) * metrics.cellHeight,
+    };
+    const pointerRect = { left: pointer.x - 0.5, right: pointer.x + 0.5, top: pointer.y - 0.5, bottom: pointer.y + 0.5 };
+    const intersects = (rect: DOMRect, other: { left: number; right: number; top: number; bottom: number }): boolean =>
+      rect.left < other.right && rect.right > other.left && rect.top < other.bottom && rect.bottom > other.top;
+    const style = getComputedStyle(label);
+    const lineHeight = Number.parseFloat(style.lineHeight);
+
+    return {
+      target: link.target,
+      text: label.textContent ?? "",
+      rows: rowCount,
+      labelWidth: labelRect.width,
+      labelClientWidth: label.clientWidth,
+      labelScrollWidth: label.scrollWidth,
+      labelHeight: labelRect.height,
+      labelScrollHeight: label.scrollHeight,
+      lineHeight,
+      tooltipRect: { x: tooltipRect.x, y: tooltipRect.y, width: tooltipRect.width, height: tooltipRect.height },
+      linkRowsRect: { top: linkRows.top, bottom: linkRows.bottom },
+      labelInsideTooltip: labelRect.left >= tooltipRect.left && labelRect.right <= tooltipRect.right &&
+        labelRect.top >= tooltipRect.top && labelRect.bottom <= tooltipRect.bottom,
+      tooltipIntersectsLinkRows: intersects(tooltipRect, linkRows),
+      tooltipIntersectsPointer: intersects(tooltipRect, pointerRect),
+    };
+  }, { expected: target, pointer: point });
+}
+
+test("a long link tooltip stays short, readable, and clear of its wrapped rows", async ({ browser }, testInfo) => {
+  test.setTimeout(90_000);
+  const capture = process.env.LINK_TOOLTIP_CAPTURE ?? "check";
+  const videoDirectory = process.env.LINK_TOOLTIP_VIDEO_DIR;
+  const context = await browser.newContext({
+    baseURL,
+    viewport: { width: 390, height: 844 },
+    ...(videoDirectory ? { recordVideo: { dir: videoDirectory, size: { width: 390, height: 844 } } } : {}),
+  });
+  await context.route("https://login.example.test/**", (route) => route.fulfill({ status: 200, body: "opened" }));
+  await context.addInitScript(() => {
+    const calls: string[][] = [];
+    (window as unknown as { __openCalls: string[][] }).__openCalls = calls;
+    const nativeOpen = window.open.bind(window);
+    window.open = ((...args: Parameters<typeof window.open>) => {
+      calls.push(args.map(String));
+      return nativeOpen(...args);
+    }) as typeof window.open;
+  });
+
+  const page = await context.newPage();
+  const video = page.video();
+  try {
+    await openTerminal(page);
+    const cols = await page.evaluate(() => window.__tracerProductTestDouble?.rendererMetrics()?.cols ?? 0);
+    const visiblePrefix = "https://login.example.test/oauth/authorize?client_id=agy&state=";
+    const visibleUrl = `${visiblePrefix}${"s".repeat(Math.max(1, cols * 8 - visiblePrefix.length))}`;
+    const longTarget = `${visibleUrl}&redirect_uri=https%3A%2F%2Flogin.example.test%2Fcallback&response_type=code`;
+    expect(longTarget.length).toBeGreaterThan(400);
+    expect(longTarget.length).toBeLessThan(550);
+
+    const longResponse = await context.request.post("/__mock/live-query-output", {
+      data: { text: `\u001b[2J\u001b[H\u001b]8;;${longTarget}\u0007${visibleUrl}\u001b]8;;\u0007` },
+    });
+    expect(longResponse.ok()).toBe(true);
+    await expect.poll(() => page.evaluate((expected) => window.__tracerProductTestDouble?.terminalLinks().some((link) => link.target === expected) ?? false, longTarget), { timeout: 30_000 }).toBe(true);
+    const longPoint = await terminalLinkPoint(page, visibleUrl.slice(0, 36));
+    await page.mouse.move(longPoint.x, longPoint.y);
+    await expect(page.locator(".tip")).toBeVisible();
+    await expect(page.locator(".tip-label.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath(`${capture}-link-tooltip-long.png`) });
+    const longLayout = await linkTooltipLayout(page, longTarget, longPoint);
+    // The product's coarse-pointer type scale raises secondary labels to 15 px.
+    const mobileTypeScale = await page.addStyleTag({ content: ":root { --text-secondary: 15px; }" });
+    await page.mouse.move(0, 0);
+    await page.mouse.move(longPoint.x, longPoint.y);
+    await expect(page.locator(".tip-label:not(.is-leaving)")).toBeVisible();
+    const mobileLongLayout = await linkTooltipLayout(page, longTarget, longPoint);
+    await mobileTypeScale.evaluate((style) => style.parentElement?.removeChild(style));
+
+    await page.mouse.click(longPoint.x, longPoint.y);
+    expect(await page.evaluate(() => (window as unknown as { __openCalls: string[][] }).__openCalls.at(-1))).toEqual([longTarget, "_blank", "noopener,noreferrer"]);
+    const popup = context.pages().find((candidate) => candidate !== page);
+    if (popup) await popup.close();
+    await page.bringToFront();
+
+    await page.mouse.move(0, 0);
+    const shortTarget = "https://login.example.test/sign-in";
+    const shortResponse = await context.request.post("/__mock/live-query-output", {
+      data: { text: `\u001b[2J\u001b[H\u001b]8;;${shortTarget}\u0007Sign in\u001b]8;;\u0007` },
+    });
+    expect(shortResponse.ok()).toBe(true);
+    await expect.poll(() => page.evaluate((expected) => window.__tracerProductTestDouble?.terminalLinks().some((link) => link.target === expected) ?? false, shortTarget), { timeout: 30_000 }).toBe(true);
+    const shortPoint = await terminalLinkPoint(page, "Sign in");
+    await page.mouse.move(shortPoint.x, shortPoint.y);
+    await expect(page.locator(".tip")).toBeVisible();
+    await expect(page.locator(".tip-label.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath(`${capture}-link-tooltip-short.png`) });
+    const shortLayout = await linkTooltipLayout(page, shortTarget, shortPoint);
+
+    console.log(`LINK_TOOLTIP_LAYOUT ${JSON.stringify({ long: longLayout, short: shortLayout, mobileLong: mobileLongLayout, columns: cols })}`);
+    expect.soft(longLayout.rows).toBe(8);
+    expect.soft(longLayout.text.startsWith("https://login.example.test")).toBe(true);
+    expect.soft(longLayout.text).toContain("…");
+    expect.soft(longLayout.text.endsWith("&response_type=code")).toBe(true);
+    expect.soft(longLayout.text).not.toBe(longTarget);
+    expect.soft(longLayout.labelScrollWidth).toBeLessThanOrEqual(longLayout.labelClientWidth);
+    expect.soft(longLayout.labelScrollHeight).toBeLessThanOrEqual(2 * longLayout.lineHeight + 1);
+    expect.soft(longLayout.labelInsideTooltip).toBe(true);
+    expect.soft(longLayout.tooltipIntersectsLinkRows).toBe(false);
+    expect.soft(longLayout.tooltipIntersectsPointer).toBe(false);
+    expect.soft(shortLayout.text).toBe(shortTarget);
+    expect.soft(shortLayout.labelScrollWidth).toBeLessThanOrEqual(shortLayout.labelClientWidth);
+    expect.soft(shortLayout.labelScrollHeight).toBeLessThanOrEqual(2 * shortLayout.lineHeight + 1);
+    expect.soft(shortLayout.labelInsideTooltip).toBe(true);
+    expect.soft(shortLayout.tooltipIntersectsLinkRows).toBe(false);
+    expect.soft(shortLayout.tooltipIntersectsPointer).toBe(false);
+    expect.soft(mobileLongLayout.text.startsWith("https://login.example.test")).toBe(true);
+    expect.soft(mobileLongLayout.text).toContain("…");
+    expect.soft(mobileLongLayout.text.endsWith("&response_type=code")).toBe(true);
+    expect.soft(mobileLongLayout.labelScrollWidth).toBeLessThanOrEqual(mobileLongLayout.labelClientWidth);
+    expect.soft(mobileLongLayout.labelScrollHeight).toBeLessThanOrEqual(2 * mobileLongLayout.lineHeight + 1);
+    expect.soft(mobileLongLayout.labelInsideTooltip).toBe(true);
+    expect.soft(mobileLongLayout.tooltipIntersectsLinkRows).toBe(false);
+    expect.soft(mobileLongLayout.tooltipIntersectsPointer).toBe(false);
+  } finally {
+    await context.close();
+    if (video && videoDirectory) await video.saveAs(`${videoDirectory}/link-tooltip.webm`);
+  }
+});
 
 test("wrapped and OSC 8 links open from the terminal and palette", async ({ browser }, testInfo) => {
   test.setTimeout(90_000);
