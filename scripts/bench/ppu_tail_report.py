@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ppu_stage_report import report as stage_report
 from ppu_soak import percentile
+from ppu_compare_report import contamination
 
 
 class Timeline:
@@ -99,7 +100,7 @@ def runqlat(events):
                 p99_ms=percentile(values, .99), max_ms=max(values, default=None))
 
 
-def report(root, warmup):
+def report(root, warmup, unit=None):
     meta = json.loads((root / 'stage-probes.json').read_text())
     assert meta['complete'] and meta['overruns'] == 0, 'incomplete scheduler capture'
     correlated = stage_report(root)
@@ -129,6 +130,24 @@ def report(root, warmup):
     counter_starts = {lock: [row['ns'] for row in data] for lock, data in counter_locks.items()}
     start = meta['started_ns'] + int(warmup * 1e9)
     rows = [row for row in correlated['rows'] if row['send_before_ns'] >= start]
+    all_settled = len(rows)
+    discarded = []
+    if unit is not None:
+        previous = None
+        number = 0
+        for line in (root / 'samples.jsonl').read_text().splitlines():
+            sample = json.loads(line)
+            if sample['kind'] == 'environment':
+                previous = sample.get('machine_receipt')
+            elif sample['kind'] == 'sample':
+                current = sample.get('machine_receipt')
+                reasons = contamination(previous, current, unit)
+                previous = current
+                if reasons and sample['elapsed_s'] >= warmup:
+                    discarded.append(dict(number=number, elapsed_s=sample['elapsed_s'], reasons=reasons))
+                number += 1
+        excluded = {row['number'] for row in discarded}
+        rows = [row for row in rows if row['number'] not in excluded]
     for row in rows:
         windows = dict(ingress=(row['send_before_ns'], row['queued_ns']),
                        pty_to_read=(row['pty_written_ns'], row['pty_read_ns']),
@@ -183,7 +202,8 @@ def report(root, warmup):
     queue = {name: runqlat([row for row in events[pid] if start <= row['ns'] <= end])
              for name, pid in roles.items()}
     result = dict(diagnostic_only=True, complete=True, warmup_s=warmup,
-                  kernel_stacks_only=True, probes=len(rows), run_queue=queue,
+                  kernel_stacks_only=True, probes=len(rows), all_settled_probes=all_settled,
+                  discarded_batches=discarded, contention_unit=unit, run_queue=queue,
                   caveat='Scheduled-running upper bounds overlap across roles; tracing changes timing. No admission subtraction.',
                   slowest=sorted(rows, key=lambda row: row['rtt_ms'], reverse=True)[:20])
     (root / 'tail-report.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -194,7 +214,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('root', type=Path)
     parser.add_argument('--warmup', type=float, default=120)
+    parser.add_argument('--unit', help='require batch lock/scope audit for this owned unit')
     args = parser.parse_args()
-    result = report(args.root, args.warmup)
+    result = report(args.root, args.warmup, args.unit)
     print(json.dumps(dict(complete=result['complete'], probes=result['probes'],
                          slowest_ms=result['slowest'][0]['rtt_ms'] if result['slowest'] else None)))
+    raise SystemExit(0 if result['probes'] else 1)

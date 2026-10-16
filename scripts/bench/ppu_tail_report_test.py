@@ -75,5 +75,32 @@ class Coverage(unittest.TestCase):
         self.assertEqual(result['slowest'][0]['fault_reclaim_events']['host'], {})
 
 
+class Contention(unittest.TestCase):
+    def test_diagnostic_probe_is_excluded_when_its_batch_has_foreign_cpu(self):
+        roles = dict(host=1, reader=2, counter=6, **{'session-900': 3,
+                     'session-971': 4, 'session-993': 5})
+        probe = dict(session=900, number=0, rtt_ms=.00008, send_before_ns=10,
+            queued_ns=20, pty_written_ns=30, pty_read_ns=50, parsed_ns=55,
+            socket_start_ns=60, socket_done_ns=65, receive_ns=90)
+        before = dict(owner='process-per-user owned now', locks=[['FLOCK']],
+            scope_cpu={'foreign.scope': dict(usage_usec='1')})
+        after = before | dict(scope_cpu={'foreign.scope': dict(usage_usec='2')})
+        records = [dict(kind='environment', machine_receipt=before),
+                   dict(kind='sample', elapsed_s=1, machine_receipt=after)]
+        events = [dict(pid=pid, ns=stamp, kind='sched_switch', state=state)
+                  for pid in roles.values() for stamp, state in [(0, 'in'), (100, 'out-sleeping')]]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'stage-probes.json').write_text(json.dumps(dict(complete=True, overruns=0, started_ns=0)))
+            (root / 'tail-roles.json').write_text(json.dumps(roles))
+            (root / 'tail-events.jsonl').write_text('\n'.join(map(json.dumps, events)))
+            (root / 'stages.log').write_text('')
+            (root / 'samples.jsonl').write_text('\n'.join(map(json.dumps, records)))
+            with patch.object(reporter, 'stage_report', return_value=dict(complete=True, rows=[probe])):
+                result = reporter.report(root, 0, unit='owned')
+        self.assertEqual(result['slowest'], [])
+        self.assertEqual(result['discarded_batches'][0]['number'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()
