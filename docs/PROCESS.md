@@ -143,13 +143,18 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,594,856 bytes |
+  | `x86_64-unknown-linux-musl` | 21,395,600 bytes |
+  | `aarch64-unknown-linux-musl` | 19,564,768 bytes |
 
-  These are the #198 measurements of the full-feature release recipe after
-  unused native APIs, duplicated action metadata construction, OpenSSL's
-  unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
-  cut (D243, D264, #198). The x86_64 build retains AES-NI and generic AES-GCM
+  The full-feature recipe retains the #198 cuts to unused native APIs,
+  duplicated action metadata construction, OpenSSL's unused VAES/AVX-512
+  AES-GCM dispatch, and unused Axum extractor features (D243, D264, #198).
+  These ceilings include Mesh recovery and bounded storage diagnostics (#229).
+  Verification and packaging use [`scripts/static-cargo`](../scripts/static-cargo),
+  which remaps repository, target and dependency source roots. The pinned C
+  wrapper canonicalizes compiler descriptions and static module directory
+  defaults, removing checkout and cache directory dependence from the ceiling.
+  The x86_64 build retains AES-NI and generic AES-GCM
   dispatch, checked against a NIST vector
   using the shipping static crypto archive.
   The release and host-facts plugins use size optimization; terminal and mesh
