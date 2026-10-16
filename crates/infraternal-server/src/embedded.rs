@@ -625,6 +625,8 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
             | infraternal_plugin_api::channel::REMOTE_STANDBY
             | if link.native() {
                 infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
+                    | infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                    | infraternal_plugin_api::channel::REMOTE_PATH_PROOF
             } else {
                 0
             },

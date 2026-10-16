@@ -12,7 +12,15 @@ esac
 export ZIG_GLOBAL_CACHE_DIR="$target_root/auth-tools/cache"
 # cc-rs detects Clang and adds Rust's target spelling, which Zig does not
 # accept. Reject mismatches and translate only the target this wrapper owns.
-args=()
+# Only the generated build output is normalized; dependency sources stay intact.
+# Upstream records the whole compiler command as a C array, so file-prefix
+# mapping alone cannot remove that absolute path from the version string.
+for arg in "$@"; do
+    if [[ "$arg" == crypto/cversion.c ]]; then
+        python3 "$root/scripts/normalize-native-metadata.py" crypto/buildinf.h
+    fi
+done
+args=("-ffile-prefix-map=$root=/infraternal" "-ffile-prefix-map=$target_root=/build")
 for arg in "$@"; do
     case "$arg" in
         # openssl-src adds this historical musl workaround. Our pinned Zig
@@ -20,6 +28,22 @@ for arg in "$@"; do
         # D244/#154 requires it in the shipping static binaries. Remove only
         # this exact argument, leaving OpenSSL sources and all other flags intact.
         -DOPENSSL_NO_SECURE_MEMORY) ;;
+        -DENGINESDIR=*|-DMODULESDIR=*)
+            directory="${arg#*=}"
+            directory="${directory#\"}"
+            directory="${directory%\"}"
+            # These are build-only installation paths, never deployed assets.
+            # Keep them absolute and inert; explicit runtime locations and the
+            # system configuration directory remain unchanged. This removes
+            # checkout/target paths from native version and directory metadata.
+            case "${arg%%=*}:$directory" in
+                "-DENGINESDIR:$target_root"/*/install/lib/engines-3)
+                    args+=('-DENGINESDIR="/infraternal/build-only/engines-3"') ;;
+                "-DMODULESDIR:$target_root"/*/install/lib/ossl-modules)
+                    args+=('-DMODULESDIR="/infraternal/build-only/ossl-modules"') ;;
+                *) args+=("$arg") ;;
+            esac
+            ;;
         --target="$TARGET") ;;
         --target=*) printf 'unexpected C target override
 ' >&2; exit 1 ;;

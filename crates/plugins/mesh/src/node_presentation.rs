@@ -144,6 +144,7 @@ mod tests {
                 kind,
                 reason,
                 endpoint: Some("10.254.0.1:7443".parse().expect("fixture address")),
+                source_port: None,
             };
             let value = serde_json::json!({"state":"On","peer_count":2,"server_link":link});
             let text = status(&value).expect("human status");

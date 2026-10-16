@@ -34,10 +34,15 @@ enum LinkTransport {
 /// Authority is attached only after durable mTLS admission and guards both
 /// transport directions; direct actor tests may still construct an unguarded link.
 pub(crate) struct RemoteLink {
+    path_proof: Option<infraternal_plugin_remote::remote_bindings::ConnectionProof>,
+    // TCP has no Quinn peer accessor. Retain only its public authenticated tuple
+    // in opt-in tests; this field is absent from every shipping build.
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    diagnostic_peer: Option<std::net::SocketAddr>,
     transport: LinkTransport,
     authority: Option<crate::remote_guard::AuthorityGuard>,
     renewal: std::sync::atomic::AtomicBool,
-    server_paths: bool,
+    peer_caps: u64,
     greeting_sent: bool,
     priming: Arc<std::sync::Mutex<Option<crate::remote_standby::Priming>>>,
 }
@@ -104,6 +109,13 @@ impl Drop for QuicLink {
 }
 
 impl RemoteLink {
+    /// The admitted logical QUIC tuple; TCP cannot move below its transport.
+    pub(crate) fn peer_address(&self) -> Option<std::net::SocketAddr> {
+        match &self.transport {
+            LinkTransport::Quic(link) => Some(link.connection.remote_address()),
+            LinkTransport::Tcp { .. } => None,
+        }
+    }
     pub(crate) fn authorize(mut self, authority: crate::remote_guard::AuthorityGuard) -> Self {
         self.authority = Some(authority);
         self
@@ -176,10 +188,13 @@ impl RemoteLink {
         let mut receive = Receive::default();
         let (prefix, greeting_sent) =
             greeting(&channel, &mut receive, admission.as_deref_mut()).await?;
-        let server_paths = supports_server_paths(&prefix);
+        let peer_caps = peer_caps(&prefix);
         // TLS losers in the outgoing dial race send no application greeting;
         // they must never supersede the winning host transport in the registry.
         Ok(Self {
+            path_proof: None,
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            diagnostic_peer: None,
             transport: LinkTransport::Tcp {
                 channel,
                 receive: Mutex::new(receive),
@@ -187,7 +202,7 @@ impl RemoteLink {
             },
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            server_paths,
+            peer_caps,
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(
                 admission.and_then(|admission| admission.priming.take()),
@@ -210,7 +225,7 @@ impl RemoteLink {
         let mut receive = Receive::default();
         let (prefix, greeting_sent) =
             greeting(control.as_ref(), &mut receive, admission.as_deref_mut()).await?;
-        let server_paths = supports_server_paths(&prefix);
+        let peer_caps = peer_caps(&prefix);
         let hello = infraternal_protocol::decode_muxed_frame(&prefix).map_err(io::Error::other)?;
         remote_quic::negotiate_binding(&connection, &hello.frame)?;
         let (output, bulk) = mpsc::channel(32);
@@ -235,6 +250,9 @@ impl RemoteLink {
             receive,
         ));
         Ok(Self {
+            path_proof: None,
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            diagnostic_peer: None,
             transport: LinkTransport::Quic(QuicLink {
                 connection,
                 binding: Mutex::new(None),
@@ -247,12 +265,32 @@ impl RemoteLink {
             }),
             authority: None,
             renewal: std::sync::atomic::AtomicBool::new(false),
-            server_paths,
+            peer_caps,
             greeting_sent,
             priming: Arc::new(std::sync::Mutex::new(
                 admission.and_then(|admission| admission.priming.take()),
             )),
         })
+    }
+
+    /// Keep physical proof service with the admitted transport, including queue
+    /// cancellation and link replacement; the durable host actor outlives both.
+    pub(crate) fn prove_paths(
+        &mut self,
+        bindings: &Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
+    ) -> io::Result<()> {
+        if let LinkTransport::Quic(link) = &self.transport {
+            self.path_proof = Some(bindings.connection_proof(&link.connection)?);
+        }
+        Ok(())
+    }
+
+    /// Public TCP coordinates label authenticated observations, never authority
+    /// or packet provenance for unrestricted terminal bytes.
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    pub(crate) fn with_diagnostic_peer(mut self, peer: std::net::SocketAddr) -> Self {
+        self.diagnostic_peer = Some(peer);
+        self
     }
 
     async fn read_transport(
@@ -272,6 +310,18 @@ impl RemoteLink {
                 }
                 let mut receive = receive.lock().await;
                 let decoded = receive.next(channel).await?;
+                #[cfg(all(test, feature = "mesh-transport-proof"))]
+                if matches!(decoded.frame, Frame::Output {bytes,..} if !bytes.is_empty())
+                    && let Some(peer) = self.diagnostic_peer
+                {
+                    // Reuse the existing authenticated decoder. This is the same
+                    // pre-actor boundary as QUIC's pump, not a second parser.
+                    crate::remote_autoswitch_probe::record(
+                        crate::remote_autoswitch_probe::Kind::TerminalByte,
+                        peer,
+                        decoded.stream_id,
+                    );
+                }
                 let mut bytes = Vec::new();
                 encode_muxed_frame_into(decoded.stream_id, &decoded.frame, &mut bytes)
                     .map_err(io::Error::other)?;
@@ -429,6 +479,15 @@ impl RemoteLink {
         }
     }
 
+    /// Observe authenticated `STOP_SENDING` before testing a late detach.
+    #[cfg(test)]
+    pub(crate) fn test_received_stop_sending(&self) -> Option<u64> {
+        match &self.transport {
+            LinkTransport::Quic(link) => Some(link.connection.stats().frame_rx.stop_sending),
+            LinkTransport::Tcp { .. } => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn limit_send_window(&self, bytes: u64) {
         if let LinkTransport::Quic(link) = &self.transport {
@@ -548,8 +607,12 @@ impl RemoteLink {
         }
     }
 
+    pub(crate) fn peer_capabilities(&self) -> u64 {
+        self.peer_caps
+    }
+    #[cfg(test)]
     pub(crate) fn supports_server_paths(&self) -> bool {
-        self.server_paths
+        self.peer_caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS != 0
     }
 
     pub(crate) fn supports_renewal(&self) -> bool {
@@ -581,10 +644,25 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
+                let terminal_close = stream != 0 && matches!(frame, Frame::Close { .. });
                 let existing = link.streams.lock().await.get(&stream).cloned();
                 let channel = if let Some(channel) = existing {
                     channel
                 } else {
+                    // Peer retirement may win the race with the consumer's
+                    // detach. Cleanup is idempotent; other frames still need
+                    // a live binding, and odd/control ids cannot invent one.
+                    if terminal_close && stream & 1 == 0 {
+                        #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+                        if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                            crate::remote_autoswitch_probe::record(
+                                crate::remote_autoswitch_probe::Kind::TerminalDetachAlreadyRetired,
+                                link.connection.remote_address(),
+                                stream,
+                            );
+                        }
+                        return Ok(());
+                    }
                     if !matches!(frame, Frame::AttachTerm { .. }) {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
@@ -631,22 +709,45 @@ impl RemoteLink {
                         channel
                     }
                 };
-                Transmit::default()
+                let result = Transmit::default()
                     .send(channel.as_ref(), stream, frame)
-                    .await?;
-                if stream != 0 && matches!(frame, Frame::Close { .. }) {
+                    .await;
+                if terminal_close {
+                    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+                    if result.is_err() && std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                        crate::remote_autoswitch_probe::record(
+                            crate::remote_autoswitch_probe::Kind::TerminalDetachWriteError,
+                            link.connection.remote_address(),
+                            stream,
+                        );
+                    }
+                    // A peer can stop receiving before local detach is sent.
+                    // Retire this channel even after a partial/failed Close:
+                    // no later frame may follow it, and its writer-local error
+                    // must not make the actor discard the host connection.
+                    // Release any write error before waiting for the map lock.
+                    drop(result);
                     link.streams.lock().await.remove(&stream);
                     channel.retire();
+                    Ok(())
+                } else {
+                    result
                 }
-                Ok(())
             }
         }
     }
 }
 
-fn supports_server_paths(prefix: &[u8]) -> bool {
-    matches!(infraternal_protocol::decode_muxed_frame(prefix), Ok(infraternal_protocol::DecodedMuxedFrame { frame: Frame::Hello { caps, .. }, .. })
-        if caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS != 0)
+fn peer_caps(prefix: &[u8]) -> u64 {
+    match infraternal_protocol::decode_muxed_frame(prefix) {
+        Ok(infraternal_protocol::DecodedMuxedFrame {
+            frame: Frame::Hello {
+                version: 1, caps, ..
+            },
+            ..
+        }) => caps,
+        _ => 0,
+    }
 }
 
 /// A ledger-admitted candidate may prove liveness without replacing the host.
@@ -742,6 +843,14 @@ async fn pump(
             }
             return;
         };
+        #[cfg(all(test, feature = "mesh-transport-proof"))]
+        if matches!(decoded.frame, Frame::Output { bytes, .. } if !bytes.is_empty()) {
+            crate::remote_autoswitch_probe::record(
+                crate::remote_autoswitch_probe::Kind::TerminalByte,
+                connection.remote_address(),
+                stream,
+            );
+        }
         let mut bytes = Vec::new();
         if encode_muxed_frame_into(stream, &decoded.frame, &mut bytes).is_err() {
             return;

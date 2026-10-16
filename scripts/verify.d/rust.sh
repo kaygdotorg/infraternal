@@ -64,8 +64,8 @@ rust_check_static_binary() {
     fi
 
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21422096 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19594856 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21320400 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19513440 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
@@ -176,6 +176,8 @@ rust_static_build_check() {
 
     scripts/auth-toolchain || return $?
     python3 scripts/test-musl-cc.py || return $?
+    python3 scripts/test-native-metadata.py || return $?
+    python3 scripts/test-rustc-paths.py || return $?
     python3 scripts/release/production_trust_test.py || return $?
 
     for target in "${targets[@]}"; do

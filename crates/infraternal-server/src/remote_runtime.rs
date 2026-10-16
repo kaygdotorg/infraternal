@@ -42,18 +42,57 @@ pub(crate) struct RemoteHosts(
 
 /// Identity and admission limits are shared; this factory never retains its host map.
 struct ListenerFactory {
-    identity: Identity,
-    roots: Vec<X509>,
+    /// One immutable TLS configuration per startup identity/root epoch. Leased
+    /// destinations use the same handshake settings and durable admission checks.
+    tls: Arc<openssl::ssl::SslAcceptor>,
     store: EnrollmentStore,
     address: SocketAddr,
     destinations: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
     limits: Arc<crate::remote_accept::Limits>,
+    /// Leased destinations join the agent address's endpoint (one CID space).
+    bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
+}
+/// Resolves an admitted tuple only during a call; node channels never own the
+/// host registry or listener factory through their routing capability.
+pub(crate) struct PeerRouting {
+    registry: std::sync::Weak<Mutex<HashMap<Uuid, Host>>>,
+    factory: std::sync::Weak<std::sync::Mutex<Option<Arc<ListenerFactory>>>>,
+}
+impl PeerRouting {
+    pub(crate) async fn route_peer(
+        &self,
+        id: Uuid,
+        alternate: SocketAddr,
+    ) -> io::Result<Option<infraternal_plugin_remote::remote_bindings::PeerBinding>> {
+        let Some(registry) = self.registry.upgrade() else {
+            return Ok(None);
+        };
+        let logical = registry
+            .lock()
+            .await
+            .get(&id)
+            .filter(|host| host.authority.permits())
+            .and_then(|host| host.peer.map(|peer| (peer, host.caps)));
+        let factory = self
+            .factory
+            .upgrade()
+            .and_then(|factory| factory.lock().ok().and_then(|factory| factory.clone()));
+        match (logical, factory) {
+            (Some((logical, caps)), Some(factory)) => {
+                let route = factory.bindings.route_peer(logical, alternate)?;
+                route.set_backup(caps & infraternal_plugin_api::channel::REMOTE_PATH_BACKUP != 0);
+                Ok(Some(route))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 struct Host {
+    peer: Option<SocketAddr>,
     ip: std::net::IpAddr,
     channel: Option<Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>>,
     uid: u32,
-    server_paths: bool,
+    caps: u64,
     authority: AuthorityGuard,
     actor: EmbeddedAgent,
     accepts: mpsc::Sender<RemoteLink>,
@@ -111,17 +150,7 @@ impl RemoteHosts {
         let listener = if factory.address.ip().is_unspecified() {
             None
         } else {
-            Some(
-                RemoteListeners::start_with_limits(
-                    SocketAddr::new(address, factory.address.port()),
-                    &factory.identity,
-                    &factory.roots,
-                    factory.store.clone(),
-                    overlay,
-                    factory.limits.clone(),
-                )
-                .await?,
-            )
+            Some(LeasedListener::start(&factory, address, overlay).await?)
         };
         *factory
             .destinations
@@ -134,6 +163,14 @@ impl RemoteHosts {
             factory,
             address: address.to_canonical(),
         }))
+    }
+    /// Node channels are stored in this registry; a route handle must be weak
+    /// so it cannot retain its own actor registry after server shutdown.
+    fn peer_capability(&self) -> PeerRouting {
+        PeerRouting {
+            registry: Arc::downgrade(&self.0),
+            factory: Arc::downgrade(&self.3),
+        }
     }
     pub(crate) async fn online(&self, id: Uuid) -> bool {
         self.actor(id).await.is_some_and(|actor| {
@@ -167,11 +204,12 @@ impl RemoteHosts {
         *self.2.lock().await = runtime.downgrade();
         let mut hosts = self.0.lock().await;
         for (id, host) in &mut *hosts {
-            Self::attach(runtime, *id, host).await?;
+            self.attach(runtime, *id, host).await?;
         }
         Ok(())
     }
     async fn attach(
+        &self,
         runtime: &crate::plugins::PluginRuntime,
         id: Uuid,
         host: &mut Host,
@@ -181,10 +219,12 @@ impl RemoteHosts {
                 id: id.to_string(),
                 ip: host.ip,
                 server: false,
-                server_paths: host.server_paths,
+                server_paths: host.caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
+                    != 0,
                 actor: host.actor.clone(),
                 authority: Some(host.authority.clone()),
                 listeners: None,
+                peer_routes: Some(self.peer_capability()),
             });
         runtime
             .attach_node(channel.clone())
@@ -193,10 +233,20 @@ impl RemoteHosts {
         host.channel = Some(channel);
         Ok(())
     }
+    fn prove_paths(&self, link: &mut RemoteLink) -> io::Result<()> {
+        if link.peer_capabilities() & infraternal_plugin_api::channel::REMOTE_PATH_PROOF == 0 {
+            return Ok(());
+        }
+        if let Some(factory) = self.3.lock().map_err(|_| io::ErrorKind::Other)?.clone() {
+            link.prove_paths(&factory.bindings)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn admit_observed(
         &self,
         authority: AuthorityGuard,
-        link: RemoteLink,
+        mut link: RemoteLink,
         ip: std::net::IpAddr,
     ) -> io::Result<()> {
         if link.primed() {
@@ -213,18 +263,21 @@ impl RemoteHosts {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         let generation = Uuid::new_v4();
-        let server_paths = link.supports_server_paths();
+        let peer = link.peer_address();
+        let caps = link.peer_capabilities();
         if let Some(host) = hosts.get_mut(&id) {
             if host.uid != uid {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
+            self.prove_paths(&mut link)?;
             host.accepts
                 .try_send(link.authorize(authority.clone()))
                 .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
             // Publish only after queue admission. A rejected replacement must
             // not alter a valid actor or cancel its existing retirement waiter.
+            host.peer = peer;
             host.generation = generation;
-            host.server_paths = server_paths;
+            host.caps = caps;
             host.retirement =
                 self.retirement(id, generation, authority.clone(), host.actor.clone());
             host.authority = authority;
@@ -236,6 +289,7 @@ impl RemoteHosts {
                 ip.to_canonical()
             };
         } else {
+            self.prove_paths(&mut link)?;
             let (actor, accepts) = EmbeddedAgent::remote(uid);
             accepts
                 .try_send(link.authorize(authority.clone()))
@@ -244,6 +298,7 @@ impl RemoteHosts {
             hosts.insert(
                 id,
                 Host {
+                    peer,
                     ip: if self.4 {
                         std::net::Ipv4Addr::UNSPECIFIED.into()
                     } else {
@@ -251,7 +306,7 @@ impl RemoteHosts {
                     },
                     channel: None,
                     uid,
-                    server_paths,
+                    caps,
                     authority,
                     actor,
                     accepts,
@@ -263,14 +318,18 @@ impl RemoteHosts {
         if let Some(runtime) = runtime
             && let Some(host) = hosts.get_mut(&id)
         {
-            Self::attach(&runtime, id, host).await?;
+            self.attach(&runtime, id, host).await?;
         }
         Ok(())
     }
 
     /// A primed native link belongs to the existing actor. Its admission waiter
     /// publishes metadata after activation, outside the actor's plugin turn.
-    async fn admit_primed(&self, authority: AuthorityGuard, link: RemoteLink) -> io::Result<()> {
+    async fn admit_primed(
+        &self,
+        authority: AuthorityGuard,
+        mut link: RemoteLink,
+    ) -> io::Result<()> {
         authority.admit_operation().await?;
         let id = authority.identity.host;
         let uid = authority.identity.execution_uid;
@@ -282,7 +341,9 @@ impl RemoteHosts {
             }
             (host.actor.clone(), host.generation)
         };
-        let server_paths = link.supports_server_paths();
+        let peer = link.peer_address();
+        let caps = link.peer_capabilities();
+        self.prove_paths(&mut link)?;
         let (activated, activation) = tokio::sync::oneshot::channel();
         link.activation(activated)?;
         actor
@@ -302,14 +363,15 @@ impl RemoteHosts {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let generation = Uuid::new_v4();
+        host.peer = peer;
         host.generation = generation;
-        host.server_paths = server_paths;
+        host.caps = caps;
         host.retirement = self.retirement(id, generation, authority.clone(), actor);
         host.authority = authority;
         // A parked underlay is a path replacement, not a new discovery source.
         // The existing remote registry retains the authoritative observed IP.
         if let Some(runtime) = runtime {
-            Self::attach(&runtime, id, host).await?;
+            self.attach(&runtime, id, host).await?;
         }
         Ok(())
     }
@@ -374,14 +436,30 @@ async fn reserve_transports(
     address: SocketAddr,
     config: &quinn::ServerConfig,
     mut on_reserved: impl FnMut(SocketAddr) -> io::Result<()>,
-) -> io::Result<(quinn::Endpoint, TcpListener)> {
+) -> io::Result<(
+    quinn::Endpoint,
+    TcpListener,
+    Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
+)> {
+    use quinn::Runtime as _;
     let attempts = if address.port() == 0 { 16 } else { 1 };
     for _ in 0..attempts {
         let tcp = TcpListener::bind(address).await?;
         let reserved = tcp.local_addr()?;
         on_reserved(reserved)?;
-        match quinn::Endpoint::server(config.clone(), reserved) {
-            Ok(endpoint) => return Ok((endpoint, tcp)),
+        match std::net::UdpSocket::bind(reserved) {
+            Ok(socket) => {
+                let bindings = infraternal_plugin_remote::remote_bindings::Bindings::new(
+                    quinn::TokioRuntime.wrap_udp_socket(socket)?,
+                );
+                let endpoint = quinn::Endpoint::new_with_abstract_socket(
+                    quinn::EndpointConfig::default(),
+                    Some(config.clone()),
+                    bindings.clone(),
+                    Arc::new(quinn::TokioRuntime),
+                )?;
+                return Ok((endpoint, tcp, bindings));
+            }
             Err(error) if address.port() == 0 && error.kind() == io::ErrorKind::AddrInUse => {}
             Err(error) => return Err(error),
         }
@@ -390,9 +468,50 @@ async fn reserve_transports(
     Err(io::ErrorKind::AddrInUse.into())
 }
 
+/// A leased mesh destination: its UDP socket joins the shared endpoint and its
+/// TCP fallback listener is its own. Dropping it releases both.
+pub(crate) struct LeasedListener {
+    _binding: infraternal_plugin_remote::remote_bindings::LeasedBinding,
+    tasks: JoinSet<()>,
+    #[cfg(test)]
+    address: SocketAddr,
+}
+impl Drop for LeasedListener {
+    fn drop(&mut self) {
+        self.tasks.abort_all();
+    }
+}
+impl LeasedListener {
+    async fn start(
+        factory: &ListenerFactory,
+        address: std::net::IpAddr,
+        overlay: RemoteHosts,
+    ) -> io::Result<Self> {
+        use quinn::Runtime as _;
+        let address = SocketAddr::new(address, factory.address.port());
+        let tcp = TcpListener::bind(address).await?;
+        let socket = quinn::TokioRuntime.wrap_udp_socket(std::net::UdpSocket::bind(address)?)?;
+        let binding = factory.bindings.lease(socket)?;
+        let mut tasks = JoinSet::new();
+        tasks.spawn(crate::remote_accept::tcp(
+            tcp,
+            factory.tls.clone(),
+            overlay,
+            factory.store.clone(),
+            factory.limits.clone(),
+        ));
+        Ok(Self {
+            _binding: binding,
+            tasks,
+            #[cfg(test)]
+            address,
+        })
+    }
+}
+
 /// Owns an additional binding or the routing classification of an existing wildcard.
 pub(crate) struct AdditionalListener {
-    listener: Option<RemoteListeners>,
+    listener: Option<LeasedListener>,
     factory: Arc<ListenerFactory>,
     address: std::net::IpAddr,
 }
@@ -414,7 +533,7 @@ impl AdditionalListener {
     pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.as_ref().map_or(
             Ok(SocketAddr::new(self.address, self.factory.address.port())),
-            RemoteListeners::local_addr,
+            |listener| Ok(listener.address),
         )
     }
 }
@@ -423,6 +542,7 @@ impl AdditionalListener {
 pub(crate) struct RemoteListeners {
     tasks: JoinSet<()>,
     endpoint: quinn::Endpoint,
+    bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
     #[cfg(test)]
     pub(crate) diagnostic_hosts: RemoteHosts,
 }
@@ -450,7 +570,7 @@ impl RemoteListeners {
         hosts: RemoteHosts,
     ) -> io::Result<Self> {
         let limits = crate::remote_accept::Limits::new();
-        let listener = Self::start_with_limits(
+        let (listener, tls) = Self::start_with_limits(
             address,
             identity,
             roots,
@@ -460,15 +580,12 @@ impl RemoteListeners {
         )
         .await?;
         let factory = ListenerFactory {
-            identity: Identity {
-                certificate: identity.certificate.clone(),
-                key: identity.key.clone(),
-            },
-            roots: roots.to_vec(),
+            tls,
             store,
             address: listener.local_addr()?,
             destinations: std::sync::Mutex::default(),
             limits,
+            bindings: listener.bindings.clone(),
         };
         *hosts.3.lock().map_err(|_| io::ErrorKind::Other)? = Some(Arc::new(factory));
         Ok(listener)
@@ -481,10 +598,10 @@ impl RemoteListeners {
         store: EnrollmentStore,
         hosts: RemoteHosts,
         limits: Arc<crate::remote_accept::Limits>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Arc<openssl::ssl::SslAcceptor>)> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
-        let (endpoint, tcp) = reserve_transports(
+        let (endpoint, tcp, bindings) = reserve_transports(
             address,
             &remote_quic::server_config(identity, roots)?,
             |_| Ok(()),
@@ -498,13 +615,23 @@ impl RemoteListeners {
             store.clone(),
             limits.clone(),
         ));
-        tasks.spawn(crate::remote_accept::tcp(tcp, tls, hosts, store, limits));
-        Ok(Self {
-            tasks,
-            endpoint,
-            #[cfg(test)]
-            diagnostic_hosts,
-        })
+        tasks.spawn(crate::remote_accept::tcp(
+            tcp,
+            tls.clone(),
+            hosts,
+            store,
+            limits,
+        ));
+        Ok((
+            Self {
+                tasks,
+                endpoint,
+                bindings,
+                #[cfg(test)]
+                diagnostic_hosts,
+            },
+            tls,
+        ))
     }
 }
 

@@ -4,6 +4,8 @@ use crate::{
     remote_quic, remote_tls,
     remote_tls::tests::{leaf, root},
 };
+use infraternal_plugin_remote::remote_path_socket::PathSocket;
+use quinn::{AsyncUdpSocket as _, Runtime as _};
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -155,6 +157,15 @@ async fn udp_replies(
 }
 pub(crate) async fn udp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    udp_proxy_on(socket, upstream)
+}
+
+/// Start a relay on an already reserved socket so a fixture can own both
+/// transport ports before any dial races begin.
+pub(crate) fn udp_proxy_on(
+    socket: Arc<UdpSocket>,
+    upstream: SocketAddr,
+) -> (SocketAddr, JoinHandle<()>) {
     let address = socket.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let mut bytes = vec![0; 65535];
@@ -283,6 +294,34 @@ async fn quic_300ms_and_1000_connection_pairs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "size investigation diagnostic; run alone without build or browser overlap"]
 async fn quic_bulk_50m_exact_bytes() {
+    measure_quic_bulk(None).await;
+}
+
+/// A private kernel-latency namespace separates socket configuration from the
+/// existing relay's explicitly documented artificial burst loss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Exact 50MiB kernel-latency control on the perf VM in an owned network namespace."]
+async fn quic_bulk_50m_kernel_latency() {
+    let original =
+        std::env::var("INFRATERNAL_BULK_HOST_NETNS").expect("owned network namespace required");
+    assert_ne!(
+        std::fs::read_link("/proc/self/ns/net")
+            .unwrap()
+            .to_string_lossy(),
+        original
+    );
+    measure_quic_bulk(Some(300)).await;
+}
+
+#[allow(clippy::too_many_lines)]
+async fn measure_quic_bulk(kernel_rtt: Option<u32>) {
+    assert_eq!(
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim(),
+        "infraternal-perf-test",
+        "physical throughput belongs on the authorized perf VM"
+    );
     let ca = root();
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
@@ -292,32 +331,66 @@ async fn quic_bulk_50m_exact_bytes() {
         "127.0.0.1:0".parse().unwrap(),
     )
     .unwrap();
-    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let direct = server.local_addr().unwrap();
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dedicated = std::env::var_os("INFRATERNAL_BULK_DEDICATED_CLIENT").is_some();
+    let path = if dedicated {
+        PathSocket::from_udp(socket, direct, &quinn::TokioRuntime).unwrap()
+    } else {
+        PathSocket::new(quinn::TokioRuntime.wrap_udp_socket(socket).unwrap(), direct)
+    };
+    let receive_segments = path.max_receive_segments();
+    let mut client = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        None,
+        path,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
     client.set_default_client_config(
         remote_quic::client_config(&client_identity, &[ca.certificate]).unwrap(),
     );
-    let direct = server.local_addr().unwrap();
-    for rtt in [0, 300] {
-        let proxy = if rtt == 300 {
+    let reverse = std::env::var_os("INFRATERNAL_BULK_REVERSE").is_some();
+    let direction = if reverse {
+        "server_to_host"
+    } else {
+        "host_to_server"
+    };
+    for rtt in kernel_rtt.map_or_else(|| vec![0, 300], |rtt| vec![rtt]) {
+        let proxy = if rtt == 300 && kernel_rtt.is_none() {
             Some(udp_proxy(direct).await)
         } else {
             None
         };
         let address = proxy.as_ref().map_or(direct, |(address, _)| *address);
-        let samples = if rtt == 0 { 3 } else { 1 };
+        let samples = if rtt == 0 || kernel_rtt.is_some() {
+            3
+        } else {
+            1
+        };
         for sample in 0..samples {
             let (a, b) = tokio::join!(client.connect(address, "localhost").unwrap(), async {
                 server.accept().await.unwrap().await
             });
             let a = a.unwrap();
             let b = b.unwrap();
+            if kernel_rtt.is_some() {
+                assert!(
+                    a.rtt() >= Duration::from_millis(250),
+                    "kernel RTT control was not applied"
+                );
+            }
             let started = Instant::now();
             let cpu = cpu_ticks();
             let payload: Vec<u8> = (0..16_384)
                 .map(|n| u8::try_from(n % 251).unwrap())
                 .collect();
             let bytes = 50 * 1024 * 1024;
-            let transfer = exact_bulk(&a, &b, &payload, bytes);
+            let transfer = if reverse {
+                exact_bulk(&b, &a, &payload, bytes)
+            } else {
+                exact_bulk(&a, &b, &payload, bytes)
+            };
             if tokio::time::timeout(Duration::from_secs(90), transfer)
                 .await
                 .is_err()
@@ -330,7 +403,8 @@ async fn quic_bulk_50m_exact_bytes() {
                 panic!("exact transfer diagnostic exceeded its bounded deadline");
             }
             println!(
-                "bulk_diagnostic transport=quic rtt_ms={rtt} sample={sample} bytes={bytes} elapsed_us={} cpu_ticks={} rss_kib={} application_missing=0 application_duplicates=0 load={}",
+                "bulk_diagnostic transport=quic dedicated_client={dedicated} receive_segments={receive_segments} direction={direction} rtt_ms={rtt} kernel_latency={} sample={sample} bytes={bytes} elapsed_us={} cpu_ticks={} rss_kib={} application_missing=0 application_duplicates=0 load={}",
+                kernel_rtt.is_some(),
                 started.elapsed().as_micros(),
                 cpu_ticks() - cpu,
                 rss(),

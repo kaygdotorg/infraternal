@@ -25,13 +25,29 @@ with tempfile.TemporaryDirectory(prefix='wrapper-test-', dir=SCRATCH) as directo
              '-DOPENSSL_NO_SECURE_MEMORY', *retained],
             env=environment, check=True, capture_output=True, text=True,
         )
-        assert result.stdout.splitlines() == ['cc', '-target', zig_target, *retained], target
+        assert result.stdout.splitlines() == ['cc', '-target', zig_target,
+            f'-ffile-prefix-map={ROOT}=/infraternal',
+            f'-ffile-prefix-map={directory}=/build', *retained], target
+        build_directories = [
+            f'-DENGINESDIR="{directory}/native/install/lib/engines-3"',
+            f'-DMODULESDIR="{directory}/native/install/lib/ossl-modules"',
+        ]
+        explicit = '-DMODULESDIR="/chosen/trusted-modules"'
+        mismatched = f'-DMODULESDIR="{directory}/native/install/lib/engines-3"'
+        result = subprocess.run(
+            [str(ROOT / '.cargo/musl-cc.sh'), *build_directories, explicit, mismatched],
+            env=environment, check=True, capture_output=True, text=True,
+        )
+        assert result.stdout.splitlines()[-4:] == [
+            '-DENGINESDIR="/infraternal/build-only/engines-3"',
+            '-DMODULESDIR="/infraternal/build-only/ossl-modules"', explicit, mismatched,
+        ], 'build-only module paths depend on the checkout or target directory'
         result = subprocess.run(
             [str(ROOT / '.cargo/musl-cc.sh'), '--target=unowned-target'],
             env=environment, capture_output=True, text=True,
         )
         assert result.returncode != 0 and not result.stdout, target
-        print(f'{target}: exact define removed; other arguments preserved; override refused')
+        print(f'{target}: exact define removed; build directories remapped; explicit paths preserved; target override refused')
 
     source = Path(directory) / 'openssl-source'
     assembly = source / 'crypto/modes/asm/aes-gcm-avx512.pl'
@@ -64,7 +80,9 @@ with tempfile.TemporaryDirectory(prefix='wrapper-test-', dir=SCRATCH) as directo
             text=True,
         )
         assert result.stdout.splitlines() == [
-            'cc', '-target', 'x86_64-linux-musl', '-O3', 'cipher_aes_gcm_hw.c',
+            'cc', '-target', 'x86_64-linux-musl',
+            f'-ffile-prefix-map={ROOT}=/infraternal',
+            f'-ffile-prefix-map={directory}=/build', '-O3', 'cipher_aes_gcm_hw.c',
         ]
     patched = include.read_text()
     assert '#include "cipher_aes_gcm_hw_vaes_avx512.inc"' not in patched

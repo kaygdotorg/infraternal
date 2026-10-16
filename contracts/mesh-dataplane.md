@@ -102,6 +102,17 @@ unchanged. A replacement must prove the enrolled server identity through mutual
 TLS before the live path is retired. Terminal shims, writer identity and retained
 input/output offsets remain authoritative across replacement and fallback.
 
+A live QUIC connection may instead move below the transport, retaining the
+same authenticated connection and streams. The coordinator can lease an exact
+alternative peer address through `NodeChannel::route_peer` before sending its
+configuration. The plugin supplies a trusted routing address and the local UDP
+port reported over the admitted control channel; NAT may have changed the
+enrolled port. The host supplies the existing logical peer tuple and authority. Both sockets preserve the original logical
+peer tuple. Bounded encrypted datagrams may be resent on a path change; QUIC
+packet numbers deduplicate them. Routing never supplies identity or authority.
+The coordinator owns the mapping lease, and disabling it removes that mapping.
+The default capability is unsupported for older hosts and TCP connections.
+
 The server also binds its authenticated QUIC/TLS listener to its assigned mesh
 address. The Mesh coordinator worker owns this listener lease; disabling Mesh
 retires it. Mesh status reports the observed infraternal agent server path and

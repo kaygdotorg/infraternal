@@ -341,3 +341,7 @@ mod tests {
 #[cfg(test)]
 #[path = "node_state_order_tests.rs"]
 mod order_tests;
+
+#[cfg(test)]
+#[path = "node_state_restore_tests.rs"]
+mod restore_tests;

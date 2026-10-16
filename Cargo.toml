@@ -52,7 +52,9 @@ webauthn-rs = { version = "=0.5.5", default-features = false, features = ["condi
 openssl = { version = "0.10", features = ["vendored"] }
 tokio-openssl = "0.6.5"
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rustls = { version = "0.23.45", default-features = false, features = ["std", "ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"] }
+# The native QUIC provider already includes this exact HMAC implementation.
+ring = { version = "0.17.14", default-features = false }
 aes-gcm = "0.10"
 hkdf = "0.12"
 serde_cbor_2 = "0.13"
@@ -111,4 +113,9 @@ opt-level = "s"
 opt-level = "s"
 
 [profile.release.package.infraternal-plugin-host-facts]
+opt-level = "s"
+
+# Keep host orchestration compact; transport, protocol, VT and cryptographic
+# crates retain their speed optimization [5,243].
+[profile.release.package.infraternal-agent]
 opt-level = "s"

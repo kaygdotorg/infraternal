@@ -298,15 +298,16 @@ async fn ephemeral_listener_pair_retries_real_udp_collision_without_leaking_tcp(
     let config = remote_quic::server_config(&server, &[root]).unwrap();
     let mut collision = None;
     let mut attempts = 0;
-    let (endpoint, tcp) = reserve_transports("127.0.0.1:0".parse().unwrap(), &config, |address| {
-        attempts += 1;
-        if attempts == 1 {
-            collision = Some(std::net::UdpSocket::bind(address)?);
-        }
-        Ok(())
-    })
-    .await
-    .unwrap();
+    let (endpoint, tcp, _bindings) =
+        reserve_transports("127.0.0.1:0".parse().unwrap(), &config, |address| {
+            attempts += 1;
+            if attempts == 1 {
+                collision = Some(std::net::UdpSocket::bind(address)?);
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert_eq!(attempts, 2);
     assert_eq!(endpoint.local_addr().unwrap(), tcp.local_addr().unwrap());
     let failed = collision.as_ref().unwrap().local_addr().unwrap();
@@ -392,7 +393,7 @@ mod additional_listeners;
 
 #[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
 #[path = "remote_mesh_namespace_tests.rs"]
-mod mesh_namespace;
+pub(crate) mod mesh_namespace;
 
 // Shared native fixtures prove replacement identity and cancelled delivery.
 async fn adapter_connect_control(
@@ -649,4 +650,179 @@ async fn cancelled_native_read_retains_dequeued_packet() {
         .is_err(),
         "frame delivered only once"
     );
+}
+
+#[test]
+fn remote_peer_routing_capability_does_not_retain_the_host_registry() {
+    let hosts = RemoteHosts::default();
+    let weak = std::sync::Arc::downgrade(&hosts.0);
+    // The registry stores each admitted node channel, including its capability.
+    // A strong handle here would form a cycle and retain actors after shutdown.
+    let capability = hosts.peer_capability();
+    drop(hosts);
+    assert!(
+        weak.upgrade().is_none(),
+        "a node route capability retained its owning host registry"
+    );
+    drop(capability);
+}
+
+#[tokio::test]
+async fn late_native_detach_after_peer_close_keeps_the_control_connection() {
+    let (link, control, _listener, _endpoint, peer) = native_link_pair().await;
+    let binding = remote_quic::negotiate_binding(&peer, &adapter_hello()).unwrap();
+    let attach = Frame::AttachTerm {
+        session_id: &[1; 16],
+        last_out_seq: 0,
+        last_in_seq: 0,
+    };
+    let mut wire = Vec::new();
+    infraternal_protocol::encode_muxed_frame_into(42, &attach, &mut wire).unwrap();
+    link.write(42, &attach, &wire).await.unwrap();
+    let terminal =
+        NativeChannel::terminal(remote_quic::accept_bound(&binding).await.unwrap()).unwrap();
+    assert!(matches!(
+        Receive::default().next(&terminal).await.unwrap().frame,
+        Frame::AttachTerm { .. }
+    ));
+    let close = Frame::Close {
+        code: 1000,
+        reason: "terminal complete",
+    };
+    Transmit::default()
+        .send(&terminal, 42, &close)
+        .await
+        .unwrap();
+    let mut received = bytes::BytesMut::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        link.read(&mut received, &mut [0; 4096]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        infraternal_protocol::decode_muxed_frame(&received)
+            .unwrap()
+            .frame,
+        Frame::Close { .. }
+    ));
+    // The peer's close has already removed this native channel. A consumer
+    // dropping its attachment later still produces the ordinary detach Close.
+    wire.clear();
+    infraternal_protocol::encode_muxed_frame_into(42, &close, &mut wire).unwrap();
+    assert!(
+        link.write(42, &close, &wire).await.is_ok(),
+        "late detach rejected a retired native writer"
+    );
+    wire.clear();
+    infraternal_protocol::encode_muxed_frame_into(1, &close, &mut wire).unwrap();
+    assert!(
+        link.write(1, &close, &wire).await.is_err(),
+        "odd id accepted as native terminal cleanup"
+    );
+    let input = Frame::Input {
+        in_seq: 0,
+        bytes: b"retired input",
+    };
+    wire.clear();
+    infraternal_protocol::encode_muxed_frame_into(42, &input, &mut wire).unwrap();
+    assert!(
+        link.write(42, &input, &wire).await.is_err(),
+        "data recreated a retired writer"
+    );
+    let ping = Frame::Ping {
+        nonce: 73,
+        sent_us: 0,
+    };
+    wire.clear();
+    infraternal_protocol::encode_muxed_frame_into(0, &ping, &mut wire).unwrap();
+    link.write(0, &ping, &wire).await.unwrap();
+    assert!(matches!(
+        Receive::default().next(&control).await.unwrap().frame,
+        Frame::Ping { nonce: 73, .. }
+    ));
+    let response = Frame::Pong {
+        nonce: 73,
+        sent_us: 0,
+    };
+    Transmit::default()
+        .send(&control, 0, &response)
+        .await
+        .unwrap();
+    received.clear();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        link.read(&mut received, &mut [0; 4096]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        infraternal_protocol::decode_muxed_frame(&received)
+            .unwrap()
+            .frame,
+        Frame::Pong { nonce: 73, .. }
+    ));
+    assert!(
+        peer.close_reason().is_none(),
+        "terminal retirement closed the host transport"
+    );
+}
+
+#[tokio::test]
+async fn late_native_detach_after_peer_stop_keeps_the_control_connection() {
+    let (link, control, _listener, _endpoint, peer) = native_link_pair().await;
+    let binding = remote_quic::negotiate_binding(&peer, &adapter_hello()).unwrap();
+    let attach = Frame::AttachTerm {
+        session_id: &[1; 16],
+        last_out_seq: 0,
+        last_in_seq: 0,
+    };
+    let mut wire = Vec::new();
+    infraternal_protocol::encode_muxed_frame_into(42, &attach, &mut wire).unwrap();
+    link.write(42, &attach, &wire).await.unwrap();
+    let mut terminal = remote_quic::accept_bound(&binding).await.unwrap();
+    let mut raw = Vec::new();
+    infraternal_protocol::encode_frame_into(&attach, &mut raw).unwrap();
+    let mut received_attach = vec![0; raw.len()];
+    terminal
+        .receive
+        .read_exact(&mut received_attach)
+        .await
+        .unwrap();
+    assert_eq!(received_attach, raw);
+    let before = link.test_received_stop_sending().unwrap();
+    terminal.receive.stop(0u32.into()).unwrap();
+    // Synchronize with the authenticated engine counter, rather than guessing
+    // when the peer's STOP_SENDING packet reached the server's sender.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while link.test_received_stop_sending().unwrap() == before {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let close = Frame::Close {
+        code: 1000,
+        reason: "detached",
+    };
+    wire.clear();
+    infraternal_protocol::encode_muxed_frame_into(42, &close, &mut wire).unwrap();
+    assert!(
+        link.write(42, &close, &wire).await.is_ok(),
+        "late detach propagated a writer-local STOP_SENDING"
+    );
+    let ping = Frame::Ping {
+        nonce: 89,
+        sent_us: 0,
+    };
+    wire.clear();
+    infraternal_protocol::encode_muxed_frame_into(0, &ping, &mut wire).unwrap();
+    link.write(0, &ping, &wire).await.unwrap();
+    assert!(matches!(
+        Receive::default().next(&control).await.unwrap().frame,
+        Frame::Ping { nonce: 89, .. }
+    ));
+    assert!(peer.close_reason().is_none());
 }

@@ -1,4 +1,6 @@
 //! Separates bounded first-byte probes from TLS work and reserves handshake capacity for previously authenticated sources [40][168], #78.
+#[cfg(all(test, feature = "mesh-transport-proof"))]
+use crate::remote_autoswitch_probe as probe;
 use crate::{
     enrollment::EnrollmentStore, remote_admission::SourceSlots, remote_guard::AuthorityGuard,
     remote_link::RemoteLink, remote_runtime::RemoteHosts,
@@ -90,6 +92,12 @@ pub(crate) async fn quic(
             let Ok(fingerprint) = remote_quic::peer_fingerprint(&connection) else {
                 return;
             };
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            crate::remote_autoswitch_probe::record(
+                crate::remote_autoswitch_probe::Kind::TlsHandshake,
+                connection.remote_address(),
+                0,
+            );
             let Ok(Ok(authority)) = tokio::time::timeout(
                 Duration::from_secs(5),
                 AuthorityGuard::admit(store, fingerprint),
@@ -100,9 +108,29 @@ pub(crate) async fn quic(
             };
             let mut admission =
                 crate::remote_standby::Admission::new(authority, (source_permit, permit), standby);
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            crate::remote_autoswitch_probe::record(
+                crate::remote_autoswitch_probe::Kind::LedgerAdmission,
+                connection.remote_address(),
+                0,
+            );
             let admitted = async {
                 let link =
                     RemoteLink::quic_admitted(connection.clone(), Some(&mut admission)).await?;
+                #[cfg(all(test, feature = "mesh-transport-proof"))]
+                crate::remote_autoswitch_probe::record(
+                    crate::remote_autoswitch_probe::Kind::ControlReady,
+                    connection.remote_address(),
+                    0,
+                );
+                #[cfg(all(test, feature = "mesh-transport-proof"))]
+                if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                    crate::remote_autoswitch_probe::record(
+                        crate::remote_autoswitch_probe::Kind::QuicControlReady,
+                        connection.remote_address(),
+                        0,
+                    );
+                }
                 hosts
                     .admit_observed(admission.authority, link, address)
                     .await?;
@@ -131,6 +159,8 @@ pub(crate) async fn tcp(
     let mut handshakes = JoinSet::new();
     while let Ok((socket, address)) = tcp.accept().await {
         while handshakes.try_join_next().is_some() {}
+        #[cfg(all(test, feature = "mesh-transport-proof"))]
+        let diagnostic_peer = address;
         let address = address.ip().to_canonical();
         let known_source = limits
             .known
@@ -189,6 +219,8 @@ pub(crate) async fn tcp(
             let Ok(connection) = remote_tls::accept(socket, &tls).await else {
                 return;
             };
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            probe::record(probe::Kind::TlsHandshake, diagnostic_peer, 0);
             let Ok(Ok(authority)) = tokio::time::timeout(
                 Duration::from_secs(5),
                 AuthorityGuard::admit(store, connection.peer_fingerprint),
@@ -199,9 +231,19 @@ pub(crate) async fn tcp(
             };
             let mut admission =
                 crate::remote_standby::Admission::new(authority, permits, limits.standby.clone());
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            probe::record(probe::Kind::LedgerAdmission, diagnostic_peer, 0);
             let Ok(link) = RemoteLink::tcp_admitted(connection.channel, Some(&mut admission)).await
             else {
                 return;
+            };
+            #[cfg(all(test, feature = "mesh-transport-proof"))]
+            let link = {
+                probe::record(probe::Kind::ControlReady, diagnostic_peer, 0);
+                if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+                    probe::record(probe::Kind::TcpControlReady, diagnostic_peer, 0);
+                }
+                link.with_diagnostic_peer(diagnostic_peer)
             };
             if hosts
                 .admit_observed(admission.authority, link, address)

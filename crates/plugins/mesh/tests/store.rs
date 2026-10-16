@@ -1,6 +1,6 @@
 //! Public allocation, restart and removed-host regressions against the production SQLite schema [165,166,216].
 #![cfg(feature = "server")]
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_plugin_mesh::{
     api::{MeshApiError, MeshCursor, MeshService},
     dataplane::DefaultPolicy,
@@ -223,4 +223,46 @@ async fn absent_discovery_preserves_the_last_known_endpoint() {
             .endpoint,
         Some(replacement)
     );
+}
+
+/// #201: a mesh disable aborts coordination workers at any await. An attach
+/// dropped after its writer BEGIN was acknowledged must not leave the pooled
+/// connection inside that transaction (the next writer then failed `Storage`).
+#[tokio::test]
+async fn attach_cancelled_at_any_await_leaves_the_store_writable() {
+    use std::{future::Future, task::Poll};
+    for polls in 1..=6 {
+        let pool = pool().await;
+        let store = Store::new(pool.clone());
+        store.attach("server", key(1), None, true).await.unwrap();
+        let mut attach = Box::pin(store.attach(
+            "host",
+            key(2),
+            Some("192.0.2.1:44000".parse().unwrap()),
+            false,
+        ));
+        for _ in 0..polls {
+            if std::future::poll_fn(|cx| Poll::Ready(attach.as_mut().poll(cx).is_ready())).await {
+                break;
+            }
+            // Let the connection worker execute and acknowledge each command.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(attach);
+        let retried = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            store.attach(
+                "host",
+                key(2),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            ),
+        )
+        .await
+        .expect("pooled connection never returned");
+        assert!(
+            retried.is_ok(),
+            "attach after cancellation at poll {polls}: {retried:?}"
+        );
+    }
 }

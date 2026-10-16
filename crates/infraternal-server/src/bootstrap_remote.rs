@@ -408,10 +408,287 @@ async fn canary(actor: &EmbeddedAgent) -> Result<(), Failure> {
     canary_registered(actor, |_| Ok(())).await
 }
 
+/// Opt-in test evidence owns only fixed stage names and bounded public clocks.
+/// Disabled diagnostics allocate no trace, sample no clocks and write no file.
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+struct CanaryStages {
+    start: std::time::Instant,
+    events: Mutex<Vec<serde_json::Value>>,
+}
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+static CANARY_STAGES: Mutex<Option<std::sync::Arc<CanaryStages>>> = Mutex::new(None);
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+impl CanaryStages {
+    fn record(&self, stage: &'static str) {
+        let mut events = self.events.lock().unwrap();
+        if events.len() < 32 {
+            events.push(serde_json::json!({"stage":stage,
+                "elapsed_us":self.start.elapsed().as_micros(),
+                "wall_us":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()}));
+        }
+    }
+}
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+fn canary_stages(begin: bool) -> Option<std::sync::Arc<CanaryStages>> {
+    if std::env::var("ACCEPTANCE_DIAGNOSTICS").ok().as_deref() != Some("canary-return") {
+        return None;
+    }
+    let mut owner = CANARY_STAGES.lock().unwrap();
+    if begin {
+        let stages = std::sync::Arc::new(CanaryStages {
+            start: std::time::Instant::now(),
+            events: Mutex::new(Vec::new()),
+        });
+        stages.record("canary_registered_start");
+        *owner = Some(stages);
+    }
+    owner.clone()
+}
+/// An early return records its exact failed wait boundary without changing the
+/// production `await/map_err` chain. Success suppresses the failure-on-drop stamp.
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+struct CanaryWait {
+    stages: std::sync::Arc<CanaryStages>,
+    failure: Option<&'static str>,
+}
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+impl CanaryWait {
+    fn start(
+        stages: &std::sync::Arc<CanaryStages>,
+        start: &'static str,
+        failure: &'static str,
+    ) -> Self {
+        stages.record(start);
+        Self {
+            stages: stages.clone(),
+            failure: Some(failure),
+        }
+    }
+    fn finish(mut self, success: &'static str) {
+        self.stages.record(success);
+        self.failure = None;
+    }
+}
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+impl Drop for CanaryWait {
+    fn drop(&mut self) {
+        if let Some(failure) = self.failure {
+            self.stages.record(failure);
+        }
+    }
+}
+/// Keep frame classification and observation flags outside the production
+/// canary flow. Helpers retain no payload and exist only in the opt-in fixture.
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+struct CanaryOutputStages {
+    stages: Option<std::sync::Arc<CanaryStages>>,
+    first_data: bool,
+    marker_recorded: bool,
+}
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+impl CanaryOutputStages {
+    fn new() -> Self {
+        Self {
+            stages: canary_stages(false),
+            first_data: false,
+            marker_recorded: false,
+        }
+    }
+    fn wait(&self, start: &'static str, error: &'static str) -> Option<CanaryWait> {
+        self.stages
+            .as_ref()
+            .map(|stages| CanaryWait::start(stages, start, error))
+    }
+    fn finish(wait: Option<CanaryWait>, stage: &'static str) {
+        if let Some(wait) = wait {
+            wait.finish(stage);
+        }
+    }
+    fn send_start(&self, frame: &infraternal_protocol::Frame<'_>) -> Option<CanaryWait> {
+        let input = matches!(frame, infraternal_protocol::Frame::Input { .. });
+        self.wait(
+            if input {
+                "send_input_start"
+            } else {
+                "send_credit_start"
+            },
+            if input {
+                "send_input_return_error"
+            } else {
+                "send_credit_return_error"
+            },
+        )
+    }
+    fn send_complete(wait: Option<CanaryWait>, frame: &infraternal_protocol::Frame<'_>) {
+        Self::finish(
+            wait,
+            if matches!(frame, infraternal_protocol::Frame::Input { .. }) {
+                "send_input_complete"
+            } else {
+                "send_credit_complete"
+            },
+        );
+    }
+    fn data_seen(&mut self, nonempty: bool) {
+        if !self.first_data
+            && nonempty
+            && let Some(stages) = &self.stages
+        {
+            stages.record("first_nonempty_data");
+            self.first_data = true;
+        }
+    }
+    fn marker_confirmed(&mut self, confirmed: bool) {
+        if confirmed
+            && !self.marker_recorded
+            && let Some(stages) = &self.stages
+        {
+            stages.record("marker_confirmed");
+            self.marker_recorded = true;
+        }
+    }
+    fn observe_closed(&self, event: &TerminalOutput) {
+        if matches!(event, TerminalOutput::Closed { .. })
+            && let Some(stages) = &self.stages
+        {
+            stages.record("terminal_closed");
+        }
+    }
+    fn exit_return(&self, success: bool) {
+        if let Some(stages) = &self.stages {
+            stages.record(if success {
+                "exit_return_ok"
+            } else {
+                "exit_return_error"
+            });
+        }
+    }
+}
+
+/// Called by the owned test adapter only after the production canary returns.
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+fn canary_stage_receipt() -> serde_json::Value {
+    let stages = CANARY_STAGES.lock().unwrap().clone();
+    serde_json::json!({"kind":"production_canary_stage_diagnostic","diagnostic_profile":"canary-return",
+        "stage_limit":32,"contains_terminal_contents":false,"ordinary_latency_acceptance":false,
+        "first_data_boundary":"actor-delivered Output or Snapshot",
+        "send_completion_boundary":"attachment handle accepted leg-A frame; not network acknowledgement",
+        "stages":stages.map(|stages|stages.events.lock().unwrap().clone()).unwrap_or_default()})
+}
+
+/// Early-return guards distinguish a failed wait from its successful completion.
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+#[test]
+fn canary_stage_wait_retains_error_success_and_bound() {
+    let stages = std::sync::Arc::new(CanaryStages {
+        start: std::time::Instant::now(),
+        events: Mutex::new(Vec::new()),
+    });
+    drop(CanaryWait::start(
+        &stages,
+        "failed_wait_start",
+        "failed_wait_return",
+    ));
+    CanaryWait::start(&stages, "successful_wait_start", "unexpected_error")
+        .finish("successful_wait_return");
+    let names: Vec<_> = stages
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| event["stage"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "failed_wait_start",
+            "failed_wait_return",
+            "successful_wait_start",
+            "successful_wait_return"
+        ]
+    );
+    for _ in 0..64 {
+        stages.record("bounded_event");
+    }
+    let events = stages.events.lock().unwrap();
+    assert_eq!(events.len(), 32);
+    for event in events.iter() {
+        assert_eq!(event.as_object().unwrap().len(), 3);
+        assert!(event["elapsed_us"].is_number());
+        assert!(event["wall_us"].is_number());
+    }
+}
+
+/// Frame names and first-data flags must stay identical after hook extraction.
+#[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+#[test]
+fn canary_output_stages_classify_frames_and_record_flags_once() {
+    let stages = std::sync::Arc::new(CanaryStages {
+        start: std::time::Instant::now(),
+        events: Mutex::new(Vec::new()),
+    });
+    let mut diagnostic = CanaryOutputStages {
+        stages: Some(stages.clone()),
+        first_data: false,
+        marker_recorded: false,
+    };
+    for frame in [
+        infraternal_protocol::Frame::Credit { bytes: 64 },
+        infraternal_protocol::Frame::Input {
+            in_seq: 0,
+            bytes: b"x",
+        },
+    ] {
+        CanaryOutputStages::send_complete(diagnostic.send_start(&frame), &frame);
+    }
+    diagnostic.data_seen(false);
+    diagnostic.data_seen(true);
+    diagnostic.data_seen(true);
+    diagnostic.marker_confirmed(false);
+    diagnostic.marker_confirmed(true);
+    diagnostic.marker_confirmed(true);
+    let names: Vec<_> = stages
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| event["stage"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "send_credit_start",
+            "send_credit_complete",
+            "send_input_start",
+            "send_input_complete",
+            "first_nonempty_data",
+            "marker_confirmed"
+        ]
+    );
+}
+
 async fn canary_registered(
     actor: &EmbeddedAgent,
     opened: impl FnOnce([u8; 16]) -> Result<(), Failure>,
 ) -> Result<(), Failure> {
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    let stages = canary_stages(true);
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    let canary_wait = stages.as_ref().map(|stages| {
+        CanaryWait::start(
+            stages,
+            "canary_registered_enter",
+            "canary_registered_return_error",
+        )
+    });
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    let open_wait = stages.as_ref().map(|stages| {
+        CanaryWait::start(
+            stages,
+            "open_readiness_start",
+            "open_readiness_return_error",
+        )
+    });
     let session = actor
         .open_readiness(TerminalSize {
             cols: 80,
@@ -421,6 +698,10 @@ async fn canary_registered(
         })
         .await
         .map_err(|_| unavailable().at(InstallStep::Readiness))?;
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    if let Some(wait) = open_wait {
+        wait.finish("open_readiness_return_ok");
+    }
     // Publish ownership before the next await: cancellation cannot lose this id.
     if let Err(error) = opened(session) {
         let _ = finish_canary(actor, session).await;
@@ -433,16 +714,30 @@ async fn canary_registered(
     if result.is_err() {
         let _ = finish_canary(actor, session).await;
     }
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    if let Some(wait) = canary_wait {
+        wait.finish(if result.is_ok() {
+            "canary_registered_return_ok"
+        } else {
+            "canary_registered_return_error"
+        });
+    }
     result.map_err(|error| error.at(InstallStep::Readiness))
 }
 
 async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), Failure> {
     use infraternal_protocol::{Frame, encode_muxed_frame_into};
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    let mut diagnostic = CanaryOutputStages::new();
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    let attach_wait = diagnostic.wait("attach_start", "attach_return_error");
     let (handle, mut output) = actor
         .attach(session, 0, 0, 2)
         .await
         .map_err(|_| unavailable())?
         .split();
+    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+    CanaryOutputStages::finish(attach_wait, "attach_return_ok");
     let marker = "infraternal-ready";
     // The fixed non-login command waits for input so its output cannot precede
     // attachment. No user shell startup or echoed marker supplies readiness.
@@ -455,16 +750,22 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
             bytes: command.as_bytes(),
         },
     ] {
+        #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+        let send_wait = diagnostic.send_start(&frame);
         // Input is leg A (odd); the attachment maps it onto its even leg-B stream.
         encode_muxed_frame_into(1, &frame, &mut wire).map_err(|_| unavailable())?;
         handle
             .send_frame(bytes::Bytes::copy_from_slice(&wire))
             .await
             .map_err(|_| unavailable())?;
+        #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+        CanaryOutputStages::send_complete(send_wait, &frame);
     }
     let mut received = Vec::new();
     let mut confirmed = false;
     while let Some(event) = output.recv().await {
+        #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+        diagnostic.observe_closed(&event);
         match event {
             // A fast first command may be included in the initial faithful
             // repaint; snapshots carry confirmed PTY output just as deltas do.
@@ -472,10 +773,14 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
                 if received.len() + bytes.len() > 65536 {
                     return Err(unavailable());
                 }
+                #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+                diagnostic.data_seen(!bytes.is_empty());
                 received.extend_from_slice(&bytes);
                 confirmed = received
                     .windows(marker.len())
                     .any(|window| window == marker.as_bytes());
+                #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+                diagnostic.marker_confirmed(confirmed);
             }
             TerminalOutput::Event { event_json } => {
                 let notice: serde_json::Value =
@@ -486,6 +791,8 @@ async fn canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
                         .as_str()
                         .and_then(|id| Uuid::parse_str(id).ok())
                         .is_some_and(|id| id.as_bytes() == &session);
+                    #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
+                    diagnostic.exit_return(confirmed && exited && notice["status"] == 0);
                     return if confirmed && exited && notice["status"] == 0 {
                         Ok(())
                     } else {
@@ -577,6 +884,15 @@ mod tests {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/bootstrap_breakit2_tests.rs"
+        ));
+    }
+
+    #[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
+    mod mesh_acceptance {
+        //! Exercises real add-host mesh lifecycles in owned disposable containers [263], #201.
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_mesh_acceptance_tests.rs"
         ));
     }
 

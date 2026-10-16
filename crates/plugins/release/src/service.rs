@@ -84,9 +84,7 @@ impl ReleaseService {
                 .acquire()
                 .await
                 .map_err(|_| "release unavailable")?;
-            let mut tx = self
-                .pool
-                .begin_with("BEGIN IMMEDIATE")
+            let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
                 .await
                 .map_err(|_| "release unavailable")?;
             let enabled: bool = sqlx::query_scalar("SELECT COALESCE((SELECT enabled FROM plugin_settings WHERE role='server' AND plugin='release'),1)")

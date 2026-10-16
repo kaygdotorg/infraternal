@@ -48,3 +48,11 @@ pub const REMOTE_STANDBY: u64 = 1 << 4;
 /// Native standby writers can share durable shim cursors before path activation [215].
 /// Both peers negotiate this bit before using the bounded per-writer cursor request.
 pub const REMOTE_PRIMED_WRITERS: u64 = 1 << 5;
+
+/// Both enrolled peers support bounded encrypted copies over the retained path
+/// below the same native QUIC connection [215,263]. This grants no authority.
+pub const REMOTE_PATH_BACKUP: u64 = 1 << 6;
+
+/// Both native peers support session-bound authenticated physical path responses
+/// independent of encrypted backups. This bit grants no host or writer authority.
+pub const REMOTE_PATH_PROOF: u64 = 1 << 7;

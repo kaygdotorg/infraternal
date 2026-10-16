@@ -1,5 +1,6 @@
 //! Uses owner-selected quinn/BBR and mTLS, binding native streams to durable server writer ids before terminal frames [11][64][130], #78.
 
+pub use crate::remote_path_proof::path_probe_header;
 use crate::remote_tls::Identity;
 use openssl::x509::X509;
 use std::{io, sync::Arc};
@@ -74,19 +75,46 @@ fn identity(
     );
     Ok((vec![certificate], key.into()))
 }
+/// Largest UDP payload a host connection may discover. The connection can move
+/// onto the mesh below QUIC without seeing a path change (`remote_path_socket`),
+/// so its discovered size must also fit the mesh interface: 1380-byte interface
+/// MTU minus the 20-byte IPv4 and 8-byte UDP headers. A larger datagram would
+/// be dropped locally (EMSGSIZE) and stall until black-hole detection.
+pub const PATH_SAFE_UDP_PAYLOAD: u16 = 1352;
+/// Received QUIC DATAGRAM bytes the server buffers per connection. Hosts send
+/// only one-byte liveness probes while on the mesh and nothing reads them;
+/// the bound keeps that buffer at a few entries instead of Quinn's default.
+const DATAGRAM_BUFFER: usize = 64;
+
 fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
     transport_with_liveness(
         incoming_streams,
         std::time::Duration::from_secs(15),
         std::time::Duration::from_secs(60),
+        false,
     )
 }
 fn transport_with_liveness(
     incoming_streams: u32,
     keep_alive: std::time::Duration,
     idle: std::time::Duration,
+    client: bool,
 ) -> std::sync::Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
+    config.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER));
+    if client {
+        // Enrolled ciphertext copies and ACK delay share the backed path's
+        // 30ms response margin. Negotiate 5ms without extending loss detection;
+        // preserve the ordinary immediate ACK on the first reordered packet.
+        let mut frequency = quinn::AckFrequencyConfig::default();
+        frequency.max_ack_delay(Some(std::time::Duration::from_millis(5)));
+        frequency.reordering_threshold(1u32.into());
+        config.ack_frequency_config(Some(frequency));
+    }
+    // Both directions retain their learned MTU across a socket-level mesh move.
+    let mut discovery = quinn::MtuDiscoveryConfig::default();
+    discovery.upper_bound(PATH_SAFE_UDP_PAYLOAD);
+    config.mtu_discovery_config(Some(discovery));
     config.congestion_controller_factory(std::sync::Arc::new(
         quinn::congestion::BbrConfig::default(),
     ));
@@ -191,6 +219,7 @@ pub fn client_config_with_liveness(
             .map_err(|_| denied())?,
         keep_alive,
         idle,
+        true,
     ));
     Ok(config)
 }
@@ -222,10 +251,8 @@ impl PeerFreshness {
         }
         self.observed.elapsed()
     }
-    /// Observe an authenticated signature change for sampled test diagnostics.
-    /// This uses the production observation, avoiding a timing threshold or a
-    /// second implementation of the post-decryption frame selection.
-    #[cfg(feature = "test-support")]
+    /// Observe an authenticated signature change since the previous observation.
+    /// Raw or duplicate UDP cannot satisfy a path proof through elapsed time.
     #[must_use]
     pub fn observe_change(&mut self, connection: &quinn::Connection) -> bool {
         let previous = self.frames;
@@ -278,6 +305,248 @@ impl PeerFreshness {
             }
         }
     }
+}
+/// Bounded public failure evidence for opt-in transport measurements only.
+#[cfg(feature = "test-support")]
+#[derive(Debug, serde::Serialize)]
+pub struct ProbeFailure {
+    /// Public counters and clocks distinguish missing physical replies from
+    /// authentication/driver progress. No packet or terminal contents survive.
+    pub mesh_reply_after_first_send: bool,
+    pub first_send_age_us: u128,
+    pub flush_age_us: u128,
+    pub authenticated_silence_us: u128,
+    pub authenticated_progress_not_observed: bool,
+    pub constructed_datagrams_before: u64,
+    pub constructed_datagrams_after: u64,
+    pub rtt_us: u128,
+}
+#[cfg(feature = "test-support")]
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+#[cfg(feature = "test-support")]
+impl std::error::Error for ProbeFailure {}
+
+/// Watch a path by asking for acknowledgements every `interval`. It is
+/// interrupted when a probe sees no newly authenticated frame within the
+/// current RTT plus `margin` (the server's ACK delay and scheduling jitter).
+/// Detection therefore follows the first unanswered probe, not a fixed silence
+/// window measured from the last packet. One timer and one probe per interval
+/// are the whole idle cost; cancellation stops both.
+/// # Errors
+/// Returns `TimedOut` on interruption or `BrokenPipe` when the connection closes.
+pub async fn path_interrupted(
+    connection: &quinn::Connection,
+    path: &crate::remote_path_socket::PathSocket,
+    interval: std::time::Duration,
+    margin: std::time::Duration,
+) -> io::Result<()> {
+    if matches!(path.path(), crate::remote_path_socket::Path::Mesh(address) if address != path.logical())
+    {
+        return authenticated_path_interrupted(connection, path, interval, margin).await;
+    }
+    // One physical tuple needs only the existing adaptive QUIC health guard.
+    // Keep its ordinary 100 ms probe cadence at the design point rather than
+    // flooding the shared receiver with the alias path's low-latency probes.
+    let mut freshness = PeerFreshness::new(connection);
+    let mut interrupted = std::pin::pin!(freshness.interrupted_adaptive(connection));
+    let mut probes = tokio::time::interval(std::time::Duration::from_millis(100));
+    probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = interrupted.as_mut() => return result,
+            _ = probes.tick() => probe_liveness(connection),
+        }
+    }
+}
+
+// Kept for the one-tuple case and emission regressions: authenticated counters
+// are path-specific only when no distinct physical response can be normalized.
+#[cfg(test)]
+pub(crate) async fn quic_path_interrupted(
+    connection: &quinn::Connection,
+    path: &crate::remote_path_socket::PathSocket,
+    interval: std::time::Duration,
+    margin: std::time::Duration,
+) -> io::Result<()> {
+    let mut freshness = PeerFreshness::new(connection);
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut closed = std::pin::pin!(connection.closed());
+    // The endpoint may queue a probe while its socket is not writable. Only
+    // a successful encrypted socket send starts the network-response clock.
+    let mut queued: Option<crate::remote_path_socket::MeshTransmission<'_>> = None;
+    let mut datagrams_before = 0;
+    let mut pending: Option<(tokio::time::Instant, tokio::time::Instant)> = None;
+    loop {
+        let deadline = pending.map(|(_, flushed)| flushed + connection.rtt() + margin);
+        tokio::select! {
+            _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
+            _ = ticks.tick() => {
+                let stats = connection.stats();
+                let silence = freshness.recorded_silence(authenticated_signature(stats.frame_rx));
+                if pending.is_some_and(|(sent, _)| path.heard_since(sent.into_std()) && silence < sent.elapsed()) {
+                    pending = None;
+                }
+                if pending.is_none() && queued.is_none() {
+                    datagrams_before = stats.frame_tx.datagram;
+                    queued = Some(path.mesh_transmitted_after(std::time::Instant::now())?);
+                }
+                probe_liveness(connection);
+            }
+            sent = async {
+                queued.as_ref().ok_or(io::ErrorKind::Interrupted)?.probe_sent(connection, datagrams_before).await
+            }, if queued.is_some() => {
+                let (first, flushed) = sent?;
+                pending = Some((first.into(), flushed.into()));
+                queued = None;
+            }
+            () = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
+                let Some((sent, _)) = pending else { continue };
+                // Let an already-ready endpoint receive authenticate its ACK
+                // before deciding a timer that became ready in the same pass.
+                tokio::task::yield_now().await;
+                // Authenticated enrolled copies preserve data but cannot prove
+                // the mesh. Require a response from its physical tuple too.
+                if !path.heard_since(sent.into_std()) || freshness.silence(connection) >= sent.elapsed() {
+                    #[cfg(feature = "test-support")]
+                    {
+                        let stats = connection.stats();
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, ProbeFailure {
+                            mesh_reply_after_first_send: path.heard_since(sent.into_std()),
+                            first_send_age_us: sent.elapsed().as_micros(),
+                            flush_age_us: pending.map_or(0, |(_, flushed)| flushed.elapsed().as_micros()),
+                            authenticated_silence_us: freshness.observed.elapsed().as_micros(),
+                            authenticated_progress_not_observed: authenticated_signature(stats.frame_rx) != freshness.frames,
+                            constructed_datagrams_before: datagrams_before,
+                            constructed_datagrams_after: stats.frame_tx.datagram,
+                            rtt_us: stats.path.rtt.as_micros(),
+                        }));
+                    }
+                    #[cfg(not(feature = "test-support"))]
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                pending = None;
+            }
+        }
+    }
+}
+
+/// A distinct mesh tuple must answer its own session-authenticated challenge.
+/// Enrolled stream progress, raw mesh UDP and old replies are all insufficient.
+async fn authenticated_path_interrupted(
+    connection: &quinn::Connection,
+    path: &crate::remote_path_socket::PathSocket,
+    interval: std::time::Duration,
+    margin: std::time::Duration,
+) -> io::Result<()> {
+    let _epoch = path.proof_epoch(connection)?;
+    // Independent sessions must not repeatedly fill one server receive queue
+    // together. Spread their first probes over 15 ms and subsequent probes
+    // over at most 5 ms; the authenticated response deadline is unchanged.
+    // The existing public UDP port spreads scheduling only; it never authenticates a path.
+    let mut phase = u64::from(quinn::AsyncUdpSocket::local_addr(path)?.port());
+    let mut skew = || {
+        phase ^= phase << 13;
+        phase ^= phase >> 7;
+        phase ^= phase << 17;
+        std::time::Duration::from_micros(phase % 5001)
+    };
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + skew() * 3, interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending: Option<(
+        std::time::Instant,
+        tokio::time::Instant,
+        std::time::Duration,
+    )> = None;
+    let mut local_delay = std::time::Duration::ZERO;
+    let mut closed = std::pin::pin!(connection.closed());
+    loop {
+        tokio::select! {
+            _ = closed.as_mut() => return Err(io::ErrorKind::BrokenPipe.into()),
+            expected = ticks.tick() => {
+                // Scheduling a local task late is not evidence that the remote
+                // path failed. Keep the measured delay, decaying after healthy
+                // scheduling, and combine it with this tuple's authenticated RTT.
+                local_delay = (local_delay * 7 / 8)
+                    .max(expected.elapsed().saturating_mul(4))
+                    .min(std::time::Duration::from_millis(200));
+                // A slower requested cadence must leave room for a response
+                // and a retry instead of silently becoming a faster poller.
+                let measured = path.proof_allowance(connection.rtt(), margin)
+                    .max(interval.saturating_mul(2)) + local_delay;
+                // This response supplies its own authenticated RTT sample.
+                // Ordinary QUIC keepalive remains owned by the connection;
+                // sending a second probe here would duplicate every idle poll.
+                if pending.is_some_and(|(sent, _, _)| path.mesh_authenticated_since(sent)) {
+                    pending = None;
+                }
+                // A response already waiting on observed load keeps that
+                // allowance. Decaying scheduler jitter must not move its deadline
+                // earlier; only an answered challenge starts a smaller window.
+                let allowance = pending.as_mut().map_or(measured, |(_, _, budget)| {
+                    *budget = (*budget).max(measured);
+                    *budget
+                });
+                if pending.is_some_and(|(_, sent, _)| sent.elapsed() >= allowance) {
+                    #[cfg(feature = "test-support")]
+                    eprintln!("path_proof_timeout pending_us={} allowance_us={} local_delay_us={} quic_rtt_us={}",
+                        pending.map_or(0, |(_, sent, _)| sent.elapsed().as_micros()),
+                        allowance.as_micros(), local_delay.as_micros(), connection.rtt().as_micros());
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                // After this tuple's measured RTT/variation has elapsed, spend
+                // the remaining margin retrying brief receive-queue loss. Keep
+                // the original sequence and first-send deadline on every retry.
+                let retry = pending.is_some_and(|(_, sent, _)| sent.elapsed() >= allowance.saturating_sub(margin));
+                // A repeated challenge retains its sequence and first physical
+                // clock, so retransmission cannot postpone a failed path forever.
+                match path.send_proof() {
+                    Ok(sent) if pending.is_none() => {
+                        // Physical observations use one monotonic clock across
+                        // endpoint runtimes; the owned async deadline also follows
+                        // virtual time in functional cancellation tests.
+                        let now = tokio::time::Instant::now();
+                        pending = Some((sent, now.checked_sub(sent.elapsed()).unwrap_or(now), allowance));
+                    },
+                    Ok(_) => {},
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                    Err(error) => return Err(error),
+                }
+                // Busy paths amortize probes over their measured response budget;
+                // a quiet LAN keeps its original interval and byte-delivery gains.
+                // Space ordinary probes by half the response allowance to reduce
+                // shared receive pressure; short retries alone spend its tail.
+                let cadence = if retry {
+                    interval.min(std::time::Duration::from_millis(5))
+                } else {
+                    interval.max((allowance / 2).min(std::time::Duration::from_millis(100)))
+                };
+                let spread = skew();
+                let mut next = cadence + if retry { spread.min(std::time::Duration::from_millis(1)) } else { spread };
+                if let Some((_, sent, _)) = pending {
+                    // An adaptive ordinary interval must not jump over the
+                    // response margin. Wake at its start, then retry within it;
+                    // neither phase spreading nor retries may skip the deadline.
+                    let boundary = if retry { allowance } else { allowance.saturating_sub(margin).max(interval) };
+                    next = next.min(boundary.saturating_sub(sent.elapsed()));
+                }
+                ticks.reset_after(next);
+            }
+        }
+    }
+}
+
+/// Ask the server for an acknowledgement: one ack-eliciting, one-byte QUIC
+/// DATAGRAM. Its ACK is authenticated traffic that keeps [`PeerFreshness`]
+/// current on an otherwise idle path; the payload carries no meaning.
+pub fn probe_liveness(connection: &quinn::Connection) {
+    // An unsupported or full datagram queue only delays detection; QUIC's own
+    // keepalive and idle timeout still bound the connection.
+    let _ = connection.send_datagram(bytes::Bytes::from_static(&[0]));
 }
 fn authenticated_frames(connection: &quinn::Connection) -> [u64; 24] {
     authenticated_signature(connection.stats().frame_rx)
@@ -445,6 +714,7 @@ mod tests {
             1,
             std::time::Duration::from_millis(50),
             std::time::Duration::from_secs(5),
+            false,
         );
         let mut server_config =
             server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();
@@ -732,3 +1002,15 @@ mod tests {
         assert!(client_config(&identity, roots).is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "remote_probe_tests.rs"]
+mod probe_tests;
+
+#[cfg(test)]
+#[path = "remote_mtu_tests.rs"]
+mod mtu_tests;
+
+#[cfg(test)]
+#[path = "remote_design_scale_review.rs"]
+mod design_scale_review;

@@ -143,25 +143,23 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,594,856 bytes |
+  | `x86_64-unknown-linux-musl` | 21,320,400 bytes |
+  | `aarch64-unknown-linux-musl` | 19,513,440 bytes |
 
-  These are the #198 measurements of the full-feature release recipe after
-  unused native APIs, duplicated action metadata construction, OpenSSL's
-  unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
-  cut (D243, D264, #198). The x86_64 build retains AES-NI and generic AES-GCM
-  dispatch, checked against a NIST vector
-  using the shipping static crypto archive.
-  The release and host-facts plugins use size optimization; terminal and mesh
-  data paths retain speed optimization (D243).
+  These ceilings pin the normalized combined-source artifacts measured on #201.
+  A fresh checkout and empty target reproduce the x86 artifact byte for byte.
+  The recipe retains the approved native AES-GCM fallback and size optimization
+  for release and host-facts plugins; terminal, mesh and cryptographic
+  dependencies retain speed optimization (D243, D264, D272). Combined-source
+  size and runtime receipts are required before the final downward ratchet.
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later
   regrowth. Update both targets and this table with evidence on the issue.
   An intentional increase needs a justified, target-specific measured owner
   exception under D243. The gate never updates a ceiling automatically.
-  Attribution, retained feature costs and runtime tradeoffs for #198 are
-  recorded on that issue.
+  Attribution, retained feature costs and runtime tradeoffs are recorded
+  on #198 and [#201](https://git.kayg.org/kayg/infraternal/issues/201).
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.

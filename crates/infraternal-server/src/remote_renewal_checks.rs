@@ -1,4 +1,9 @@
 //! Defensive renewal publication regressions using signed host leaves and the real CA, #78.
+//!
+//! Successful leaves start one second before the fixture clock: these cases
+//! exercise key, purpose, lifetime and publication rather than the boundary
+//! between independent wall-clock reads. The explicit future `notBefore` case
+//! still starts almost a minute in the future.
 use super::*;
 use infraternal_agent::remote_renewal::{
     CertificatePublisher, CertificateUpdate, CsrProof, RenewalIdentity,
@@ -29,7 +34,7 @@ fn renewal_validates_host_dates_json_and_durable_publication_before_ack() {
     let json = current.action("transport.csr", b"{}").unwrap();
     let proof: CsrProof = serde_json::from_slice(&json).unwrap();
     let request = crate::csr::ValidatedCsr::parse(&proof.csr_der).unwrap();
-    let epoch = now().unwrap();
+    let epoch = now().unwrap() - 1;
     let renewed = signer
         .sign_host(Uuid::from_u128(42), &request, epoch + 60)
         .unwrap();
@@ -117,7 +122,7 @@ fn renewal_refuses_same_issuer_wrong_key_purpose_or_lifetime_before_publication(
     .unwrap();
     let proof: CsrProof = serde_json::from_slice(&proof).unwrap();
     let csr = crate::csr::ValidatedCsr::parse(&proof.csr_der).unwrap();
-    let epoch = now().unwrap();
+    let epoch = now().unwrap() - 1;
     let previous = signer
         .sign_host(Uuid::from_u128(42), &csr, epoch - 60)
         .unwrap();

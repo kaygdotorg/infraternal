@@ -144,9 +144,10 @@ enum Connected {
     Tcp(remote_tls::Connection),
 }
 
-// A proven TCP decoder and a native QUIC decoder retain their buffered frames.
+// One concrete remote control adapter shares daemon and relay dispatch. TCP
+// stays raw; QUIC retains its negotiated greeting and already-buffered decoder.
 enum ControlChannel<'a> {
-    Quic(NativeChannel),
+    Quic(&'a PrefixedControl),
     Tcp(&'a crate::remote_tls::TcpTls),
 }
 impl Channel for ControlChannel<'_> {
@@ -184,13 +185,13 @@ impl Channel for ControlChannel<'_> {
 
 // Replay the negotiated Hello into common dispatch while retaining the same
 // decoder: its first read may also contain the following control frame.
-struct PrefixedControl<'a> {
-    channel: ControlChannel<'a>,
+struct PrefixedControl {
+    channel: NativeChannel,
     prefix: Mutex<Vec<u8>>,
     sent_greeting: Mutex<Option<Vec<u8>>>,
     receive: Mutex<Receive>,
 }
-impl Channel for PrefixedControl<'_> {
+impl Channel for PrefixedControl {
     fn native_stream_id(&self) -> Option<u32> {
         self.channel.native_stream_id()
     }
@@ -205,16 +206,7 @@ impl Channel for PrefixedControl<'_> {
         if prefix.is_empty() {
             let mut receive = self.receive.lock().await;
             let frame = receive.next(&self.channel).await?;
-            if self.channel.native_stream_id().is_some() {
-                encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
-            } else {
-                infraternal_protocol::encode_muxed_frame_into(
-                    frame.stream_id,
-                    &frame.frame,
-                    &mut prefix,
-                )
-                .map_err(io::Error::other)?;
-            }
+            encode_frame_into(&frame.frame, &mut prefix).map_err(io::Error::other)?;
         }
         let count = target.len().min(prefix.len());
         target[..count].copy_from_slice(&prefix[..count]);
@@ -251,24 +243,15 @@ async fn quic_connect(
 fn client_greeting(renewal: bool) -> infraternal_protocol::Frame<'static> {
     infraternal_protocol::Frame::Hello {
         version: 1,
-        caps: remote_quic::REMOTE_WRITER_BINDING
-            | infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
-            | infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS
-            | if renewal {
-                crate::remote_renewal::LIVE_RENEWAL
-            } else {
-                0
-            },
+        caps: daemon::hello_capabilities(true, renewal),
         client_info: "infraternal agent",
     }
 }
 
-/// A proved stream retains its decoder and an optional parked server greeting.
+/// A proved native stream retains the decoder that consumed its nonce reply.
 struct ProvedControl {
     control: NativeChannel,
     receive: Receive,
-    greeting: Option<Vec<u8>>,
-    primed: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -279,15 +262,12 @@ async fn quic_session_on(
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     plugins: crate::plugin_control::Registry,
     proof: Option<ProvedControl>,
-    standby: &tokio::sync::watch::Sender<u64>,
-    external_native: bool,
+    publish: impl FnOnce(u64),
 ) -> io::Result<()> {
     let result = async {
         let ProvedControl {
             control,
             receive: mut rx,
-            greeting: cached,
-            primed,
         } = if let Some(proof) = proof {
             proof
         } else {
@@ -295,54 +275,33 @@ async fn quic_session_on(
             ProvedControl {
                 control: NativeChannel::control(send, receive)?,
                 receive: Receive::default(),
-                greeting: None,
-                primed: false,
             }
         };
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
         let greeting = client_greeting(renewal.is_some());
-        if primed {
-            // Priming already sent Hello. Only this negotiated activation may
-            // replace the server's actor and release the parked identity slot.
-            tx.send(
-                &control,
-                0,
-                &infraternal_protocol::Frame::Call {
-                    call_id: 0,
-                    action_id: "transport.activate",
-                    input_json: b"{}",
-                },
-            )
-            .await?;
-        } else {
-            tx.send(&control, 0, &greeting).await?;
-        }
+        tx.send(&control, 0, &greeting).await?;
         let mut sent_greeting = Vec::new();
         encode_frame_into(&greeting, &mut sent_greeting).map_err(io::Error::other)?;
-        let prefix = if let Some(cached) = cached {
-            cached
-        } else {
-            let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control))
-                .await
-                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-            let mut encoded = Vec::new();
-            encode_frame_into(&hello.frame, &mut encoded).map_err(io::Error::other)?;
-            encoded
-        };
+        let hello = tokio::time::timeout(Duration::from_secs(5), rx.next(&control))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        let mut prefix = Vec::new();
+        encode_frame_into(&hello.frame, &mut prefix).map_err(io::Error::other)?;
         let hello = infraternal_protocol::decode_frame(&prefix).map_err(io::Error::other)?;
         let binding = remote_quic::negotiate_binding(&connection, &hello.frame)?;
         let infraternal_protocol::Frame::Hello { caps, .. } = hello.frame else {
             return Err(io::ErrorKind::InvalidData.into());
         };
-        standby.send_replace(caps);
+        publish(caps);
         let control = PrefixedControl {
-            channel: ControlChannel::Quic(control),
+            channel: control,
             prefix: Mutex::new(prefix),
             sent_greeting: Mutex::new(Some(sent_greeting)),
             receive: Mutex::new(rx),
         };
+        let control = ControlChannel::Quic(&control);
         let dispatch = daemon::run_authenticated_with_plugins(
             &control,
             state.clone(),
@@ -350,18 +309,11 @@ async fn quic_session_on(
             renewal,
             plugins,
         );
-        let native = async {
-            if external_native {
-                std::future::pending::<io::Result<()>>().await
-            } else {
-                primed_native::serve(
-                    &binding,
-                    state,
-                    caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0,
-                )
-                .await
-            }
-        };
+        let native = primed_native::serve(
+            &binding,
+            state,
+            caps & infraternal_plugin_api::channel::REMOTE_PRIMED_WRITERS != 0,
+        );
         tokio::select! {
             result = dispatch => result,
             result = native => result,

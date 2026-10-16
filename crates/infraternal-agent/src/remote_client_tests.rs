@@ -3,6 +3,20 @@ use super::*;
 use crate::remote_tls::tests::{leaf, root};
 use infraternal_protocol::Frame;
 
+/// Reserve both fixture transports before publishing their common address.
+/// The protocols allocate ports independently, so either reservation can collide.
+async fn reserve_transport_pair() -> (tokio::net::TcpListener, tokio::net::UdpSocket) {
+    for _ in 0..16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        match tokio::net::UdpSocket::bind(listener.local_addr().unwrap()).await {
+            Ok(socket) => return (listener, socket),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("cannot reserve the fixture UDP socket: {error}"),
+        }
+    }
+    panic!("fixture transport reservations collided repeatedly");
+}
+
 struct StateDirectory(PathBuf);
 impl StateDirectory {
     fn new() -> Self {
@@ -89,7 +103,7 @@ async fn prefixed_control_keeps_coalesced_suffix_and_suppresses_only_its_greetin
     let mut prefix = Vec::new();
     encode_frame_into(&hello.frame, &mut prefix).unwrap();
     let control = PrefixedControl {
-        channel: ControlChannel::Quic(channel),
+        channel,
         prefix: Mutex::new(prefix),
         sent_greeting: Mutex::new(Some(greeting_bytes.clone())),
         receive: Mutex::new(receive),
@@ -162,9 +176,10 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
         "127.0.0.1:0".parse().unwrap(),
     )
     .unwrap();
+    let (tcp, socket) = reserve_transport_pair().await;
+    let socket = std::sync::Arc::new(socket);
     let (proxy_address, proxy) =
-        crate::transport_diagnostics::udp_proxy(server.local_addr().unwrap()).await;
-    let tcp = tokio::net::TcpListener::bind(proxy_address).await.unwrap();
+        crate::transport_diagnostics::udp_proxy_on(socket, server.local_addr().unwrap());
     let identity = RemoteIdentity {
         identity: client_identity,
         roots: vec![ca.certificate],
@@ -363,6 +378,7 @@ async fn delayed_proxy_keeps_replies_bound_to_the_original_udp_client() {
 }
 
 #[tokio::test]
+#[ignore = "Physical packet-spacing budget: run on the perf VM under the shared benchmark lock."]
 async fn tcp_proxy_preserves_spacing_between_packets_already_in_flight() {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -534,7 +550,7 @@ async fn unavailable_local_credentials_retry_without_creating_state() {
 mod idle_timers;
 
 #[tokio::test]
-async fn proven_tcp_decoder_preserves_mux_envelopes_and_buffered_suffix() {
+async fn raw_tcp_control_preserves_mux_envelopes_and_buffered_suffix() {
     let ca = root();
     let server = leaf(&ca, true);
     let client = leaf(&ca, false);
@@ -564,19 +580,10 @@ async fn proven_tcp_decoder_preserves_mux_envelopes_and_buffered_suffix() {
         combined.extend_from_slice(&frame);
     }
     peer.channel.write(&combined).await.unwrap();
+    let control = ControlChannel::Tcp(&connection.channel);
     let mut receive = Receive::default();
-    assert_eq!(
-        receive.next(&connection.channel).await.unwrap().stream_id,
-        0
-    );
-    let control = PrefixedControl {
-        channel: ControlChannel::Tcp(&connection.channel),
-        prefix: Mutex::new(Vec::new()),
-        sent_greeting: Mutex::new(None),
-        receive: Mutex::new(receive),
-    };
-    let mut consumer = Receive::default();
-    let frame = consumer.next(&control).await.unwrap();
+    assert_eq!(receive.next(&control).await.unwrap().stream_id, 0);
+    let frame = receive.next(&control).await.unwrap();
     assert_eq!(frame.stream_id, 7);
     assert_eq!(
         frame.frame,
@@ -593,14 +600,18 @@ async fn server_path_capability_is_advertised_on_native_and_fallback_transports(
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
     for native in [true, false] {
-        let server = quinn::Endpoint::server(
-            remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
-                .unwrap(),
-            "127.0.0.1:0".parse().unwrap(),
+        let (listener, socket) = reserve_transport_pair().await;
+        let address = listener.local_addr().unwrap();
+        let server = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(
+                remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+                    .unwrap(),
+            ),
+            socket.into_std().unwrap(),
+            std::sync::Arc::new(quinn::TokioRuntime),
         )
         .unwrap();
-        let address = server.local_addr().unwrap();
-        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
         let tls =
             remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
                 .unwrap();

@@ -364,6 +364,108 @@ writer. Malformed requests retire their own stream. Owned supervisors and
 preparation/write tasks are cancelled on link retirement, component down or
 actor shutdown; the parked transport grants no additional session authority.
 
+### Native leg-B encrypted path copies (#201, D215, D263)
+
+`REMOTE_PATH_BACKUP` is additive Hello bit 6, advertised by native peers.
+It permits bounded copies of existing encrypted QUIC datagrams to the retained
+enrolled path while that same connection uses a plugin-proposed mesh path.
+The client enables copies only after the authenticated server Hello announces
+bit 6; the server enables a trusted peer lease only after the admitted client
+Hello announces it. Legacy peers keep their previous behavior. Cached native
+standby Hello also announces support. Frame layouts and protocol version remain
+unchanged, and no capability replaces mTLS, ledger admission or writer binding.
+
+The transport reuses its existing recent history, bounded to 64 datagrams and
+64 KiB of ciphertext per peer. One clock belongs to each endpoint socket,
+never a detached task. Ordinary mesh-to-enrolled copies each become eligible
+10 ms after their original transmission; another entry's earlier deadline
+must not copy younger entries early. Each endpoint receive poll permits at
+most 32 copy send calls, shared across peers. A segmented send call can carry
+multiple UDP datagrams. Due work beyond this budget remains pending for the
+next poll. Successful copies are not scheduled again; socket backpressure
+retains pending work within the same bounded history.
+
+Returning to enrolled makes retained mesh originals eligible for bounded
+recovery. A completed return consumes its original once, including when the
+send budget is exhausted; a later route change must not re-arm completed
+returns. Pending returns retain their backpressure deadlines. Withdrawing
+bit 6 cancels negotiated copies while preserving pending legacy enrolled
+recovery. Retiring a peer lease cancels its remaining work; retiring the last
+lease releases the clock and cache.
+
+#### Bounded dual reply (#201)
+
+The additive clarification proposed on #201 is implemented in the remote
+plugin; release acceptance remains pending on that issue. It changes no frame
+layout, version, capability bit or authority.
+
+For negotiated bit 6 peers, an enrolled primary reply remains immediate.
+The same encrypted datagram may additionally be sent to the admitted mesh
+alternative without changing that primary route. This alternative is eligible
+immediately, rather than adding a second 10 ms delay; ordinary mesh-to-enrolled
+copies retain their individual 10 ms deadlines. Both kinds of copy share the
+existing bounded history, endpoint clock and 32-send budget, within the same
+64-datagram / 64-KiB limits. Redundant alternative admission must not evict or
+displace pending enrolled-return work; backpressure must not discard that
+recovery work.
+
+Unknown mesh coordinates remain dormant. A withdrawn capability cancels
+negotiated alternatives while preserving pending legacy enrolled returns.
+Component removal or lease retirement cancels its alternative work, and a
+retired lease must never select a replacement socket. Alternative replies
+create no new connection, stream, writer or admission authority.
+
+Receivers deliver every datagram to QUIC for authentication and packet-number
+deduplication. A bounded ciphertext-suffix cache filters recent duplicate
+routing hints, including differently batched GRO input. A suffix collision
+keeps a route hint rather than admitting or dropping data. A duplicate mesh
+original received after its enrolled copy must not promote the primary route;
+the alternative reply does not change this rule. The mesh liveness
+probe requires that physical path's own session-authenticated response.
+Authenticated enrolled copies and unrelated mesh UDP cannot jointly prove mesh health.
+
+#### Session-bound physical path proof (#201)
+
+`REMOTE_PATH_PROOF` is additive native Hello bit 7. Both regular and parked
+native greetings advertise it. A client keeps an enrolled path in place until
+the server advertises support; the server allocates responder state only after
+admitting a client that advertises the bit. Withdrawal retires mesh selection.
+
+The native UDP socket accepts a fixed 45-byte probe envelope alongside QUIC:
+`0x80 "ip1"`, direction byte (`0` request, `1` response), big-endian `u64`
+sequence and a 32-byte HMAC-SHA256 tag over the preceding 13 bytes. In QUIC
+long-header interpretation, prefix plus direction selects unsupported versions
+`0x69703100` or `0x69703101`; valid negotiated QUIC packets cannot share it. The existing
+QUIC session exports 32 key bytes with label `EXPORTER-infraternal-path-v1`
+and empty context. Exporter bytes are cleared after native key import.
+This adds no terminal frame, protocol version, connection, writer or authority.
+
+A server responder is registered only for an admitted live QUIC connection.
+Its key lease is independent of mesh routing leases, so enrolled proofs keep
+working after mesh disable. Alternative tuples resolve only through admitted
+peer leases. Replies use the actual receiving socket and local address, never
+a replacement socket or a UDP-learned arbitrary destination. Connection/key
+retirement removes the responder; an older lease cannot erase its replacement.
+Up to four admitted connection keys may share an exact UDP tuple during queued
+replacement; cancelling any one removes only that key. The registry retains at
+most 10,000 exact tuples, matching native host admission's existing bound.
+
+A client accepts only the outstanding sequence, response direction, valid MAC
+and exact probed physical source tuple. Each new challenge advances the socket's
+sequence; retransmission preserves both sequence and first successful-send
+clock. Replies cannot answer another direction or session, and an accepted
+reply cannot refresh health twice. Backup copying never copies these probes.
+Datagram aggregation preserves each independent envelope. Unknown formats,
+wrong lengths and invalid authentication do not advance health.
+
+The response allowance follows this physical path's authenticated smoothed RTT
+and variation, with its configured scheduling margin and measured local timer
+lateness. A single-tuple connection reuses ordinary adaptive QUIC health;
+connection-wide counters are insufficient when distinct tuples are normalized.
+Probe work is owned by the selected path's existing future and stops when it
+is cancelled. Older peers that cannot answer keep enrolled service rather than
+satisfying a mesh proof with ambiguous connection-wide progress.
+
 ## 9. Route liveness (D265, #199)
 
 Use the existing `Ping`/`Pong` layouts in both directions. With active terminal

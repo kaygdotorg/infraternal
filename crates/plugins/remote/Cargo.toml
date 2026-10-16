@@ -7,12 +7,14 @@ license.workspace = true
 
 [features]
 default = []
-transport = ["dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
-agent = ["transport", "dep:infraternal-shim", "dep:nix"]
-server = ["transport", "dep:bytes", "infraternal-plugin-api/socket-host"]
+transport = ["dep:ring", "dep:zeroize", "dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
+agent = ["transport", "dep:infraternal-shim", "dep:nix", "nix/net"]
+server = ["transport", "infraternal-plugin-api/socket-host"]
 test-support = ["transport"]
 
 [dependencies]
+ring = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 infraternal-shim = { workspace = true, optional = true }
 nix = { workspace = true, optional = true, features = ["net"] }
@@ -25,6 +27,10 @@ rustls = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Virtual clocks test probe scheduling without measuring host wall time.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

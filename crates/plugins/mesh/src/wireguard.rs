@@ -37,6 +37,10 @@ pub struct Counters {
     #[serde(default)]
     pub persistent_keepalive_secs: u16,
     pub handshake_secs: u64,
+    /// Measurement-only precision; neither the shipping layout nor JSON changes.
+    #[cfg(feature = "test-support")]
+    #[serde(skip)]
+    pub handshake_nanos: u32,
     pub received_bytes: u64,
     pub sent_bytes: u64,
 }
@@ -469,6 +473,8 @@ impl Device {
                     let mut key = None;
                     let mut keepalive = None;
                     let mut handshake = None;
+                    #[cfg(feature = "test-support")]
+                    let mut nanos = None;
                     let mut received = None;
                     let mut sent = None;
                     for field in netlink::attributes(peer.payload)? {
@@ -478,7 +484,13 @@ impl Device {
                                     field.payload.try_into().map_err(io::Error::other)?,
                                 ));
                             }
-                            6 => handshake = Some(scalar64(field.payload)?),
+                            6 => {
+                                handshake = Some(scalar64(field.payload)?);
+                                #[cfg(feature = "test-support")]
+                                {
+                                    nanos = Some(handshake_nanos(field.payload)?);
+                                }
+                            }
                             5 => {
                                 keepalive = Some(u16::from_ne_bytes(
                                     field.payload.try_into().map_err(io::Error::other)?,
@@ -499,6 +511,10 @@ impl Device {
                         }
                         if let Some(value) = handshake {
                             stats.handshake_secs = value;
+                        }
+                        #[cfg(feature = "test-support")]
+                        if let Some(value) = nanos {
+                            stats.handshake_nanos = value;
                         }
                         if let Some(value) = received {
                             stats.received_bytes = value;
@@ -521,6 +537,44 @@ fn scalar64(payload: &[u8]) -> io::Result<u64> {
             .try_into()
             .map_err(io::Error::other)?,
     ))
+}
+
+/// Kernel timespec64 has two native-endian 64-bit fields. Precision belongs to
+/// the opt-in measurement build, so collecting it cannot enlarge shipped nodes.
+#[cfg(feature = "test-support")]
+fn handshake_nanos(payload: &[u8]) -> io::Result<u32> {
+    if payload.len() != 16 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let nanos = u32::try_from(scalar64(&payload[8..])?).map_err(|_| io::ErrorKind::InvalidData)?;
+    if nanos >= 1_000_000_000 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(nanos)
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod timestamp_tests {
+    //! Checks kernel handshake timestamp precision without accepting truncated or invalid timespecs.
+    use super::*;
+
+    #[test]
+    fn handshake_timestamp_keeps_subsecond_precision() {
+        let mut payload = 1_791_870_000_u64.to_ne_bytes().to_vec();
+        payload.extend_from_slice(&987_654_321_u64.to_ne_bytes());
+        assert_eq!(handshake_nanos(&payload).ok(), Some(987_654_321));
+    }
+
+    #[test]
+    fn handshake_timestamp_refuses_invalid_timespecs() {
+        assert!(handshake_nanos(&[0; 8]).is_err());
+        assert!(handshake_nanos(&[0; 17]).is_err());
+        for nanos in [1_000_000_000_u64, u64::MAX] {
+            let mut payload = 0_u64.to_ne_bytes().to_vec();
+            payload.extend_from_slice(&nanos.to_ne_bytes());
+            assert!(handshake_nanos(&payload).is_err());
+        }
+    }
 }
 fn activate(index: u32) -> io::Result<()> {
     let mut payload = vec![0; 16];

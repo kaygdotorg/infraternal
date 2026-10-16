@@ -1482,11 +1482,13 @@ dependencies = [
  "nix",
  "openssl",
  "quinn",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
  "tokio",
  "tokio-openssl",
+ "zeroize",
 ]
 
 [[package]]

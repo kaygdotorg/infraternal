@@ -612,6 +612,8 @@ async fn build_router_core(
                 authority: None,
                 #[cfg(feature = "remote")]
                 listeners: Some(hosts.clone()),
+                #[cfg(feature = "remote")]
+                peer_routes: None,
             }))
             .await
             .map_err(|_| ServerError::InvalidConfiguration)?;

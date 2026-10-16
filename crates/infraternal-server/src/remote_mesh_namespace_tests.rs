@@ -12,10 +12,16 @@ use std::{
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use zeroize::Zeroize as _;
 
-const PROOF_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mesh-agent-transport-round2";
+#[path = "remote_mesh_timing.rs"]
+mod timing;
+
+const PROOF_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mesh-autoswitch/evidence";
 // The longer evidence directory would make a session socket 108 bytes. This
 // owned sibling keeps kernel sun_path below 107 bytes without changing sessions.
 const STATE_SCRATCH: &str = "/home/kayg/.cache/codex-scratch/mat-r2-ns";
+// The shim's audited exec isolation closes fd 3. Reuse this wrapper for both
+// inherited channels so neither can remain open in the surviving shim.
+const INHERITED_SOCKET_EXEC: &str = "leg_b_fd=$1; if [ \"$leg_b_fd\" != 3 ]; then exec 3<&\"$leg_b_fd\"; exec {leg_b_fd}<&-; fi; shift; exec \"$@\"";
 
 /// All public reports share the caller-selected benchmark artifact directory.
 fn proof_scratch() -> PathBuf {
@@ -32,6 +38,7 @@ struct ClientBundle {
     state: PathBuf,
     binary: PathBuf,
     session: Option<Uuid>,
+    server_key: infraternal_plugin_mesh::policy::model::PublicKey,
 }
 impl Drop for ClientBundle {
     fn drop(&mut self) {
@@ -88,10 +95,27 @@ async fn mesh_namespace_client() {
         Uuid::from_bytes(session.id),
         session.pid
     );
+    let shim_pid = session.pid;
     drop(session);
-    infraternal_agent::remote_client::run(&identity, Some(state))
-        .await
+    let fd = std::env::var("INFRATERNAL_MESH_TIMING_FD")
+        .unwrap()
+        .parse::<i32>()
         .unwrap();
+    let timing_socket = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+    assert_ne!(
+        std::fs::read_link(format!("/proc/{shim_pid}/fd/{fd}")).ok(),
+        Some(timing_socket),
+        "timing socket leaked into the surviving shim"
+    );
+    let running = infraternal_agent::remote_client::run(&identity, Some(state));
+    tokio::pin!(running);
+    tokio::select! {
+        result = &mut running => result.unwrap(),
+        result = timing::serve(fd, bundle.server_key) => {
+            result.unwrap();
+            running.await.unwrap();
+        }
+    }
 }
 
 fn command(program: &str, args: &[&str]) {
@@ -143,9 +167,18 @@ impl Drop for Processes {
 async fn node_process(
     namespace_pid: u32,
     bundle: &ClientBundle,
-) -> (tokio::process::Child, Uuid, u32) {
+) -> (tokio::process::Child, Uuid, u32, tokio::net::UnixStream) {
+    let (timestamps, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
+    nix::fcntl::fcntl(
+        &inherited,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .unwrap();
     let mut child = tokio::process::Command::new("nsenter")
-        .args(["-t", &namespace_pid.to_string(), "-n"])
+        .args(["-t", &namespace_pid.to_string(), "-n", "bash", "-c"])
+        .arg(INHERITED_SOCKET_EXEC)
+        .arg("mesh-proof")
+        .arg(inherited.as_raw_fd().to_string())
         .arg(std::env::current_exe().unwrap())
         .args([
             "mesh_namespace_client",
@@ -154,12 +187,16 @@ async fn node_process(
             "--test-threads=1",
         ])
         .env("INFRATERNAL_MESH_CHILD", "1")
+        .env("INFRATERNAL_MESH_TIMING_FD", "3")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
+    drop(inherited);
+    timestamps.set_nonblocking(true).unwrap();
+    let timestamps = tokio::net::UnixStream::from_std(timestamps).unwrap();
     let mut input = child.stdin.take().unwrap();
     let encoded = zeroize::Zeroizing::new(serde_json::to_vec(bundle).unwrap());
     input.write_all(&encoded).await.unwrap();
@@ -192,7 +229,7 @@ async fn node_process(
             discard.clear();
         }
     });
-    (child, id, pid)
+    (child, id, pid, timestamps)
 }
 
 fn wire(frame: &Frame<'_>) -> Bytes {
@@ -209,7 +246,7 @@ async fn link(actor: &EmbeddedAgent) -> Option<ServerLink> {
     let value: serde_json::Value = serde_json::from_slice(&result).ok()?;
     serde_json::from_value(value["server_link"].clone()).ok()
 }
-async fn wait_link(actor: &EmbeddedAgent, kind: ServerLinkKind) -> ServerLink {
+pub(crate) async fn wait_link(actor: &EmbeddedAgent, kind: ServerLinkKind) -> ServerLink {
     let result = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             if let Some(link) = link(actor).await
@@ -236,7 +273,7 @@ async fn wait_link(actor: &EmbeddedAgent, kind: ServerLinkKind) -> ServerLink {
 }
 
 /// Drain continuously so a path move cannot be disguised by receiver backpressure.
-struct Echo {
+pub(crate) struct Echo {
     input: AttachmentHandle,
     bytes: Arc<Mutex<Vec<u8>>>,
     changed: Arc<tokio::sync::Notify>,
@@ -251,7 +288,11 @@ impl Drop for Echo {
     }
 }
 impl Echo {
-    async fn start(actor: &EmbeddedAgent, session: Uuid) -> Self {
+    pub(crate) fn writer_id(&self) -> u32 {
+        self.input.stream_id()
+    }
+
+    pub(crate) async fn start(actor: &EmbeddedAgent, session: Uuid) -> Self {
         let (input, mut output) = actor
             .attach(session.into_bytes(), 0, 0, 2)
             .await
@@ -282,6 +323,7 @@ impl Echo {
                     }
                     TerminalOutput::Snapshot { bytes, .. } => {
                         if running.load(std::sync::atomic::Ordering::Acquire) && !bytes.is_empty() {
+                            println!("FAULT repaint_snapshot");
                             failed.store(true, std::sync::atomic::Ordering::Release);
                         }
                         received.lock().await.extend_from_slice(&bytes);
@@ -293,6 +335,7 @@ impl Echo {
                             .unwrap();
                     }
                     TerminalOutput::Closed { .. } => {
+                        println!("FAULT terminal_closed");
                         failed.store(true, std::sync::atomic::Ordering::Release);
                         break;
                     }
@@ -339,38 +382,50 @@ impl Echo {
         echo.ready.store(true, std::sync::atomic::Ordering::Release);
         echo
     }
-    async fn send(&mut self, bytes: &[u8]) {
+    pub(crate) async fn send(&mut self, bytes: &[u8]) {
+        self.send_result(bytes)
+            .await
+            .expect("terminal input unavailable");
+    }
+    /// Preserve a closed baseline writer as a failed receipt, never a replacement.
+    pub(crate) async fn send_result(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
         self.input
             .send_frame(wire(&Frame::Input {
                 in_seq: self.sequence,
                 bytes,
             }))
             .await
-            .unwrap();
+            .map_err(|_| "terminal input unavailable")?;
         self.sequence += bytes.len() as u64;
+        Ok(())
     }
-    async fn wait(&self, expected: &[u8]) {
+    pub(crate) async fn wait(&self, expected: &[u8]) {
+        self.wait_result(expected)
+            .await
+            .expect("terminal integrity failed");
+    }
+    /// Baseline receipts retain a failed byte proof instead of treating a
+    /// repaint/snapshot as equivalent to an intact raw terminal stream.
+    pub(crate) async fn wait_result(&self, expected: &[u8]) -> Result<(), &'static str> {
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let notified = self.changed.notified();
-                assert!(
-                    !self.fault.load(std::sync::atomic::Ordering::Acquire),
-                    "terminal retired or required an approximate repaint"
-                );
+                if self.fault.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("terminal retired or required an approximate repaint");
+                }
                 let received = self.bytes.lock().await;
-                assert!(
-                    expected.starts_with(&received),
-                    "terminal byte ordering issue"
-                );
+                if !expected.starts_with(&received) {
+                    return Err("terminal byte ordering issue");
+                }
                 if received.len() == expected.len() {
-                    break;
+                    return Ok(());
                 }
                 drop(received);
                 notified.await;
             }
         })
         .await
-        .unwrap();
+        .map_err(|_| "terminal echo timed out")?
     }
     async fn samples(&mut self, expected: &mut Vec<u8>, tag: u8) -> Vec<u128> {
         let mut samples = Vec::new();
@@ -387,7 +442,7 @@ impl Echo {
     }
 }
 
-fn root_fixture_home(scratch: &Path) {
+pub(crate) fn root_fixture_home(scratch: &Path) {
     // Private mount propagation is mandatory before binding public login-account fixtures.
     command("mount", &["--make-rprivate", "/"]);
     let home = scratch.join("h");
@@ -415,16 +470,35 @@ fn root_fixture_home(scratch: &Path) {
     }
 }
 
-fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
+/// Share the proof-only physical route resolver without exposing listener fields.
+pub(crate) fn proof_routes(
+    listeners: &RemoteListeners,
+) -> Arc<infraternal_plugin_remote::remote_bindings::Bindings> {
+    listeners.bindings.clone()
+}
+
+pub(crate) fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
     let (socket, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
     nix::fcntl::fcntl(
         &inherited,
         nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
     )
     .unwrap();
-    let child = Command::new("bash").args(["-c", "leg_b_fd=$1; if [ \"$leg_b_fd\" != 3 ]; then exec 3<&\"$leg_b_fd\"; exec {leg_b_fd}<&-; fi; shift; exec \"$@\"", "mesh-proof", &inherited.as_raw_fd().to_string()])
-        .arg(binary).args(["agent", "--fd", "3", "--state"]).arg(state)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let child = Command::new("bash")
+        .args([
+            "-c",
+            INHERITED_SOCKET_EXEC,
+            "mesh-proof",
+            &inherited.as_raw_fd().to_string(),
+        ])
+        .arg(binary)
+        .args(["agent", "--fd", "3", "--state"])
+        .arg(state)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     drop(inherited);
     socket.set_nonblocking(true).unwrap();
     (
@@ -433,8 +507,85 @@ fn local_daemon(binary: &Path, state: &Path) -> (Child, EmbeddedAgent) {
     )
 }
 
+// Match production's durable SQLite storage. Cancelling pool checkout can
+// discard its connection before ownership reaches the caller; the last
+// in-memory connection would then erase the schema, unrelated to transaction
+// cancellation. Each namespace lifecycle owns a fresh file outside the repo.
+pub(crate) async fn namespace_pool(options: sqlx::sqlite::SqlitePoolOptions) -> sqlx::SqlitePool {
+    let scratch = proof_scratch();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let database = scratch.join(format!("namespace-{}.sqlite", Uuid::new_v4()));
+    options
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(database)
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn namespace_store_survives_cancelled_pool_checkout() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let armed = Arc::new(AtomicBool::new(false));
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let options = sqlx::sqlite::SqlitePoolOptions::new().before_acquire({
+        let armed = armed.clone();
+        let reached = reached.clone();
+        move |_, _| {
+            let armed = armed.clone();
+            let reached = reached.clone();
+            Box::pin(async move {
+                if armed.swap(false, Ordering::AcqRel) {
+                    reached.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(true)
+            })
+        }
+    });
+    let pool = namespace_pool(options).await;
+    let (_, pool, _) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
+    let runtime = crate::plugins::compiled(&pool).await.unwrap();
+    armed.store(true, Ordering::Release);
+    let checkout = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.acquire().await }
+    });
+    reached.notified().await;
+    checkout.abort();
+    assert!(checkout.await.unwrap_err().is_cancelled());
+    // Disable must still persist after an aborted coordinator checkout; this
+    // is a connection replacement, independent of BEGIN/COMMIT cancellation.
+    runtime.set_enabled("mesh", false).await.unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT enabled FROM plugin_settings WHERE role='server' AND plugin='mesh'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+    let database = pool.connect_options().get_filename().to_owned();
+    pool.close().await;
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", database.display()));
+    }
+}
+
 async fn root_store(host: &Identity, root: &X509) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
-    let (store, pool, id) = crate::enrollment::authority::tests::enrolled().await;
+    let pool = namespace_pool(sqlx::sqlite::SqlitePoolOptions::new()).await;
+    let (store, pool, id) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
     // The generic fixture has a synthetic rootless enrollment. Start a fresh
     // rootful fixture row rather than changing an enrolled execution mode.
     for table in ["remote_join_tokens", "remote_certificates", "remote_hosts"] {
@@ -709,6 +860,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
             actor: actor.clone(),
             authority: None,
             listeners: Some(hosts.clone()),
+            peer_routes: None,
         }))
         .await
         .unwrap();
@@ -764,8 +916,9 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         state: node_state.clone(),
         binary,
         session: None,
+        server_key: server_mesh.public_key,
     };
-    let (mut client, session, shim) = node_process(namespace_pid, &bundle).await;
+    let (mut client, session, shim, mut timestamps) = node_process(namespace_pid, &bundle).await;
     processes.shim = Some(shim);
     let remote = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -836,6 +989,12 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
+    let capture = crate::remote_autoswitch_probe::Capture::start(|peer| match peer.ip() {
+        std::net::IpAddr::V4(ip) => ip.octets()[..2] == [10, 254] || ip.octets() == [10, 220, 0, 2],
+        std::net::IpAddr::V6(_) => false,
+    })
+    .with_routes(listeners.bindings.clone());
+    let enabled_wall = std::time::SystemTime::now();
     let moved = tokio::time::Instant::now();
     runtime.set_enabled("mesh", true).await.unwrap();
     let mesh_link = wait_link(&remote, ServerLinkKind::Mesh).await;
@@ -854,6 +1013,63 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     echo.sequence += moving.len() as u64;
     expected.extend_from_slice(&moving);
     echo.wait(&expected).await;
+    let joined = tokio::time::timeout(Duration::from_secs(5), timing::handshake(&mut timestamps))
+        .await
+        .unwrap()
+        .unwrap();
+    let events = capture.events();
+    let first_byte = events
+        .iter()
+        .filter(|event| {
+            event.kind == crate::remote_autoswitch_probe::Kind::TerminalByte
+                && event.peer.ip() != "10.220.0.2".parse::<std::net::IpAddr>().unwrap()
+        })
+        .min_by_key(|event| event.monotonic)
+        .unwrap();
+    assert_ne!(first_byte.stream, 0);
+    let milestone = |kind| {
+        events
+            .iter()
+            .find(|event| event.kind == kind && event.peer == first_byte.peer)
+    };
+    // An in-place move keeps the admitted connection: no mesh peer may complete
+    // a new mTLS handshake, and none of the setup milestones exist for it.
+    let tls = milestone(crate::remote_autoswitch_probe::Kind::TlsHandshake);
+    let admitted = milestone(crate::remote_autoswitch_probe::Kind::LedgerAdmission);
+    let control = milestone(crate::remote_autoswitch_probe::Kind::ControlReady);
+    let preserved = !events.iter().any(|event| {
+        event.kind == crate::remote_autoswitch_probe::Kind::TlsHandshake
+            && event.peer.ip() != "10.220.0.2".parse::<std::net::IpAddr>().unwrap()
+    });
+    assert!(preserved, "the move opened a new mesh connection");
+    timing::validate_lifecycle(
+        enabled_wall,
+        joined,
+        tls.map(|event| event.wall),
+        first_byte.wall,
+        first_byte.monotonic.duration_since(moved.into_std()),
+    )
+    .unwrap();
+    let between = |from: Option<&crate::remote_autoswitch_probe::Event>,
+                   to: Option<&crate::remote_autoswitch_probe::Event>| {
+        from.zip(to)
+            .map(|(from, to)| to.monotonic.duration_since(from.monotonic).as_micros())
+    };
+    let phases = serde_json::json!({
+        "terminal_byte_boundary": "authenticated_transport_arrival_before_actor_delivery",
+        "fresh_kernel_peer": true,
+        "lifecycle_and_clock_validated": true,
+        "preserved_connection": preserved,
+        "fixture_enable_to_node_wg_handshake_us": joined.duration_since(enabled_wall).unwrap().as_micros(),
+        "node_wg_handshake_to_first_mesh_byte_us": first_byte.wall.duration_since(joined).unwrap().as_micros(),
+        "fixture_enable_to_first_mesh_byte_us": first_byte.monotonic.duration_since(moved.into_std()).as_micros(),
+        "server_mtls_to_ledger_admission_us": between(tls, admitted),
+        "ledger_admission_to_control_ready_us": between(admitted, control),
+        "control_ready_to_first_mesh_byte_us": between(control, Some(first_byte)),
+        "server_mtls_to_first_mesh_byte_us": between(tls, Some(first_byte)),
+        "first_mesh_byte_stream": first_byte.stream,
+        "add_host_completion_measured": false,
+    });
     assert_ne!(
         mesh_link.endpoint.unwrap().ip(),
         listeners.local_addr().unwrap().ip()
@@ -908,7 +1124,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     // Persist latency before later lifecycle assertions: a failed mesh reprobe
     // must not discard the already measured terminal recovery evidence.
     let partial = serde_json::json!({
-        "machine": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(), "head_profile": "primed-writer",
+        "machine": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap().trim(), "head_profile": "in-place-path",
         "configured_rtt_ms": rtt_ms, "configured_rtt_jitter_ms": 2 * (rtt_ms / 20),
         "real_kernel": true, "real_pty": true, "live_nodes": 2,
         "live_terminals": 1, "public_inventory": 1000,
@@ -921,6 +1137,8 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         "load": std::fs::read_to_string("/proc/loadavg").unwrap().trim(),
         "lifecycle_complete": false
     });
+    let mut partial = partial;
+    partial["phases"] = phases.clone();
     std::fs::write(
         scratch.join(format!("namespace-transport-{rtt_ms}.json")),
         serde_json::to_vec_pretty(&partial).unwrap(),
@@ -932,6 +1150,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     );
     command("nft", &["delete", "table", "inet", "mesh_link_cut"]);
     wait_link(&remote, ServerLinkKind::Mesh).await;
+    println!("CHECK mesh_restored result=PASS");
     // Refuse only the underlay listener. A retained mesh path must join without
     // first reaching the original infraternal agent port.
     command("nft", &["add", "table", "inet", "fallback_cut"]);
@@ -982,13 +1201,16 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     client.wait().await.unwrap();
     bundle.session = Some(session);
     let restarted = tokio::time::Instant::now();
-    let (next, same_session, same_shim) = node_process(namespace_pid, &bundle).await;
+    let (next, same_session, same_shim, next_timestamps) =
+        node_process(namespace_pid, &bundle).await;
     assert_eq!((same_session, same_shim), (session, shim));
     wait_link(&remote, ServerLinkKind::Mesh).await;
+    println!("CHECK restarted_on_mesh result=PASS");
     echo.send(b"restart-survives|").await;
     expected.extend_from_slice(b"restart-survives|");
     echo.wait(&expected).await;
     let restart_us = restarted.elapsed().as_micros();
+    println!("CHECK restart_retains_bytes result=PASS");
     command("nft", &["delete", "table", "inet", "fallback_cut"]);
     runtime.set_enabled("mesh", false).await.unwrap();
     wait_link(&remote, ServerLinkKind::Fallback).await;
@@ -1002,8 +1224,9 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     report["silent_cut_to_echo_us"] = serde_json::json!(fallback_us);
     report["silent_cut_to_fallback_status_us"] = serde_json::json!(fallback_status_us);
     report["load_start"] = load_start.trim().into();
-    report["head_profile"] = "primed-writer".into();
+    report["head_profile"] = "in-place-path".into();
     report["lifecycle_complete"] = true.into();
+    report["phases"] = phases;
     std::fs::write(
         scratch.join(format!("namespace-transport-{rtt_ms}.json")),
         serde_json::to_vec_pretty(&report).unwrap(),
@@ -1028,6 +1251,7 @@ async fn mesh_transport_real_namespaces_preserve_the_terminal() {
         "local mesh echo p99 exceeded direct by 2ms"
     );
     drop(next);
+    drop(next_timestamps);
     drop(echo);
     drop(runtime);
     drop(listeners);
