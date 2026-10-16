@@ -91,6 +91,35 @@ test("a pushed recovery cancels the scheduled retry", async () => {
   } finally { source.dispose(); restore(); }
 });
 
+test("a pushed recovery supersedes an outstanding retry failure", async () => {
+  const pending = new Set<number>();
+  const restore = timers(pending);
+  let deliver: ((event: Record<string, unknown>) => void) | undefined;
+  let rejectRetry: ((reason: Error) => void) | undefined;
+  let retrying = false;
+  const source = createMeshApi({prime, transport: {
+    call: () => retrying
+      ? new Promise((_resolve, reject) => { rejectRetry = reject; })
+      : Promise.reject(new Error("connection lost")),
+    onReady: () => () => {},
+    subscribe: (_topic, listener) => { deliver = listener; return () => {}; },
+  }});
+  try {
+    deliver!({type: "changed", revision: 1});
+    await settle();
+    expect(source.status()).toBe("error");
+    retrying = true;
+    source.retry();
+    await settle();
+    deliver!({type: "resync", snapshot: {...raw, revision: 2}});
+    expect(source.status()).toBe("ready");
+    rejectRetry!(new Error("connection lost"));
+    await settle();
+    expect(source.status()).toBe("ready");
+    expect(pending.size).toBe(0);
+  } finally { source.dispose(); restore(); }
+});
+
 // Closed sockets, liveness deadlines and JSON decoding reject the same pending
 // call promise. The source must distinguish these failures from access refusal.
 for (const [label, answer, status] of [
