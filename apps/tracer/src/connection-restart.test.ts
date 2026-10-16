@@ -298,7 +298,7 @@ test("a prolonged outage inside the fast-recovery window does not leave recovery
   }
 });
 
-test("online and foreground events cancel reconnect backoff immediately", () => {
+test("online and foreground events cancel delays and preserve handshakes in progress", () => {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, document: globals.document, random: Math.random };
   let nextTimerId = 1;
@@ -317,7 +317,8 @@ test("online and foreground events cancel reconnect backoff immediately", () => 
   const sockets: Socket[] = [];
   class Socket {
     static OPEN = 1;
-    readyState = 1;
+    static CONNECTING = 0;
+    readyState = 0;
     binaryType = "";
     onopen?: () => void;
     onclose?: (event?: { code: number; reason: string }) => void;
@@ -355,6 +356,7 @@ test("online and foreground events cancel reconnect backoff immediately", () => 
     connection = new MuxConnection();
     const stream = connection.openStream(handler);
     const admit = (socket: Socket): void => {
+      socket.readyState = Socket.OPEN;
       socket.onopen?.();
       socket.onmessage?.({ data: welcome() });
       connection?.streamAttached(true, stream);
@@ -384,7 +386,20 @@ test("online and foreground events cancel reconnect backoff immediately", () => 
     (globals.document as { visibilityState: string }).visibilityState = "visible";
     fire(documentListeners, "visibilitychange");
     expect(sockets).toHaveLength(4);
+    expect(sockets[3]!.readyState).toBe(Socket.CONNECTING);
+    fire(windowListeners, "online");
+    expect(sockets).toHaveLength(4);
+    expect(sockets[3]!.readyState).toBe(Socket.CONNECTING);
     expect(timers.size).toBe(0);
+    sockets[3]!.readyState = Socket.OPEN;
+    fire(windowListeners, "online");
+    expect(sockets).toHaveLength(4);
+    expect(sockets[3]!.readyState).toBe(Socket.OPEN);
+    admit(sockets[3]!);
+    expect(connection.isWelcomed).toBe(true);
+    expect([...timers.values()].map((timer) => timer.delay)).toEqual([25]);
+    expect([...windowListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
+    expect([...documentListeners.values()].every((handlers) => handlers.size === 0)).toBe(true);
   } finally {
     connection?.dispose();
     Math.random = original.random;

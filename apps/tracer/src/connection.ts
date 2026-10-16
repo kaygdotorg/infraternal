@@ -148,7 +148,7 @@ export class MuxConnection {
   private fastRecovery = false;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
   private welcomedAt = 0;
-  /** Retry hints exist only while a reconnect timer is pending. */
+  /** Retry hints stay installed from a reconnect timer until the next Welcome. */
   private retryHintListeners = false;
   private readonly onNetworkAvailable = (): void => this.retryNow();
   private readonly onPageVisible = (): void => { if (document.visibilityState === "visible") this.retryNow(); };
@@ -387,7 +387,6 @@ export class MuxConnection {
   private connect(): void {
     if (this.closed) return;
     this.clearRetryTimer();
-    this.stopRetryHintListeners();
     const resuming = [...this.streams.values()].some((s) => s.hasSession());
     this.status(resuming ? "Connection lost. Reconnecting…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -542,6 +541,7 @@ export class MuxConnection {
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
+        this.stopRetryHintListeners();
         this.send(CONTROL_STREAM, { type: "Subscribe", subId: RECOVERY_SUBSCRIPTION, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
         this.credentials?.connectionId.fill(0);
         this.credentials?.resumeToken.fill(0);
@@ -624,13 +624,20 @@ export class MuxConnection {
     this.startRetryHintListeners();
   }
 
-  /** Online and foreground events supersede a pending delay because the route may work again now. */
+  /** Online and foreground hints reset retry state while an in-flight handshake remains the active attempt. */
   private retryNow(): void {
-    if (this.closed || this.retryTimer === 0) return;
+    if (this.closed) return;
+    const socket = this.socket;
+    const retryPending = this.retryTimer !== 0;
+    const handshakePending = socket !== undefined && !this.welcomed;
+    if (!retryPending && !handshakePending) return;
     this.clearRetryTimer();
-    this.stopRetryHintListeners();
     this.retryAttempt = 0;
     this.fastRecovery = this.streams.size > 0;
+    // A WebSocket already opening across the outage is itself the immediate retry. Closing it here
+    // discards a handshake the browser can resume when its network returns.
+    if (socket && socket.readyState !== WebSocket.CLOSED) return;
+    if (socket) this.socket = undefined;
     this.connect();
   }
 
