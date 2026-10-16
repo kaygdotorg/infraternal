@@ -76,6 +76,8 @@ test("exhausted setup preserves eligibility and explains a new setup", () => {
     expect(parseSetupEvent({ setup: { host_id: HOST, stage: "join", state: "failed", retry_available } })).toBeUndefined();
   }
   expect(setupGuide("o2", view).effect).toContain("retry limit");
-  expect(setupGuide("o2", view).effect).toContain("Open Add host");
+  const next = setupGuide("o2", view).effect;
+  expect(next).toContain("Remove host in the command palette");
+  expect(next.indexOf("Remove host")).toBeLessThan(next.indexOf("Add host"));
   expect(foldSetup(view, ev("join", "running")).retryAvailable).toBeUndefined();
 });

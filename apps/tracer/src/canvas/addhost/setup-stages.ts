@@ -137,6 +137,6 @@ export function setupGuide(host: string, view: SetupView): { title: string; effe
     start: `The infraternal agent didn't start on ${host}`,
     readiness: `${host} isn't ready yet`,
   } satisfies Record<FailedStep, string>)[step];
-  const next = view.retryAvailable === false ? "Setup has reached its retry limit. Open Add host to start a new setup." : NEXT[step];
+  const next = view.retryAvailable === false ? "Setup has reached its retry limit. Use Remove host in the command palette, then Add host to start again." : NEXT[step];
   return { title, effect: `Your terminal keeps working. ${next}`, details: view.message ?? "" };
 }
