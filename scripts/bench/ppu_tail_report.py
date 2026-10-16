@@ -49,14 +49,16 @@ class Timeline:
 def waits(events):
     """Pair sleeping transitions with their own nearby kernel stack, if present."""
     result = []
-    pending = stack = None
+    pending = stack = ready = None
     for row in sorted(events, key=lambda item: item['ns']):
         if row['kind'] == 'sched_switch':
             if row['state'] == 'out-sleeping':
-                pending, stack = row['ns'], None
+                pending, stack, ready = row['ns'], None, None
             elif row['state'] == 'in' and pending is not None:
-                result.append(dict(begin_ns=pending, end_ns=row['ns'], symbols=stack))
-                pending = stack = None
+                result.append(dict(begin_ns=pending, end_ns=row['ns'], ready_ns=ready, symbols=stack))
+                pending = stack = ready = None
+        elif row['kind'] == 'sched_wakeup' and pending is not None and ready is None:
+            ready = row['ns']
         elif row['kind'] == 'stack' and pending is not None and 0 <= row['ns'] - pending <= 100_000:
             stack = row['symbols']
     return result
@@ -166,11 +168,16 @@ def report(root, warmup):
             high = bisect.bisect_right(fault_starts[pid], end)
             for event in faults[pid][low:high]:
                 counts[event['kind']] += 1
-            row['fault_reclaim_events'][name] = dict(counts)
+            traced_fault = pid in {roles['host'], roles['reader'], roles['session-971'], roles['session-993']}
+            row['fault_reclaim_events'][name] = dict(counts) if traced_fault else None
             low = bisect.bisect_right(wait_ends[pid], begin)
             high = bisect.bisect_right(wait_ends[pid], end) + 1
             row['kernel_waits'][name] = [wait | dict(overlap_ms=(min(end, wait['end_ns']) -
-                max(begin, wait['begin_ns'])) / 1e6) for wait in blocked[pid][low:high]
+                max(begin, wait['begin_ns'])) / 1e6,
+                sleeping_overlap_ms=None if wait['ready_ns'] is None else max(0,
+                    min(end, wait['ready_ns']) - max(begin, wait['begin_ns'])) / 1e6,
+                runnable_overlap_ms=None if wait['ready_ns'] is None else max(0,
+                    min(end, wait['end_ns']) - max(begin, wait['ready_ns'])) / 1e6) for wait in blocked[pid][low:high]
                 if wait['end_ns'] > begin and wait['begin_ns'] < end]
     end = max((row['receive_ns'] for row in rows), default=start)
     queue = {name: runqlat([row for row in events[pid] if start <= row['ns'] <= end])
