@@ -117,6 +117,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   };
   const toError = (): void => {
     status = "error"; notify(true);
+    window.clearTimeout(retryTimer);
     const wait = RETRY_MS[Math.min(retryStep++, RETRY_MS.length - 1)]!;
     retryTimer = window.setTimeout(refresh, wait);
   };
@@ -132,11 +133,17 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   let stopWatch: (() => void) | undefined;
   const watch = (): void => {
     if (stopWatch || disposed) return;
-    stopWatch = client.watch({}, (ev) => {
+    let ended = false;
+    const release = client.watch({}, (ev) => {
       if (disposed) return;
       if (ev.type === "error") {
         // The server ended the subscription. A withdrawn view: the Mesh goes. Anything else: ask again, with a new watch.
+        // A failed client-side refresh can leave the wire watch alive. Release
+        // it before retry installs another, including pending page work (#229).
+        ended = true;
+        const stop = stopWatch;
         stopWatch = undefined;
+        stop?.();
         if (ev.error === "forbidden") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); } else toError();
         return;
       }
@@ -146,6 +153,8 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       if (inflight > 0) { dirty = true; return; }
       if (snap.rev >= rev) apply(snap);
     });
+    // Refusal may arrive inside subscribe, before its release handle exists.
+    if (ended) release(); else stopWatch = release;
   };
   // The first connection and every reconnect (a terminal is attached): start from a list when nothing is live; a live
   // watch is subscribed again by the connection and answers with its own snapshot.
