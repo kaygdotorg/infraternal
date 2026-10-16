@@ -28,6 +28,15 @@ def validate_receipt(probe):
     # Both use the same active clock; no tolerance or timing subtraction is needed.
     if (end - start) * 1000 > elapsed:
         raise ValueError('marker receipt span exceeds timed echo')
+    keys = ('send_before_thread_cpu_ns', 'receive_thread_cpu_ns')
+    if any(key in probe for key in keys):
+        clocks = [probe.get(key) for key in keys]
+        if not all(type(value) is int and value >= 0 for value in clocks):
+            raise ValueError('invalid paired reader CPU clocks')
+        # Endpoints are inside the RTT. Missing legacy clocks remain unknown;
+        # never infer CPU work from a scheduled-running upper bound instead.
+        if not 0 <= clocks[1] - clocks[0] <= elapsed * 1_000_000:
+            raise ValueError('reader CPU interval outside timed echo')
 
 
 def correlate(probe, records, origin):

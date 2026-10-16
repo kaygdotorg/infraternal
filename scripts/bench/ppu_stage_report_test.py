@@ -37,6 +37,22 @@ class CorrelationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'receipt span exceeds timed echo'):
             correlate(probe, rows, 10)
 
+    def test_reader_cpu_requires_paired_integer_bounds_inside_the_timed_echo(self):
+        for fields in (dict(send_before_thread_cpu_ns=0),
+                       dict(send_before_thread_cpu_ns=2, receive_thread_cpu_ns=1),
+                       dict(send_before_thread_cpu_ns=-1, receive_thread_cpu_ns=0),
+                       dict(send_before_thread_cpu_ns=0, receive_thread_cpu_ns=9_000_001),
+                       dict(send_before_thread_cpu_ns=0, receive_thread_cpu_ns=float('nan')),
+                       dict(send_before_thread_cpu_ns=False, receive_thread_cpu_ns=1)):
+            with self.subTest(fields=fields):
+                probe, rows = fixture()
+                probe.update(fields)
+                with self.assertRaisesRegex(ValueError, 'reader CPU'):
+                    correlate(probe, rows, 10)
+        probe, rows = fixture()
+        probe.update(send_before_thread_cpu_ns=700, receive_thread_cpu_ns=9_000_700)
+        self.assertEqual(correlate(probe, rows, 10)['receive_thread_cpu_ns'], 9_000_700)
+
     def test_legacy_or_nonfinite_marker_receipts_cannot_certify_causality(self):
         root = MagicMock()
         (root / 'stage-probes.json').read_text.return_value = '{}'
