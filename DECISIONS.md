@@ -3078,3 +3078,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Several viewers (Q20):** one person in control; others watch and
        can ask for control; the controller sees Give / Keep; an idle
        controller loses control after 5 minutes when someone asks.
+295. **Undoing a failed server update stays simple (owner, 2026-10-16,
+     #211; narrows D251's recovery):** "let's keep it lean and simple".
+     Right before switching to a new version, the server makes one safe copy
+     of its database (SQLite's online backup) next to the previous binary.
+     The previous version stays the one that starts on any restart until the
+     new one passes its health check, within about 2 minutes. If the new
+     version crashes or fails the check, the previous binary and that
+     database copy come back and the server restarts; the Inbox says the
+     update was undone. Data written in that short window is lost. After a
+     successful check the copy is kept until the next update. Rejected:
+     encrypted recovery checkpoints with a separate recovery supervisor and
+     certificate restoration (estimated 4-7 days of work for the same
+     outcome). Broader backup and disaster recovery remain separate work.
