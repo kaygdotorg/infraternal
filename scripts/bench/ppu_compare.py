@@ -27,9 +27,22 @@ def lock_receipt():
     owner_path = Path('/var/lock/perf-bench.owner')
     scopes = subprocess.check_output(['systemctl', 'list-units', '--type=scope',
         '--state=running', '--plain', '--no-legend', '--no-pager'], text=True)
-    return dict(lock_identity=key, locks=locks,
+    names = [line.split()[0] for line in scopes.splitlines() if line.split()]
+    groups = subprocess.check_output(['systemctl', 'show', *names,
+        '-p', 'Id', '-p', 'ControlGroup'], text=True)
+    scope_cpu = {}
+    for block in groups.strip().split('\n\n'):
+        properties = dict(line.split('=', 1) for line in block.splitlines() if '=' in line)
+        group = properties.get('ControlGroup', '')
+        if group:
+            counters = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cpu.stat'
+            try:
+                scope_cpu[properties['Id']] = dict(line.split() for line in counters.read_text().splitlines())
+            except FileNotFoundError:
+                scope_cpu[properties['Id']] = None  # Scope ended during observation.
+    return dict(scope_cpu=scope_cpu, lock_identity=key, locks=locks,
                 owner=owner_path.read_text().strip() if owner_path.exists() else None,
-                running_scopes=[line.split()[0] for line in scopes.splitlines() if line.split()],
+                running_scopes=names,
                 load=Path('/proc/loadavg').read_text().strip())
 
 
