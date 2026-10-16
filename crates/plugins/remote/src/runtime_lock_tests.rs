@@ -112,3 +112,55 @@ fn unavailable_lock_support_does_not_claim_a_live_holder() {
         77
     );
 }
+
+/// Exact kernel replies validate lengths and identity before reading the owner.
+#[test]
+fn diagnostic_uid_rejects_unexpected_fixed_records() {
+    let inode = 1234_u32;
+    let mut record = [0_u8; 48];
+    for (offset, value) in [(0, 48), (8, 1), (20, inode), (44, 1001)] {
+        record[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+    }
+    for (offset, value) in [(4, 20_u16), (32, 5), (34, 6), (40, 8), (42, 7)] {
+        record[offset..offset + 2].copy_from_slice(&value.to_ne_bytes());
+    }
+    record[16] = 1;
+    assert_eq!(diagnostic_uid(&record, inode).unwrap(), 1001);
+    for length in 0..record.len() {
+        assert!(diagnostic_uid(&record[..length], inode).is_err());
+    }
+    let mut extended = record.to_vec();
+    for _ in 0..64 {
+        extended.push(0);
+        assert!(diagnostic_uid(&extended, inode).is_err());
+    }
+    for offset in [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 20, 21, 22, 23, 32, 33, 34, 35, 40, 41, 42, 43,
+    ] {
+        let mut changed = record;
+        changed[offset] ^= 0x80;
+        assert!(diagnostic_uid(&changed, inode).is_err());
+    }
+    for byte in 0..=255 {
+        assert!(diagnostic_uid(&[byte; 48], inode).is_err());
+    }
+}
+
+/// Kernel ownership remains observable when a runtime makes descriptors private.
+#[test]
+fn diagnostic_uid_matches_a_real_bound_socket() {
+    let fixture = Fixture::new();
+    let path = fixture.state().join("plugins.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let rows = fs::read_to_string("/proc/net/unix").unwrap();
+    let row = rows
+        .lines()
+        .find(|row| row.ends_with(path.to_str().unwrap()))
+        .unwrap();
+    let inode = row.split_whitespace().nth(6).unwrap().parse().unwrap();
+    assert_eq!(
+        socket_uid(inode).unwrap(),
+        nix::unistd::Uid::effective().as_raw()
+    );
+    drop(listener);
+}
