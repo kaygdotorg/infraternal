@@ -1344,17 +1344,27 @@ fn earlier_attempt_classification_preserves_status_boundary_and_authentication()
 
 #[tokio::test]
 async fn start_fresh_resumes_the_same_attempt_after_owner_confirmation() {
-    exercise_start_fresh(false, false).await;
+    exercise_start_fresh(false, false, CachedHelper::Current).await;
 }
 
 #[tokio::test]
 async fn turning_off_paused_host_provisioning_preserves_earlier_leftovers() {
-    exercise_start_fresh(true, false).await;
+    exercise_start_fresh(true, false, CachedHelper::Current).await;
 }
 
 #[tokio::test]
 async fn known_failed_setup_finishes_without_a_second_confirmation() {
-    exercise_start_fresh(false, true).await;
+    exercise_start_fresh(false, true, CachedHelper::Current).await;
+}
+
+#[tokio::test]
+async fn earlier_binary_cache_is_refreshed_before_owned_recovery() {
+    exercise_start_fresh(false, true, CachedHelper::Earlier).await;
+}
+#[derive(Clone, Copy)]
+enum CachedHelper {
+    Current,
+    Earlier,
 }
 
 // Reuse one real-filesystem fixture for completion and component cancellation.
@@ -1362,7 +1372,7 @@ async fn known_failed_setup_finishes_without_a_second_confirmation() {
     clippy::too_many_lines,
     reason = "Keep the real shell fixture and same-attempt admission assertions together."
 )]
-async fn exercise_start_fresh(turn_off: bool, automatic: bool) {
+async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHelper) {
     use infraternal_plugin_api::{ComponentPlugin, PluginState};
     use infraternal_plugin_ssh::{
         bootstrap::{Authority, Backend, Bootstrap, Resolved},
@@ -1465,6 +1475,22 @@ async fn exercise_start_fresh(turn_off: bool, automatic: bool) {
     std::fs::write(&foreign, "foreign data").unwrap();
     assert!(old.rollback().await.is_err());
     std::fs::remove_file(&foreign).unwrap();
+    if matches!(helper, CachedHelper::Earlier) {
+        let runtime = fixture.base().join("sessions");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(runtime.join("plugins.sock")).unwrap());
+        // A cache from before the internal command must be replaced by the
+        // trusted matching executable before recovery can inspect the socket.
+        std::fs::write(
+            fixture
+                .base()
+                .with_file_name("infraternal.bootstrap-cache")
+                .join("payload"),
+            b"#!/bin/sh\nexit 2\n",
+        )
+        .unwrap();
+    }
     let backend = Arc::new(Ready {
         host: fixture.join.host,
         automatic,

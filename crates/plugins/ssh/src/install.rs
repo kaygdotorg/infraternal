@@ -173,6 +173,47 @@ if [ "$kind" = fresh ]; then handoff_setup_lease "$stage/payload" yes; fi
         Ok(())
     }
 
+    /// Publish only the trusted executable cache when legacy recovery needs a newer helper.
+    /// # Errors
+    /// Refuses unsafe cache/parent ownership or a partial/mismatched transfer.
+    pub async fn prepare_recovery(
+        session: &dyn SshSession,
+        target: &Target,
+        binary: &Path,
+    ) -> Result<(), Failure> {
+        target.validate()?;
+        let digest = binary_digest(binary).await?;
+        let setup_lock = include_str!("setup_lock.sh");
+        let body = format!(
+            r#"{setup_lock}
+setup_guard
+{PAYLOAD_CACHE}
+validate_cache
+prepared="$cache.recovery-$transaction"
+mkdir "$prepared"
+trap 'rm -f "$prepared/payload" "$prepared/owner"; rmdir "$prepared" 2>/dev/null || :' EXIT
+cat > "$prepared/payload"
+printf '%s  %s\n' {} "$prepared/payload" | sha256sum -c - >/dev/null
+chmod 700 "$prepared/payload"
+printf 'INFRATERNAL_PAYLOAD_CACHE_V1\n' > "$prepared/owner"
+if [ -e "$cache" ]; then
+    mv -Tf "$prepared/payload" "$cache/payload"
+else
+    mv -Tn "$prepared" "$cache"
+    [ ! -e "$prepared" ] || exit 71
+fi
+"#,
+            shell_quote(&digest),
+        );
+        session
+            .run(
+                &Self::script_for(target.mode, uuid::Uuid::nil(), uuid::Uuid::new_v4(), &body),
+                Input::File(binary),
+            )
+            .await?;
+        Ok(())
+    }
+
     fn script(&self, body: &str) -> String {
         // A local binding shares this literal across format programs instead
         // of embedding another copy of the setup-lock program in each one.

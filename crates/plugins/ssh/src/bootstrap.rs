@@ -619,10 +619,25 @@ impl Bootstrap {
         } else {
             previous_attempt::check_script(target.mode)
         };
-        let output = session
-            .run(&script, Input::Empty)
-            .await
-            .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
+        let output = match session.run(&script, Input::Empty).await {
+            Err(error) if error.exit_status == Some(76) => {
+                // Old hosts may have no helper, or a cached binary predating it.
+                // Resolve and verify our executable before inspecting again; never
+                // ask the host to install an interpreter or trust its PATH.
+                let sniff = session
+                    .run(crate::probe::CHECK_SCRIPT, Input::Empty)
+                    .await?;
+                let check = crate::probe::Check::parse(&sniff.stdout)?;
+                check.authorize_mode(target.mode)?;
+                let binary = self
+                    .payload(batch, target, attempt, started, check.architecture)
+                    .await?;
+                Installation::prepare_recovery(session.as_ref(), target, &binary).await?;
+                session.run(&script, Input::Empty).await
+            }
+            result => result,
+        }
+        .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
         // Preserve method evidence even if the authenticated host is unsupported.
         // Public metadata only; no provider or private material enters replay state.
         if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
@@ -630,7 +645,16 @@ impl Bootstrap {
         }
         let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
         check.authorize_mode(target.mode)?;
-        restore_previous(batch, target, attempt, started, session.clone()).await?;
+        match restore_previous(batch, target, attempt, started, session.clone()).await {
+            Err(error) if error.exit_status == Some(76) => {
+                let binary = self
+                    .payload(batch, target, attempt, started, check.architecture)
+                    .await?;
+                Installation::prepare_recovery(session.as_ref(), target, &binary).await?;
+                restore_previous(batch, target, attempt, started, session.clone()).await?;
+            }
+            result => result?,
+        }
         if let Some(previous) = previous {
             let automatic = self
                 .backend
