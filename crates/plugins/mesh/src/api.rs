@@ -1,5 +1,6 @@
 //! SQLite-backed Mesh inventory, named grants, action authorization, and change revisions [154,163,164,166,187].
 
+use crate::diagnostics::{storage_error, storage_sql_error};
 use infraternal_mesh::{
     model::{Node, NodeId, PublicKey},
     rules::{Arrow, Endpoint, RuleId, TrafficPolicy},
@@ -554,14 +555,18 @@ impl MeshService {
         filter: &MeshFilter,
         change: &MeshChange,
     ) -> Result<bool, MeshApiError> {
-        let mut tx = self.pool.begin().await.map_err(map_sql_error)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| map_sql_error(error))?;
         if let Some(tag) = &filter.tag {
             validate_name(tag)?;
             if sqlx::query("SELECT 1 FROM mesh_tags WHERE name=?")
                 .bind(tag)
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(map_sql_error)?
+                .map_err(|error| map_sql_error(error))?
                 .is_none()
             {
                 return Err(MeshApiError::NotFound);
@@ -598,7 +603,11 @@ impl MeshService {
         filter: &MeshFilter,
         now: i64,
     ) -> Result<Option<i64>, MeshApiError> {
-        let mut tx = self.pool.begin().await.map_err(map_sql_error)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| map_sql_error(error))?;
         let access = view_access(&mut tx, actor).await?;
         let all = access.all && filter.tag.is_none();
         let tags = if let Some(tag) = &filter.tag {
@@ -609,7 +618,8 @@ impl MeshService {
         } else {
             access.tags
         };
-        let tags = serde_json::to_string(&tags).map_err(|_| MeshApiError::Storage)?;
+        let tags = serde_json::to_string(&tags)
+            .map_err(|_| storage_error("watch tag serialization failed"))?;
         // Match the complete view, including nodes beyond the first wire page.
         // Inclusive liveness ends at last_seen + 31, exactly as snapshots do.
         sqlx::query_scalar("SELECT MIN(n.last_seen) FROM mesh_nodes AS n WHERE n.last_seen BETWEEN ? AND ? AND (? OR EXISTS(SELECT 1 FROM mesh_tag_members AS m WHERE m.node_id=n.id AND m.tag_name IN (SELECT value FROM json_each(?))))")
@@ -620,7 +630,7 @@ impl MeshService {
             .fetch_one(&mut *tx)
             .await
             .map(|seen: Option<i64>| seen.and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1)))
-            .map_err(map_sql_error)
+            .map_err(|error| map_sql_error(error))
     }
 
     /// Execute a validated action for an authenticated account.
@@ -653,7 +663,7 @@ impl MeshService {
             }
             MeshRequest::List(filter) => {
                 Ok(serde_json::to_value(self.list(actor, filter, now).await?)
-                    .map_err(|_| MeshApiError::Storage)?)
+                    .map_err(|_| storage_error("snapshot serialization failed"))?)
             }
             MeshRequest::EnrollNode(request) => {
                 let (id, revision) = self.enroll_node(actor, request, now).await?;
@@ -743,11 +753,15 @@ impl MeshService {
         filter: MeshFilter,
         now: i64,
     ) -> Result<(MeshSnapshot, Option<i64>), MeshApiError> {
-        let mut transaction = self.pool.begin().await.map_err(map_sql_error)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| map_sql_error(error))?;
         let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
             .fetch_one(&mut *transaction)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         let access = view_access(&mut transaction, actor).await?;
         let restrict_to_filter = filter.tag.is_some();
         let visible_tags = if let Some(tag) = filter.tag {
@@ -758,7 +772,7 @@ impl MeshService {
                 .bind(&tag)
                 .fetch_optional(&mut *transaction)
                 .await
-                .map_err(map_sql_error)?
+                .map_err(|error| map_sql_error(error))?
                 .is_none()
             {
                 return Err(MeshApiError::NotFound);
@@ -768,14 +782,17 @@ impl MeshService {
             sqlx::query_scalar::<_, String>("SELECT name FROM mesh_tags ORDER BY name")
                 .fetch_all(&mut *transaction)
                 .await
-                .map_err(map_sql_error)?
+                .map_err(|error| map_sql_error(error))?
                 .into_iter()
                 .collect()
         } else {
             access.tags
         };
         let snapshot = read_snapshot(&mut transaction, revision, now).await?;
-        transaction.commit().await.map_err(map_sql_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| map_sql_error(error))?;
         let snapshot = filter_snapshot(snapshot, access.all && !restrict_to_filter, &visible_tags);
         // A node is live through last_seen + 30 inclusive. The first offline
         // second is +31. Compute before paging so later-page nodes still expire.
@@ -807,7 +824,7 @@ impl MeshService {
             .bind(id.as_bytes().as_slice())
             .fetch_one(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
             if !exists {
                 return Err(MeshApiError::NotFound);
             }
@@ -820,7 +837,7 @@ impl MeshService {
         .bind(i64::MAX)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(map_sql_error)?
+        .map_err(|error| map_sql_error(error))?
         .ok_or(MeshApiError::Conflict)?;
         sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us,dataplane_host) VALUES (?,?,?,NULL,NULL,?)")
             .bind(id)
@@ -829,7 +846,7 @@ impl MeshService {
             .bind(&request.host_id)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         if let Some(host) = &request.host_id {
             // Only explicit management authority clears removal, atomically with
             // binding. A later channel quoting a public key has no such authority [166].
@@ -837,7 +854,7 @@ impl MeshService {
                 .bind(host)
                 .execute(&mut *tx)
                 .await
-                .map_err(map_sql_error)?;
+                .map_err(|error| map_sql_error(error))?;
         }
         let revision = self
             .finish_change(
@@ -851,7 +868,7 @@ impl MeshService {
             )
             .await?;
         Ok((
-            u64::try_from(id).map_err(|_| MeshApiError::Storage)?,
+            u64::try_from(id).map_err(|_| storage_error("stored node id invalid"))?,
             revision,
         ))
     }
@@ -884,7 +901,7 @@ impl MeshService {
         .bind(id)
         .execute(&mut *tx)
         .await
-        .map_err(map_sql_error)?
+        .map_err(|error| map_sql_error(error))?
         .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -917,7 +934,7 @@ impl MeshService {
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -951,22 +968,22 @@ impl MeshService {
         .bind(id)
         .fetch_one(&mut *tx)
         .await
-        .map_err(map_sql_error)?;
+        .map_err(|error| map_sql_error(error))?;
         if server {
             return Err(MeshApiError::Denied);
         }
         // Member removal and its reconnect refusal are one writer transaction.
         // Public unbound inventory has no host capability to retire.
-        sqlx::query("INSERT INTO mesh_dataplane_removed(host) SELECT dataplane_host FROM mesh_nodes WHERE id=? AND dataplane_host IS NOT NULL ON CONFLICT(host) DO NOTHING").bind(id).execute(&mut *tx).await.map_err(map_sql_error)?;
+        sqlx::query("INSERT INTO mesh_dataplane_removed(host) SELECT dataplane_host FROM mesh_nodes WHERE id=? AND dataplane_host IS NOT NULL ON CONFLICT(host) DO NOTHING").bind(id).execute(&mut *tx).await.map_err(|error| map_sql_error(error))?;
         let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
-            .bind(id.to_string()).bind(id.to_string()).fetch_one(&mut *tx).await.map_err(map_sql_error)?;
+            .bind(id.to_string()).bind(id.to_string()).fetch_one(&mut *tx).await.map_err(|error| map_sql_error(error))?;
         sqlx::query("DELETE FROM mesh_grants WHERE (from_kind='node' AND from_value=?) OR (to_kind='node' AND to_value=?)")
-            .bind(id.to_string()).bind(id.to_string()).execute(&mut *tx).await.map_err(map_sql_error)?;
+            .bind(id.to_string()).bind(id.to_string()).execute(&mut *tx).await.map_err(|error| map_sql_error(error))?;
         let changed = sqlx::query("DELETE FROM mesh_nodes WHERE id=?")
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -998,7 +1015,7 @@ impl MeshService {
             .bind(now)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         self.finish_change(
             tx,
             actor,
@@ -1028,7 +1045,7 @@ impl MeshService {
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -1038,13 +1055,13 @@ impl MeshService {
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         sqlx::query("UPDATE mesh_grants SET to_value=? WHERE to_kind='tag' AND to_value=?")
             .bind(&request.new_name)
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         self.finish_change(
             tx,
             actor,
@@ -1066,7 +1083,7 @@ impl MeshService {
         let mut tx = self.begin_change().await?;
         authorize(&mut tx, actor, MANAGE_TAGS, &[]).await?;
         let references: i64 = sqlx::query_scalar("SELECT count(*) FROM mesh_grants WHERE (from_kind='tag' AND from_value=?) OR (to_kind='tag' AND to_value=?)")
-            .bind(&request.name).bind(&request.name).fetch_one(&mut *tx).await.map_err(map_sql_error)?;
+            .bind(&request.name).bind(&request.name).fetch_one(&mut *tx).await.map_err(|error| map_sql_error(error))?;
         if references != 0 {
             return Err(MeshApiError::Conflict);
         }
@@ -1074,7 +1091,7 @@ impl MeshService {
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -1122,7 +1139,7 @@ impl MeshService {
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -1178,10 +1195,11 @@ impl MeshService {
         .await?;
         let (from_kind, from_value) = endpoint_fields(&arrow.from)?;
         let (to_kind, to_value) = endpoint_fields(&arrow.to)?;
-        let policy = serde_json::to_string(&arrow.ports).map_err(|_| MeshApiError::Storage)?;
+        let policy = serde_json::to_string(&arrow.ports)
+            .map_err(|_| storage_error("access ports serialization failed"))?;
         let row = sqlx::query("INSERT INTO mesh_grants(name,from_kind,from_value,to_kind,to_value,both_ways,ports_json) VALUES (?,?,?,?,?,?,?) RETURNING id")
             .bind(&request.name).bind(from_kind).bind(from_value).bind(to_kind).bind(to_value)
-            .bind(arrow.both_ways).bind(policy).fetch_one(&mut *tx).await.map_err(map_sql_error)?;
+            .bind(arrow.both_ways).bind(policy).fetch_one(&mut *tx).await.map_err(|error| map_sql_error(error))?;
         let id: i64 = row.get("id");
         let revision = self
             .finish_change(
@@ -1195,7 +1213,7 @@ impl MeshService {
             )
             .await?;
         Ok((
-            u64::try_from(id).map_err(|_| MeshApiError::Storage)?,
+            u64::try_from(id).map_err(|_| storage_error("stored rule id invalid"))?,
             revision,
         ))
     }
@@ -1239,7 +1257,7 @@ impl MeshService {
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -1280,7 +1298,7 @@ impl MeshService {
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -1322,7 +1340,7 @@ impl MeshService {
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
             .rows_affected();
         if changed != 1 {
             return Err(MeshApiError::NotFound);
@@ -1354,19 +1372,19 @@ impl MeshService {
         .bind(now)
         .execute(&mut *tx)
         .await
-        .map_err(map_sql_error)?;
+        .map_err(|error| map_sql_error(error))?;
         sqlx::query("DELETE FROM mesh_role_actions WHERE role_name=?")
             .bind(&request.name)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         if let Some(scopes) = &request.scopes {
             for scope in scopes {
                 if sqlx::query("SELECT 1 FROM mesh_tags WHERE name=?")
                     .bind(scope)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(map_sql_error)?
+                    .map_err(|error| map_sql_error(error))?
                     .is_none()
                 {
                     return Err(MeshApiError::NotFound);
@@ -1384,7 +1402,7 @@ impl MeshService {
                     .bind(scope)
                     .execute(&mut *tx)
                     .await
-                    .map_err(map_sql_error)?;
+                    .map_err(|error| map_sql_error(error))?;
                 }
             } else {
                 sqlx::query(
@@ -1394,7 +1412,7 @@ impl MeshService {
                 .bind(action)
                 .execute(&mut *tx)
                 .await
-                .map_err(map_sql_error)?;
+                .map_err(|error| map_sql_error(error))?;
             }
         }
         self.finish_change(
@@ -1422,7 +1440,7 @@ impl MeshService {
             .bind(&request.role)
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         self.finish_change(
             tx,
             actor,
@@ -1436,12 +1454,16 @@ impl MeshService {
     }
 
     async fn begin_change(&self) -> Result<Transaction<'static, Sqlite>, MeshApiError> {
-        let mut tx = self.pool.begin().await.map_err(map_sql_error)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| map_sql_error(error))?;
         // The first write acquires SQLite's writer slot before permission and object reads.
         sqlx::query("UPDATE mesh_state SET revision=revision WHERE singleton=1")
             .execute(&mut *tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
         Ok(tx)
     }
 
@@ -1461,11 +1483,12 @@ impl MeshService {
         )
         .fetch_one(&mut *tx)
         .await
-        .map_err(map_sql_error)?;
-        let detail = serde_json::to_string(&detail).map_err(|_| MeshApiError::Storage)?;
+        .map_err(|error| map_sql_error(error))?;
+        let detail = serde_json::to_string(&detail)
+            .map_err(|_| storage_error("audit serialization failed"))?;
         sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES (?,?,?,?,?,?)")
             .bind(actor).bind(action).bind(resource).bind(revision).bind(now).bind(detail)
-            .execute(&mut *tx).await.map_err(map_sql_error)?;
+            .execute(&mut *tx).await.map_err(|error| map_sql_error(error))?;
         // Re-read inside the writer transaction after all waits, immediately before
         // commit. Denial rolls back inventory, revision and audit together [28].
         if let Some(token_hash) = &self.fresh_authority
@@ -1477,18 +1500,18 @@ impl MeshService {
                 infraternal_plugin_api::FRESH_SECONDS,
             )
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
         {
             return Err(MeshApiError::FreshRequired);
         }
-        tx.commit().await.map_err(map_sql_error)?;
+        tx.commit().await.map_err(|error| map_sql_error(error))?;
         let _ = self.updates.send(MeshChange {
             revision,
             scopes,
             liveness_deadline: (action == "mesh.node.observe")
                 .then(|| now.saturating_add(NODE_LIVE_SECONDS + 1)),
         });
-        u64::try_from(revision).map_err(|_| MeshApiError::Storage)
+        u64::try_from(revision).map_err(|_| storage_error("stored revision invalid"))
     }
 }
 
@@ -1507,7 +1530,7 @@ async fn view_access(
             .bind(actor)
             .fetch_one(&mut **tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
     if owner {
         return Ok(ViewAccess {
             all: true,
@@ -1518,7 +1541,7 @@ async fn view_access(
         .bind(actor)
         .fetch_all(&mut **tx)
         .await
-        .map_err(map_sql_error)?;
+        .map_err(|error| map_sql_error(error))?;
     let mut access = ViewAccess::default();
     for row in rows {
         let action: String = row.get("action");
@@ -1548,7 +1571,7 @@ async fn authorize(
             .bind(actor)
             .fetch_one(&mut **tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
     if owner {
         return Ok(());
     }
@@ -1557,7 +1580,7 @@ async fn authorize(
         .bind(action)
         .fetch_all(&mut **tx)
         .await
-        .map_err(map_sql_error)?;
+        .map_err(|error| map_sql_error(error))?;
     let mut global = false;
     let mut scopes = BTreeSet::new();
     for row in rows {
@@ -1610,7 +1633,7 @@ async fn tag_member_scopes(
     .bind(name)
     .fetch_all(&mut **tx)
     .await
-    .map_err(map_sql_error)?;
+    .map_err(|error| map_sql_error(error))?;
     Ok(tags.into_iter().collect())
 }
 
@@ -1624,7 +1647,7 @@ async fn endpoint_scopes(
                 .bind(name)
                 .fetch_optional(&mut **tx)
                 .await
-                .map_err(map_sql_error)?
+                .map_err(|error| map_sql_error(error))?
                 .is_some()
             {
                 Ok(vec![name.clone()])
@@ -1639,7 +1662,7 @@ async fn endpoint_scopes(
                     .bind(id)
                     .fetch_one(&mut **tx)
                     .await
-                    .map_err(map_sql_error)?;
+                    .map_err(|error| map_sql_error(error))?;
             if !node_exists {
                 return Err(MeshApiError::NotFound);
             }
@@ -1649,12 +1672,13 @@ async fn endpoint_scopes(
             .bind(id)
             .fetch_all(&mut **tx)
             .await
-            .map_err(map_sql_error)
+            .map_err(|error| map_sql_error(error))
         }
         Endpoint::User(_) => Err(MeshApiError::InvalidInput),
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keep consistent row decoding and validation in one read transaction.
 async fn read_snapshot(
     tx: &mut Transaction<'_, Sqlite>,
     revision: i64,
@@ -1664,34 +1688,50 @@ async fn read_snapshot(
         sqlx::query("SELECT id,name,public_key,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id")
             .fetch_all(&mut **tx)
             .await
-            .map_err(map_sql_error)?;
+            .map_err(|error| map_sql_error(error))?;
     let mut memberships = BTreeMap::<i64, Vec<String>>::new();
     let mut tag_members = BTreeMap::<String, Vec<NodeId>>::new();
     for row in
         sqlx::query("SELECT tag_name,node_id FROM mesh_tag_members ORDER BY tag_name,node_id")
             .fetch_all(&mut **tx)
             .await
-            .map_err(map_sql_error)?
+            .map_err(|error| map_sql_error(error))?
     {
-        let tag: String = row.get("tag_name");
-        let id: i64 = row.get("node_id");
+        let tag: String = row
+            .try_get("tag_name")
+            .map_err(|error| map_sql_error(error))?;
+        let id: i64 = row
+            .try_get("node_id")
+            .map_err(|error| map_sql_error(error))?;
         memberships.entry(id).or_default().push(tag.clone());
         tag_members.entry(tag).or_default().push(NodeId(
-            u64::try_from(id).map_err(|_| MeshApiError::Storage)?,
+            u64::try_from(id).map_err(|_| storage_error("stored tag member id invalid"))?,
         ));
     }
     let mut nodes = Vec::with_capacity(node_rows.len());
     for row in node_rows {
-        let id: i64 = row.get("id");
-        let key: Vec<u8> = row.get("public_key");
-        let key: [u8; 32] = key.try_into().map_err(|_| MeshApiError::Storage)?;
-        let last_seen: Option<i64> = row.get("last_seen");
-        let last_rtt: Option<i64> = row.get("last_rtt_us");
+        let id: i64 = row.try_get("id").map_err(|error| map_sql_error(error))?;
+        let host: String = row.try_get("name").map_err(|error| map_sql_error(error))?;
+        // Stored inventory can predate validation. Refuse names that would make
+        // the client reject the whole snapshot, with a content-free reason.
+        validate_host(&host).map_err(|_| storage_error("stored host name invalid"))?;
+        let key: Vec<u8> = row
+            .try_get("public_key")
+            .map_err(|error| map_sql_error(error))?;
+        let key: [u8; 32] = key
+            .try_into()
+            .map_err(|_| storage_error("stored node public key length invalid"))?;
+        let last_seen: Option<i64> = row
+            .try_get("last_seen")
+            .map_err(|error| map_sql_error(error))?;
+        let last_rtt: Option<i64> = row
+            .try_get("last_rtt_us")
+            .map_err(|error| map_sql_error(error))?;
         nodes.push(MeshNode {
             node: Node {
-                id: NodeId(u64::try_from(id).map_err(|_| MeshApiError::Storage)?),
+                id: NodeId(u64::try_from(id).map_err(|_| storage_error("stored node id invalid"))?),
                 public_key: PublicKey(key),
-                host: row.get("name"),
+                host,
                 tags: memberships
                     .remove(&id)
                     .unwrap_or_default()
@@ -1704,13 +1744,13 @@ async fn read_snapshot(
             last_rtt_us: last_rtt
                 .map(u64::try_from)
                 .transpose()
-                .map_err(|_| MeshApiError::Storage)?,
+                .map_err(|_| storage_error("stored round trip invalid"))?,
         });
     }
     let tag_names = sqlx::query_scalar::<_, String>("SELECT name FROM mesh_tags ORDER BY name")
         .fetch_all(&mut **tx)
         .await
-        .map_err(map_sql_error)?;
+        .map_err(|error| map_sql_error(error))?;
     let tags = tag_names
         .into_iter()
         .map(|name| MeshTag {
@@ -1719,30 +1759,45 @@ async fn read_snapshot(
         })
         .collect();
     let rows = sqlx::query("SELECT id,name,from_kind,from_value,to_kind,to_value,both_ways,ports_json FROM mesh_grants ORDER BY name")
-        .fetch_all(&mut **tx).await.map_err(map_sql_error)?;
+        .fetch_all(&mut **tx).await.map_err(|error| map_sql_error(error))?;
     let mut grants = Vec::with_capacity(rows.len());
     for row in rows {
-        let id: i64 = row.get("id");
-        let from_kind: String = row.get("from_kind");
-        let from_value: String = row.get("from_value");
-        let to_kind: String = row.get("to_kind");
-        let to_value: String = row.get("to_value");
+        let id: i64 = row.try_get("id").map_err(|error| map_sql_error(error))?;
+        let from_kind: String = row
+            .try_get("from_kind")
+            .map_err(|error| map_sql_error(error))?;
+        let from_value: String = row
+            .try_get("from_value")
+            .map_err(|error| map_sql_error(error))?;
+        let to_kind: String = row
+            .try_get("to_kind")
+            .map_err(|error| map_sql_error(error))?;
+        let to_value: String = row
+            .try_get("to_value")
+            .map_err(|error| map_sql_error(error))?;
         let arrow = Arrow {
-            id: RuleId(u64::try_from(id).map_err(|_| MeshApiError::Storage)?),
+            id: RuleId(u64::try_from(id).map_err(|_| storage_error("stored rule id invalid"))?),
             from: parse_endpoint(&from_kind, &from_value)?,
             to: parse_endpoint(&to_kind, &to_value)?,
-            both_ways: row.get("both_ways"),
-            ports: serde_json::from_str(&row.get::<String, _>("ports_json"))
-                .map_err(|_| MeshApiError::Storage)?,
+            both_ways: row
+                .try_get("both_ways")
+                .map_err(|error| map_sql_error(error))?,
+            ports: serde_json::from_str(
+                &row.try_get::<String, _>("ports_json")
+                    .map_err(|error| map_sql_error(error))?,
+            )
+            .map_err(|_| storage_error("stored access ports JSON invalid"))?,
         };
-        arrow.validate().map_err(|_| MeshApiError::Storage)?;
+        arrow
+            .validate()
+            .map_err(|_| storage_error("stored access rule invalid"))?;
         grants.push(MeshGrant {
-            name: row.get("name"),
+            name: row.try_get("name").map_err(|error| map_sql_error(error))?,
             arrow,
         });
     }
     Ok(MeshSnapshot {
-        revision: u64::try_from(revision).map_err(|_| MeshApiError::Storage)?,
+        revision: u64::try_from(revision).map_err(|_| storage_error("stored revision invalid"))?,
         nodes,
         tags,
         grants,
@@ -1807,12 +1862,19 @@ fn page_items<T: Serialize>(
     let mut page = Vec::with_capacity(items.len() - skipped);
     for item in items.into_iter().skip(skipped) {
         let mut counter = JsonByteCount(0);
-        serde_json::to_writer(&mut counter, &item).map_err(|_| MeshApiError::Storage)?;
+        serde_json::to_writer(&mut counter, &item).map_err(|error| {
+            // The counting writer's only I/O failure is its byte limit.
+            storage_error(if error.is_io() {
+                "stored item exceeds frame budget"
+            } else {
+                "page item serialization failed"
+            })
+        })?;
         let size = counter.0 + 1;
         if size > PAGE_ITEM_BYTES {
             // A single unrepresentable object is a sanitized service failure,
             // never an encoder error that disconnects sibling terminal streams.
-            return Err(MeshApiError::Storage);
+            return Err(storage_error("stored item exceeds frame budget"));
         }
         if *used + size > PAGE_ITEM_BYTES {
             return Ok((page, false));
@@ -1883,9 +1945,9 @@ fn parse_endpoint(kind: &str, value: &str) -> Result<Endpoint, MeshApiError> {
             .parse::<u64>()
             .map(NodeId)
             .map(Endpoint::Node)
-            .map_err(|_| MeshApiError::Storage),
+            .map_err(|_| storage_error("stored endpoint id invalid")),
         "tag" => Ok(Endpoint::Tag(value.to_owned())),
-        _ => Err(MeshApiError::Storage),
+        _ => Err(storage_error("stored endpoint kind invalid")),
     }
 }
 
@@ -1902,28 +1964,45 @@ async fn read_grant_by_name(
     name: &str,
 ) -> Result<MeshGrant, MeshApiError> {
     let row = sqlx::query("SELECT id,name,from_kind,from_value,to_kind,to_value,both_ways,ports_json FROM mesh_grants WHERE name=?")
-        .bind(name).fetch_optional(&mut **tx).await.map_err(map_sql_error)?.ok_or(MeshApiError::NotFound)?;
-    let id: i64 = row.get("id");
-    let from_kind: String = row.get("from_kind");
-    let from_value: String = row.get("from_value");
-    let to_kind: String = row.get("to_kind");
-    let to_value: String = row.get("to_value");
+        .bind(name).fetch_optional(&mut **tx).await.map_err(|error| map_sql_error(error))?.ok_or(MeshApiError::NotFound)?;
+    let id: i64 = row.try_get("id").map_err(|error| map_sql_error(error))?;
+    let from_kind: String = row
+        .try_get("from_kind")
+        .map_err(|error| map_sql_error(error))?;
+    let from_value: String = row
+        .try_get("from_value")
+        .map_err(|error| map_sql_error(error))?;
+    let to_kind: String = row
+        .try_get("to_kind")
+        .map_err(|error| map_sql_error(error))?;
+    let to_value: String = row
+        .try_get("to_value")
+        .map_err(|error| map_sql_error(error))?;
     let arrow = Arrow {
-        id: RuleId(u64::try_from(id).map_err(|_| MeshApiError::Storage)?),
+        id: RuleId(u64::try_from(id).map_err(|_| storage_error("stored rule id invalid"))?),
         from: parse_endpoint(&from_kind, &from_value)?,
         to: parse_endpoint(&to_kind, &to_value)?,
-        both_ways: row.get("both_ways"),
-        ports: serde_json::from_str(&row.get::<String, _>("ports_json"))
-            .map_err(|_| MeshApiError::Storage)?,
+        both_ways: row
+            .try_get("both_ways")
+            .map_err(|error| map_sql_error(error))?,
+        ports: serde_json::from_str(
+            &row.try_get::<String, _>("ports_json")
+                .map_err(|error| map_sql_error(error))?,
+        )
+        .map_err(|_| storage_error("stored access ports JSON invalid"))?,
     };
-    arrow.validate().map_err(|_| MeshApiError::Storage)?;
+    arrow
+        .validate()
+        .map_err(|_| storage_error("stored access rule invalid"))?;
     Ok(MeshGrant {
-        name: row.get("name"),
+        name: row.try_get("name").map_err(|error| map_sql_error(error))?,
         arrow,
     })
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[cold]
+#[inline(never)]
+#[track_caller]
 fn map_sql_error(error: sqlx::Error) -> MeshApiError {
     if let sqlx::Error::Database(database) = &error {
         if database.is_unique_violation() {
@@ -1933,5 +2012,5 @@ fn map_sql_error(error: sqlx::Error) -> MeshApiError {
             return MeshApiError::NotFound;
         }
     }
-    MeshApiError::Storage
+    storage_sql_error(error)
 }
