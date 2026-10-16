@@ -1,6 +1,6 @@
 /** Finds and opens links in the visible terminal buffer; callers feed changed rows only after paint. */
-import { hideTipAt, hoverTipAt, peekTipAt } from "../../../packages/ui/src/tooltip";
-import { formatLinkTooltipText } from "../../../packages/ui/src/tooltip-link-text";
+import { hideTipAt as hideSharedTipAt, hoverTipAt, peekTipAt } from "../../../packages/ui/src/tooltip";
+import { alignLinkTooltipArrow, formatLinkTooltipText, installLinkTooltipStyles, linkTooltipLineCount } from "../../../packages/ui/src/tooltip-link-text";
 
 export interface TerminalLinkRange {
   start: { x: number; y: number };
@@ -214,11 +214,32 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
   let touchOpenedKey: string | undefined;
   let touchOpenTimer = 0;
   let disposed = false;
+  let sideRestoreTimer = 0;
+  let savedTipSide: string | null = null;
+  let temporaryTipSide = false;
 
   const linkKey = (link: TerminalLink): string => `${link.kind}:${link.range.start.y}:${link.range.start.x}:${link.range.end.y}:${link.range.end.x}:${link.target}`;
 
+  const tooltipTextStyle = (): { fontSize: number; contentWidth: number; font: string } => {
+    const style = getComputedStyle(options.host);
+    const fontSize = Number.parseFloat(style.getPropertyValue("--text-secondary")) || 12;
+    const weight = style.getPropertyValue("--fw-label").trim() || "500";
+    const family = style.getPropertyValue("--font-ui").trim() || "ui-monospace";
+    return {
+      fontSize,
+      contentWidth: Math.max(1, Math.min(258, innerWidth - 38)),
+      font: `${weight} ${fontSize}px ${family}`,
+    };
+  };
+
+  const formatTarget = (target: string): string => {
+    const style = tooltipTextStyle();
+    return formatLinkTooltipText(target, style.contentWidth, style.font);
+  };
+
   /** Multiline links span the terminal width so the shared tooltip can clear every wrapped row. */
-  const tooltipBounds = (link: TerminalLink): DOMRect => {
+  const tooltipPoint = (link: TerminalLink, label: string): { x: number; y: number; side: "top" | "bottom" } => {
+    installLinkTooltipStyles();
     const canvas = options.canvas.getBoundingClientRect();
     const metrics = options.getCellMetrics();
     const visible = options.getVisibleRange();
@@ -227,8 +248,46 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     const multiline = link.range.start.y !== link.range.end.y;
     const left = multiline ? canvas.left : canvas.left + link.range.start.x * metrics.width;
     const right = multiline ? canvas.right : canvas.left + (link.range.end.x + 1) * metrics.width;
-    const top = canvas.top + first * metrics.height;
-    return new DOMRect(left, top, Math.max(0, right - left), Math.max(0, (last - first + 1) * metrics.height));
+    const linkTop = canvas.top + first * metrics.height;
+    const linkBottom = canvas.top + (last + 1) * metrics.height;
+    const { fontSize, contentWidth, font } = tooltipTextStyle();
+    const lineCount = linkTooltipLineCount(label, contentWidth, font);
+    const tooltipHeight = Math.ceil(lineCount * fontSize * 1.2) + 14;
+    const reserve = Math.max(0, tooltipHeight - 27);
+    const topFits = linkTop - 8 - tooltipHeight >= 8;
+    const bottomFits = innerHeight - linkBottom - 8 - tooltipHeight >= 8;
+    const side = topFits || (!bottomFits && linkTop - tooltipHeight >= innerHeight - linkBottom - tooltipHeight) ? "top" : "bottom";
+    return { x: (left + right) / 2, y: side === "top" ? linkTop - reserve : linkBottom, side };
+  };
+
+  /** Temporarily uses the shared tooltip's existing side preference for the complete wrapped link. */
+  const showLinkTip = (label: string, point: { x: number; y: number; side: "top" | "bottom" }, hover: boolean): void => {
+    window.clearTimeout(sideRestoreTimer);
+    if (!temporaryTipSide) savedTipSide = options.host.getAttribute("data-tip-side");
+    temporaryTipSide = true;
+    options.host.dataset.tipSide = point.side;
+    if (hover) hoverTipAt(options.host, label, point.x, point.y);
+    else peekTipAt(options.host, label, point.x, point.y, 2600);
+    alignLinkTooltipArrow();
+    if (hover) {
+      // Cold hover waits 400 ms before placement; align after that callback has run.
+      sideRestoreTimer = window.setTimeout(alignLinkTooltipArrow, 400);
+    } else sideRestoreTimer = window.setTimeout(restoreTipSide, 2600);
+  };
+
+  const restoreTipSide = (): void => {
+    window.clearTimeout(sideRestoreTimer);
+    sideRestoreTimer = 0;
+    if (!temporaryTipSide) return;
+    if (savedTipSide === null) delete options.host.dataset.tipSide;
+    else options.host.setAttribute("data-tip-side", savedTipSide);
+    savedTipSide = null;
+    temporaryTipSide = false;
+  };
+
+  const hideLinkTip = (): void => {
+    restoreTipSide();
+    hideSharedTipAt(options.host);
   };
 
   const rowsAt = (y: number, scannedRows: Map<number, TerminalLinkRow>, changedRows?: Set<number>): TerminalLinkRow | undefined => {
@@ -299,12 +358,15 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
         endY: Math.min(visible.last - visible.first, endY),
       });
       options.canvas.style.cursor = link.openable ? "pointer" : "text";
-      if (shouldShowLinkTarget(link) && point) hoverTipAt(options.host, formatLinkTooltipText(link.target), point.x, point.y, tooltipBounds(link));
-      else hideTipAt(options.host);
+      if (shouldShowLinkTarget(link) && point) {
+        const label = formatTarget(link.target);
+        showLinkTip(label, tooltipPoint(link, label), true);
+      }
+      else hideLinkTip();
     } else {
       options.paint(null);
       options.canvas.style.cursor = "text";
-      hideTipAt(options.host);
+      hideLinkTip();
     }
   };
 
@@ -351,7 +413,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       if (touchesRows(link, changedRows)) links.delete(key);
     }
     if (focusedLink && touchesRows(focusedLink, changedRows)) {
-      hideTipAt(options.host);
+      hideLinkTip();
       refreshHover = true;
     }
     for (const [key, link] of links) {
@@ -411,7 +473,10 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       touchOpenedKey = key;
       window.clearTimeout(touchOpenTimer);
       touchOpenTimer = window.setTimeout(() => { touchOpenedKey = undefined; }, 700);
-      if (shouldShowLinkTarget(link)) peekTipAt(options.host, formatLinkTooltipText(link.target), event.clientX, event.clientY, 2600, tooltipBounds(link));
+      if (shouldShowLinkTarget(link)) {
+        const label = formatTarget(link.target);
+        showLinkTip(label, tooltipPoint(link, label), false);
+      }
       options.open(link);
     }
   };
@@ -429,7 +494,10 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     if (!link || !link.openable || wasDragged || !sameLink) return;
     event.preventDefault();
     event.stopPropagation();
-    if (shouldShowLinkTarget(link)) peekTipAt(options.host, formatLinkTooltipText(link.target), event.clientX, event.clientY, 2600, tooltipBounds(link));
+    if (shouldShowLinkTarget(link)) {
+      const label = formatTarget(link.target);
+      showLinkTip(label, tooltipPoint(link, label), false);
+    }
     options.open(link);
   };
   const onPointerLeave = (): void => {
@@ -460,7 +528,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
           }
         }
         if (focusedLink && touchesDirtyGroup(focusedLink)) {
-          hideTipAt(options.host);
+      hideLinkTip();
           refreshHover = true;
         }
       }
@@ -496,6 +564,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     dispose() {
       if (disposed) return;
       disposed = true;
+      restoreTipSide();
       if (idleHandle) {
         const w = window as unknown as { cancelIdleCallback?: (id: number) => void };
         if (w.cancelIdleCallback) w.cancelIdleCallback(idleHandle);
