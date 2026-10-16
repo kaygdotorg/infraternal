@@ -28,5 +28,9 @@ tokio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
+[dev-dependencies]
+# Virtual clocks test probe scheduling without measuring host wall time.
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true
