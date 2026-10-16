@@ -188,6 +188,13 @@ fn diagnostic_uid(data: &[u8], inode: u32) -> io::Result<u32> {
     }
     Ok(u32::from_ne_bytes([data[44], data[45], data[46], data[47]]))
 }
+/// Internal property-test entry; never inspects the host.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use]
+pub fn check_diagnostic_record(data: &[u8], inode: u32) -> Option<u32> {
+    diagnostic_uid(data, inode).ok()
+}
 #[cold]
 #[inline(never)]
 fn socket_uid(inode: u32) -> io::Result<u32> {
