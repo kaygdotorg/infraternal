@@ -11,10 +11,9 @@
  *   in flight;
  * - an IDR repairs the reference state inside the running decoder, which is only reconfigured when the profile or the
  *   level in its parameter sets changed; closing it on every IDR would cancel valid queued output;
- * - decoded pictures are drawn on the display's next frame (`requestAnimationFrame` in the worker where it exists):
- *   one retained picture is replaced by a newer one, so a slow display shows the newest frame and the rest are closed
- *   at once. A picture is closed as soon as it is drawn or replaced, never held (a held `VideoFrame` pins decoder
- *   memory and stalls the decoder).
+ * - decoded pictures are drawn directly from the decoder output callback, without a second display-clock queue.
+ *   The canvas always holds the newest completed picture; the compositor may skip earlier draws when output bursts.
+ *   Each picture is closed before the callback returns so no presentation wait pins decoder memory.
  *
  * Nothing is scheduled while no unit arrives and nothing is drawn without a new picture: a window whose machine shows
  * the same pixels costs no work at all (D254). The worker exists only while its window streams; the page ends it when
@@ -26,8 +25,6 @@ import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 interface WorkerScope {
   onmessage: ((event: MessageEvent<ToWorker>) => void) | null;
   postMessage(message: FromWorker): void;
-  requestAnimationFrame?(callback: (time: number) => void): number;
-  cancelAnimationFrame?(handle: number): void;
   setTimeout(callback: () => void, ms: number): number;
   clearTimeout(handle: number): void;
   close(): void;
@@ -57,8 +54,6 @@ let waitingKeyframe = true;
 let repairPending = false;
 let timestamp = 0;
 let first = true;
-let retained: VideoFrame | undefined;
-let paintHandle: number | undefined;
 let shownW = 0, shownH = 0;
 const stats: WorkerStats = { received: 0, decoded: 0, painted: 0, dropped: 0, superseded: 0, repairs: 0 };
 
@@ -84,10 +79,8 @@ function repair(): void {
   if (wait > 0) repairTimer = scope.setTimeout(sendRepair, wait); else sendRepair();
 }
 
-function paint(): void {
-  paintHandle = undefined;
-  const frame = retained;
-  retained = undefined;
+function output(frame: VideoFrame): void {
+  stats.decoded++;
   if (!frame || !canvas || !context) { frame?.close(); return; }
   try {
     if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
@@ -104,28 +97,8 @@ function paint(): void {
   } finally { frame.close(); }
 }
 
-function schedulePaint(): void {
-  if (paintHandle !== undefined) return;
-  if (scope.requestAnimationFrame) paintHandle = scope.requestAnimationFrame(paint);
-  else paintHandle = scope.setTimeout(paint, 0);
-}
-
-function output(frame: VideoFrame): void {
-  stats.decoded++;
-  if (retained) { retained.close(); stats.superseded++; }
-  retained = frame;
-  schedulePaint();
-}
-
 function retireDecoder(): void {
   if (repairTimer !== undefined) { scope.clearTimeout(repairTimer); repairTimer = undefined; }
-  if (paintHandle !== undefined) {
-    if (scope.cancelAnimationFrame) scope.cancelAnimationFrame(paintHandle); else scope.clearTimeout(paintHandle);
-    paintHandle = undefined;
-  }
-  // The retained picture is not drawn: a reset or a close means the stream it belonged to is over.
-  retained?.close();
-  retained = undefined;
   if (decoder && decoder.state !== "closed") decoder.close();
   decoder = undefined;
   codec = undefined;
