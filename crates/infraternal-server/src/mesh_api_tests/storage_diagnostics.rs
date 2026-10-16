@@ -529,6 +529,39 @@ async fn invalid_stored_host_is_reported_once_by_id() {
 }
 
 #[tokio::test]
+async fn coordinator_clones_share_failure_counts_and_report_recovery() {
+    let fixture = Fixture::new().await;
+    let store = fixture.service.dataplane();
+    let (capture, _guard) = Capture::start();
+    for _ in 0..10 {
+        assert_eq!(
+            store
+                .clone()
+                .config(infraternal_mesh::model::NodeId(1))
+                .await,
+            Err(MeshApiError::Storage)
+        );
+    }
+    let first_count = capture.errors().len();
+    let (id, _) = store
+        .attach(
+            "server",
+            infraternal_mesh::model::PublicKey([37; 32]),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    store.config(id).await.unwrap();
+    let recovered = capture.events("mesh_storage_recovered");
+    fixture.cleanup().await;
+    assert_eq!(first_count, 1);
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0]["fields"]["count"], 10);
+    assert_eq!(recovered[0]["fields"]["operation"], "mesh.coordinator.load");
+}
+
+#[tokio::test]
 async fn coordinator_loading_preserves_missing_server_and_sql_reasons() {
     let fixture = Fixture::new().await;
     let store = fixture.service.dataplane();

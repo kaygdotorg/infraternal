@@ -2,7 +2,7 @@
 use crate::{
     configuration,
     dataplane::{Config, DefaultPolicy},
-    diagnostics::{storage_error, storage_sql_error},
+    diagnostics::{StorageDiagnostics, storage_error, storage_sql_error},
     policy::{
         address::AddressAllocator,
         coordinator::Coordinator,
@@ -56,6 +56,9 @@ impl Snapshot {
 pub struct Store {
     pool: SqlitePool,
     cache: std::sync::Arc<tokio::sync::Mutex<Option<Loaded>>>,
+    load_diagnostics: StorageDiagnostics,
+    config_diagnostics: StorageDiagnostics,
+    preview_diagnostics: StorageDiagnostics,
 }
 impl Store {
     #[must_use]
@@ -63,6 +66,9 @@ impl Store {
         Self {
             pool,
             cache: std::sync::Arc::default(),
+            load_diagnostics: StorageDiagnostics::new("mesh.coordinator.load"),
+            config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
+            preview_diagnostics: StorageDiagnostics::new("mesh.default.preview"),
         }
     }
     /// Attach an authenticated host using its approved inventory binding, never a public key as authority.
@@ -149,7 +155,9 @@ impl Store {
     /// # Errors
     /// Refuses absent server identity, invalid inventory, allocation exhaustion or storage errors.
     pub async fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
-        self.snapshot().await?.config(node)
+        self.config_diagnostics
+            .run(async { self.snapshot().await?.config(node) })
+            .await
     }
     /// Retain one shared immutable inventory/policy snapshot, rather than a peer map per node.
     pub(crate) async fn snapshot(&self) -> Result<Snapshot, crate::api::MeshApiError> {
@@ -163,94 +171,101 @@ impl Store {
         next: DefaultPolicy,
         cursor: Option<crate::api::MeshCursor>,
     ) -> Result<serde_json::Value, crate::api::MeshApiError> {
-        use crate::api::{MAX_MESH_FRAME_LEN, MeshApiError, MeshCursor};
-        let (coordinator, _, default, revision) = self.load().await?;
-        if cursor.is_some_and(|cursor| cursor.revision != revision) {
-            return Err(MeshApiError::Conflict);
-        }
-        let views = coordinator.views();
-        let losses = |view: &crate::policy::view::PeerView| {
-            views.len().saturating_sub(1).saturating_sub(
-                view.peers
-                    .values()
-                    .filter(|peer| peer.outbound != TrafficPolicy::None)
-                    .count(),
+        self.preview_diagnostics.run(async {
+            use crate::api::{MAX_MESH_FRAME_LEN, MeshApiError, MeshCursor};
+            let (coordinator, _, default, revision) = self.load().await?;
+            if cursor.is_some_and(|cursor| cursor.revision != revision) {
+                return Err(MeshApiError::Conflict);
+            }
+            let views = coordinator.views();
+            let losses = |view: &crate::policy::view::PeerView| {
+                views.len().saturating_sub(1).saturating_sub(
+                    view.peers
+                        .values()
+                        .filter(|peer| peer.outbound != TrafficPolicy::None)
+                        .count(),
+                )
+            };
+            let reducing = default == DefaultPolicy::Allow && next == DefaultPolicy::Deny;
+            let mut total = 0usize;
+            if reducing {
+                for view in views.values() {
+                    total = total
+                        .checked_add(losses(view))
+                        .ok_or_else(|| storage_error("reach count exhausted"))?;
+                }
+            }
+            let offset = cursor.map_or(0, |cursor| cursor.offset);
+            if offset > total {
+                return Err(MeshApiError::InvalidInput);
+            }
+            let mut skip = offset;
+            let mut pairs = Vec::new();
+            let mut bytes = 2usize;
+            'sources: for (node, view) in views.iter().filter(|_| reducing) {
+                let count = losses(view);
+                if skip >= count {
+                    skip -= count;
+                    continue;
+                }
+                for other in views.keys() {
+                    if other == node
+                        || view
+                            .peers
+                            .get(other)
+                            .is_some_and(|peer| peer.outbound != TrafficPolicy::None)
+                    {
+                        continue;
+                    }
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    let pair = (*node, *other);
+                    let length = serde_json::to_vec(&pair)
+                        .map_err(|_| storage_error("reach pair serialization failed"))?
+                        .len()
+                        + 1;
+                    if bytes + length > MAX_MESH_FRAME_LEN - 1024 {
+                        break 'sources;
+                    }
+                    bytes += length;
+                    pairs.push(pair);
+                }
+            }
+            let delivered = offset
+                .checked_add(pairs.len())
+                .ok_or_else(|| storage_error("reach count exhausted"))?;
+            let cursor = (delivered < total).then_some(MeshCursor {
+                revision,
+                offset: delivered,
+            });
+            Ok(
+                serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"next_cursor":cursor}),
             )
-        };
-        let reducing = default == DefaultPolicy::Allow && next == DefaultPolicy::Deny;
-        let mut total = 0usize;
-        if reducing {
-            for view in views.values() {
-                total = total
-                    .checked_add(losses(view))
-                    .ok_or_else(|| storage_error("reach count exhausted"))?;
-            }
-        }
-        let offset = cursor.map_or(0, |cursor| cursor.offset);
-        if offset > total {
-            return Err(MeshApiError::InvalidInput);
-        }
-        let mut skip = offset;
-        let mut pairs = Vec::new();
-        let mut bytes = 2usize;
-        'sources: for (node, view) in views.iter().filter(|_| reducing) {
-            let count = losses(view);
-            if skip >= count {
-                skip -= count;
-                continue;
-            }
-            for other in views.keys() {
-                if other == node
-                    || view
-                        .peers
-                        .get(other)
-                        .is_some_and(|peer| peer.outbound != TrafficPolicy::None)
-                {
-                    continue;
-                }
-                if skip > 0 {
-                    skip -= 1;
-                    continue;
-                }
-                let pair = (*node, *other);
-                let length = serde_json::to_vec(&pair)
-                    .map_err(|_| storage_error("reach pair serialization failed"))?
-                    .len()
-                    + 1;
-                if bytes + length > MAX_MESH_FRAME_LEN - 1024 {
-                    break 'sources;
-                }
-                bytes += length;
-                pairs.push(pair);
-            }
-        }
-        let delivered = offset
-            .checked_add(pairs.len())
-            .ok_or_else(|| storage_error("reach count exhausted"))?;
-        let cursor = (delivered < total).then_some(MeshCursor {
-            revision,
-            offset: delivered,
-        });
-        Ok(
-            serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"next_cursor":cursor}),
-        )
+        }).await
     }
     async fn load(&self) -> Result<Loaded, crate::api::MeshApiError> {
-        let mut cached = self.cache.lock().await;
-        let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
-            .fetch_one(&self.pool)
+        self.load_diagnostics
+            .run(async {
+                let mut cached = self.cache.lock().await;
+                let revision: i64 =
+                    sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(|error| storage_sql_error(error))?;
+                let revision =
+                    u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?;
+                if let Some(loaded) = cached.as_ref()
+                    && loaded.3 == revision
+                {
+                    return Ok(loaded.clone());
+                }
+                let loaded = self.load_uncached().await?;
+                *cached = Some(loaded.clone());
+                Ok(loaded)
+            })
             .await
-            .map_err(|error| storage_sql_error(error))?;
-        let revision =
-            u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?;
-        if let Some(loaded) = cached.as_ref()
-            && loaded.3 == revision
-        {
-            return Ok(loaded.clone());
-        }
-        let loaded = self.load_uncached().await?;
-        *cached = Some(loaded.clone());
-        Ok(loaded)
     }
     // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
     #[allow(clippy::too_many_lines)]
