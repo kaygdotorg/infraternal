@@ -65,7 +65,6 @@ export function createSetupFeed(options: SetupFeedOptions): SetupSource {
         socket = next;
         next.onopen = () => {
           if (next !== socket) return;
-          attempts = 0;
           next.send(JSON.stringify({ action: "subscribe", host_id: hostId, window_id: options.windowId, after: last }));
           if (wantRetry) { wantRetry = false; next.send(JSON.stringify({ action: "retry", host_id: hostId })); }
         };
@@ -80,6 +79,8 @@ export function createSetupFeed(options: SetupFeedOptions): SetupSource {
           if (!event || event.hostId !== hostId) return;
           // A replay after a reconnect can repeat what was already shown.
           if (event.sequence !== undefined) { if (event.sequence <= last) return; last = event.sequence; }
+          // Only useful host status restores the budget; opening an empty socket proves nothing.
+          attempts = 0;
           seen = true;
           listener(event);
           if (event.stage === "ready" && event.state === "done") end();
