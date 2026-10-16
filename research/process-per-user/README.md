@@ -342,6 +342,12 @@ discard buffer addresses and contents. Pair those syscall bounds with the
 session's next PTY-read stage before deciding whether a kernel wait occurred
 on a productive read or a speculative retry. Nonblocking PTY reads can still
 wait for kernel terminal work; a byte budget cannot preempt such a syscall.
+Diagnostic send/receipt pairs also retain the main reader thread's accounted
+CPU clock, sampled inside the original RTT. This excludes the counter thread
+and waits, while including diagnostic observer work and other event-loop tasks
+inside that probe. Reports refuse missing halves, reversed clocks or CPU spans
+longer than the RTT. Older captures without these clocks have no measured
+reader-CPU value; overlapping probe intervals must never be added together.
 
 `ppu_baseline_tail.py` observes the shipping control without requesting a
 native stage header or sending profiling signals to it. Independent launch
