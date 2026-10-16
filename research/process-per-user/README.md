@@ -349,12 +349,14 @@ inside that probe. Reports refuse missing halves, reversed clocks or CPU spans
 longer than the RTT. Older captures without these clocks have no measured
 reader-CPU value; overlapping probe intervals must never be added together.
 
-`ppu_aged_tail.py` retains one host through 5,400 active seconds of the original
-mixed workload before the existing 900-second diagnostic. Wrap the entire
-6,300-second fixture with `ppu_segment.py`; the full kernel capture still fits
-one short hold. Its phase boundary includes a survivor census, task restart and
-resize pair, so this preconditioned capture cannot replace unchanged admission.
-The native stage ring remains bounded while aging. Preserve its raw prefix,
+`ppu_aged_tail.py` keeps one original mixed-workload invocation running for
+6,300 active seconds, retaining its readers, tasks, RNG and accumulated sample
+history. Full kernel tracing starts only after 5,400 seconds and stays within
+the existing 900-second limit. Wrap the whole fixture with `ppu_segment.py`;
+the full capture still fits one short hold. No intermediate survivor census,
+task restart or resize resets the observer or terminal state. Marker observation,
+the boundary fence, stage flushing and tracing still make this diagnostic rather
+than unchanged admission. The native stage ring remains bounded while aging. Preserve its raw prefix,
 including any preconditioning overflow, and use `preconditioning.json`'s fenced
 byte offset with `stage_window` to derive a separate capture-only log. Never
 truncate the native process's open file or ignore overflow inside the capture.
