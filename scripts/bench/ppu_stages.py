@@ -52,6 +52,11 @@ async def ready(host):
     await ORIGINAL_READY(host)
     with (host.root.parent / 'stages.log').open() as source:
         read_header(source)
+    register_readers(host)
+
+
+def register_readers(host):
+    """Register the same marker matcher for either native process layout."""
     for index, peer in enumerate(host.peers):
         READERS[peer.reader] = dict(session=index, tail=b'', head=peer.head, peer=peer)
 
