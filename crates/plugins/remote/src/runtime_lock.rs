@@ -53,10 +53,40 @@ fn checked_lock(file: &File, path: &Path) -> io::Result<()> {
 /// # Errors
 /// Refuses unsafe paths or a second running infraternal agent/cleanup.
 pub fn acquire(state: &Path) -> io::Result<File> {
+    acquire_bound(state, None)
+}
+/// Bind a managed runtime to its loaded host identity while admitting startup.
+/// # Errors
+/// Refuses outstanding rollback receipts or another host's installation marker.
+pub fn acquire_owned(state: &Path, host: &str) -> io::Result<File> {
+    acquire_bound(state, Some(host))
+}
+fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
     // Cleanup holds the exclusive parent-directory setup guard. This shared
     // admission guard prevents starting between lock-file unlink and root retirement.
     let parent = File::open(state.parent().and_then(Path::parent).ok_or_else(refused)?)?;
     parent.lock_shared()?;
+    if let Some(host) = host {
+        let base = state.parent().ok_or_else(refused)?;
+        let _root = directory(base)?;
+        if super::uninstall::public_file(
+            &base.join(".bootstrap-owner"),
+            nix::unistd::Uid::effective().as_raw(),
+            33,
+        )? != format!("{host}\n")
+        {
+            return Err(refused());
+        }
+        let prefix = format!(
+            "{}.bootstrap-rollback-",
+            base.file_name().ok_or_else(refused)?.to_string_lossy()
+        );
+        for entry in fs::read_dir(base.parent().ok_or_else(refused)?)? {
+            if entry?.file_name().to_string_lossy().starts_with(&prefix) {
+                return Err(refused());
+            }
+        }
+    }
     match fs::DirBuilder::new().mode(0o700).create(state) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -64,6 +94,20 @@ pub fn acquire(state: &Path) -> io::Result<File> {
     }
     let directory = directory(state)?;
     let path = at(&directory, LOCK);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Never publish a new-protocol lock beside a live legacy runtime:
+            // a later cleanup would otherwise treat that unheld file as authority.
+            control(&directory, false, true).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "Runtime ownership is not available",
+                )
+            })?;
+        }
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -78,12 +122,17 @@ pub fn acquire(state: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Recheck a retained runtime description before restarting its local service.
+/// # Errors
+/// Refuses replacement or redirected state while the process still owns its original lock.
+pub fn validate(file: &File, state: &Path) -> io::Result<()> {
+    let directory = directory(state)?;
+    checked_lock(file, &at(&directory, LOCK))
+}
+
 // Legacy runtimes did not hold the lifetime lock. A refused connect alone is
 // insufficient during bind-before-listen: retain a same-user bound endpoint too.
-fn base_root(name: &Path) -> &Path {
-    name.parent().and_then(Path::parent).unwrap_or(name)
-}
-fn legacy_bound(name: &Path) -> io::Result<bool> {
+fn legacy_bound(runtime: &Path) -> io::Result<bool> {
     let rows = fs::read_to_string("/proc/net/unix")?;
     for row in rows.lines().skip(1) {
         let fields = row.split_whitespace().collect::<Vec<_>>();
@@ -91,7 +140,7 @@ fn legacy_bound(name: &Path) -> io::Result<bool> {
             continue;
         }
         let saved = Path::new(fields[7]);
-        if !(saved.starts_with(base_root(name))
+        if !(saved.starts_with(runtime)
             || (!saved.is_absolute()
                 && saved
                     .extension()
@@ -127,7 +176,7 @@ fn legacy_bound(name: &Path) -> io::Result<bool> {
     }
     Ok(false)
 }
-fn control(runtime: &File, base: &Path, retire: bool, legacy: bool) -> Result<(), u8> {
+fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
     let path = at(runtime, "plugins.sock");
     let before = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -154,7 +203,9 @@ fn control(runtime: &File, base: &Path, retire: bool, legacy: bool) -> Result<()
             Err(nix::errno::Errno::ECONNREFUSED) => {}
             Err(_) => return Err(77),
         }
-        if legacy_bound(&base.join("sessions/plugins.sock")).map_err(|_| 77)? {
+        let resolved =
+            fs::read_link(format!("/proc/self/fd/{}", runtime.as_raw_fd())).map_err(|_| 77)?;
+        if legacy_bound(&resolved).map_err(|_| 77)? {
             return Err(73);
         }
     }
@@ -212,7 +263,7 @@ pub fn command(arguments: &[std::ffi::OsString]) -> Option<u8> {
         if !matches!(mode, "inspect" | "retire") {
             return Err(71);
         }
-        control(&runtime, base, mode == "retire", legacy)
+        control(&runtime, mode == "retire", legacy)
     };
     Some(execute().err().unwrap_or(0))
 }

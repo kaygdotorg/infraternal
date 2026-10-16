@@ -14,6 +14,8 @@ use tokio::{
 /// One dedicated sleeping worker owns synchronous plugin calls; terminal dispatch never enters kernel work.
 #[derive(Clone)]
 pub(crate) struct Registry {
+    #[cfg(feature = "remote")]
+    lifetime: Option<std::sync::Arc<std::fs::File>>,
     sender: mpsc::Sender<Job>,
     events: tokio::sync::broadcast::Sender<Vec<u8>>,
     pending: std::sync::Arc<std::sync::Mutex<Option<PendingWorker>>>,
@@ -101,6 +103,8 @@ impl Registry {
         let (sender, incoming) = mpsc::channel::<Job>(8);
         let (events, _) = tokio::sync::broadcast::channel(8);
         Self {
+            #[cfg(feature = "remote")]
+            lifetime: None,
             sender,
             events,
             paths: tokio::sync::watch::channel(None).0,
@@ -129,9 +133,13 @@ impl Registry {
             let notifications = self.events.clone();
             let paths = self.paths.clone();
             let link = self.link.clone();
+            #[cfg(feature = "remote")]
+            let lifetime = self.lifetime.clone();
             std::thread::Builder::new()
                 .name("node-plugins".into())
                 .spawn(move || {
+                    #[cfg(feature = "remote")]
+                    let _lifetime = lifetime;
                     let Ok(mut registry) = factory() else {
                         return;
                     };
@@ -285,6 +293,54 @@ impl Service {
         mode: crate::plugins::ExecutionMode,
         installation: Option<&crate::plugins::Installation>,
     ) -> io::Result<Self> {
+        Self::start_inner(
+            state,
+            mode,
+            installation,
+            #[cfg(feature = "remote")]
+            None,
+        )
+        .await
+    }
+    #[cfg(feature = "remote")]
+    pub(crate) async fn start_retained(
+        state: &Path,
+        installation: Option<&crate::plugins::Installation>,
+        lifetime: &mut Option<std::sync::Arc<std::fs::File>>,
+    ) -> io::Result<Self> {
+        let service = Self::start_inner(
+            state,
+            crate::plugins::ExecutionMode::Remote,
+            installation,
+            lifetime.clone(),
+        )
+        .await?;
+        lifetime.clone_from(&service.registry.lifetime);
+        Ok(service)
+    }
+    async fn start_inner(
+        state: &Path,
+        mode: crate::plugins::ExecutionMode,
+        installation: Option<&crate::plugins::Installation>,
+        #[cfg(feature = "remote")] lifetime: Option<std::sync::Arc<std::fs::File>>,
+    ) -> io::Result<Self> {
+        #[cfg(feature = "remote")]
+        let lifetime = if matches!(mode, crate::plugins::ExecutionMode::Remote) {
+            let guard = if let Some(guard) = lifetime {
+                infraternal_plugin_remote::runtime_lock::validate(&guard, state)?;
+                guard
+            } else {
+                std::sync::Arc::new(if let Some(context) = installation {
+                    infraternal_plugin_remote::runtime_lock::acquire_owned(state, &context.host)?
+                } else {
+                    infraternal_plugin_remote::runtime_lock::acquire(state)?
+                })
+            };
+            crate::sessions::state(Some(state.to_owned()))?;
+            Some(guard)
+        } else {
+            None
+        };
         // Compiled metadata is validated by registry tests; construct its
         // process-owned instances only when a caller needs an action.
         #[cfg(feature = "remote")]
@@ -292,6 +348,13 @@ impl Service {
         #[cfg(not(feature = "remote"))]
         let installation = installation.copied();
         let registry = Registry::for_mode(state.to_owned(), mode, installation);
+        // Listener tasks and synchronous workers retain the same ownership even
+        // when cancellation has been requested but their work has not stopped.
+        #[cfg(feature = "remote")]
+        let registry = Registry {
+            lifetime,
+            ..registry
+        };
         let local = Local::bind(state, registry.clone()).await?;
         Ok(Self {
             registry,
@@ -810,6 +873,37 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn retained_runtime_registry_keeps_lifetime_ownership_after_listener_abort() {
+        let directory = Directory::new();
+        let service = Service::start(&directory.0, crate::plugins::ExecutionMode::Remote, None)
+            .await
+            .unwrap();
+        let retained = service.registry.clone();
+        let stopped = service._local.task.abort_handle();
+        let probe = std::fs::File::open(
+            directory
+                .0
+                .join(infraternal_plugin_remote::runtime_lock::LOCK),
+        )
+        .unwrap();
+        drop(service);
+        tokio::task::yield_now().await;
+        assert!(
+            probe.try_lock().is_err(),
+            "retained runtime work lost its lifetime lock"
+        );
+        drop(retained);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !stopped.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(probe.try_lock().is_ok());
     }
     #[tokio::test]
     async fn synchronous_plugin_work_does_not_park_the_current_thread_reactor() {

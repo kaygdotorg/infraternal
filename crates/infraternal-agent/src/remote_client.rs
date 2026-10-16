@@ -72,8 +72,12 @@ async fn run_inner(
     // its sole owner and local listener across watchdog resets; only a closed
     // receiver proves the worker has ended and can safely be replaced.
     let service = Mutex::new(None::<crate::plugin_control::Service>);
+    // Keep lifetime ownership even when a failed worker is being replaced or
+    // credentials temporarily prevent another connection attempt.
+    let lifetime = Mutex::new(None::<std::sync::Arc<std::fs::File>>);
     supervisor::run(|connected| {
         let service = &service;
+        let lifetime = &lifetime;
         let state = state.clone();
         async move {
             // Invalid enrollment creates no local state or plugin work. A clock or
@@ -83,17 +87,17 @@ async fn run_inner(
             } else {
                 crate::remote_renewal::require_current(&identity.identity)?;
             }
-            let state = crate::sessions::state(state.clone())?;
+            let state = crate::sessions::state_path(state.clone())?;
             let mut local = service.lock().await;
             if local.as_ref().is_some_and(|local| local.registry.ended()) {
                 local.take();
             }
             if local.is_none() {
                 *local = Some(
-                    crate::plugin_control::Service::start(
+                    crate::plugin_control::Service::start_retained(
                         &state,
-                        crate::plugins::ExecutionMode::Remote,
                         installation,
+                        &mut *lifetime.lock().await,
                     )
                     .await?,
                 );

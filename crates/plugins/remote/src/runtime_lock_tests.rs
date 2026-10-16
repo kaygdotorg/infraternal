@@ -72,3 +72,32 @@ fn lock_links_and_replacements_are_refused() {
     assert!(acquire(&fixture.state()).is_err());
     assert_eq!(fs::read(other).unwrap(), b"retained");
 }
+
+#[test]
+fn managed_start_refuses_another_host_and_an_unfinished_receipt() {
+    let fixture = Fixture::new();
+    let marker = fixture.0.join("base/.bootstrap-owner");
+    let host = "11111111111111111111111111111111";
+    fs::write(&marker, format!("{host}\n")).unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(acquire_owned(&fixture.state(), "22222222222222222222222222222222").is_err());
+    let receipt = fixture
+        .0
+        .join("base.bootstrap-rollback-22222222222222222222222222222222");
+    fs::write(&receipt, b"retained").unwrap();
+    assert!(acquire_owned(&fixture.state(), host).is_err());
+    assert!(!fixture.state().join(LOCK).exists());
+    fs::remove_file(receipt).unwrap();
+    assert!(acquire_owned(&fixture.state(), host).is_ok());
+}
+
+#[test]
+fn a_live_legacy_runtime_cannot_publish_an_unheld_lifetime_file() {
+    let fixture = Fixture::new();
+    let listener =
+        std::os::unix::net::UnixListener::bind(fixture.state().join("plugins.sock")).unwrap();
+    assert!(acquire(&fixture.state()).is_err());
+    assert!(!fixture.state().join(LOCK).exists());
+    drop(listener);
+    assert!(acquire(&fixture.state()).is_ok());
+}
