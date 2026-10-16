@@ -3,7 +3,7 @@
 
 Requires a host-diagnostics image. This changes scheduling and is diagnostic
 only. No output/input bytes enter the receipt; only synthetic marker identities,
-stream offsets, descriptor numbers and monotonic timestamps are retained.
+stream offsets, descriptor numbers and monotonic/thread CPU clocks are retained.
 """
 import asyncio
 import contextlib
@@ -63,6 +63,9 @@ def register_readers(host):
 
 async def frame(reader):
     result = await ORIGINAL_FRAME(reader)
+    # This thread's accounted CPU excludes the counter thread and waits.
+    # Take it before the wall receipt: the CPU interval stays inside the RTT.
+    cpu_stamp = time.thread_time_ns()
     stamp = time.monotonic_ns()
     state = READERS.get(reader)
     if state is not None and result[0] == 0x11:
@@ -83,6 +86,7 @@ async def frame(reader):
                     raise ValueError('probe waiter belongs to another session')
                 end = offset - len(tail) + position + len(marker)
                 RECEIVED.setdefault((session, number), dict(receive_ns=stamp, output_end=end,
+                    receive_thread_cpu_ns=cpu_stamp,
                     receive_active_s=suite.clock_now()))
         state.update(tail=combined[-64:], head=offset + len(payload))
     return result
@@ -92,7 +96,8 @@ async def send(peer, kind, data=b''):
     probe = CURRENT.get()
     if kind == 0x10 and probe is not None:
         probe.update(input_start=peer.accepted, input_end=peer.accepted + len(data),
-                     send_before_ns=time.monotonic_ns(), send_before_s=suite.clock_now())
+                     send_before_ns=time.monotonic_ns(), send_before_s=suite.clock_now(),
+                     send_before_thread_cpu_ns=time.thread_time_ns())
         await ORIGINAL_SEND(peer, kind, data)
         probe['send_after_ns'] = time.monotonic_ns()
     else:

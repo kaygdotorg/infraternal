@@ -76,12 +76,14 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
             return next(frames)
         stages.READERS[reader] = dict(session=900, tail=b'', head=123,
             peer=SimpleNamespace(waiters={b'probe-900-12': asyncio.get_running_loop().create_future()}))
-        with patch.object(stages, 'ORIGINAL_FRAME', receive):
+        with patch.object(stages, 'ORIGINAL_FRAME', receive), \
+             patch.object(stages.time, 'thread_time_ns', return_value=900):
             await stages.frame(reader)
             await stages.frame(reader)
         row = stages.RECEIVED[(900, 12)]
         self.assertEqual(row['output_end'], 123 + len(first) + len(b'12'))
         self.assertGreater(row['receive_ns'], 0)
+        self.assertEqual(row['receive_thread_cpu_ns'], 900)
 
     async def test_registered_marker_receipt_does_not_wait_for_its_newline(self):
         reader = object()
@@ -125,12 +127,14 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
         token = stages.CURRENT.set(probe)
         try:
-            with patch.object(stages, 'ORIGINAL_SEND', send):
+            with patch.object(stages, 'ORIGINAL_SEND', send), \
+                 patch.object(stages.time, 'thread_time_ns', return_value=700):
                 await stages.send(peer, 0x10, b'seed\n')
         finally:
             stages.CURRENT.reset(token)
         self.assertEqual((probe['input_start'], probe['input_end'], peer.accepted), (17, 22, 22))
         self.assertGreaterEqual(probe['send_after_ns'], probe['send_before_ns'])
+        self.assertEqual(probe['send_before_thread_cpu_ns'], 700)
 
 
 if __name__ == '__main__':
