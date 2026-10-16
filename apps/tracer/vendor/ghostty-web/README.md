@@ -17,7 +17,9 @@ colors in the existing terminal. Cells continue to retain palette indices, and
 truecolor cells remain literal RGB values. The API avoids sending synthetic VT
 data through the parser or PTY. `cell-metrics.patch` measures cell height from
 the font ascent and descent, defaults the line-height factor to 1.0, and rounds
-cell dimensions to device pixels. The patches apply in that order. The script
+cell dimensions to device pixels. `link-underline.patch` paints temporary link
+underlines with the active theme cursor colour while preserving batched text
+rendering. The patches apply in that order. The script
 runs the upstream locked install and its four constituent build steps. It does
 not use the upstream aggregate `build` task because that task invokes a second,
 non-frozen `prebuild` install.
