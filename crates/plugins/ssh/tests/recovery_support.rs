@@ -225,15 +225,36 @@ fn review_stale_receipt_recovers_without_host_python() {
 /// A process still owns its bound control socket during the bind-to-listen gap.
 #[test]
 fn review_bound_control_socket_before_listen_preserves_receipt() {
+    bound_legacy_control_socket_retains_receipt(false);
+}
+
+/// Restricted descriptor inspection cannot prove a bound legacy endpoint stale.
+#[test]
+fn private_legacy_control_socket_preserves_receipt() {
+    bound_legacy_control_socket_retains_receipt(true);
+}
+
+fn bound_legacy_control_socket_retains_receipt(private: bool) {
     let host = MinimalHost::new();
     let control = host.base().join("sessions/plugins.sock");
     fs::remove_file(&control).unwrap();
     // Relative bind plus chdir keeps cwd/descriptor paths from supplying an
     // unrelated liveness signal. EOF proves the same holder can still listen.
+    let privacy = if private {
+        "import ctypes; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; "
+    } else {
+        ""
+    };
+    let program = format!(
+        "import os,socket,sys; s=socket.socket(socket.AF_UNIX); s.bind('sessions/plugins.sock'); os.chdir('/'); {privacy}print('ready',flush=True); sys.stdin.read(); s.listen(); print('listening',flush=True)"
+    );
     let mut holder = Command::new("python3")
-        .args(["-u", "-c", "import os,socket,sys; s=socket.socket(socket.AF_UNIX); s.bind('sessions/plugins.sock'); os.chdir('/'); print('ready',flush=True); sys.stdin.read(); s.listen(); print('listening',flush=True)"])
+        .args(["-u", "-c", &program])
         .current_dir(host.base())
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut ready = [0; 6];
     holder
         .stdout
