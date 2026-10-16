@@ -8,10 +8,9 @@ const prime: Snapshot = { rev: 0, access: { view: true, manageGrants: false }, n
 const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 
 /** Deterministic browser timer ownership without real retry delays or a DOM. */
-function timers(): () => void {
+function timers(pending = new Set<number>()): () => void {
   const prior = Object.getOwnPropertyDescriptor(globalThis, "window");
   let serial = 0;
-  const pending = new Set<number>();
   Object.defineProperty(globalThis, "window", { configurable: true, value: {
     setTimeout: () => { const id = ++serial; pending.add(id); return id; },
     clearTimeout: (id: number) => pending.delete(id),
@@ -68,4 +67,26 @@ test("a synchronous subscription refusal leaves retry able to install a new watc
     expect(active).toBe(1);
   } finally { source.dispose(); restore(); }
   expect(active).toBe(0);
+});
+
+
+test("a pushed recovery cancels the scheduled retry", async () => {
+  const pending = new Set<number>();
+  const restore = timers(pending);
+  let deliver: ((event: Record<string, unknown>) => void) | undefined;
+  const transport: MeshTransport = {
+    call: () => Promise.reject(new Error("connection lost")),
+    onReady: () => () => {},
+    subscribe: (_topic, listener) => { deliver = listener; return () => {}; },
+  };
+  const source = createMeshApi({transport, prime});
+  try {
+    deliver!({type: "changed", revision: 1});
+    await settle();
+    expect(source.status()).toBe("error");
+    expect(pending.size).toBe(1);
+    deliver!({type: "resync", snapshot: raw});
+    expect(source.status()).toBe("ready");
+    expect(pending.size).toBe(0);
+  } finally { source.dispose(); restore(); }
 });

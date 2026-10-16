@@ -81,6 +81,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   };
 
   const apply = (s: Snapshot): void => {
+    window.clearTimeout(retryTimer); retryTimer = 0;
     rev = s.rev; access = s.access;
     if (!access.view) { status = "unavailable"; notify(true); return; }
     nodes = new Map(s.nodes.map((n) => [n.name, n]));
