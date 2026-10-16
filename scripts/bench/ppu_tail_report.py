@@ -107,6 +107,10 @@ def report(root, warmup):
     for line in (root / 'tail-events.jsonl').read_text().splitlines():
         row = json.loads(line)
         events[row['pid']].append(row)
+    for data in events.values():
+        data.sort(key=lambda item: item['ns'])
+    dumps = [row for line in (root / 'stages.log').read_text().splitlines()
+             if (row := json.loads(line))['kind'] == 'stage-dump']
     timelines = {pid: Timeline(rows) for pid, rows in events.items()}
     blocked = {pid: waits(rows) for pid, rows in events.items()}
     faults = {pid: [row for row in data if row['kind'].startswith(('page_fault_', 'mm_vmscan_'))]
@@ -116,6 +120,11 @@ def report(root, warmup):
     reader_waits = futex_waits(events[roles['reader']])
     counter_ops = [row for row in events.get(roles.get('counter'), [])
                    if row['kind'] == 'sys_enter_futex']
+    reader_wait_ends = [row['end_ns'] for row in reader_waits]
+    counter_locks = defaultdict(list)
+    for op in counter_ops:
+        counter_locks[op.get('futex_lock')].append(op)
+    counter_starts = {lock: [row['ns'] for row in data] for lock, data in counter_locks.items()}
     start = meta['started_ns'] + int(warmup * 1e9)
     rows = [row for row in correlated['rows'] if row['send_before_ns'] >= start]
     for row in rows:
@@ -129,15 +138,26 @@ def report(root, warmup):
                                       for name, pid in role_ids.items()}
                                for stage, window in windows.items()}
         begin, end = row['send_before_ns'], row['receive_ns']
-        row['reader_futex'] = [wait | dict(
-            duration_ms=(wait['end_ns'] - wait['begin_ns']) / 1e6,
-            post_socket_overlap_ms=max(0, min(end, wait['end_ns']) -
-                max(row['socket_done_ns'], wait['begin_ns'])) / 1e6,
-            counter_same_lock=[dict(ns=op['ns'], operation=op.get('futex_op'))
-                for op in counter_ops if wait['lock'] is not None
-                and op.get('futex_lock') == wait['lock']
-                and wait['begin_ns'] <= op['ns'] <= wait['end_ns']])
-            for wait in reader_waits if wait['end_ns'] > begin and wait['begin_ns'] < end]
+        row['diagnostic_dump_overlap_ms'] = sum(max(0, min(end, dump['end_ns']) -
+            max(begin, dump['start_ns'])) for dump in dumps) / 1e6
+        row['reader_futex'] = []
+        low = bisect.bisect_right(reader_wait_ends, begin)
+        high = bisect.bisect_right(reader_wait_ends, end) + 1
+        for wait in reader_waits[low:high]:
+            if wait['begin_ns'] >= end or wait['end_ns'] <= begin:
+                continue
+            lock = wait['lock']
+            matching = []
+            if lock is not None and lock in counter_locks:
+                first = bisect.bisect_left(counter_starts[lock], wait['begin_ns'])
+                last = bisect.bisect_right(counter_starts[lock], wait['end_ns'])
+                matching = [dict(ns=op['ns'], operation=op.get('futex_op'))
+                            for op in counter_locks[lock][first:last]]
+            row['reader_futex'].append(wait | dict(
+                duration_ms=(wait['end_ns'] - wait['begin_ns']) / 1e6,
+                post_socket_overlap_ms=max(0, min(end, wait['end_ns']) -
+                    max(row['socket_done_ns'], wait['begin_ns'])) / 1e6,
+                counter_same_lock=matching))
         row['fault_reclaim_events'] = {}
         row['kernel_waits'] = {}
         for name, pid in role_ids.items():
