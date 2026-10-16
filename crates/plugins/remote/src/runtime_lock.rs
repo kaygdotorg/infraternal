@@ -1,4 +1,5 @@
 //! Coordinates remote runtime lifetime with transaction cleanup without host interpreters [17], #230.
+//! Filesystem setup stays outside CLI and supervisor pollers to bound release size [243].
 
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
 use std::{
@@ -17,6 +18,8 @@ pub const LOCK: &str = ".lifetime-lock";
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
+#[cold]
+#[inline(never)]
 fn directory(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -29,12 +32,16 @@ fn directory(path: &Path) -> io::Result<File> {
     }
     Ok(file)
 }
+#[cold]
+#[inline(never)]
 fn at(file: &File, name: &str) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}/{name}", file.as_raw_fd()))
 }
 fn same(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
+#[cold]
+#[inline(never)]
 fn checked_lock(file: &File, path: &Path) -> io::Result<()> {
     let actual = file.metadata()?;
     let named = fs::symlink_metadata(path)?;
@@ -61,6 +68,8 @@ pub fn acquire(state: &Path) -> io::Result<File> {
 pub fn acquire_owned(state: &Path, host: &str) -> io::Result<File> {
     acquire_bound(state, Some(host))
 }
+#[cold]
+#[inline(never)]
 fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
     // Cleanup holds the exclusive parent-directory setup guard. This shared
     // admission guard prevents starting between lock-file unlink and root retirement.
@@ -125,6 +134,8 @@ fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
 /// Recheck a retained runtime description before restarting its local service.
 /// # Errors
 /// Refuses replacement or redirected state while the process still owns its original lock.
+#[cold]
+#[inline(never)]
 pub fn validate(file: &File, state: &Path) -> io::Result<()> {
     let directory = directory(state)?;
     checked_lock(file, &at(&directory, LOCK))
@@ -132,6 +143,8 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
 
 // Legacy runtimes did not hold the lifetime lock. A refused connect alone is
 // insufficient during bind-before-listen: retain a same-user bound endpoint too.
+#[cold]
+#[inline(never)]
 fn legacy_bound(runtime: &Path) -> io::Result<bool> {
     let rows = fs::read_to_string("/proc/net/unix")?;
     for row in rows.lines().skip(1) {
@@ -176,6 +189,8 @@ fn legacy_bound(runtime: &Path) -> io::Result<bool> {
     }
     Ok(false)
 }
+#[cold]
+#[inline(never)]
 fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
     let path = at(runtime, "plugins.sock");
     let before = match fs::symlink_metadata(&path) {
@@ -234,6 +249,8 @@ fn lock_status(error: &std::fs::TryLockError) -> u8 {
 /// Taking flock on that open description keeps it held by the shell after we exit.
 /// Returns a fixed status; never emits host filesystem content.
 #[must_use]
+#[cold]
+#[inline(never)]
 pub fn command(arguments: &[std::ffi::OsString]) -> Option<u8> {
     if arguments.len() == 1 && arguments[0] == "--bootstrap-runtime-version" {
         return Some(0);
