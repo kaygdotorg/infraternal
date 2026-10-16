@@ -13,6 +13,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
   let forwarding = true;
   let disconnected = 0;
   let welcomes = 0;
+  const statuses: string[] = [];
   const resumed: boolean[] = [];
   let latestProbe = 0n;
   let latestStamp = 0n;
@@ -37,7 +38,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
   }
   const handler: StreamHandler = {
     onSocketOpen: (value) => resumed.push(value), onWelcome: () => { welcomes++; }, onFrame() {},
-    onDisconnected: () => { disconnected++; }, hasSession: () => true, onStatus() {},
+    onDisconnected: () => { disconnected++; }, hasSession: () => true, onStatus: (message) => statuses.push(message),
   };
   const advance = (ms: number) => {
     const until = now + ms;
@@ -71,6 +72,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     advance(276);
     expect(disconnected).toBe(1);
     expect(connection.isWelcomed).toBe(false);
+    expect(statuses).toContain("The connection did not respond in time.");
     advance(10);
     expect(sockets).toHaveLength(2);
     sockets[1]!.onopen?.();

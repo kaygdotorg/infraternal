@@ -9,6 +9,7 @@ const KNOWN: Record<string, string> = {
   "detached": "This window was disconnected from its terminal. Open it again to reconnect.",
   "attachment ended": "This window was disconnected from its terminal. Open it again to reconnect.",
   "reader fell behind; reattach": "The screen could not keep up, so this window was reconnected.",
+  "connection unresponsive": "The connection did not respond in time.",
   "connection closed": "The connection to the server ended.",
   "connection ended": "The connection to the server ended.",
   "terminal shim disconnected": "The terminal on the host stopped responding.",
