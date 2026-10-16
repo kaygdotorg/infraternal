@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,455,472 bytes |
-  | `aarch64-unknown-linux-musl` | 19,624,712 bytes |
+  | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
+  | `aarch64-unknown-linux-musl` | 19,594,856 bytes |
 
   These are the #198 measurements of the full-feature release recipe after
   unused native APIs, duplicated action metadata construction, OpenSSL's
