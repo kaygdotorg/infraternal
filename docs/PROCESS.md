@@ -144,12 +144,14 @@ Reviews and fixes run at the same time as the next lane's build.
   | Target | Measured ceiling |
   | --- | ---: |
   | `x86_64-unknown-linux-musl` | 21,332,464 bytes |
-  | `aarch64-unknown-linux-musl` | 19,524,616 bytes |
+  | `aarch64-unknown-linux-musl` | 19,524,584 bytes |
 
   These are the #230 measurements of the full-feature release recipe after
   sharing the SSH setup-lock literal, optimizing its management crate for size,
   and retaining shell proof notes beside their Rust embedding constants rather
   than inside transmitted programs.
+  The direct socket-probe repair reuses validated identity/status data; its
+  final aarch64 ceiling is ratcheted down another 32 bytes (#230).
   The earlier #198 reductions remain: unused native APIs, duplicated action
   metadata construction, OpenSSL's
   unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
