@@ -107,6 +107,8 @@ let setupToken = newToken();
 let pendingRegistration: { ceremony: string; userId: string; username: string; displayName: string; rpId: string; prfInput: string } | undefined;
 let pendingLogin: { ceremony: string } | undefined;
 let dropNextAck = false;
+/** Closes each newly attached stream after a controlled delay for reconnect regressions. */
+let closeAfterAttachMs: number | undefined;
 let selectedFixture: Uint8Array | undefined;
 const liveSessionIds = new Set<string>();
 let sessionInventoryAvailable = true;
@@ -579,6 +581,19 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     for (const connection of connections) connection.socket.close(1011, "test-double link dropped");
     return sendJson(response, 200, {});
   }
+  if (request.method === "POST" && url.pathname === "/__mock/close-after-attach") {
+    const body = await readJson(request);
+    if (body?.delay_ms === null) {
+      closeAfterAttachMs = undefined;
+      return sendJson(response, 200, { delay_ms: null });
+    }
+    const delay = body?.delay_ms;
+    if (typeof delay !== "number" || !Number.isInteger(delay) || delay < 50 || delay > 1000) {
+      return sendJson(response, 400, { error: "delay is outside the test bound" });
+    }
+    closeAfterAttachMs = delay;
+    return sendJson(response, 200, { delay_ms: delay });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/reset") {
     resetMockState();
     return sendJson(response, 200, { setup_token: setupToken });
@@ -882,6 +897,13 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       connection.replayUntil = BigInt(connection.session.outputLength);
       sendFrame(connection.socket, connection.stream, { type: "Ack", inSeqAcked: connection.inputCursor });
       flushOutput(connection);
+      if (closeAfterAttachMs !== undefined) {
+        setTimeout(() => {
+          if (!isSocketOpen(connection.socket)) return;
+          sendFrame(connection.socket, 0, { type: "Close", code: 1011, reason: "connection ended" });
+          connection.socket.close(1011, "connection ended");
+        }, closeAfterAttachMs);
+      }
       return;
     case "Credit":
       if (!connection.attached || connection.credit > 1024 * 1024 - frame.bytes) {
@@ -1182,6 +1204,7 @@ function resetMockState(): void {
   pendingRegistration = undefined;
   pendingLogin = undefined;
   dropNextAck = false;
+  closeAfterAttachMs = undefined;
   selectedFixture = undefined;
   socketOpenCount = 0;
   socketCloseCount = 0;

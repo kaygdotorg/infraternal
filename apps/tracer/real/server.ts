@@ -27,12 +27,29 @@ export interface Bridge {
   closed: boolean;
   /** Which side ended the socket first, and its close code. */
   closedBy?: string;
+  /** UTF-8 close reason from the first socket close event. */
+  closedReason?: string;
+  /** Epoch milliseconds when one side ended this socket. */
+  closedAt?: number;
   /** The reason of the last `Close` frame the server sent on this socket (stream 0 or a terminal stream). */
   serverClose?: string;
   /** AttachTerm frames by client stream id: the session each stream attached to (hex). */
   attached: Map<number, string[]>;
   /** Terminal output text by client stream id. */
   output: Map<number, string>;
+  /** Optional epoch timestamps for output frames, enabled only by focused redraw traces. */
+  outputTimes?: number[];
+  /** Output cursor ranges without terminal text, to identify replayed byte ranges. */
+  outputRanges?: Array<{ stream: number; outSeq: string; bytes: number; at: number }>;
+  /** Optional terminal recovery events and closes, enabled only by focused redraw traces. */
+  terminalEvents?: Array<{ stream: number; type: string; at: number }>;
+  terminalCloses?: Array<{ stream: number; code: number; reason: string; at: number }>;
+  /** Safe workload markers emitted by diagnostic scripts; never capture terminal text. */
+  markers?: Array<{ name: string; at: number }>;
+  /** Optional AttachTerm timestamps for focused connection traces. */
+  attachTimes?: Array<{ stream: number; at: number }>;
+  /** Resume cursors by stream, without session identifiers or terminal input. */
+  attachCursors?: Array<{ stream: number; lastOutSeq: string; lastInSeq: string; at: number }>;
   /** Highest acknowledged input offset by stream. */
   acked: Map<number, bigint>;
   /** Completed real PTY replays, including automatic rebinding on the same browser socket. */
@@ -173,6 +190,18 @@ export async function startRealServer(options: {
       activeBrowsers.add(browser);
       const upstream = new WebSocket(backend.replace("http:", "ws:") + (request.url ?? "/v1/ws"), { headers: { Origin: origin, Cookie: request.headers.cookie ?? "" } });
       const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
+      // Harness stage markers contain only fixed labels and timestamps, never terminal text.
+      bridge.markers = [];
+      if (process.env.REAL_OUTPUT_TIMES === "1") {
+        bridge.outputTimes = [];
+        bridge.outputRanges = [];
+      }
+      if (process.env.REAL_EVENT_TIMES === "1") {
+        bridge.terminalEvents = [];
+        bridge.terminalCloses = [];
+        bridge.attachTimes = [];
+        bridge.attachCursors = [];
+      }
       // Bootstrap frames can contain private sign-in inputs. Only protocol sockets enter diagnostics.
       const protocol = request.url === "/v1/ws";
       if (protocol) bridges.push(bridge);
@@ -182,8 +211,18 @@ export async function startRealServer(options: {
       browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
         if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
-          if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Input" && f.type !== "Credit" && f.type !== "Pong") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}`);
-          if (f.type === "AttachTerm") bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
+          if (process.env.REAL_FRAME_LOG === "1") {
+            // Input bytes can contain private terminal input; record only frame type and bounded metadata.
+            const detail = f.type === "Input" ? ` bytes=${f.bytes.byteLength}`
+              : f.type === "Credit" ? ` bytes=${f.bytes}`
+                : f.type === "Resize" ? ` cols=${f.cols} rows=${f.rows}` : "";
+            console.error(`FRAME ${Date.now() % 100000} b${bridge.id} up s${stream} ${f.type}${detail}`);
+          }
+          if (f.type === "AttachTerm") {
+            bridge.attached.set(stream, [...(bridge.attached.get(stream) ?? []), Buffer.from(f.sessionId).toString("hex")]);
+            bridge.attachTimes?.push({ stream, at: Date.now() });
+            bridge.attachCursors?.push({ stream, lastOutSeq: f.lastOutSeq.toString(), lastInSeq: f.lastInSeq.toString(), at: Date.now() });
+          }
           if (f.type === "Close" && stream !== 0) bridge.detached.push(stream);
           if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
           if (f.type === "Subscribe") bridge.control.push({ dir: "up", type: "Subscribe", detail: (() => { try { return String((JSON.parse(text.decode(f.filterJson)) as { topic?: unknown }).topic); } catch { return "?"; } })() });
@@ -194,21 +233,64 @@ export async function startRealServer(options: {
       upstream.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
         if (!lean && protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
-          if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack" && f.type !== "Ping") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
-          if (f.type === "Output") bridge.output.set(stream, (bridge.output.get(stream) ?? "") + text.decode(f.bytes, { stream: true }));
-          if (f.type === "Snapshot") bridge.output.set(stream, text.decode(f.bytes));
+          if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
+          if (f.type === "Output") {
+            const chunkText = text.decode(f.bytes, { stream: true });
+            bridge.output.set(stream, (bridge.output.get(stream) ?? "") + chunkText);
+            for (const match of chunkText.matchAll(/PILL_STAGE:([a-z0-9-]+)/g)) {
+              bridge.markers?.push({ name: match[1] ?? "unknown", at: Date.now() });
+            }
+            bridge.outputTimes?.push(Date.now());
+            bridge.outputRanges?.push({ stream, outSeq: f.outSeq.toString(), bytes: f.bytes.byteLength, at: Date.now() });
+          }
+          if (f.type === "Snapshot") {
+            bridge.output.set(stream, text.decode(f.bytes));
+            bridge.outputRanges?.push({ stream, outSeq: f.outSeq.toString(), bytes: f.bytes.byteLength, at: Date.now() });
+          }
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
           if (f.type === "Event" && stream !== 0 && f.eventJson.byteLength <= 1024
             && JSON.parse(text.decode(f.eventJson)).type === "terminal.replay_complete") bridge.replays++;
-          if (f.type === "Close") bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof (f as { reason?: unknown }).reason === "string" ? (f as { reason: string }).reason : JSON.stringify((f as { reason?: unknown }).reason)}`;
+          if (f.type === "Event" && stream !== 0 && bridge.terminalEvents && f.eventJson.byteLength <= 1024) {
+            try {
+              const event = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(f.eventJson)) as { type?: unknown };
+              if (typeof event.type === "string" && event.type.startsWith("terminal.")) bridge.terminalEvents.push({ stream, type: event.type, at: Date.now() });
+            } catch { /* Invalid notices are handled by the browser protocol parser. */ }
+          }
+          if (f.type === "Close") {
+            const close = f as { code?: unknown; reason?: unknown };
+            bridge.serverClose = `s${stream === 0 ? 0 : "n"} ${typeof close.reason === "string" ? close.reason : JSON.stringify(close.reason)}`;
+            if (bridge.terminalCloses && typeof close.code === "number") {
+              const reason = typeof close.reason === "string" ? close.reason : JSON.stringify(close.reason);
+              bridge.terminalCloses.push({ stream, code: close.code, reason, at: Date.now() });
+              if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_CLOSE_FRAME b${bridge.id} stream=${stream} code=${close.code} reason=${JSON.stringify(reason)}`);
+            }
+          }
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
         later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
       });
       const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
-      upstream.on("close", (code) => { eraseQueue(); bridge.closed = true; bridge.closedBy = `server ${code}`; if (!retainedBrowsers.has(browser)) browser.close(); });
+      upstream.on("close", (code, reason) => {
+        eraseQueue();
+        bridge.closed = true;
+        bridge.closedAt ??= Date.now();
+        bridge.closedBy ??= `server ${code}`;
+        bridge.closedReason ??= reason.toString("utf8");
+        if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_SOCKET_CLOSE b${bridge.id} side=upstream code=${code} reason=${JSON.stringify(reason.toString("utf8"))}`);
+        if (!retainedBrowsers.has(browser)) browser.close();
+      });
       upstream.on("error", () => { if (!retainedBrowsers.has(browser)) browser.close(); });
-      browser.on("close", (code) => { activeBrowsers.delete(browser); retainedBrowsers.delete(browser); eraseQueue(); bridge.closed = true; bridge.closedBy ??= `browser ${code}`; upstream.close(); });
+      browser.on("close", (code, reason) => {
+        activeBrowsers.delete(browser);
+        retainedBrowsers.delete(browser);
+        eraseQueue();
+        bridge.closed = true;
+        bridge.closedAt ??= Date.now();
+        bridge.closedBy ??= `browser ${code}`;
+        bridge.closedReason ??= reason.toString("utf8");
+        if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_SOCKET_CLOSE b${bridge.id} side=browser code=${code} reason=${JSON.stringify(bridge.closedReason)}`);
+        upstream.close();
+      });
     });
   });
 
