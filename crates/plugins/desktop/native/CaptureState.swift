@@ -5,6 +5,42 @@ import Foundation
 import CoreGraphics
 #endif
 
+/// Executable basenames used only for factual process detection [D290].
+let tilingManagerExecutables: Set<String> = [
+    "OmniWM", "yabai", "AeroSpace", "Amethyst", "paneru", "glide"
+]
+
+/// A single externally undone resize permanently yields ownership to the desktop.
+/// The monotonic two-second observation window includes asynchronous AX notifications.
+struct WindowResizeOwnership {
+    private(set) var managed = false
+    private var expected: CGSize?
+    private var attemptedAt: Double?
+    private var attempted: CGSize?
+
+    mutating func detectManager(_ present: Bool) { managed = managed || present }
+
+    mutating func observe(_ actual: CGSize, at now: Double) {
+        guard !managed, let expected, let attemptedAt, now.isFinite,
+              now >= attemptedAt, now - attemptedAt <= 2 else { return }
+        if !matches(actual, expected) { managed = true }
+    }
+
+    mutating func attempt(_ desired: CGSize, actual: CGSize, at now: Double) -> Bool {
+        guard !managed, now.isFinite, desired.width.isFinite, desired.height.isFinite,
+              desired.width > 0, desired.height > 0,
+              !matches(actual, desired), attempted.map({ !matches($0, desired) }) ?? true else { return false }
+        // A refused or constrained AX request is never retried by a timer. A new
+        // canvas size may request once again, unless managed ownership latched.
+        attempted = desired; expected = desired; attemptedAt = now
+        return true
+    }
+
+    private func matches(_ a: CGSize, _ b: CGSize) -> Bool {
+        abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
+    }
+}
+
 func fittedContent(_ rect: CGRect, _ output: CGSize) -> CGRect {
     guard rect.width > 0, rect.height > 0, output.width > 0, output.height > 0 else { return .zero }
     let scale = min(output.width / rect.width, output.height / rect.height)

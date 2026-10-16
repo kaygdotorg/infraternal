@@ -37,6 +37,18 @@ fn run_swift_fixture(name: &str, sources: &[&str], optimized: bool) {
 }
 
 #[test]
+fn managed_windows_never_retry_an_externally_undone_resize() {
+    run_swift_fixture(
+        "window-ownership",
+        &[
+            "native/CaptureState.swift",
+            "tests/fixtures/window-ownership-test.swift",
+        ],
+        false,
+    );
+}
+
+#[test]
 fn hardware_encoder_delivers_repeated_frames_after_reconfiguration() {
     run_swift_fixture(
         "encoder",
@@ -62,6 +74,31 @@ fn raw_encoder_drops_preserve_delta_references_and_refresh_quality() {
         ],
         false,
     );
+}
+
+#[test]
+#[ignore = "requires the signed helper, a running managing process and the shared Mac hardware lock"]
+fn managed_native_window_has_no_resize_requests_or_frame_size_flips() {
+    let helper = std::env::var_os("INFRATERNAL_NATIVE_CONTROL_TEST_HELPER")
+        .expect("set the authorized installed native helper path");
+    let scratch =
+        std::env::var_os("CARGO_TARGET_DIR").expect("set the job scratch target directory");
+    let result = std::process::Command::new("python3")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/native-managed-window.py"),
+        )
+        .arg(helper)
+        .arg(scratch)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&result.stdout));
 }
 
 #[test]

@@ -1,6 +1,29 @@
-/// Role: AX window identity, follow/letterbox geometry and restoration on every session exit [D208 A2].
+/// Role: AX window identity and aspect-preserving geometry that yields permanently to managed desktops [D208 A2,D290].
 import AppKit
 import ApplicationServices
+import Darwin
+
+/// Read executable names, never arguments or settings. Cache across viewers;
+/// manager presence latches separately in each window, including on restoration.
+private enum WindowManagerPresence {
+    static var checkedAt = -Double.infinity
+    static var present = false
+    static func current(at now: Double) -> Bool {
+        if now - checkedAt < 1 { return present }
+        checkedAt = now
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return present }
+        var pids = [Int32](repeating: 0, count: Int(count) + 64)
+        let found = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+        present = pids.prefix(max(0, min(Int(found), pids.count))).contains { pid in
+            var name = [CChar](repeating: 0, count: 1024)
+            let length = name.withUnsafeMutableBytes { proc_name(pid, $0.baseAddress, UInt32($0.count)) }
+            guard length > 0 else { return false }
+            return tilingManagerExecutables.contains(String(decoding: name.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        }
+        return present
+    }
+}
 
 func axValue(_ element: AXUIElement, _ name: CFString) -> CFTypeRef? {
     var value: CFTypeRef?
@@ -29,6 +52,8 @@ final class WindowGeometry {
     private var observer: AXObserver?
     var reason = "following"
     var didResize = false
+    private var ownership = WindowResizeOwnership()
+    private var resizeRequests = 0
     var exists = true
     private var interactive: [CGRect] = []
 
@@ -99,14 +124,18 @@ final class WindowGeometry {
         if let window, let f = axFrame(window) { actual = f } else { actual = cgFrame }
         let density = backingScale(actual)
         desired = CGSize(width:output.width/density,height:output.height/density)
-        if localIdleSeconds() < 60 { reason = "local_input" }
+        let now = ProcessInfo.processInfo.systemUptime
+        ownership.detectManager(WindowManagerPresence.current(at: now))
+        ownership.observe(actual.size, at: now)
+        if ownership.managed { reason = "managed" }
+        else if localIdleSeconds() < 60 { reason = "local_input" }
         else if let window {
             var settable = DarwinBoolean(false)
             let canSet = AXUIElementIsAttributeSettable(window, kAXSizeAttribute as CFString, &settable) == .success && settable.boolValue
-            if canSet && (abs(actual.width-desired.width) >= 1 || abs(actual.height-desired.height) >= 1) {
+            if canSet && ownership.attempt(desired, actual: actual.size, at: now) {
                 var size = desired
                 if let value = AXValueCreate(.cgSize, &size),
-                   AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value) == .success {
+                   requestSize(window, value) == .success {
                     didResize = true
                     if let f = axFrame(window) { actual = f }
                 }
@@ -127,6 +156,9 @@ final class WindowGeometry {
     }
 
     func restore() -> Bool {
+        ownership.detectManager(WindowManagerPresence.current(at: ProcessInfo.processInfo.systemUptime))
+        // Restoring an old size after ownership changed would restart the fight.
+        if ownership.managed { didResize = false; return true }
         guard didResize, let window else { return true }
         var size = original.size; var point = original.origin
         guard let s = AXValueCreate(.cgSize, &size), let p = AXValueCreate(.cgPoint, &point) else { return false }
@@ -140,7 +172,12 @@ final class WindowGeometry {
 
     func json() -> [String: Any] {
         ["original": rectJSON(original), "actual": rectJSON(actual), "capture_rect": rectJSON(captureRect), "content_rect": rectJSON(content),
-         "reason": reason, "width": output.width, "height": output.height, "window_id": id, "owner_pid": pid, "source_backing_scale": backingScale(actual)]
+         "reason": reason, "width": output.width, "height": output.height, "window_id": id, "owner_pid": pid, "source_backing_scale": backingScale(actual), "managed": ownership.managed, "resize_requests": resizeRequests]
+    }
+
+    private func requestSize(_ window: AXUIElement, _ value: AXValue) -> AXError {
+        resizeRequests += 1
+        return AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
     }
 
     func point(x: Double, y: Double) -> CGPoint? {
