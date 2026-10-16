@@ -64,6 +64,63 @@ class EarlierSetup(unittest.TestCase):
         self.assertFalse(self.base.exists())
         self.assertFalse(self.receipt.exists())
 
+    def test_stale_control_socket_is_recoverable(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        control.chmod(0o755)
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.recover().returncode, 0)
+        self.assertFalse(control.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_original_rollback_finishes_after_service_stop(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(self.base.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_control_socket_in_another_root_does_not_block_cleanup(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        other = Path(self.temp.name) / 'other'
+        other.mkdir(mode=0o700)
+        unrelated = other / 'plugins.sock'
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(unrelated))
+            unrelated.chmod(0o600)
+            listener.listen()
+            self.assertEqual(self.run_shell('\ninspect_previous').returncode, 0)
+            self.assertEqual(self.recover().returncode, 0)
+            self.assertTrue(unrelated.exists())
+        self.assertFalse(self.base.exists())
+
+    def test_live_control_socket_preserves_original_receipt(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.listener = socket.socket(socket.AF_UNIX)
+        self.listener.bind(str(control))
+        control.chmod(0o600)
+        self.listener.listen()
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 73)
+        self.assertTrue(control.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_control_socket_symlink_is_never_followed(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        control.symlink_to(self.socket)
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 71)
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(control.is_symlink())
+
     def test_live_listener_is_refused(self):
         self.listener.listen()
         self.assertEqual(self.run_shell('\ninspect_previous').returncode, 73)

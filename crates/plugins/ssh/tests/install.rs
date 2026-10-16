@@ -1734,3 +1734,50 @@ async fn stopped_control_socket_modes_from_service_manager_are_recoverable() {
         assert!(!fixture.base().exists());
     }
 }
+
+/// An older failed run has only a fresh receipt; confirmed recovery uses the same guarded cleanup.
+#[tokio::test]
+async fn earlier_control_socket_receipt_recovers_before_a_new_setup() {
+    let fixture = Fixture::new();
+    let first = fixture.transaction();
+    first.stage(&fixture.binary).await.unwrap();
+    first.enroll_and_start(&fixture.join).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"preserve until observed").unwrap();
+    assert!(first.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    std::fs::remove_file(keep).unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut listener = control_listener(&runtime).await;
+    std::fs::set_permissions(
+        runtime.join("plugins.sock"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    listener.kill().await.unwrap();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let output = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await
+        .unwrap();
+    let (_, previous) =
+        infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout).unwrap();
+    previous
+        .unwrap()
+        .start_fresh(&session, &fixture.target)
+        .await
+        .unwrap();
+    assert!(!receipt.exists());
+    assert!(!fixture.base().exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.enroll_and_start(&fixture.join).await.unwrap();
+    retry.commit().await.unwrap();
+}

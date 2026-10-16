@@ -14,19 +14,6 @@ not_live() {
         flock -n 8 || exit 73
         exec 8<&-
     fi
-    [ -r /proc/net/unix ] || exit 75
-    # Match live socket entries by canonical path or the exact UUID basename. The latter
-    # also covers a listener bound through a relative path or a directory alias.
-    # A collision refuses conservatively; it never authorizes removal.
-    while read -r num refs protocol flags type state inode path; do
-        # A bound socket before listen, or an accepted connection after the
-        # listener closes, is still live. Closed stale files have no kernel row.
-        case "$path" in "$base"/*) exit 73;; esac
-        for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
-            [ -S "$entry" ] || continue
-            case "$path" in "${entry##*/}"|*/"${entry##*/}") exit 73;; esac
-        done
-    done < /proc/net/unix
     # no_redirect has already permitted only the home alias and symlinks above
     # it. Resolve that alias so /proc descriptor links under the real home are
     # still recognized as live setup state.
@@ -35,6 +22,25 @@ not_live() {
     else
         exit 75
     fi
+    [ -r /proc/net/unix ] || exit 75
+    # Match live socket entries by canonical path or the exact UUID basename. The latter
+    # also covers a listener bound through a relative path or a directory alias.
+    # A collision refuses conservatively; it never authorizes removal.
+    while read -r num refs protocol flags type state inode path; do
+        # A bound socket before listen, or an accepted connection after the
+        # listener closes, is still live. Closed stale files have no kernel row.
+        case "$path" in "$base"/*|"$base_real"/*) exit 73;; esac
+        for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
+            [ -S "$entry" ] || continue
+            # Control sockets have a fixed basename on every host. Match only
+            # our canonical directory or a relative bind, never another root.
+            if [ "$entry" = "$base/sessions/plugins.sock" ]; then
+                case "$path" in plugins.sock|./plugins.sock) exit 73;; esac
+                continue
+            fi
+            case "$path" in "${entry##*/}"|*/"${entry##*/}") exit 73;; esac
+        done
+    done < /proc/net/unix
     # Inspect executable and open-descriptor links in one native traversal,
     # never argv or environments. Per-link shell subprocesses grow with every
     # other workload's open files. Bound the process table and refuse paths
@@ -183,6 +189,12 @@ inspect_previous() {
         for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
             [ -e "$entry" ] || [ -L "$entry" ] || continue
             [ "$entry" != "$base/sessions/sessions" ] || continue
+            if [ "$entry" = "$base/sessions/plugins.sock" ]; then
+                validate_control_socket
+                sockets=$((sockets + 1))
+                [ "$sockets" -le 1024 ] || exit 75
+                continue
+            fi
             [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
             name=${entry##*/}
             socket_id=${name%.sock}

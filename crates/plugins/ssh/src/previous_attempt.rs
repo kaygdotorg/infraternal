@@ -7,10 +7,7 @@ use crate::{
     transport::{Input, SshSession},
 };
 
-pub(crate) const INSPECT: &str = concat!(
-    include_str!("setup_lock.sh"),
-    include_str!("previous_attempt.sh")
-);
+pub(crate) const INSPECT: &str = include_str!("previous_attempt.sh");
 
 /// Nonsecret coordinates bind confirmation to exactly the directory observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +25,11 @@ pub fn check_script(mode: InstallMode) -> String {
         mode,
         uuid::Uuid::nil(),
         uuid::Uuid::nil(),
-        &format!("{INSPECT}\ninspect_previous"),
+        &format!(
+            "{}\n{}\n{INSPECT}\ninspect_previous",
+            include_str!("setup_lock.sh"),
+            crate::install::RUNTIME_CLEANUP
+        ),
     );
     format!("{CHECK_SCRIPT}\n{inspect}")
 }
@@ -115,7 +116,7 @@ impl PreviousAttempt {
                 if self.sockets == 0 {
                     "No live setup found"
                 } else {
-                    "Session sockets with no listener"
+                    "Local sockets with no listener"
                 },
             ],
         }
@@ -138,7 +139,8 @@ impl PreviousAttempt {
             self.sockets
         );
         let body = format!(
-            "{INSPECT}\n{}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nnot_live\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            include_str!("setup_lock.sh"),
             crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&expected),
             crate::install::FRESH_CLEANUP,
