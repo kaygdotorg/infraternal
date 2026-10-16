@@ -111,8 +111,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
                 guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
-                    damageState.completed(delivered: false)
-                    retryDroppedFrame = true
+                    retryDroppedFrame = damageState.encoderDropped(decision)
                     break
                 }
                 let began = ProcessInfo.processInfo.systemUptime
@@ -120,10 +119,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 damageState.completed(delivered: true)
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }
-            // Rate control may drop even a complete capture. Keep its surface and
-            // repair on the next source-rate opportunity, including a static window
-            // with no further damage callbacks. Reuse the existing one-shot timer;
-            // never spin on the retained frame or leave a timer on after success/Stop.
+            // Ordinary raw drops need no reference repair. Retry only an explicit
+            // IDR/refresh that was dropped, including on a now-static window. Reuse
+            // the existing one-shot timer at source cadence, never a hot loop.
             let deadline = retryDroppedFrame ? ProcessInfo.processInfo.systemUptime + 1 / Double(fps) : damageState.refreshDeadline
             if let deadline {
                 if refresh == nil {

@@ -43,15 +43,26 @@ struct DamageEncodingState {
     private var damaged = false
     private var keyframe = true
     private var settle: Double?
+    private var retryRefresh = false
     mutating func changed(at now: Double) {
         hasFrame = true; damaged = true; settle = now + 0.25
     }
     mutating func repair() { keyframe = true }
     mutating func next(at now: Double) -> EncodeDecision? {
         guard hasFrame else { return nil }
-        if damaged || keyframe { damaged = false; return .motion(keyframe: keyframe) }
+        if damaged { damaged = false; retryRefresh = false; return .motion(keyframe: keyframe) }
+        if retryRefresh { retryRefresh = false; return .refresh }
+        if keyframe { return .motion(keyframe: true) }
         if let settle, now >= settle { self.settle = nil; return .refresh }
         return nil
+    }
+    // A dropped encoder input never became a decoder reference. Only a lost
+    // encoded picture needs repair; raw motion drops preserve the next delta.
+    // Requested IDRs and sharp refreshes must still be fulfilled, even if the
+    // window becomes static before another capture arrives.
+    mutating func encoderDropped(_ decision: EncodeDecision) -> Bool {
+        if decision == .refresh { retryRefresh = true; return true }
+        return decision.keyframe
     }
     mutating func completed(delivered: Bool) { keyframe = !delivered }
     var refreshDeadline: Double? { settle }
