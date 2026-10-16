@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check retained-host preconditioning and explicit diagnostic log boundaries [D270].
+"""Check a continuous aged workload and explicit diagnostic log boundaries [D270].
 
 SPDX-License-Identifier: AGPL-3.0-only
 """
@@ -20,61 +20,36 @@ def setUpModule():
 
 
 class Aging(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, root, fail=False, complete=True):
+    async def test_one_continuous_workload_keeps_original_arguments_and_state(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            await self.exercise(Path(directory))
+
+    async def exercise(self, root):
         host = SimpleNamespace(count=1000)
         args = SimpleNamespace(mode='soak', seconds=900, warmup=600, interval=10)
         record = SimpleNamespace(file=io.StringIO())
         record.file.name = str(root / 'samples.jsonl')
         rng = object()
-        original_echo = aged.suite.Peer.echo
-        original_wakeups = aged.suite.Wakeups
-        seen = []
-
-        async def precondition(actual, options, receipt, random):
-            self.assertIs(actual, host)
-            self.assertIs(random, rng)
-            self.assertEqual(options.seconds, 5400)
-            self.assertEqual(args.seconds, 900)
-            self.assertIs(aged.suite.Peer.echo, aged.stages.ORIGINAL_ECHO)
-            self.assertIs(aged.suite.Wakeups, aged.tail.ORIGINAL_WAKEUPS)
-            seen.append(receipt)
-            if fail:
-                raise ConnectionError('synthetic session ended')
-            receipt.write('sample', elapsed_s=5400 if complete else 5390)
-            receipt.write('survivors', expected_sessions=1000, responsive_sessions=1000, host_alive=True)
-            return False  # An echo-budget failure must not be disguised as lost sessions.
-
         capture = AsyncMock(return_value=False)
-        with patch.object(aged.stages, 'ORIGINAL_SOAK', precondition), \
-             patch.object(aged.stages, 'soak', capture), \
+        with patch.object(aged.stages, 'soak', capture), \
              patch.object(aged, 'boundary', AsyncMock(return_value={'stage_log_offset': 100})), \
-             patch.object(aged.stages, 'register_readers'), \
-             patch.object(aged.compare, 'write', lambda *_args, **_kwargs: None):
-            try:
-                result = await aged.soak(host, args, record, rng)
-            except BaseException:
-                capture.assert_not_awaited()
-                raise
-            finally:
-                self.assertIs(aged.suite.Peer.echo, original_echo)
-                self.assertIs(aged.suite.Wakeups, original_wakeups)
-                self.assertTrue(seen[0].file.closed)
-        capture.assert_awaited_once_with(host, args, record, rng)
+             patch.object(aged.stages, 'register_readers'):
+            result = await aged.soak(host, args, record, rng)
+        capture.assert_awaited_once()
+        actual_host, options, actual_record, actual_rng = capture.await_args.args
+        self.assertIs(actual_host, host)
+        self.assertIs(actual_record, record)
+        self.assertIs(actual_rng, rng)
+        self.assertEqual(options.seconds, 6300)
+        self.assertEqual(args.seconds, 900)
+        self.assertEqual(capture.await_args.kwargs['profile_after'], 5400)
         self.assertFalse(result)
 
-    async def test_same_host_reaches_capture_despite_preconditioning_echo_failure(self):
-        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
-            await self.exercise(Path(directory))
-
-    async def test_preconditioning_failure_restores_hooks_without_starting_capture(self):
-        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
-            with self.assertRaises(ConnectionError):
-                await self.exercise(Path(directory), fail=True)
-
-    async def test_incomplete_preconditioning_cannot_claim_an_aged_capture(self):
-        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
-            with self.assertRaisesRegex(RuntimeError, 'incomplete preconditioning'):
-                await self.exercise(Path(directory), complete=False)
+    async def test_extended_capture_is_refused_before_any_work(self):
+        with patch.object(aged.stages, 'soak', AsyncMock()) as capture:
+            with self.assertRaises(AssertionError):
+                await aged.soak(None, SimpleNamespace(mode='soak', seconds=901, warmup=600), None, None)
+            capture.assert_not_awaited()
 
 
 class StageWindow(unittest.TestCase):

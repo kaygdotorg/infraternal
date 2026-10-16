@@ -125,11 +125,20 @@ class RoleTrace(BASE_TRACE):
         if self.error is not None:
             self.close()
             raise RuntimeError(f'private tail trace unavailable: {self.setup_error}')
+        if 'counter' in ROLES:
+            self.attach_counter(ROLES['counter'])
+
+    def attach_counter(self, tid):
+        """Support an existing wakeup counter when full tracing starts late."""
+        self.counter_tid.value = tid
+        self.known.add(tid)
+        for event in ('sched/sched_switch', 'sched/sched_wakeup', 'syscalls'):
+            self.enable(event, '')
 
     def enable(self, event, condition):
         low, high = min(self.known), max(self.known)
-        # A range keeps the kernel expression below its one-page limit for 102
-        # roles. The decoder still accepts only the verified exact PID set.
+        # A range keeps the kernel expression below its one-page limit for all
+        # selected roles. The decoder still accepts only the verified PID set.
         if event == 'sched/sched_switch':
             condition = f'(prev_pid>={low}&&prev_pid<={high})||(next_pid>={low}&&next_pid<={high})'
         elif event in ('sched/sched_wakeup', 'sched/sched_waking'):
@@ -218,10 +227,8 @@ class Wakeups(ORIGINAL_WAKEUPS):
             raise RuntimeError('counter thread unavailable')
         tid = self.thread.native_id
         ROLES['counter'] = tid
-        CURRENT.counter_tid.value = tid
-        CURRENT.known.add(tid)
-        for event in ('sched/sched_switch', 'sched/sched_wakeup', 'syscalls'):
-            CURRENT.enable(event, '')
+        if CURRENT is not None:
+            CURRENT.attach_counter(tid)
 
 
 async def ready(host):

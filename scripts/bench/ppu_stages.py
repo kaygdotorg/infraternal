@@ -120,42 +120,62 @@ async def echo(peer, marker, command=b''):
         CURRENT.reset(token)
 
 
-async def soak(host, args, record, rng):
-    assert args.mode == 'soak' and args.seconds <= 900
-    scheduler = trace.Trace(host.pid)
+async def soak(host, args, record, rng, *, profile_after=0, before_profile=None):
+    # Aging stays inside the same workload invocation. Only the final bounded
+    # interval owns a full trace; default callers retain their existing limit.
+    assert args.mode == 'soak' and 0 <= profile_after <= 5400 and 0 < args.seconds - profile_after <= 900
+    scheduler = None
+    started = None
+    finished = False
+    if profile_after == 0 and before_profile is None:
+        scheduler = trace.Trace(host.pid)
+        started = time.monotonic_ns()
     async def flush():
+        nonlocal scheduler, started
+        if scheduler is None:
+            await asyncio.sleep(profile_after)
+            if before_profile is not None:
+                await before_profile()
+            scheduler = trace.Trace(host.pid)
+            started = time.monotonic_ns()
         while True:
             os.kill(host.pid, signal.SIGUSR1)
             await asyncio.sleep(.5)
     task = asyncio.create_task(flush())
-    started = time.monotonic_ns()
     try:
-        return await ORIGINAL_SOAK(host, args, record, rng)
+        result = await ORIGINAL_SOAK(host, args, record, rng)
+        finished = True
+        return result
     finally:
         task.cancel()
         try:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-            os.kill(host.pid, signal.SIGUSR1)
-            await host.peers[-1].echo(b'stage-final-fence')
+            if scheduler is not None:
+                os.kill(host.pid, signal.SIGUSR1)
+                await host.peers[-1].echo(b'stage-final-fence')
         finally:
             # A failed host or final fence must still release our private
             # scheduler instance and its owned reader process.
-            summary = scheduler.close()
-        root = Path(record.file.name).parent
-        rows = [probe | RECEIVED.get((probe['session'], probe['number']), {}) for probe in PROBES]
-        ended = max((row['completed_ns'] for row in rows), default=started)
-        settled = [(stamp, kind, state) for stamp, kind, state in scheduler.events
-                   if started + args.warmup * 1_000_000_000 <= stamp * 1_000_000_000 <= ended]
-        summary.update(diagnostic_only=True, marker_receipt=MARKER_RECEIPT, full_trace_includes_census=True,
-                       settled_scheduler=trace.summarize(settled), ended_ns=ended,
-                       started_ns=started, origin=host.origin, probes=rows,
-                       matched=sum('receive_ns' in probe for probe in rows))
-        (root / 'stage-probes.json').write_text(json.dumps(summary, indent=2) + '\n')
-        with (root / 'stage-offcpu.log').open('w') as output:
-            for event in scheduler.events:
-                output.write(json.dumps(event) + '\n')
-        assert summary['complete'] and summary['matched'] == len(rows) and rows, 'incomplete stage correlation'
+            summary = scheduler.close() if scheduler is not None else None
+        if scheduler is None and finished:
+            raise RuntimeError('workload ended before bounded capture started')
+        if scheduler is not None:
+            root = Path(record.file.name).parent
+            rows = [probe | RECEIVED.get((probe['session'], probe['number']), {}) for probe in PROBES
+                    if probe['send_before_ns'] >= started]
+            ended = max((row['completed_ns'] for row in rows), default=started)
+            settled = [(stamp, kind, state) for stamp, kind, state in scheduler.events
+                       if started + args.warmup * 1_000_000_000 <= stamp * 1_000_000_000 <= ended]
+            summary.update(diagnostic_only=True, marker_receipt=MARKER_RECEIPT, full_trace_includes_census=True,
+                           settled_scheduler=trace.summarize(settled), ended_ns=ended,
+                           started_ns=started, origin=host.origin, probes=rows,
+                           matched=sum('receive_ns' in probe for probe in rows))
+            (root / 'stage-probes.json').write_text(json.dumps(summary, indent=2) + '\n')
+            with (root / 'stage-offcpu.log').open('w') as output:
+                for event in scheduler.events:
+                    output.write(json.dumps(event) + '\n')
+            assert summary['complete'] and summary['matched'] == len(rows) and rows, 'incomplete stage correlation'
 
 
 def write(record, kind, **fields):

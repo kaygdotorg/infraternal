@@ -2,9 +2,12 @@
 """Check diagnostic probe offsets across real framing boundaries and input reservations [#205]."""
 import asyncio
 import io
+from pathlib import Path
+import tempfile
+import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import ppu_stages as stages
 
@@ -13,6 +16,66 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         stages.READERS.clear()
         stages.RECEIVED.clear()
+        stages.PROBES.clear()
+
+    async def test_short_workload_cannot_claim_a_late_capture(self):
+        with patch.object(stages.trace, 'Trace') as create, \
+             patch.object(stages, 'ORIGINAL_SOAK', AsyncMock(return_value=True)):
+            with self.assertRaisesRegex(RuntimeError, 'before bounded capture'):
+                await stages.soak(SimpleNamespace(pid=123),
+                    SimpleNamespace(mode='soak', seconds=900), None, None, profile_after=600)
+            create.assert_not_called()
+
+    async def test_original_failure_before_activation_is_preserved(self):
+        with patch.object(stages.trace, 'Trace') as create, \
+             patch.object(stages, 'ORIGINAL_SOAK', AsyncMock(side_effect=ConnectionError('lost fixture'))):
+            with self.assertRaisesRegex(ConnectionError, 'lost fixture'):
+                await stages.soak(SimpleNamespace(pid=123),
+                    SimpleNamespace(mode='soak', seconds=900), None, None, profile_after=600)
+            create.assert_not_called()
+
+    async def test_delayed_capture_keeps_one_original_workload_invocation(self):
+        scratch = Path.home() / '.cache/codex-scratch/process-per-user/tests'
+        scratch.mkdir(parents=True, exist_ok=True)
+        active = asyncio.Event()
+        async def prepare():
+            active.set()
+        async def workload(*_):
+            await active.wait()
+            stamp = time.monotonic_ns()
+            stages.PROBES.append(dict(session=900, number=540, send_before_ns=stamp, completed_ns=stamp))
+            stages.RECEIVED[(900, 540)] = dict(receive_ns=stamp)
+            return False
+        scheduler = Mock(events=[])
+        scheduler.close.return_value = dict(complete=True, overruns=0)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory, \
+             patch.object(stages.trace, 'Trace', return_value=scheduler) as create, \
+             patch.object(stages, 'ORIGINAL_SOAK', AsyncMock(side_effect=workload)) as original, \
+             patch.object(stages.os, 'kill'):
+            host = SimpleNamespace(pid=123, origin=1, peers=[SimpleNamespace(echo=AsyncMock())])
+            record = SimpleNamespace(file=SimpleNamespace(name=str(Path(directory) / 'samples.jsonl')))
+            self.assertFalse(await stages.soak(host, SimpleNamespace(mode='soak', seconds=1, warmup=0),
+                record, object(), profile_after=.001, before_profile=prepare))
+            original.assert_awaited_once()
+            create.assert_called_once_with(123)
+            scheduler.close.assert_called_once()
+
+    async def test_failed_activation_never_leaves_an_unowned_trace(self):
+        attempted = asyncio.Event()
+        async def prepare():
+            attempted.set()
+            raise ConnectionError('boundary refused')
+        async def workload(*_):
+            await attempted.wait()
+            return True
+        with patch.object(stages.trace, 'Trace') as create, \
+             patch.object(stages, 'ORIGINAL_SOAK', workload), \
+             patch.object(stages.os, 'kill') as send:
+            with self.assertRaisesRegex(ConnectionError, 'boundary refused'):
+                await stages.soak(SimpleNamespace(pid=123), SimpleNamespace(mode='soak', seconds=1),
+                    None, None, profile_after=.001, before_profile=prepare)
+            create.assert_not_called()
+            send.assert_not_called()
 
     def test_missing_or_other_format_is_refused_before_diagnostic_signals(self):
         for text in ['', '{}', '{"kind":"stage-format","version":2}', '[]']:

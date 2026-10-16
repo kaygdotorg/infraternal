@@ -1,7 +1,24 @@
 #!/usr/bin/env python3
 """Check diagnostic event identity filtering and argument disposal [D270]."""
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 import ppu_tail as tail
+
+
+class DeferredCounter(unittest.TestCase):
+    def test_counter_identity_precedes_full_trace_and_attaches_when_available(self):
+        def initialize(counter, _pid):
+            counter.thread = SimpleNamespace(native_id=456)
+            counter.error = None
+        for current in (None, Mock()):
+            with self.subTest(current=current), \
+                 patch.object(tail.ORIGINAL_WAKEUPS, '__init__', initialize), \
+                 patch.object(tail, 'CURRENT', current), patch.dict(tail.ROLES, {}, clear=True):
+                tail.Wakeups(123)
+                self.assertEqual(tail.ROLES['counter'], 456)
+                if current is not None:
+                    current.attach_counter.assert_called_once_with(456)
 
 
 class Events(unittest.TestCase):
