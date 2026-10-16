@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ppu_stage_report import report as stage_report
 from ppu_soak import percentile
-from ppu_compare_report import contamination
+from ppu_compare_report import audit_batches
 
 
 class Timeline:
@@ -133,19 +133,8 @@ def report(root, warmup, unit=None):
     all_settled = len(rows)
     discarded = []
     if unit is not None:
-        previous = None
-        number = 0
-        for line in (root / 'samples.jsonl').read_text().splitlines():
-            sample = json.loads(line)
-            if sample['kind'] == 'environment':
-                previous = sample.get('machine_receipt')
-            elif sample['kind'] == 'sample':
-                current = sample.get('machine_receipt')
-                reasons = contamination(previous, current, unit)
-                previous = current
-                if reasons and sample['elapsed_s'] >= warmup:
-                    discarded.append(dict(number=number, elapsed_s=sample['elapsed_s'], reasons=reasons))
-                number += 1
+        records = [json.loads(line) for line in (root / 'samples.jsonl').read_text().splitlines()]
+        discarded = audit_batches(records, warmup, unit)
         excluded = {row['number'] for row in discarded}
         rows = [row for row in rows if row['number'] not in excluded]
     for row in rows:

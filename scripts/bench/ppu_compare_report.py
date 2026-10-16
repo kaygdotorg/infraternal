@@ -31,6 +31,24 @@ def contamination(previous, current, unit):
     return reasons
 
 
+def audit_batches(records, warmup, unit):
+    """Use the same ownership exclusions for percentile and causal reports."""
+    previous = None
+    number = 0
+    discarded = []
+    for sample in records:
+        if sample['kind'] == 'environment':
+            previous = sample.get('machine_receipt')
+        elif sample['kind'] == 'sample':
+            current = sample.get('machine_receipt')
+            reasons = contamination(previous, current, unit)
+            previous = current
+            if reasons and sample['elapsed_s'] >= warmup:
+                discarded.append(dict(number=number, elapsed_s=sample['elapsed_s'], reasons=reasons))
+            number += 1
+    return discarded
+
+
 def windows(events):
     """Use certified wall-clock lock windows, never post-sample resource timestamps."""
     result = []
