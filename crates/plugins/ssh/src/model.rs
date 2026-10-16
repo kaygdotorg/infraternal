@@ -284,6 +284,10 @@ impl Failure {
 
     /// Attach a fixed local boundary: channel execution when true, connection setup otherwise.
     #[must_use]
+    // Failure-only rewrites stay out of x86_64 async callers under the measured
+    // size budget; ARM retains its existing code generation [243], #230.
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn at_ssh_boundary(mut self, channel: bool) -> Self {
         // Reuse bounded, static diagnostics rather than growing every retained
         // Failure/event with a field solely for server instrumentation.
@@ -306,6 +310,8 @@ impl Failure {
 
     /// Attach the command boundary without changing authentication/trust classification.
     #[must_use]
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn at(mut self, step: InstallStep) -> Self {
         self.failed_step = Some(step);
         if self.kind == FailureKind::Install
@@ -340,6 +346,8 @@ impl Failure {
     /// Classify fixed installer exit codes using the approved path. Join also
     /// executes the uploaded payload, whose status is not an ownership receipt.
     #[must_use]
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn in_mode(mut self, mode: InstallMode) -> Self {
         if self.kind != FailureKind::Install {
             return self;

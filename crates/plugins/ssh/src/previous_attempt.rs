@@ -195,6 +195,10 @@ impl PreviousAttempt {
 
 /// Installer-owned statuses are fixed vocabulary; remote output remains withheld.
 #[must_use]
+// Keep failure-only mapping out of x86_64 async callers for the measured size
+// budget; other targets retain their measured code generation [243], #230.
+#[cfg_attr(target_arch = "x86_64", cold)]
+#[cfg_attr(target_arch = "x86_64", inline(never))]
 pub fn classify(mut error: Failure) -> Failure {
     if error.kind != FailureKind::Install {
         return error;
