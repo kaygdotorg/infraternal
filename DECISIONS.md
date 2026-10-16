@@ -2978,3 +2978,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        SFTP. The caps rise once by the measured delta when the SSH slice
        lands, and only by that; jobs offset it with cuts elsewhere where
        they can, and the ratchet continues downward from there.
+290. **App windows never fight a window manager (owner, 2026-10-16, #146;
+     extends D208):** on a desktop where a window manager places and sizes
+     windows (tiling managers on macOS such as OmniWM, yabai and AeroSpace,
+     and their Linux and Windows counterparts), infraternal does not resize
+     the real window to match its canvas window. It detects this on its own,
+     with no setting: a known manager is running, or a size it set is undone
+     by someone else. From then on the canvas window follows the real
+     window's size and scales the picture to fit; it never retries the
+     resize. Without a manager, resizing from the canvas still resizes the
+     real window. Trigger: the owner saw TextEdit flicker on the MacBook as
+     infraternal shrank it and OmniWM tiled it back, over and over.
