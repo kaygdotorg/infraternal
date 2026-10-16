@@ -12,14 +12,14 @@ from pathlib import Path
 from ppu_soak import percentile
 
 
-def contamination(previous, current, unit):
+def contamination(previous, current, unit, observer_scopes=()):
     """Reject missing ownership and observed foreign-scope CPU work conservatively."""
     if not previous or not current:
         return ['missing-machine-receipt']
     owner = (current.get('owner') or '').split()
     if owner[:2] != ['process-per-user', unit] or not current.get('locks'):
         return ['uncertified-perf-lock']
-    allowed = {'init.scope', unit + '.scope'} | set(previous.get('control_scopes', [])) | set(current.get('control_scopes', []))
+    allowed = set(observer_scopes) | {'init.scope', unit + '.scope'} | set(previous.get('control_scopes', [])) | set(current.get('control_scopes', []))
     before, after = previous.get('scope_cpu', {}), current.get('scope_cpu', {})
     reasons = []
     for name in (before.keys() | after.keys()) - allowed:
@@ -31,7 +31,7 @@ def contamination(previous, current, unit):
     return reasons
 
 
-def audit_batches(records, warmup, unit):
+def audit_batches(records, warmup, unit, observer_scopes=()):
     """Use the same ownership exclusions for percentile and causal reports."""
     previous = None
     number = 0
@@ -41,7 +41,7 @@ def audit_batches(records, warmup, unit):
             previous = sample.get('machine_receipt')
         elif sample['kind'] == 'sample':
             current = sample.get('machine_receipt')
-            reasons = contamination(previous, current, unit)
+            reasons = contamination(previous, current, unit, observer_scopes)
             previous = current
             if reasons and sample['elapsed_s'] >= warmup:
                 discarded.append(dict(number=number, elapsed_s=sample['elapsed_s'], reasons=reasons))
@@ -64,7 +64,7 @@ def windows(events):
     return result
 
 
-def report(root, segment_root, unit):
+def report(root, segment_root, unit, observer_scopes=()):
     records = [json.loads(line) for line in (root / 'samples.jsonl').read_text().splitlines()]
     environment = next(row for row in records if row['kind'] == 'environment')
     segments = windows([json.loads(line) for line in (segment_root / 'segments.jsonl').read_text().splitlines()])
@@ -74,7 +74,7 @@ def report(root, segment_root, unit):
         if row['kind'] != 'sample':
             continue
         current = row.get('machine_receipt')
-        reasons = contamination(previous, current, unit)
+        reasons = contamination(previous, current, unit, observer_scopes)
         previous = current
         if row['elapsed_s'] < environment['warmup']:
             continue
@@ -101,6 +101,7 @@ def report(root, segment_root, unit):
         native_outcome=outcome, segments=table,
         discarded=[dict(elapsed_s=row['elapsed_s'], segment=row['segment'],
                         reasons=row['discard_reasons']) for row in discarded],
+        declared_observer_scopes=sorted(observer_scopes),
         contention_audit='post-cohort lock/scope snapshots; idle foreign scopes retained only with zero CPU delta')
     (root / 'comparison-report.json').write_text(json.dumps(result, indent=2) + '\n')
     return result
@@ -111,5 +112,7 @@ if __name__ == '__main__':
     parser.add_argument('root', type=Path)
     parser.add_argument('segments', type=Path)
     parser.add_argument('--unit', required=True)
+    parser.add_argument('--observer-scope', action='append', default=[],
+                        help='own observer scope verified separately; retained as explicit overhead')
     args = parser.parse_args()
-    print(json.dumps(report(args.root, args.segments, args.unit), indent=2))
+    print(json.dumps(report(args.root, args.segments, args.unit, args.observer_scope), indent=2))
