@@ -114,6 +114,17 @@ final class WindowGeometry {
         follow()
     }
 
+    /// Keyboard input has no coordinates. Validate the same live window/PID on
+    /// every event without enumerating other windows, reading AX geometry or
+    /// attempting a resize. Pointer input and AX notifications still reconcile
+    /// geometry, menus and the managed-window detector through follow().
+    func validateKeyboardTarget() {
+        exists = windowSnapshot(applicationMetadata: false, windowID: id).contains {
+            ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid
+        }
+        if !exists { interactive = []; reason = "closed" }
+    }
+
     func follow() {
         let snapshot = windowSnapshot(applicationMetadata: false)
         guard let selected = snapshot.first(where: { ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid }),

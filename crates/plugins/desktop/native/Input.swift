@@ -95,7 +95,9 @@ final class RemoteControl {
         guard AXIsProcessTrusted(), CGPreflightPostEventAccess(), let source else { throw HelperFailure.permission }
         let idle = localIdleSeconds()
         guard idle >= 2 else { releaseHeld(); return ["accepted": false, "reason": "local_input", "pause_remaining_ms": (2-idle)*1000] }
-        geometry?.follow()
+        guard let type = input["type"] as? String else { throw HelperFailure.invalid }
+        if type == "text" || type == "key" { geometry?.validateKeyboardTarget() }
+        else { geometry?.follow() }
         guard geometry?.exists != false else { throw HelperFailure.unavailable }
         if let geometry, let app = NSRunningApplication(processIdentifier: geometry.pid) {
             if !app.isActive {
@@ -115,7 +117,6 @@ final class RemoteControl {
             }
         }
         guard localIdleSeconds() >= 2 else { releaseHeld(); return ["accepted":false,"reason":"local_input","pause_remaining_ms":max(0,2-localIdleSeconds())*1000] }
-        guard let type = input["type"] as? String else { throw HelperFailure.invalid }
         let mods = input["modifiers"] as? UInt8 ?? 0
         try begin()
         if geometry == nil { owner = NSWorkspace.shared.frontmostApplication }
