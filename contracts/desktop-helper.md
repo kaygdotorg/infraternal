@@ -101,6 +101,15 @@ both hazards at a measured copy/capture cost (#146). The private pixel packet
 socket remains bounded to 4 MiB. One owned image is in flight, and at most one
 encoded image waits for output. A dropped encoded frame forces the next
 transmitted frame to be an IDR, so its references never depend on a dropped frame.
+A successful native encoder callback marked `frameDropped` completes its input
+without a sample. It must not retire capture. The surface path retains its latest
+surface and requests a repairing keyframe on the next source-rate opportunity,
+using its existing one-shot timer even when no further damage arrives. It never
+spins on a dropped surface. The owned-pixel reply makes at most one forced-keyframe
+retry of the same captured pixels and timestamp, then refuses repeated drops.
+Callback errors, missing unflagged samples, invalid access units and a genuine
+completion timeout remain terminal failures. No wire frame is sent for a drop.
+
 Control runs independently of capture/encoding. After 250 ms of identical
 owned pixels, a forced IDR receives a larger intra-frame bitrate budget.
 
@@ -168,6 +177,14 @@ The responsibility/PID/pipe fixture is verified on macOS 27.0.1 with SDK 27.0.
 object with boolean `screen_recording` and `device_control` keys from
 `CGPreflightScreenCaptureAccess()` and `AXIsProcessTrusted()`, then exits before
 AppKit setup. It never requests permissions, creates capture or injects input.
+
+`--capture-still <window-id> <owner-pid> <absolute.png>` is a local native
+companion diagnostic. It follows the same responsibility bootstrap, requires
+Screen Recording already granted, and validates the current window/PID pair
+before invoking `/usr/sbin/screencapture` as its child. The output path must be
+absolute and end in `.png`. It neither requests permissions nor injects input;
+it is not exposed as a server action. This keeps diagnostic stills under the
+installed identity instead of attributing them to a remote shell.
 
 A local supervisor may set `INFRATERNAL_DESKTOP_COMPANION` to the absolute
 executable path inside its installed signed companion bundle. It must be an
