@@ -9,8 +9,10 @@ import sys
 SOURCE = Path('util/mkbuildinf.pl')
 ORIGINAL = '$cflags = "compiler: $cflags";'
 # Keep the wrapper name and every compiler option; only its checkout prefix is
-# private to the builder. The wrapper runs during Configure, before generation.
-PATCHED = r'''$cflags =~ s{^.*?/\.cargo/(musl-cc(?:-avx512)?\.sh)(?=\s|$)}{.cargo/$1};
+# private to the builder. Configure may quote paths containing spaces; consume
+# the closing quote with that prefix, preserving later path-valued options.
+# The wrapper runs during Configure, before generation.
+PATCHED = r'''$cflags =~ s{^.*?/\.cargo/(musl-cc(?:-avx512)?\.sh)["']?(?=\s|$)}{.cargo/$1};
 $cflags = "compiler: $cflags";'''
 
 

@@ -22,9 +22,14 @@ test("compiler metadata retains flags and wrapper identity across checkout locat
     expect(statSync(generator).mode & 0o777).toBe(0o755);
     for (const wrapper of ["musl-cc.sh", "musl-cc-avx512.sh"]) {
       for (const checkout of ["/a/short", "/a much longer/checkout"]) {
-        const result = Bun.spawnSync(["perl", generator, `${checkout}/.cargo/${wrapper} -O2 -fPIC -DVALUE=1`]);
-        expect(result.exitCode).toBe(0);
-        expect(result.stdout.toString()).toBe(`compiler: .cargo/${wrapper} -O2 -fPIC -DVALUE=1`);
+        for (const quoted of [false, true]) {
+          const compiler = `${checkout}/.cargo/${wrapper}`;
+          const options = "-O2 -fPIC -DVALUE=1 -DWRAPPER=/other/.cargo/musl-cc.sh";
+          const command = quoted ? `cache-launcher "${compiler}"` : compiler;
+          const result = Bun.spawnSync(["perl", generator, `${command} ${options}`]);
+          expect(result.exitCode).toBe(0);
+          expect(result.stdout.toString()).toBe(`compiler: .cargo/${wrapper} ${options}`);
+        }
       }
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
