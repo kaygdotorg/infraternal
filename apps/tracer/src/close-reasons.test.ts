@@ -5,4 +5,3 @@ import { plainCloseReason } from "./close-reasons";
 test("a missed connection response keeps a plain and stable reason", () => {
   expect(plainCloseReason("connection unresponsive")).toBe("The connection did not respond in time.");
 });
-
