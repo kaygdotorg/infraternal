@@ -15,7 +15,16 @@ validate_control_socket() {
     # cannot do this after a relative bind, chdir or rename. Missing diagnostics
     # cannot prove staleness. Inode collisions on other devices refuse safely.
     rows=$(ss -x -a -n -e -p -H 2>&1) || exit 75
-    live=$(printf '%s\n' "$rows" | awk -v wanted="ino:${control_identity#*:}" '
+    # The kernel Unix diagnostic VFS inode is u32 even on wide-inode filesystems.
+    # Reduce decimal digits individually: full u64 values exceed awk precision
+    # and signed shell arithmetic. Truncation collisions only retain more state.
+    live=$(printf '%s\n' "$rows" | awk -v filesystem_inode="i${control_identity#*:}" '
+        BEGIN {
+            value = 0
+            for (position = 2; position <= length(filesystem_inode); position++)
+                value = (value * 10 + substr(filesystem_inode, position, 1)) % 4294967296
+            wanted = sprintf("ino:%.0f", value)
+        }
         NF {
             if ($1 !~ /^u_/) exit 2
             mapped = 0

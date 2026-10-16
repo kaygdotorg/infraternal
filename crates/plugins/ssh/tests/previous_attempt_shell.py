@@ -166,6 +166,32 @@ class EarlierSetup(unittest.TestCase):
             self.assertTrue(control.exists())
             self.assertTrue(self.receipt.exists())
 
+    def test_live_control_socket_with_high_inode_bits_is_retained(self):
+        # Unix diagnostics expose the low 32 bits of the filesystem inode.
+        # Model wide inode values without requiring a separate mounted fixture.
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        self.listener.listen()
+        metadata = control.stat()
+        for upper in [1 << 32, 1 << 63, ((1 << 64) - 1) ^ ((1 << 32) - 1)]:
+            inode = upper | (metadata.st_ino & ((1 << 32) - 1))
+            prefix = f"""stat() {{
+    if [ \"$#\" = 3 ] && [ \"$1\" = -c ] && [ \"$2\" = '%d:%i' ] && [ \"$3\" = \"$base/sessions/plugins.sock\" ]; then
+        printf '%s\\n' '{metadata.st_dev}:{inode}'
+    else
+        command stat \"$@\"
+    fi
+}}
+"""
+            for body in ['\ninspect_previous', CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']]:
+                self.assertEqual(self.run_shell(prefix + body).returncode, 73, inode)
+                self.assertTrue(control.exists())
+                self.assertTrue(self.receipt.exists())
+        self.listener.close()
+        self.assertEqual(self.run_shell(prefix + CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']).returncode, 0)
+        self.assertFalse(control.exists())
+        self.assertFalse(self.receipt.exists())
+
     def test_missing_socket_diagnostics_preserves_receipt(self):
         self.listener.close()
         control = self.sessions.parent / 'plugins.sock'
