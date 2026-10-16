@@ -103,10 +103,17 @@ impl Fixture {
                 root.join("refuse-start").display()
             ),
         );
+        executable(
+            &root.join("tools/runtime-helper"),
+            &format!(
+                "#!/bin/sh\nexec '{}' \"$@\"\n",
+                common::runtime_helper().display()
+            ),
+        );
         let binary = root.join("payload");
         executable(
             &binary,
-            "#!/bin/sh\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\n[ \"$4\" = join ] && [ \"$6\" = --enroll-only ] || exit 1\nmkdir -p \"$state\"\nprintf 'public-fixture-state\\n' > \"$state/proof\"\ncat >/dev/null\n",
+            "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\n[ \"$4\" = join ] && [ \"$6\" = --enroll-only ] || exit 1\nmkdir -p \"$state\"\nprintf 'public-fixture-state\\n' > \"$state/proof\"\ncat >/dev/null\n",
         );
         Self {
             root,
@@ -475,11 +482,14 @@ async fn fresh_runtime_symlink_never_removes_foreign_empty_directories() {
     transaction.stage(&fixture.binary).await.unwrap();
     let foreign = fixture.root.join("foreign/sessions");
     std::fs::create_dir_all(&foreign).unwrap();
+    let retained_runtime = fixture.root.join("retained-runtime");
+    std::fs::rename(fixture.base().join("sessions"), &retained_runtime).unwrap();
     symlink(foreign.parent().unwrap(), fixture.base().join("sessions")).unwrap();
     assert!(transaction.rollback().await.is_err());
     assert!(foreign.exists());
     assert!(fixture.base().join(".bootstrap-owner").exists());
     std::fs::remove_file(fixture.base().join("sessions")).unwrap();
+    std::fs::rename(retained_runtime, fixture.base().join("sessions")).unwrap();
     transaction.rollback().await.unwrap();
 }
 
@@ -1165,7 +1175,10 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
 #[tokio::test]
 async fn enrollment_process_exit_71_is_not_reported_as_directory_refusal() {
     let fixture = Fixture::new();
-    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    executable(
+        &fixture.binary,
+        "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\nexit 71\n",
+    );
     let transaction = fixture.transaction();
     transaction.stage(&fixture.binary).await.unwrap();
 
@@ -1590,7 +1603,7 @@ async fn control_listener_at(
 ) -> tokio::process::Child {
     use tokio::io::AsyncReadExt;
     let mut child = Command::new("python3")
-        .args(["-u", "-c", "import socket,os,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1],0o600); s.listen(); os.chdir('/'); print('ready',flush=True); sys.stdin.read()"])
+        .args(["-u", "-c", "import socket,os,sys,fcntl; lock=os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])),'.lifetime-lock'); held=open(lock,'rb') if os.path.exists(lock) else None; fcntl.flock(held,fcntl.LOCK_EX) if held else None; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1],0o600); s.listen(); os.chdir('/'); print('ready',flush=True); sys.stdin.read()"])
         .arg(binding)
         .current_dir(runtime)
         .stdin(std::process::Stdio::piped())
@@ -1913,7 +1926,7 @@ async fn review_live_relative_control_socket_preserves_its_receipt() {
     let receipt = fixture.receipt();
     std::fs::remove_file(keep).unwrap();
     let runtime = fixture.base().join("sessions");
-    std::fs::create_dir(&runtime).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut listener = control_listener_at(
         &fixture.base(),
@@ -2069,8 +2082,12 @@ async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
     transaction.stage(&fixture.binary).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"retained until observed").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    std::fs::remove_file(keep).unwrap();
     let runtime = fixture.base().join("sessions");
-    std::fs::create_dir(&runtime).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
     let control = runtime.join("plugins.sock");
     let mut listener = inode_reuse_listener(&fixture.base()).await;
@@ -2080,12 +2097,13 @@ async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
     // Capture real diagnostics, then pause before the direct probe. The snapshot
     // remains stale across a real inode reuse; it cannot authorize removal.
     executable(
-        &fixture.root.join("tools/python3"),
+        &fixture.root.join("tools/runtime-helper"),
         &format!(
-            "#!/bin/sh\n/usr/bin/ss -x -a -n -e -p -H > '{}' || exit $?\n: > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexec /usr/bin/python3 \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = --bootstrap-runtime ]; then /usr/bin/ss -x -a -n -e -p -H > '{}' || exit $?; : > '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; fi\nexec '{}' \"$@\"\n",
             snapshot.display(),
             observed.display(),
             replaced.display(),
+            common::runtime_helper().display(),
         ),
     );
     let cleanup = tokio::spawn(async move { transaction.rollback().await });
@@ -2152,7 +2170,7 @@ async fn review_unrelated_user_relative_socket_does_not_block_stale_cleanup() {
     let receipt = fixture.receipt();
     std::fs::remove_file(keep).unwrap();
     let runtime = fixture.base().join("sessions");
-    std::fs::create_dir(&runtime).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stale = std::os::unix::net::UnixListener::bind(runtime.join("plugins.sock")).unwrap();
     drop(stale);

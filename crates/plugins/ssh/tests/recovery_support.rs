@@ -13,6 +13,9 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[allow(dead_code)]
+mod common;
+
 const HOST: &str = "11111111111111111111111111111111";
 const TRANSACTION: &str = "22222222222222222222222222222222";
 
@@ -36,6 +39,12 @@ impl MinimalHost {
         fs::create_dir(&root).unwrap();
         let fixture = Self { root };
         let base = fixture.base();
+        fs::create_dir_all(base.parent().unwrap()).unwrap();
+        let cache = base.with_file_name("infraternal.bootstrap-cache");
+        fs::create_dir(&cache).unwrap();
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::copy(common::runtime_helper(), cache.join("payload")).unwrap();
+        fs::set_permissions(cache.join("payload"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir_all(base.join("sessions")).unwrap();
         for directory in [
             &fixture.root,
@@ -89,7 +98,7 @@ impl MinimalHost {
                 "debian:trixie-slim",
                 "/bin/sh",
                 "-c",
-                "if command -v python3 >/dev/null 2>&1; then exit 99; fi; exec /bin/sh",
+                "if command -v python3 >/dev/null 2>&1; then exit 99; fi; [ \"$(id -u)\" != 0 ] || exit 98; exec /bin/sh",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -151,6 +160,18 @@ fn recovery_scripts() -> (String, String) {
 #[ignore = "requires sudo -n Docker and the local debian:trixie-slim image"]
 fn review_stale_receipt_recovers_without_host_python() {
     let host = MinimalHost::new();
+    // The VM runner is root; only this bind-mounted fixture becomes a rootless
+    // uid in the image. The build-host runner already uses its ordinary uid.
+    if fs::metadata(&host.root).unwrap().uid() == 0 {
+        assert!(
+            Command::new("chown")
+                .args(["-R", "65534:65534"])
+                .arg(&host.root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     let (inspect, rollback) = recovery_scripts();
     let mut inspection = Vec::new();
     let mut cleanup = Vec::new();
@@ -180,6 +201,25 @@ fn review_stale_receipt_recovers_without_host_python() {
         "minimal host retry stops: inspection={inspection:?}, cleanup={cleanup:?}, receipt_retained={receipt_retained}, socket_retained={socket_retained}, without_socket={:?}",
         without_socket.status.code()
     );
+    // Continue through fresh staging in the same minimal image. The verified
+    // executable cache survives rollback; no additional host tool is installed.
+    let fresh = format!(
+        "set -euC\numask 077\nbase=\"$HOME/.local/share/infraternal\"\nhost={HOST}\ntransaction={TRANSACTION}\n{}\n{}\n{}\nln \"$cache/payload\" \"$stage/payload\"\nhandoff_setup_lease \"$stage/payload\" yes\n{}\n{}\n{}\n",
+        include_str!("../src/setup_lock.sh"),
+        installer_constant("PAYLOAD_CACHE"),
+        installer_constant("STAGE_TRANSACTION"),
+        include_str!("../src/runtime_cleanup.sh"),
+        installer_constant("FRESH_CLEANUP"),
+        installer_constant("ROLLBACK_TRANSACTION"),
+    );
+    let retried = host.run(&fresh);
+    assert!(
+        retried.status.success(),
+        "minimal image fresh retry status={:?}",
+        retried.status.code()
+    );
+    assert!(!host.base().exists());
+    assert!(!host.receipt().exists());
 }
 
 /// A process still owns its bound control socket during the bind-to-listen gap.
@@ -232,4 +272,63 @@ fn review_bound_control_socket_before_listen_preserves_receipt() {
         inspection.status.code(),
         cleanup.status.code()
     );
+}
+
+/// A helper's lock survives its exit because the installer owns the same description.
+#[test]
+fn cleanup_holds_runtime_lock_until_all_receipts_retire() {
+    let host = MinimalHost::new();
+    let stage = host.base().join(".bootstrap-lock");
+    fs::create_dir(&stage).unwrap();
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(stage.join("kind"), b"fresh\n").unwrap();
+    fs::set_permissions(stage.join("kind"), fs::Permissions::from_mode(0o600)).unwrap();
+    let lock_path = host.base().join("sessions/.lifetime-lock");
+    fs::write(&lock_path, b"").unwrap();
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let metadata = fs::metadata(host.base()).unwrap();
+    let mut holder = Command::new("/bin/sh")
+        .args(["-c", "exec 6< \"$1\"; \"$2\" --bootstrap-runtime \"$3\" \"$4\" inspect <&6 || exit $?; echo ready; read answer", "sh"])
+        .arg(&lock_path).arg(common::runtime_helper()).arg(host.base())
+        .arg(format!("{}:{}", metadata.dev(), metadata.ino()))
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut ready = [0; 6];
+    holder
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    let independent = fs::File::open(&lock_path).unwrap();
+    assert!(independent.try_lock().is_err());
+    let (inspect, rollback) = recovery_scripts();
+    for program in [&inspect, &rollback] {
+        let observed = Command::new("/bin/sh")
+            .args(["-c", &program.replace("$HOME", host.root.to_str().unwrap())])
+            .output()
+            .unwrap();
+        assert_eq!(observed.status.code(), Some(73));
+        assert!(
+            stage.join("kind").exists(),
+            "live runtime lost its partial staging receipt"
+        );
+        assert!(host.receipt().exists());
+        assert!(host.base().join("sessions/plugins.sock").exists());
+    }
+    holder.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    assert!(holder.wait().unwrap().success());
+    let cleaned = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &rollback.replace("$HOME", host.root.to_str().unwrap()),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cleaned.status.success(),
+        "cleanup status={:?}",
+        cleaned.status.code()
+    );
+    assert!(!host.receipt().exists());
 }

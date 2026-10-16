@@ -20,6 +20,12 @@ class EarlierSetup(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=scratch)
         self.base = Path(self.temp.name) / 'infraternal'
         self.base.mkdir(mode=0o700)
+        helper = Path(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'])
+        cache = Path(str(self.base) + '.bootstrap-cache')
+        cache.mkdir(mode=0o700)
+        import shutil
+        shutil.copyfile(helper, cache / 'payload')
+        (cache / 'payload').chmod(0o700)
         self.owner = self.base / '.bootstrap-owner'
         self.owner.write_text(HOST + '\n')
         self.owner.chmod(0o600)
@@ -217,7 +223,8 @@ class EarlierSetup(unittest.TestCase):
         self.listener.close()
         control = self.sessions.parent / 'plugins.sock'
         self.socket.rename(control)
-        result = self.run_shell('python3() { return 76; }\n' + CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        Path(str(self.base) + '.bootstrap-cache/payload').unlink()
+        result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
         self.assertEqual(result.returncode, 76)
         self.assertTrue(control.exists())
         self.assertTrue(self.receipt.exists())

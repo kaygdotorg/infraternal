@@ -307,7 +307,10 @@ fn script_status_diagnostics_are_honest_for_all_nonzero_codes() {
 #[test]
 fn control_probe_statuses_preserve_actionable_setup_messages() {
     use infraternal_plugin_ssh::model::{Failure, InstallMode, InstallStep};
-    for (status, fragment) in [(76, "Python 3"), (77, "could not determine")] {
+    for (status, fragment) in [
+        (76, "matching infraternal binary"),
+        (77, "could not determine"),
+    ] {
         for mode in [InstallMode::Rootless, InstallMode::Root] {
             let mut failure = Failure::install("static").at(InstallStep::Install);
             failure.exit_status = Some(status);

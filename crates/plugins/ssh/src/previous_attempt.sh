@@ -121,6 +121,7 @@ inspect_previous() {
         hex_id "$previous_transaction"
     fi
     not_live
+    validate_control_socket
     if [ -n "$receipt" ]; then
         validate_retired_stage "$previous_transaction" "$previous_host"
     elif [ -e "$base/.bootstrap-lock" ] || [ -L "$base/.bootstrap-lock" ]; then
@@ -177,6 +178,7 @@ inspect_previous() {
         for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
             [ -e "$entry" ] || [ -L "$entry" ] || continue
             [ "$entry" != "$base/sessions/sessions" ] || continue
+            [ "$entry" != "$base/sessions/.lifetime-lock" ] || continue
             if [ "$entry" = "$base/sessions/plugins.sock" ]; then
                 validate_control_socket
                 sockets=$((sockets + 1))

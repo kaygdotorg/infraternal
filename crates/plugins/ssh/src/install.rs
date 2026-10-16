@@ -154,8 +154,11 @@ impl Installation {
             "cat > \"$stage/payload\""
         };
         let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
+        let runtime = r#"
+if [ "$kind" = fresh ]; then handoff_setup_lease "$stage/payload" yes; fi
+"#;
         let body = format!(
-            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}",
+            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{runtime}",
             shell_quote(&digest)
         );
         let input = if reuse {
@@ -232,6 +235,10 @@ impl Installation {
     /// Join into staged state on private stdin; previous enrolled state remains untouched.
     /// # Errors
     /// Refuses a mismatched invitation or failed pinned enrollment/installation command.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep transaction journaling and lifetime handoff ordered with service activation."
+    )]
     pub async fn enroll_and_start(&self, join: &JoinMaterial) -> Result<(), Failure> {
         if join.host != self.host {
             return Err(Failure::install(
@@ -292,6 +299,8 @@ if [ -f "$stage/was-active" ]; then
 else
     $manager stop infraternal-agent.service >/dev/null 2>&1 || :
 fi
+# Transfer lifetime ownership from the staging lease while replacing artifacts.
+handoff_setup_lease "$stage/payload" yes
 # Journal ownership before replacement, after stopping the previous service.
 # A refused prior stop is separate from an unknown/interrupted reply.
 : > "$stage/activating"
@@ -320,7 +329,9 @@ mv -f "$stage/unit" "$unit"
                     r#"
 stage="$base/.bootstrap-lock"
 [ ! -L "$stage" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+handoff_setup_lease "$base/bin/live" no
 $manager daemon-reload
+exec 6<&-
 $manager enable --now infraternal-agent.service
 "#,
                 ),
@@ -409,22 +420,10 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     }
 }
 
-// Shell proof notes live outside transmitted literals [243].
-// These checks precede every lookup below sessions; links never authorize cleanup.
-// The service manager supplies the umask, so socket mode is not an ownership
-// receipt. The real private parent protects it for every inherited mode.
-// Probe through an opened, no-follow private directory rather than cached inode
-// diagnostics or global names: a replacement can reuse a retired inode. Only a
-// direct ECONNREFUSED proves staleness; connection, timeout and all other errors
-// retain state. Python's timed socket uses nonblocking connect with a 250 ms bound.
-// The probe lstat checks uid/type/link count before connecting and rechecks the
-// same device/inode immediately before unlinking relative to that directory.
-// Root identity remains tied to the receipt, including after server restart.
-// Python runs isolated without site imports, only for a retained control socket;
-// missing support refuses cleanup with a fixed actionable diagnostic.
-// An outside receipt is written only after service rollback, before retiring
-// stage. Its surviving markers may be any subset; validate known artifacts
-// without reading enrollment contents or following links before resuming removal.
+// The staged binary validates and takes the inherited runtime lock on fd 6.
+// The shell keeps the same open description until all receipt cleanup ends.
+// Legacy runtimes without that file use the binary's conservative socket probe.
+// A private parent-directory setup guard fences startup during final lock unlink.
 pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats
@@ -529,6 +528,7 @@ fi
 pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
+    validate_control_socket
     stage="$base/.bootstrap-lock"
     if [ -e "$stage" ] || [ -L "$stage" ]; then
         validate_retired_stage "$transaction" "$host"
@@ -587,6 +587,10 @@ esac
 retire_setup_lease
 if [ -f "$stage/activating" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
+fi
+if [ "$kind" = fresh ]; then
+    identity=$(stat -c '%d:%i' "$base")
+    validate_control_socket
 fi
 if [ -f "$stage/linger-requested" ]; then
     uid=$(id -u)
@@ -691,6 +695,7 @@ finish_fresh() {
             if [ ! -L "$base/sessions/sessions" ] && [ -O "$base/sessions/sessions" ]; then
                 rmdir "$base/sessions/sessions" 2>/dev/null || :
             fi
+            if [ -e "$base/sessions/.lifetime-lock" ]; then rm -- "$base/sessions/.lifetime-lock"; fi
             rmdir "$base/sessions" 2>/dev/null || :
         fi
         for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do

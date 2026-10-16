@@ -4,7 +4,7 @@ use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 
-pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs Python 3 on this host to check its local control socket. Its files were kept.";
+pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs the matching infraternal binary on this host. Its files were kept.";
 pub(crate) const SOCKET_PROBE_UNCERTAIN: &str = "Setup could not determine whether its local control socket is still in use. Its files were kept; check host permissions and retry.";
 
 /// A validated destination; fields are private to prevent bypassing shell/option safety.

@@ -1,36 +1,21 @@
-# Probe owned control sockets directly before retiring failed setup (#230).
+# Validate runtime lifetime under the cleanup shell's inherited lock descriptor (#230).
 control_socket() {
-    control="$base/sessions/plugins.sock"
     [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0
-    [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ] || exit 71
-    [ -e "$control" ] || [ -L "$control" ] || return 0
-    command -v python3 >/dev/null 2>&1 || exit 76
-    python3 -I -S -B - "$base" "$1" "$identity" <<'PYTHON' || exit $?
-import errno,os,socket,stat,sys
-try:
-    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
-    root=os.open(sys.argv[1],flags)
-    base=os.fstat(root)
-    if base.st_uid!=os.geteuid() or stat.S_IMODE(base.st_mode)!=0o700 or '%d:%d'%(base.st_dev,base.st_ino)!=sys.argv[3]: sys.exit(71)
-    fd=os.open('sessions',flags,dir_fd=root)
-    parent=os.fstat(fd)
-    if parent.st_uid!=os.geteuid() or stat.S_IMODE(parent.st_mode)!=0o700: sys.exit(71)
-    def checked():
-        entry=os.stat('plugins.sock',dir_fd=fd,follow_symlinks=False)
-        if not stat.S_ISSOCK(entry.st_mode) or entry.st_uid!=os.geteuid() or entry.st_nlink!=1: sys.exit(71)
-        return entry.st_dev,entry.st_ino
-    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as peer:
-        peer.settimeout(0.25)
-        before=checked()
-        try:
-            peer.connect('/proc/self/fd/%d/plugins.sock'%fd)
-        except OSError as error:
-            if error.errno!=errno.ECONNREFUSED: sys.exit(77)
-        else: sys.exit(73)
-    if checked()!=before: sys.exit(77)
-    if sys.argv[2]=='retire': os.unlink('plugins.sock',dir_fd=fd)
-except OSError: sys.exit(77)
-PYTHON
+    [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ] && [ "$(stat -c '%a' "$base/sessions")" = 700 ] || exit 71
+    control="$base/sessions/plugins.sock"
+    lifetime="$base/sessions/.lifetime-lock"
+    if [ ! -e "$control" ] && [ ! -L "$control" ] && [ ! -e "$lifetime" ] && [ ! -L "$lifetime" ]; then return 0; fi
+    helper="$base.bootstrap-cache/payload"
+    [ -d "$base.bootstrap-cache" ] && [ ! -L "$base.bootstrap-cache" ] && [ -O "$base.bootstrap-cache" ] && [ "$(stat -c '%a' "$base.bootstrap-cache")" = 700 ] || exit 76
+    [ -f "$helper" ] && [ ! -L "$helper" ] && [ -O "$helper" ] && [ "$(stat -c '%a' "$helper")" = 700 ] || exit 76
+    "$helper" --bootstrap-runtime-version >/dev/null 2>&1 || exit 76
+    if [ -e "$lifetime" ] || [ -L "$lifetime" ]; then
+        [ -f "$lifetime" ] && [ ! -L "$lifetime" ] && [ -O "$lifetime" ] && [ "$(stat -c '%a:%h' "$lifetime")" = 600:1 ] || exit 71
+        if [ "${runtime_locked:-no}" != yes ]; then exec 6< "$lifetime"; runtime_locked=yes; fi
+        "$helper" --bootstrap-runtime "$base" "$identity" "$1" <&6 || exit $?
+    else
+        "$helper" --bootstrap-runtime "$base" "$identity" "$1" </dev/null || exit $?
+    fi
 }
 validate_control_socket() { control_socket inspect; }
 retire_control_socket() { control_socket retire; }

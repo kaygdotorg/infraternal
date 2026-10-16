@@ -15,7 +15,7 @@ setup_guard() {
 start_setup_lease() {
     exec 7< "$stage"
     flock -n 7 || exit 73
-    (exec 9<&-; exec sleep 180) >/dev/null 2>&1 &
+    (exec 9<&-; if [ "${lease_runtime:-no}" != yes ]; then exec 6<&-; fi; exec sleep 180) >/dev/null 2>&1 &
     lease_pid=$!
     lease_birth=$(awk '{print $22}' "/proc/$lease_pid/stat")
     printf '%s %s\n' "$lease_pid" "$lease_birth" > "$stage/lease"
@@ -37,4 +37,24 @@ retire_setup_lease() {
         exec 7< "$stage"
         flock -w 2 7 || exit 73
     fi
+}
+
+# Change lease ownership only under the parent setup guard and exact transaction.
+handoff_setup_lease() {
+    retire_setup_lease
+    rm -f "$stage/lease"
+    runtime="$base/sessions"
+    if [ ! -e "$runtime" ] && [ ! -L "$runtime" ]; then mkdir "$runtime"; fi
+    [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ -O "$runtime" ] && [ "$(stat -c '%a' "$runtime")" = 700 ] || exit 71
+    lifetime="$runtime/.lifetime-lock"
+    identity=$(stat -c '%d:%i' "$base")
+    if [ ! -e "$lifetime" ] && [ ! -L "$lifetime" ]; then
+        "$1" --bootstrap-runtime "$base" "$identity" inspect </dev/null
+        : > "$lifetime"
+    fi
+    [ -f "$lifetime" ] && [ ! -L "$lifetime" ] && [ -O "$lifetime" ] && [ "$(stat -c '%a:%h' "$lifetime")" = 600:1 ] || exit 71
+    exec 6< "$lifetime"
+    "$1" --bootstrap-runtime "$base" "$identity" inspect <&6
+    lease_runtime=$2
+    start_setup_lease
 }
