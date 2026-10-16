@@ -147,6 +147,13 @@ impl SshTransport for FixtureTransport {
 // unchanged, and this prints only fixed boundaries and typed local errors.
 struct ObservedBackend(Arc<RemoteBackend>);
 impl Backend for ObservedBackend {
+    fn owns_failed_setup<'a>(
+        &'a self, a: &'a Authority, t: &'a Target, c: &'a Check,
+        host: Uuid, lookup: Option<String>,
+    ) -> Operation<'a, bool> {
+        self.0.owns_failed_setup(a, t, c, host, lookup)
+    }
+
     fn record_failure(&self, t: &Target, h: Option<Uuid>, p: Step, f: &Failure) {
         self.0.record_failure(t, h, p, f);
     }
@@ -334,8 +341,10 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         .unwrap();
     assert!(private.len() <= 24576);
     let mut f = fixture(true).await;
+    let server_name = std::env::var("BREAKIT2_SERVER_NAME")
+        .unwrap_or_else(|_| "addhost-breakit2.test".into());
     let (identity, material) =
-        crate::remote_runtime::tests::server_material_for_name("addhost-breakit2.test");
+        crate::remote_runtime::tests::server_material_for_name(&server_name);
     let source: Arc<dyn CaKeySource> = Arc::new(Signer(Some(material.clone())));
     let hosts = RemoteHosts::from_source(Some(source.clone()));
     let store = f.backend.issuer.store().clone();
@@ -351,12 +360,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let endpoint = EnrollmentEndpoint {
         ca_der: material.issuer().to_der().unwrap(),
         endpoint: listeners.local_addr().unwrap(),
-        server_name: "addhost-breakit2.test".into(),
+        server_name: server_name.clone(),
     };
     let auth = Auth::new(
         f.pool.clone(),
-        "addhost-breakit2.test",
-        "https://addhost-breakit2.test:4929",
+        &server_name,
+        &format!("https://{server_name}:4929"),
     )
     .await
     .unwrap();
@@ -392,7 +401,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         hosts,
         attempts: Mutex::default(),
     });
-    let retry_private = std::env::var_os("BREAKIT2_RETRY").map(|_| private.clone());
+    let timeout_retry = std::env::var_os("BREAKIT2_TIMEOUT_RETRY").is_some();
+    let retry_private = (timeout_retry || std::env::var_os("BREAKIT2_RETRY").is_some())
+        .then(|| private.clone());
     let transport = Arc::new(FixtureTransport {
         transport: Arc::new(TimedTransport {
             adapter: OpenSsh {
@@ -475,6 +486,14 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                     && selected_attempt == 1
                     && let Some(private) = retry_private.take()
                 {
+                    if timeout_retry {
+                        assert_eq!(event.step, Step::Failed);
+                        assert!(events.iter().any(|phase| phase.step == Step::Facts));
+                        assert!(std::process::Command::new("nft")
+                            .args(["delete", "table", "inet", "addhost_retry_230"])
+                            .status().unwrap().success());
+                        println!("RETRY timeout=facts network_restored=true");
+                    }
                     *transport.private.lock().unwrap() = Some(Secret::new(private));
                     println!(
                         "RETRY breakit2 first_failure_step={:?}",
@@ -503,6 +522,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     })
     .await
     .unwrap();
+    if timeout_retry {
+        assert_eq!(selected_attempt, 2, "a network timeout must precede the retry");
+    }
     let active: i64 =
         sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
             .fetch_one(&f.pool)
