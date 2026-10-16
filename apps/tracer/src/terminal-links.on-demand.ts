@@ -1,5 +1,6 @@
 /** Finds and opens links in the visible terminal buffer; callers feed changed rows only after paint. */
 import { hideTipAt, hoverTipAt, peekTipAt } from "../../../packages/ui/src/tooltip";
+import { formatLinkTooltipText } from "../../../packages/ui/src/tooltip-link-text";
 
 export interface TerminalLinkRange {
   start: { x: number; y: number };
@@ -216,6 +217,20 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
 
   const linkKey = (link: TerminalLink): string => `${link.kind}:${link.range.start.y}:${link.range.start.x}:${link.range.end.y}:${link.range.end.x}:${link.target}`;
 
+  /** Multiline links span the terminal width so the shared tooltip can clear every wrapped row. */
+  const tooltipBounds = (link: TerminalLink): DOMRect => {
+    const canvas = options.canvas.getBoundingClientRect();
+    const metrics = options.getCellMetrics();
+    const visible = options.getVisibleRange();
+    const first = Math.max(0, link.range.start.y - visible.first);
+    const last = Math.min(visible.last - visible.first, link.range.end.y - visible.first);
+    const multiline = link.range.start.y !== link.range.end.y;
+    const left = multiline ? canvas.left : canvas.left + link.range.start.x * metrics.width;
+    const right = multiline ? canvas.right : canvas.left + (link.range.end.x + 1) * metrics.width;
+    const top = canvas.top + first * metrics.height;
+    return new DOMRect(left, top, Math.max(0, right - left), Math.max(0, (last - first + 1) * metrics.height));
+  };
+
   const rowsAt = (y: number, scannedRows: Map<number, TerminalLinkRow>, changedRows?: Set<number>): TerminalLinkRow | undefined => {
     const scanned = scannedRows.get(y);
     if (scanned) return scanned;
@@ -284,7 +299,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
         endY: Math.min(visible.last - visible.first, endY),
       });
       options.canvas.style.cursor = link.openable ? "pointer" : "text";
-      if (shouldShowLinkTarget(link) && point) hoverTipAt(options.host, link.target, point.x, point.y);
+      if (shouldShowLinkTarget(link) && point) hoverTipAt(options.host, formatLinkTooltipText(link.target), point.x, point.y, tooltipBounds(link));
       else hideTipAt(options.host);
     } else {
       options.paint(null);
@@ -396,7 +411,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       touchOpenedKey = key;
       window.clearTimeout(touchOpenTimer);
       touchOpenTimer = window.setTimeout(() => { touchOpenedKey = undefined; }, 700);
-      if (shouldShowLinkTarget(link)) peekTipAt(options.host, link.target, event.clientX, event.clientY);
+      if (shouldShowLinkTarget(link)) peekTipAt(options.host, formatLinkTooltipText(link.target), event.clientX, event.clientY, 2600, tooltipBounds(link));
       options.open(link);
     }
   };
@@ -414,7 +429,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     if (!link || !link.openable || wasDragged || !sameLink) return;
     event.preventDefault();
     event.stopPropagation();
-    if (shouldShowLinkTarget(link)) peekTipAt(options.host, link.target, event.clientX, event.clientY);
+    if (shouldShowLinkTarget(link)) peekTipAt(options.host, formatLinkTooltipText(link.target), event.clientX, event.clientY, 2600, tooltipBounds(link));
     options.open(link);
   };
   const onPointerLeave = (): void => {

@@ -310,27 +310,6 @@ function sideOf(el: HTMLElement, r: DOMRect, h: number): Side {
   return topSpace >= bottomSpace ? "top" : "bottom";
 }
 
-const LINK_TOOLTIP_MAX = 56;
-const LINK_ORIGIN = /^(?:https?:\/\/[^/?#]+|mailto:[^?#]*|file:\/\/)/iu;
-
-/** Shortens only the destination tail; grapheme segmentation keeps the visible ellipsis on glyph boundaries. */
-function linkTooltipText(target: string): string {
-  if (target.length <= LINK_TOOLTIP_MAX) return target;
-  const prefix = LINK_ORIGIN.exec(target)?.[0] ?? "";
-  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-  const prefixLength = Array.from(segmenter.segment(prefix)).length;
-  if (prefixLength >= LINK_TOOLTIP_MAX) return prefix;
-  const tail = Array.from(segmenter.segment(target.slice(prefix.length)), (part) => part.segment);
-  const allowance = LINK_TOOLTIP_MAX - prefixLength;
-  if (tail.length <= allowance) return target;
-  const retained = allowance - 1;
-  // Keep a short tail intact (often the final query parameter), and spend the remaining
-  // room on the start of the path after the full scheme and host.
-  const trailing = Math.min(20, retained);
-  const leading = retained - trailing;
-  return `${prefix}${tail.slice(0, leading).join("")}…${trailing ? tail.slice(-trailing).join("") : ""}`;
-}
-
 /** Places the surface for `el`; returns the travel direction (−1 left, 1 right). */
 function place(el: HTMLElement, animateMove: boolean): number {
   const text = labelOf(el);
@@ -476,7 +455,7 @@ export function peekTip(el: HTMLElement, duration = 2600): void {
 /** Shows the shared warm link tooltip at the pointer, using the link's full row range when supplied. */
 export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number, bounds?: DOMRect): void {
   pointAnchor = anchor;
-  pointLabel = linkTooltipText(text);
+  pointLabel = text;
   pointRect = bounds ?? new DOMRect(x, y, 0, 0);
   if (warm()) {
     byHover = true;
@@ -495,7 +474,7 @@ export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: numb
 /** Shows the shared link tooltip at a pointer position for a short touch or click confirmation. */
 export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600, bounds?: DOMRect): void {
   pointAnchor = anchor;
-  pointLabel = linkTooltipText(text);
+  pointLabel = text;
   pointRect = bounds ?? new DOMRect(x, y, 0, 0);
   byHover = false;
   show(anchor, shown ? "instant" : "pop");
