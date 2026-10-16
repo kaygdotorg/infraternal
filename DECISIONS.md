@@ -3001,3 +3001,27 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      port (7443) is no longer required for anything. Owner: "this is very
      non-intrusive and I love it." Trigger: adding calternal-dev failed
      because its network did not allow TCP 7443 to the server (#230).
+292. **VNC build choices (owner, 2026-10-16, #223; extends D282):**
+     - **Pipeline B, mirrored decode (Q1):** the Rust session owner decodes
+       every update into its retained framebuffer, and the browser decodes
+       the same compact updates in an on-demand worker. A late or returning
+       viewer gets the server's snapshot first.
+     - **The person in control sets the remote resolution (Q2);** watchers
+       scale to fit.
+     - **macOS Screen Sharing first, macOS 26 onwards only (Q3).** Older
+       macOS versions come later.
+     - **First compatibility gate (Q4):** QEMU/Proxmox and macOS Screen
+       Sharing; a Linux VNC server later. The test Mac is the Mac VM, whose
+       Screen Sharing listens only on its private address and localhost, so
+       tests reach it through a tunnel. Its credentials are supplied by the
+       orchestrator at run time, never stored in the repo, logs or argv.
+     - **Clipboard (Q5):** text first, with explicit Send and Get. Two more
+       features the owner wants, which other VNC clients lack: **automatic
+       text recognition** of the remote screen (owner: "a big one that I
+       would love"), and **a text field whose contents are typed into the
+       remote window** at the cursor. Their design is grilled next.
+     - **Hard gates (Q6):** extremely lean and fast. The VNC code is
+       loaded only when a VNC window opens and is at most 128 KiB gzip;
+       input to pixel p95 ≤50 ms; join ≤300 ms.
+     - **Synthetic protocol coverage (Q7)** until a cleaned-up recording from
+       the real Mac exists.
