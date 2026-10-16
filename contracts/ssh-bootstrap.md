@@ -513,6 +513,13 @@ the owner marker or the installation root. An existing root must retain the
 receipt's exact directory inode; without an owner marker it must be empty.
 An absent root still passes the process-liveness checks before receipt removal.
 Neither boundary recreates an ownership marker or relaxes the ledger proof.
+The final outside receipt also denotes completed service rollback before staging
+retirement. A stop during staging removal may leave any subset of its markers.
+Recovery validates surviving transaction/kind markers when present, known
+private staging artifacts and bounded private enrollment/cache trees without
+reading identity contents or following links. Unknown artifacts, foreign
+markers and nested links are refused before mutation. It then retires staging
+without repeating completed service changes, and finishes root/receipt removal.
 
 Exact screen copy for the later UI pass: title “This host has leftovers from an
 earlier setup”; body “infraternal didn't finish setting up here before. Start
