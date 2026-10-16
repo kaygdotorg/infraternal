@@ -5,10 +5,10 @@
 //! independent of terminal framing and authority. Only a live admitted tuple
 //! receives a responder key; every reply echoes one outstanding sequence with a
 //! separate direction tag. No timer, task, socket or connection is created here.
-use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use std::{
     io,
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
@@ -63,47 +63,46 @@ pub fn path_probe_header(bytes: &[u8]) -> Option<(bool, u64)> {
     ))
 }
 
-/// Clones share the native key object; raw exporter bytes are immediately cleared.
+/// Clones share the existing QUIC provider's key; raw exporter bytes are cleared.
 #[derive(Clone)]
-pub(crate) struct PathKey(PKey<openssl::pkey::Private>);
+pub(crate) struct PathKey(Arc<ring::hmac::Key>);
 impl PathKey {
     /// Derive a session-bound key without exporting it to files, logs or argv.
     /// # Errors
-    /// Refuses unavailable TLS exporters or native key import failure.
+    /// Refuses unavailable TLS exporters.
     pub fn from_connection(connection: &quinn::Connection) -> io::Result<Self> {
         let mut bytes = Zeroizing::new([0; 32]);
         connection
             .export_keying_material(&mut bytes[..], b"EXPORTER-infraternal-path-v1", b"")
             .map_err(|_| io::ErrorKind::PermissionDenied)?;
-        PKey::hmac(&bytes[..]).map(Self).map_err(io::Error::other)
+        Ok(Self(Arc::new(ring::hmac::Key::new(
+            ring::hmac::HMAC_SHA256,
+            &bytes[..],
+        ))))
     }
-    fn packet(&self, direction: u8, sequence: u64) -> io::Result<[u8; PACKET_SIZE]> {
+    fn packet(&self, direction: u8, sequence: u64) -> [u8; PACKET_SIZE] {
         let mut packet = [0; PACKET_SIZE];
         packet[..4].copy_from_slice(PREFIX);
         packet[4] = direction;
         packet[5..HEADER].copy_from_slice(&sequence.to_be_bytes());
-        let mut signer = Signer::new(MessageDigest::sha256(), &self.0).map_err(io::Error::other)?;
-        signer.update(&packet[..HEADER]).map_err(io::Error::other)?;
-        let length = signer
-            .sign(&mut packet[HEADER..])
-            .map_err(io::Error::other)?;
-        if length != 32 {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        Ok(packet)
+        let tag = ring::hmac::sign(&self.0, &packet[..HEADER]);
+        packet[HEADER..].copy_from_slice(tag.as_ref());
+        packet
     }
+
     fn sequence(&self, bytes: &[u8], direction: u8) -> Option<u64> {
         let (response, sequence) = path_probe_header(bytes)?;
         if response != (direction == RESPONSE) {
             return None;
         }
-        let expected = self.packet(direction, sequence).ok()?;
-        openssl::memcmp::eq(&expected[HEADER..], &bytes[HEADER..]).then_some(sequence)
+        ring::hmac::verify(&self.0, &bytes[..HEADER], &bytes[HEADER..])
+            .ok()
+            .map(|()| sequence)
     }
     /// Answer only an authenticated request on the caller's admitted exact tuple.
     #[must_use]
     pub fn response(&self, request: &[u8]) -> Option<[u8; PACKET_SIZE]> {
-        self.packet(RESPONSE, self.sequence(request, REQUEST)?).ok()
+        Some(self.packet(RESPONSE, self.sequence(request, REQUEST)?))
     }
 }
 
@@ -155,12 +154,14 @@ impl Probe {
         if self.pending.is_none() {
             self.sequence = self.sequence.checked_add(1).ok_or(io::ErrorKind::Other)?;
         }
-        self.key
+        Ok(self
+            .key
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
             .1
-            .packet(REQUEST, self.sequence)
+            .packet(REQUEST, self.sequence))
     }
+
     /// Publish only after successful physical send; an unsent request cannot time out.
     pub fn sent(&mut self, at: Instant) {
         if self.pending.is_none() {
@@ -214,7 +215,10 @@ mod tests {
     //! Cryptographic controls use two distinct keys, stale sequences and both direction tags.
     use super::*;
     fn fixture_key(byte: u8) -> PathKey {
-        PathKey(PKey::hmac(&[byte; 32]).unwrap())
+        PathKey(Arc::new(ring::hmac::Key::new(
+            ring::hmac::HMAC_SHA256,
+            &[byte; 32],
+        )))
     }
     #[test]
     fn mixed_aggregation_preserves_all_neighboring_quic_bytes() {
@@ -224,9 +228,9 @@ mod tests {
         let last = vec![0x42; 21];
         let mut bytes = [
             first.clone(),
-            key.packet(REQUEST, 1).unwrap().to_vec(),
+            key.packet(REQUEST, 1).to_vec(),
             second.clone(),
-            key.packet(RESPONSE, 1).unwrap().to_vec(),
+            key.packet(RESPONSE, 1).to_vec(),
             last.clone(),
         ]
         .concat();
@@ -255,7 +259,7 @@ mod tests {
                 ],
             ),
         ] {
-            let packet = key.packet(direction, 42).unwrap();
+            let packet = key.packet(direction, 42);
             assert_eq!(&packet[HEADER..], tag);
         }
     }
@@ -273,8 +277,8 @@ mod tests {
         let response = key.response(&request).unwrap();
         let since = Instant::now();
         probe.receive(&request, address);
-        probe.receive(&key.packet(RESPONSE, 0).unwrap(), address);
-        probe.receive(&fixture_key(2).packet(RESPONSE, 1).unwrap(), address);
+        probe.receive(&key.packet(RESPONSE, 0), address);
+        probe.receive(&fixture_key(2).packet(RESPONSE, 1), address);
         let mut unexpected = response;
         unexpected[20] ^= 1;
         probe.receive(&unexpected, address);
