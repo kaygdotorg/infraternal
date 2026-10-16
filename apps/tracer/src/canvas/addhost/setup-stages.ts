@@ -61,9 +61,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 export function parseSetupEvent(value: unknown): SetupEvent | undefined {
   const body = isRecord(value) && isRecord(value.setup) ? value.setup : undefined;
   if (!body || typeof body.host_id !== "string" || !UUID.test(body.host_id)) return undefined;
-  if (!SETUP_STAGES.includes(body.stage as SetupStageId) || !["running", "done", "failed"].includes(String(body.state))) return undefined;
+  if (!SETUP_STAGES.includes(body.stage as SetupStageId) || typeof body.state !== "string" || !["running", "done", "failed"].includes(body.state)) return undefined;
   const event: SetupEvent = { hostId: body.host_id, stage: body.stage as SetupStageId, state: body.state as SetupEvent["state"] };
-  if (event.state === "failed" && STEPS.includes(String(body.failed_step))) event.failedStep = body.failed_step as FailedStep;
+  if (event.state === "failed" && body.failed_step !== undefined) {
+    if (typeof body.failed_step !== "string") return undefined;
+    if (STEPS.includes(body.failed_step)) event.failedStep = body.failed_step as FailedStep;
+  }
   if (Number.isSafeInteger(body.sequence) && Number(body.sequence) >= 0) event.sequence = Number(body.sequence);
   if (typeof body.message === "string") event.message = body.message.slice(0, 500);
   return event;
