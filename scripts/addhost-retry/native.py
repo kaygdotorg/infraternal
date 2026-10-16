@@ -42,13 +42,26 @@ def main():
     assert not home.exists()
     sshd = None
     created = False
+    public_created = False
     blocked = False
     fd = None
     try:
-        run('useradd', '--create-home', '--shell', '/bin/bash', account)
+        # Account deletion can precede logind's retirement of the old uid.
+        # Keep execution uids distinct across adjacent fixture runs.
+        counter = root.parent / 'next_uid'
+        uid = int(counter.read_text()) if counter.exists() else 30000
+        while True:
+            try:
+                pwd.getpwuid(uid)
+                uid += 1
+            except KeyError:
+                break
+        assert uid < 60000
+        counter.write_text(str(uid + 1))
+        run('useradd', '--create-home', '--uid', str(uid), '--shell', '/bin/bash', account)
         created = True
-        uid = pwd.getpwnam(account).pw_uid
         run('loginctl', 'enable-linger', account)
+        run('systemctl', 'start', f'user@{uid}.service')
         for _ in range(100):
             if Path(f'/run/user/{uid}/bus').exists():
                 break
@@ -63,6 +76,7 @@ def main():
         # The daemon reads its generated public allow-list from a root-owned public directory.
         public_root = Path('/run') / account
         public_root.mkdir(mode=0o755)
+        public_created = True
         authorized = public_root / 'authorized_keys'
         authorized.write_text(public + '\n')
         authorized.chmod(0o644)
@@ -110,7 +124,7 @@ PidFile {root}/sshd.pid
             run('nft', '-f', '-', input=rule.encode())
             blocked = True
             environment['BREAKIT2_TIMEOUT_RETRY'] = '1'
-        print(f'ENVIRONMENT machine={os.uname().nodename} cpus={os.cpu_count()} load={Path("/proc/loadavg").read_text().strip()} label={args.label}', flush=True)
+        print(f'ENVIRONMENT machine={os.uname().nodename} cpus={os.cpu_count()} load={Path("/proc/loadavg").read_text().strip()} label={args.label} uid={uid}', flush=True)
         time.sleep(.2)
         result = subprocess.run([str(args.test_binary.resolve()), 'breakit2_live_ssh_install_join_and_terminal', '--ignored', '--nocapture'], input=private, env=environment)
         base = home / '.local/share/infraternal'
@@ -134,7 +148,8 @@ PidFile {root}/sshd.pid
             # Account retirement must wait for the manager and its PAM child.
             run('systemctl', 'stop', f'user@{uid}.service')
             run('userdel', '--remove', account, stderr=subprocess.DEVNULL)
-            shutil.rmtree(Path('/run') / account)
+            if public_created:
+                shutil.rmtree(public_root)
         assert subprocess.run(['nft', 'list', 'table', 'inet', 'addhost_retry_230'],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0
         if created:
