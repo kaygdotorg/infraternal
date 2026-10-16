@@ -290,3 +290,27 @@ async fn coordinator_stored_column_refuses_without_panic_and_recovers_after_repa
     assert!(store.config(id).await.is_ok());
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn settings_storage_failure_has_a_safe_original_reason() {
+    let fixture = Fixture::new().await;
+    let (capture, _guard) = Capture::start();
+    fixture.pool.close().await;
+    assert_eq!(
+        fixture
+            .service
+            .execute(OWNER, "mesh.default.get", b"{}", NOW)
+            .await,
+        Err(MeshApiError::Storage)
+    );
+    let errors = capture.errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0]["fields"]["reason"], "database pool closed");
+    assert!(
+        errors[0]["fields"]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("settings.rs")
+    );
+    fixture.cleanup().await;
+}
