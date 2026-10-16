@@ -74,7 +74,7 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
      // PASS 2: Draw all cell text and decorations
      // Now text can safely extend beyond cell boundaries (for complex scripts)
      this.renderAsciiRunsAndComplexCells(line, y, lineCellCount, lineOffset);
-+    if (this.hoveredLinkRanges) this.renderHoveredLinkRangesForRow(y, cols);
++    if (this.hoveredLinkRanges) this.renderHoveredLinkRangesForRow(y, cols, line, lineOffset);
    }
  
    /**
@@ -164,7 +164,7 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
    public setHoveredLinkRange(
      range: {
        startX: number;
-@@ -1137,7 +1096,37 @@
+@@ -1137,7 +1096,40 @@
        endY: number;
      } | null
    ): void {
@@ -181,7 +181,7 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
 +    this.hoveredLinkRanges = next;
 +  }
 +
-+  private renderHoveredLinkRangesForRow(row: number, cols: number): void {
++  private renderHoveredLinkRangesForRow(row: number, cols: number, line: GhosttyCell[], lineOffset: number): void {
 +    const ranges = this.hoveredLinkRanges;
 +    if (!ranges) return;
 +    this.ctx.save();
@@ -193,17 +193,20 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
 +      const firstColumn = Math.max(0, row === range.startY ? range.startX : 0);
 +      const lastColumn = Math.min(cols - 1, row === range.endY ? range.endX : cols - 1);
 +      if (lastColumn < firstColumn) continue;
++      // Ghostty stores a wide glyph's width on its lead cell; the continuation cell has width zero.
++      const endpointWidth = row === range.endY ? line[lineOffset + lastColumn]?.width : undefined;
++      const endColumn = Math.min(cols, lastColumn + (endpointWidth === 2 ? 2 : 1));
 +      const underlineY = row * this.metrics.height + this.metrics.baseline + 2;
 +      this.ctx.beginPath();
 +      this.ctx.moveTo(firstColumn * this.metrics.width, underlineY);
-+      this.ctx.lineTo((lastColumn + 1) * this.metrics.width, underlineY);
++      this.ctx.lineTo(endColumn * this.metrics.width, underlineY);
 +      this.ctx.stroke();
 +    }
 +    this.ctx.restore();
    }
  
    /**
-@@ -1172,3 +1161,17 @@
+@@ -1172,3 +1164,17 @@
      this.stopCursorBlink();
    }
  }

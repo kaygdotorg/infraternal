@@ -1457,18 +1457,18 @@ class QA {
       const w = this.terminal.wasmTerm.getScrollbackLength(), s = A - w;
       let t;
       if (s < 0 ? t = this.terminal.wasmTerm.getScrollbackHyperlinkUri(A, I) : t = this.terminal.wasmTerm.getHyperlinkUri(s, I), t) {
-        let a = I;
+        let N = I;
         for (let h = I + 1; h < C.length; h++) {
           const M = C.getCell(h);
           if (!M || M.getHyperlinkId() === 0 || (s < 0 ? this.terminal.wasmTerm.getScrollbackHyperlinkUri(A, h) : this.terminal.wasmTerm.getHyperlinkUri(s, h)) !== t)
             break;
-          a = h;
+          N = h;
         }
-        for (let h = I; h <= a; h++)
+        for (let h = I; h <= N; h++)
           E.add(h);
         const k = {
           start: { x: I, y: A },
-          end: { x: a, y: A }
+          end: { x: N, y: A }
         };
         g.push({
           text: t,
@@ -1503,8 +1503,8 @@ class QA {
         const t = E.getLine(s);
         if (!t || t.length === 0)
           break;
-        const a = t.getCell(t.length - 1);
-        if (!a || a.getHyperlinkId() !== A)
+        const N = t.getCell(t.length - 1);
+        if (!N || N.getHyperlinkId() !== A)
           break;
         C = s, I = 0;
         for (let k = t.length - 1; k >= 0; k--) {
@@ -1533,15 +1533,15 @@ class QA {
         let s = D + 1;
         const t = E.length;
         for (; s < t; ) {
-          const a = E.getLine(s);
-          if (!a || a.length === 0)
+          const N = E.getLine(s);
+          if (!N || N.length === 0)
             break;
-          const k = a.getCell(0);
+          const k = N.getCell(0);
           if (!k || k.getHyperlinkId() !== A)
             break;
           D = s, o = 0;
-          for (let h = 0; h < a.length; h++) {
-            const M = a.getCell(h);
+          for (let h = 0; h < N.length; h++) {
+            const M = N.getCell(h);
             if (!M)
               break;
             if (M.getHyperlinkId() !== A) {
@@ -1550,7 +1550,7 @@ class QA {
             }
             o = h;
           }
-          if (o === a.length - 1)
+          if (o === N.length - 1)
             s++;
           else
             break;
@@ -1769,7 +1769,7 @@ class gA {
         this.selectionManager.clearDirtySelectionRows();
       }
     }
-    const N = /* @__PURE__ */ new Set(), U = this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId, n = this.hoveredLinkRanges !== this.previousHoveredLinkRanges;
+    const a = /* @__PURE__ */ new Set(), U = this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId, n = this.hoveredLinkRanges !== this.previousHoveredLinkRanges;
     if (U) {
       for (let e = 0; e < D.rows; e++) {
         let c = null;
@@ -1786,7 +1786,7 @@ class gA {
         if (c) {
           for (const F of c)
             if (F.hyperlink_id === this.hoveredHyperlinkId || F.hyperlink_id === this.previousHoveredHyperlinkId) {
-              N.add(e);
+              a.add(e);
               break;
             }
         }
@@ -1796,15 +1796,15 @@ class gA {
     if (n) {
       for (const e of this.previousHoveredLinkRanges ?? [])
         for (let c = e.startY; c <= e.endY; c++)
-          N.add(c);
+          a.add(c);
       for (const e of this.hoveredLinkRanges ?? [])
         for (let c = e.startY; c <= e.endY; c++)
-          N.add(c);
+          a.add(c);
       this.previousHoveredLinkRanges = this.hoveredLinkRanges;
     }
     const q = /* @__PURE__ */ new Set();
     for (let e = 0; e < D.rows; e++)
-      (g > 0 ? !0 : Q || A.isRowDirty(e) || M.has(e) || N.has(e)) && (q.add(e), e > 0 && q.add(e - 1), e < D.rows - 1 && q.add(e + 1));
+      (g > 0 ? !0 : Q || A.isRowDirty(e) || M.has(e) || a.has(e)) && (q.add(e), e > 0 && q.add(e - 1), e < D.rows - 1 && q.add(e + 1));
     const Y = Q && g === 0 && A.getViewport !== void 0;
     Y && (this.ctx.clearRect(0, 0, D.cols * this.metrics.width, D.rows * this.metrics.height), this.ctx.fillStyle = this.theme.background, this.ctx.fillRect(0, 0, D.cols * this.metrics.width, D.rows * this.metrics.height));
     for (let e = 0; e < D.rows; e++) {
@@ -1850,7 +1850,7 @@ class gA {
       const t = A[E + s];
       t && t.width !== 0 && (!w && !(t.flags & G.INVERSE) && t.bg_r === this.themeBackgroundRgb[0] && t.bg_g === this.themeBackgroundRgb[1] && t.bg_b === this.themeBackgroundRgb[2] || this.renderCellBackground(t, s, Q));
     }
-    this.renderAsciiRunsAndComplexCells(A, Q, o, E), this.hoveredLinkRanges && this.renderHoveredLinkRangesForRow(Q, g);
+    this.renderAsciiRunsAndComplexCells(A, Q, o, E), this.hoveredLinkRanges && this.renderHoveredLinkRangesForRow(Q, g, A, E);
   }
   /**
    * Batch contiguous plain ASCII cells but keep complex or styled cells on the
@@ -1867,29 +1867,29 @@ class gA {
         break;
       D -= 1;
     }
-    let o = 0, w = "", s = "", t = -1, a = -1, k = -1;
+    let o = 0, w = "", s = "", t = -1, N = -1, k = -1;
     const h = () => {
       if (s.length === 0)
         return;
       this.ctx.font = `${this.fontSize}px ${this.fontFamily}`, this.ctx.fillStyle = w;
       const M = this.ctx;
       if (typeof M.letterSpacing == "string") {
-        const N = M.letterSpacing;
-        M.letterSpacing = `${this.metrics.width - this.naturalCellWidth}px`, this.ctx.fillText(s, o * this.metrics.width, C), M.letterSpacing = N;
+        const a = M.letterSpacing;
+        M.letterSpacing = `${this.metrics.width - this.naturalCellWidth}px`, this.ctx.fillText(s, o * this.metrics.width, C), M.letterSpacing = a;
       } else
-        for (let N = 0; N < s.length; N++)
-          this.ctx.fillText(s[N], (o + N) * this.metrics.width, C);
+        for (let a = 0; a < s.length; a++)
+          this.ctx.fillText(s[a], (o + a) * this.metrics.width, C);
       s = "";
     };
     for (let M = 0; M <= D; M++) {
-      const N = A[E + M];
-      if (N.width === 0)
+      const a = A[E + M];
+      if (a.width === 0)
         continue;
-      if (!(N.width === 1 && N.flags === 0 && N.hyperlink_id === 0 && N.grapheme_len === 0 && (N.codepoint === 0 || N.codepoint >= 32 && N.codepoint <= 126) && (!I || !this.isInSelection(M, Q)))) {
-        h(), this.renderCellText(N, M, Q);
+      if (!(a.width === 1 && a.flags === 0 && a.hyperlink_id === 0 && a.grapheme_len === 0 && (a.codepoint === 0 || a.codepoint >= 32 && a.codepoint <= 126) && (!I || !this.isInSelection(M, Q)))) {
+        h(), this.renderCellText(a, M, Q);
         continue;
       }
-      s.length === 0 ? (o = M, t = N.fg_r, a = N.fg_g, k = N.fg_b, w = this.rgbToCSS(t, a, k)) : (N.fg_r !== t || N.fg_g !== a || N.fg_b !== k) && (h(), o = M, t = N.fg_r, a = N.fg_g, k = N.fg_b, w = this.rgbToCSS(t, a, k)), s += String.fromCharCode(N.codepoint || 32);
+      s.length === 0 ? (o = M, t = a.fg_r, N = a.fg_g, k = a.fg_b, w = this.rgbToCSS(t, N, k)) : (a.fg_r !== t || a.fg_g !== N || a.fg_b !== k) && (h(), o = M, t = a.fg_r, N = a.fg_g, k = a.fg_b, w = this.rgbToCSS(t, N, k)), s += String.fromCharCode(a.codepoint || 32);
     }
     h();
   }
@@ -1923,13 +1923,13 @@ class gA {
     else if (o)
       this.ctx.fillStyle = this.theme.selectionForeground;
     else {
-      let h = A.fg_r, M = A.fg_g, N = A.fg_b;
-      A.flags & G.INVERSE && (h = A.bg_r, M = A.bg_g, N = A.bg_b), this.ctx.fillStyle = this.rgbToCSS(h, M, N);
+      let h = A.fg_r, M = A.fg_g, a = A.fg_b;
+      A.flags & G.INVERSE && (h = A.bg_r, M = A.bg_g, a = A.bg_b), this.ctx.fillStyle = this.rgbToCSS(h, M, a);
     }
     A.flags & G.FAINT && (this.ctx.globalAlpha = 0.5);
     const s = C, t = I + this.metrics.baseline;
-    let a;
-    if (A.grapheme_len > 0 && ((k = this.currentBuffer) != null && k.getGraphemeString) ? a = this.currentBuffer.getGraphemeString(g, Q) : a = String.fromCodePoint(A.codepoint || 32), this.ctx.fillText(a, s, t), A.flags & G.FAINT && (this.ctx.globalAlpha = 1), A.flags & G.UNDERLINE) {
+    let N;
+    if (A.grapheme_len > 0 && ((k = this.currentBuffer) != null && k.getGraphemeString) ? N = this.currentBuffer.getGraphemeString(g, Q) : N = String.fromCodePoint(A.codepoint || 32), this.ctx.fillText(N, s, t), A.flags & G.FAINT && (this.ctx.globalAlpha = 1), A.flags & G.UNDERLINE) {
       const h = I + this.metrics.baseline + 2;
       this.ctx.strokeStyle = this.ctx.fillStyle, this.ctx.lineWidth = 1, this.ctx.beginPath(), this.ctx.moveTo(C, h), this.ctx.lineTo(C + D, h), this.ctx.stroke();
     }
@@ -2039,7 +2039,7 @@ class gA {
     const C = this.ctx, I = this.canvas.height / this.devicePixelRatio, D = this.canvas.width / this.devicePixelRatio, o = 8, w = D - o - 4, s = 4, t = I - s * 2;
     if (C.clearRect(w - 2, 0, o + 6, I), C.fillStyle = this.theme.background, C.fillRect(w - 2, 0, o + 6, I), E <= 0 || Q === 0)
       return;
-    const a = Q + g, k = Math.max(20, g / a * t), h = A / Q, M = s + (t - k) * (1 - h);
+    const N = Q + g, k = Math.max(20, g / N * t), h = A / Q, M = s + (t - k) * (1 - h);
     C.fillStyle = `rgba(128, 128, 128, ${0.1 * E})`, C.fillRect(w, s, o, t);
     const U = A > 0 ? 0.5 : 0.3;
     C.fillStyle = `rgba(128, 128, 128, ${U * E})`, C.fillRect(w, M, o, k);
@@ -2085,18 +2085,19 @@ class gA {
     const Q = A != null && A.length ? A.map((g) => ({ ...g })) : null;
     EA(this.hoveredLinkRanges, Q) || (this.hoveredLinkRanges = Q);
   }
-  renderHoveredLinkRangesForRow(A, Q) {
-    const g = this.hoveredLinkRanges;
-    if (g) {
+  renderHoveredLinkRangesForRow(A, Q, g, E) {
+    var I;
+    const C = this.hoveredLinkRanges;
+    if (C) {
       this.ctx.save(), this.ctx.globalAlpha = 1, this.ctx.strokeStyle = this.theme.cursor, this.ctx.lineWidth = 1;
-      for (const E of g) {
-        if (A < E.startY || A > E.endY)
+      for (const D of C) {
+        if (A < D.startY || A > D.endY)
           continue;
-        const C = Math.max(0, A === E.startY ? E.startX : 0), I = Math.min(Q - 1, A === E.endY ? E.endX : Q - 1);
-        if (I < C)
+        const o = Math.max(0, A === D.startY ? D.startX : 0), w = Math.min(Q - 1, A === D.endY ? D.endX : Q - 1);
+        if (w < o)
           continue;
-        const D = A * this.metrics.height + this.metrics.baseline + 2;
-        this.ctx.beginPath(), this.ctx.moveTo(C * this.metrics.width, D), this.ctx.lineTo((I + 1) * this.metrics.width, D), this.ctx.stroke();
+        const s = A === D.endY ? (I = g[E + w]) == null ? void 0 : I.width : void 0, t = Math.min(Q, w + (s === 2 ? 2 : 1)), N = A * this.metrics.height + this.metrics.baseline + 2;
+        this.ctx.beginPath(), this.ctx.moveTo(o * this.metrics.width, N), this.ctx.lineTo(t * this.metrics.width, N), this.ctx.stroke();
       }
       this.ctx.restore();
     }
@@ -2185,7 +2186,7 @@ const x = class H {
         continue;
       let w = -1;
       const s = D === Q ? A : 0, t = D === E ? g : o.length - 1;
-      let a = "";
+      let N = "";
       for (let k = s; k <= t; k++) {
         const h = o[k];
         if (h && h.codepoint !== 0) {
@@ -2194,16 +2195,16 @@ const x = class H {
             if (D < C)
               M = this.wasmTerm.getScrollbackGraphemeString(D, k);
             else {
-              const N = D - C;
-              M = this.wasmTerm.getGraphemeString(N, k);
+              const a = D - C;
+              M = this.wasmTerm.getGraphemeString(a, k);
             }
           else
             M = String.fromCodePoint(h.codepoint);
-          a += M, M.trim() && (w = a.length);
+          N += M, M.trim() && (w = N.length);
         } else
-          a += " ";
+          N += " ";
       }
-      w >= 0 ? a = a.substring(0, w) : a = "", I += a, D < E && (I += `
+      w >= 0 ? N = N.substring(0, w) : N = "", I += N, D < E && (I += `
 `);
     }
     return I;
@@ -2650,8 +2651,8 @@ class sA {
         }
       else
         w = o + D;
-      const a = await this.linkDetector.getLinkAt(C, w);
-      a && (a.activate(g), (g.ctrlKey || g.metaKey) && g.preventDefault());
+      const N = await this.linkDetector.getLinkAt(C, w);
+      N && (N.activate(g), (g.ctrlKey || g.metaKey) && g.preventDefault());
     }, this.handleWheel = (g) => {
       var C, I, D;
       if (g.preventDefault(), g.stopPropagation(), this.customWheelEventHandler && this.customWheelEventHandler(g))
@@ -2678,14 +2679,14 @@ class sA {
       const E = this.wasmTerm.getScrollbackLength();
       if (E === 0)
         return;
-      const C = this.canvas.getBoundingClientRect(), I = g.clientX - C.left, D = g.clientY - C.top, o = C.width, w = C.height, s = 8, t = o - s - 4, a = 4;
+      const C = this.canvas.getBoundingClientRect(), I = g.clientX - C.left, D = g.clientY - C.top, o = C.width, w = C.height, s = 8, t = o - s - 4, N = 4;
       if (I >= t && I <= t + s) {
         g.preventDefault(), g.stopPropagation(), g.stopImmediatePropagation();
-        const k = w - a * 2, h = this.rows, M = E + h, N = Math.max(20, h / M * k), U = this.viewportY / E, n = a + (k - N) * (1 - U);
-        if (D >= n && D <= n + N)
+        const k = w - N * 2, h = this.rows, M = E + h, a = Math.max(20, h / M * k), U = this.viewportY / E, n = N + (k - a) * (1 - U);
+        if (D >= n && D <= n + a)
           this.isDraggingScrollbar = !0, this.scrollbarDragStart = D, this.scrollbarDragStartViewportY = this.viewportY, this.canvas && (this.canvas.style.userSelect = "none", this.canvas.style.webkitUserSelect = "none");
         else {
-          const Y = 1 - (D - a) / k, L = Math.round(Y * E);
+          const Y = 1 - (D - N) / k, L = Math.round(Y * E);
           this.scrollToLine(Math.max(0, Math.min(E, L)));
         }
       }
@@ -3230,11 +3231,11 @@ class sA {
     if (w > 0) {
       const M = this.wasmTerm.getScrollbackLength();
       if (C < w) {
-        const N = M - w + C;
-        D = this.wasmTerm.getScrollbackLine(N);
+        const a = M - w + C;
+        D = this.wasmTerm.getScrollbackLine(a);
       } else {
-        const N = C - w;
-        D = this.wasmTerm.getLine(N);
+        const a = C - w;
+        D = this.wasmTerm.getLine(a);
       }
     } else
       D = this.wasmTerm.getLine(C);
@@ -3242,21 +3243,21 @@ class sA {
     const s = this.renderer.hoveredHyperlinkId || 0;
     I !== s && this.renderer.setHoveredHyperlinkId(I);
     const t = this.wasmTerm.getScrollbackLength();
-    let a;
+    let N;
     const k = this.getViewportY(), h = Math.max(0, Math.floor(k));
     if (h > 0)
       if (C < h)
-        a = t - h + C;
+        N = t - h + C;
       else {
         const M = C - h;
-        a = t + M;
+        N = t + M;
       }
     else
-      a = t + C;
-    this.linkDetector.getLinkAt(g, a).then((M) => {
-      var N, U, n, q;
+      N = t + C;
+    this.linkDetector.getLinkAt(g, N).then((M) => {
+      var a, U, n, q;
       if (M !== this.currentHoveredLink) {
-        (U = (N = this.currentHoveredLink) == null ? void 0 : N.hover) == null || U.call(N, !1), this.currentHoveredLink = M, (n = M == null ? void 0 : M.hover) == null || n.call(M, !0);
+        (U = (a = this.currentHoveredLink) == null ? void 0 : a.hover) == null || U.call(a, !1), this.currentHoveredLink = M, (n = M == null ? void 0 : M.hover) == null || n.call(M, !0);
         const Y = M ? "pointer" : "text";
         if (this.element && (this.element.style.cursor = Y), this.canvas && (this.canvas.style.cursor = Y), this.renderer)
           if (M) {
@@ -3283,7 +3284,7 @@ class sA {
     const Q = this.wasmTerm.getScrollbackLength();
     if (Q === 0)
       return;
-    const g = this.canvas.getBoundingClientRect(), C = A.clientY - g.top - this.scrollbarDragStart, o = g.height - 4 * 2, w = this.rows, s = Q + w, t = Math.max(20, w / s * o), a = -C / (o - t), k = Math.round(a * Q), h = this.scrollbarDragStartViewportY + k;
+    const g = this.canvas.getBoundingClientRect(), C = A.clientY - g.top - this.scrollbarDragStart, o = g.height - 4 * 2, w = this.rows, s = Q + w, t = Math.max(20, w / s * o), N = -C / (o - t), k = Math.round(N * Q), h = this.scrollbarDragStartViewportY + k;
     this.scrollToLine(Math.max(0, Math.min(Q, h)));
   }
   /**
@@ -3441,8 +3442,8 @@ class tA {
    * @returns Proposed dimensions or undefined if cannot calculate
    */
   proposeDimensions() {
-    var N;
-    if (!((N = this._terminal) != null && N.element))
+    var a;
+    if (!((a = this._terminal) != null && a.element))
       return;
     const Q = this._terminal.renderer;
     if (!Q || typeof Q.getMetrics != "function")
@@ -3456,7 +3457,7 @@ class tA {
     const C = window.getComputedStyle(E), I = Number.parseInt(C.getPropertyValue("padding-top")) || 0, D = Number.parseInt(C.getPropertyValue("padding-bottom")) || 0, o = Number.parseInt(C.getPropertyValue("padding-left")) || 0, w = Number.parseInt(C.getPropertyValue("padding-right")) || 0, s = E.clientWidth, t = E.clientHeight;
     if (s === 0 || t === 0)
       return;
-    const a = s - o - w - oA, k = t - I - D, h = Math.max(IA, Math.floor(a / g.width)), M = Math.max(DA, Math.floor(k / g.height));
+    const N = s - o - w - oA, k = t - I - D, h = Math.max(IA, Math.floor(N / g.width)), M = Math.max(DA, Math.floor(k / g.height));
     return { cols: h, rows: M };
   }
   /**
