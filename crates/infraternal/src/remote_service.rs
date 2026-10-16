@@ -8,12 +8,17 @@ pub(crate) fn run(
     runtime: tokio::runtime::Runtime,
     link: impl std::future::Future<Output = io::Result<()>>,
 ) -> io::Result<()> {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(link)))
-        .unwrap_or_else(|_| {
-            Err(io::Error::other(
-                "Infraternal agent server link task ended unexpectedly",
-            ))
-        });
+    // Share the reactor poll loop with the other process entrypoints [243].
+    // This one startup allocation replaces the caller's box; panic fencing
+    // and bounded shutdown remain owned by this service.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        infraternal_agent::block_on_io(&runtime, Box::pin(link))
+    }))
+    .unwrap_or_else(|_| {
+        Err(io::Error::other(
+            "Infraternal agent server link task ended unexpectedly",
+        ))
+    });
     stopped(runtime, result)
 }
 
