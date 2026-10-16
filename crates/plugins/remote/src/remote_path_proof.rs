@@ -163,10 +163,9 @@ impl Probe {
     }
 
     /// Publish only after successful physical send; an unsent request cannot time out.
-    pub fn sent(&mut self, at: Instant) {
-        if self.pending.is_none() {
-            self.pending = Some((self.sequence, at));
-        }
+    /// Every retransmission returns the same first clock to its health watcher.
+    pub fn sent(&mut self, at: Instant) -> Instant {
+        self.pending.get_or_insert((self.sequence, at)).1
     }
     pub fn receive(&mut self, bytes: &[u8], source: SocketAddr) {
         if self.destination != Some(source) {

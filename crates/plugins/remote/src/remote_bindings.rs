@@ -772,7 +772,11 @@ mod tests {
                 path.use_enrolled();
             }
             let since = std::time::Instant::now();
-            path.send_path_proof(mesh).unwrap();
+            let first = path.send_path_proof(mesh).unwrap();
+            assert!(
+                first == path.send_path_proof(mesh).unwrap(),
+                "retransmission replaced the original physical-send clock"
+            );
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 while !path.path_authenticated_since(since, mesh) {
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;

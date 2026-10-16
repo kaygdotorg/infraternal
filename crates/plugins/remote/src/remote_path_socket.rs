@@ -441,8 +441,7 @@ impl PathSocket {
             src_ip: None,
         })?;
         let sent = Instant::now();
-        proof.sent(sent);
-        Ok(sent)
+        Ok(proof.sent(sent))
     }
 
     /// An exact physical tuple, current challenge and valid session MAC are all required.
