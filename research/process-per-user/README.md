@@ -320,6 +320,12 @@ Missing ownership, observed foreign scope CPU activity and ambiguous windows
 cannot become clean timing rows. Snapshots do not continuously certify that
 arbitrary work outside the flock was absent. A baseline miss establishes a
 measured comparison, not permission to change D41 or to subtract percentiles.
+An own queued coordinator can consume small amounts of CPU outside the active
+fixture's ancestor scope. Reporters accept an explicit `--observer-scope` only
+after its PID, saved birth, script and unit have been verified separately.
+Every declaration is retained in the report and its CPU counters remain in raw
+receipts as observer overhead. Unknown scope activity is still excluded; a
+waiting own coordinator must not be silently labelled another job.
 
 `ppu_tail.py` combines corrected host stages with scheduler events for the
 host, reader and all 100 probed shells. Syscalls, kernel wait stacks, fault and
