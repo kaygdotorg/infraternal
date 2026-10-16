@@ -77,3 +77,25 @@ test("reduced motion: the failure and the retry still show, with no flight", asy
   await page.getByRole("dialog", { name: "Setup of instant-fail.lab" }).getByRole("button", { name: "Try again" }).click();
   await page.waitForSelector(".ui-window .ui-setup-ring", { state: "detached", timeout: 20_000 });
 });
+
+// An exhausted attempt is authoritative even though the existing terminal stays open.
+test("review exhausted setup does not offer an enabled retry", async ({ page }) => {
+  await page.routeWebSocket("**/v1/bootstrap/setup/ws", (client) => {
+    const server = client.connectToServer();
+    server.onMessage((data) => {
+      if (typeof data !== "string") { client.send(data); return; }
+      const message = JSON.parse(data) as { setup?: { state?: string; attempt?: number; retry_available?: boolean } };
+      if (message.setup?.state === "failed") {
+        message.setup.attempt = 8;
+        message.setup.retry_available = false;
+      }
+      client.send(JSON.stringify(message));
+    });
+  });
+  await addHost(page, "instant-fail.lab");
+  await expect(page.locator('.ui-window .ui-setup-fill[data-state="failed"]')).toHaveCount(1, { timeout: 30_000 });
+  await pillOf(page, "instant-fail.lab").click();
+  const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
+  await expect(tip).toBeVisible();
+  await expect(tip.getByRole("button", { name: "Try again", disabled: false })).toHaveCount(0);
+});
