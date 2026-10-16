@@ -5,8 +5,8 @@ import CoreGraphics
 // Input and geometry need ownership and bounds, not application labels. Keep
 // their projection on the same validated CG entries without LaunchServices work
 // per window on every keystroke or AX notification. The picker retains labels.
-func windowSnapshot(applicationMetadata: Bool = true) -> [[String: Any]] {
-    let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+func windowSnapshot(applicationMetadata: Bool = true, windowID: CGWindowID? = nil) -> [[String: Any]] {
+    let entries = CGWindowListCopyWindowInfo(windowID == nil ? .optionAll : .optionIncludingWindow, windowID ?? kCGNullWindowID) as? [[String: Any]] ?? []
     return entries.compactMap { entry in
         guard let id = entry[kCGWindowNumber as String] as? UInt32,
               let pid = entry[kCGWindowOwnerPID as String] as? Int32,

@@ -49,6 +49,19 @@ fn managed_windows_never_retry_an_externally_undone_resize() {
 }
 
 #[test]
+#[ignore = "requires a fixture-owned GUI window and the shared Mac hardware lock"]
+fn keyboard_inventory_selects_only_the_original_window_identity() {
+    run_swift_fixture(
+        "keyboard-target",
+        &[
+            "native/Inventory.swift",
+            "tests/fixtures/keyboard-target-test.swift",
+        ],
+        false,
+    );
+}
+
+#[test]
 fn hardware_encoder_delivers_repeated_frames_after_reconfiguration() {
     run_swift_fixture(
         "encoder",
