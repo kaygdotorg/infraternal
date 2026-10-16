@@ -63,3 +63,27 @@ fn raw_encoder_drops_preserve_delta_references_and_refresh_quality() {
         false,
     );
 }
+
+#[test]
+#[ignore = "requires authorized signed helper, an owned GUI document and the shared Mac hardware lock"]
+fn native_typing_stays_within_the_source_control_reply_budget() {
+    let helper = std::env::var_os("INFRATERNAL_NATIVE_CONTROL_TEST_HELPER")
+        .expect("set the authorized installed native helper path");
+    let scratch =
+        std::env::var_os("CARGO_TARGET_DIR").expect("set the job scratch target directory");
+    let result = std::process::Command::new("python3")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/native-input-pipeline.py"),
+        )
+        .arg(helper)
+        .arg(scratch)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
