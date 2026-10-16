@@ -222,6 +222,14 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
     }
     Ok(())
 }
+// Only a conflicting holder is live; other lock failures are uncertain.
+fn lock_status(error: &std::fs::TryLockError) -> u8 {
+    match error {
+        std::fs::TryLockError::WouldBlock => 73,
+        std::fs::TryLockError::Error(_) => 77,
+    }
+}
+
 /// Internal installer entry: stdin duplicates the cleanup shell's lock descriptor.
 /// Taking flock on that open description keeps it held by the shell after we exit.
 /// Returns a fixed status; never emits host filesystem content.
@@ -252,7 +260,7 @@ pub fn command(arguments: &[std::ffi::OsString]) -> Option<u8> {
             Ok(_) => {
                 let file: File = nix::unistd::dup(std::io::stdin()).map_err(|_| 71)?.into();
                 checked_lock(&file, &lock_path).map_err(|_| 71)?;
-                file.try_lock().map_err(|_| 73)?;
+                file.try_lock().map_err(|error| lock_status(&error))?;
                 checked_lock(&file, &lock_path).map_err(|_| 71)?;
                 false
             }

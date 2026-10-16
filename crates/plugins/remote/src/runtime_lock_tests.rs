@@ -101,3 +101,14 @@ fn a_live_legacy_runtime_cannot_publish_an_unheld_lifetime_file() {
     drop(listener);
     assert!(acquire(&fixture.state()).is_ok());
 }
+
+#[test]
+fn unavailable_lock_support_does_not_claim_a_live_holder() {
+    assert_eq!(lock_status(&std::fs::TryLockError::WouldBlock), 73);
+    assert_eq!(
+        lock_status(&std::fs::TryLockError::Error(
+            io::ErrorKind::PermissionDenied.into()
+        )),
+        77
+    );
+}
