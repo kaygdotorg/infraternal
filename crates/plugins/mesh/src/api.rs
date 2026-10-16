@@ -494,6 +494,7 @@ pub struct MeshService {
     // Request-local authority is never installed in the shared service.
     fresh_authority: Option<String>,
     store: crate::store::Store,
+    invalid_hosts: crate::diagnostics::InvalidHosts,
 }
 
 impl MeshService {
@@ -506,6 +507,7 @@ impl MeshService {
             pool,
             updates,
             fresh_authority: None,
+            invalid_hosts: crate::diagnostics::InvalidHosts::default(),
         }
     }
 
@@ -788,7 +790,15 @@ impl MeshService {
         } else {
             access.tags
         };
-        let snapshot = read_snapshot(&mut transaction, revision, now).await?;
+        let snapshot = read_snapshot(
+            &mut transaction,
+            revision,
+            now,
+            access.all && !restrict_to_filter,
+            &visible_tags,
+            &self.invalid_hosts,
+        )
+        .await?;
         transaction
             .commit()
             .await
@@ -1683,6 +1693,9 @@ async fn read_snapshot(
     tx: &mut Transaction<'_, Sqlite>,
     revision: i64,
     now: i64,
+    all: bool,
+    scopes: &BTreeSet<String>,
+    invalid_hosts: &crate::diagnostics::InvalidHosts,
 ) -> Result<MeshSnapshot, MeshApiError> {
     let node_rows =
         sqlx::query("SELECT id,name,public_key,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id")
@@ -1704,54 +1717,34 @@ async fn read_snapshot(
             .try_get("node_id")
             .map_err(|error| map_sql_error(error))?;
         memberships.entry(id).or_default().push(tag.clone());
-        tag_members.entry(tag).or_default().push(NodeId(
-            u64::try_from(id).map_err(|_| storage_error("stored tag member id invalid"))?,
-        ));
+        if let Ok(id) = u64::try_from(id) {
+            tag_members.entry(tag).or_default().push(NodeId(id));
+        }
     }
     let mut nodes = Vec::with_capacity(node_rows.len());
+    let mut omitted = BTreeSet::new();
     for row in node_rows {
         let id: i64 = row.try_get("id").map_err(|error| map_sql_error(error))?;
-        let host: String = row.try_get("name").map_err(|error| map_sql_error(error))?;
-        // Stored inventory can predate validation. Refuse names that would make
-        // the client reject the whole snapshot, with a content-free reason.
-        validate_host(&host).map_err(|_| storage_error("stored host name invalid"))?;
-        let key: Vec<u8> = row
-            .try_get("public_key")
-            .map_err(|error| map_sql_error(error))?;
-        let key: [u8; 32] = key
-            .try_into()
-            .map_err(|_| storage_error("stored node public key length invalid"))?;
-        let last_seen: Option<i64> = row
-            .try_get("last_seen")
-            .map_err(|error| map_sql_error(error))?;
-        let last_rtt: Option<i64> = row
-            .try_get("last_rtt_us")
-            .map_err(|error| map_sql_error(error))?;
-        nodes.push(MeshNode {
-            node: Node {
-                id: NodeId(u64::try_from(id).map_err(|_| storage_error("stored node id invalid"))?),
-                public_key: PublicKey(key),
-                host,
-                tags: memberships
-                    .remove(&id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect(),
-            },
-            live: last_seen
-                .is_some_and(|seen| seen <= now && seen >= now.saturating_sub(NODE_LIVE_SECONDS)),
-            last_seen,
-            last_rtt_us: last_rtt
-                .map(u64::try_from)
-                .transpose()
-                .map_err(|_| storage_error("stored round trip invalid"))?,
-        });
+        let tags = memberships.remove(&id).unwrap_or_default();
+        // Scope before decoding any host fields: unrelated persisted damage
+        // cannot withdraw a member's inventory or produce a diagnostic for it.
+        if !all && !tags.iter().any(|tag| scopes.contains(tag)) {
+            continue;
+        }
+        if let Some(node) = decode_host(&row, id, tags, now) {
+            nodes.push(node);
+        } else {
+            invalid_hosts.report(id);
+            if let Ok(id) = u64::try_from(id) {
+                omitted.insert(NodeId(id));
+            }
+        }
     }
     let tag_names = sqlx::query_scalar::<_, String>("SELECT name FROM mesh_tags ORDER BY name")
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| map_sql_error(error))?;
-    let tags = tag_names
+    let mut tags: Vec<MeshTag> = tag_names
         .into_iter()
         .map(|name| MeshTag {
             members: tag_members.remove(&name).unwrap_or_default(),
@@ -1796,12 +1789,55 @@ async fn read_snapshot(
             arrow,
         });
     }
+    // Healthy owner reads retain their allocation-free filtering path. Only
+    // damaged rows require pruning dangling references from the public view.
+    if !omitted.is_empty() {
+        for tag in &mut tags {
+            tag.members.retain(|id| !omitted.contains(id));
+        }
+        grants.retain(|rule| {
+            [&rule.arrow.from, &rule.arrow.to]
+                .iter()
+                .all(|endpoint| !matches!(endpoint, Endpoint::Node(id) if omitted.contains(id)))
+        });
+    }
     Ok(MeshSnapshot {
         revision: u64::try_from(revision).map_err(|_| storage_error("stored revision invalid"))?,
         nodes,
         tags,
         grants,
         next_cursor: None,
+    })
+}
+
+/// Isolate malformed inventory rows without logging their stored contents.
+fn decode_host(
+    row: &sqlx::sqlite::SqliteRow,
+    id: i64,
+    tags: Vec<String>,
+    now: i64,
+) -> Option<MeshNode> {
+    let host: String = row.try_get("name").ok()?;
+    validate_host(&host).ok()?;
+    let key: Vec<u8> = row.try_get("public_key").ok()?;
+    let last_seen: Option<i64> = row.try_get("last_seen").ok()?;
+    let last_rtt: Option<i64> = row.try_get("last_rtt_us").ok()?;
+    Some(MeshNode {
+        node: Node {
+            // Browser IDs must remain exact JSON integers.
+            id: NodeId(
+                u64::try_from(id)
+                    .ok()
+                    .filter(|id| *id > 0 && *id < (1 << 53))?,
+            ),
+            public_key: PublicKey(key.try_into().ok()?),
+            host,
+            tags: tags.into_iter().collect(),
+        },
+        live: last_seen
+            .is_some_and(|seen| seen <= now && seen >= now.saturating_sub(NODE_LIVE_SECONDS)),
+        last_seen,
+        last_rtt_us: last_rtt.map(u64::try_from).transpose().ok()?,
     })
 }
 
@@ -1912,11 +1948,11 @@ fn filter_snapshot(
     if all {
         return snapshot;
     }
-    snapshot
-        .nodes
-        .retain(|node| node.node.tags.iter().any(|tag| scopes.contains(tag)));
+    // Host rows were scoped before decoding; finish filtering their references.
     let visible_nodes: BTreeSet<NodeId> = snapshot.nodes.iter().map(|node| node.node.id).collect();
-    snapshot.tags.retain(|tag| scopes.contains(&tag.name));
+    snapshot
+        .tags
+        .retain(|tag| all || scopes.contains(&tag.name));
     for tag in &mut snapshot.tags {
         tag.members.retain(|node| visible_nodes.contains(node));
     }

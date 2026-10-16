@@ -104,20 +104,20 @@ test("production-shaped inventory remains readable before and after a cold CA un
   console.log("MESH_PROOF enrolled=3 never_connected=1 revoked=1 observations=controlled cold_locked_list=ok unlocked_list=ok restart_after_unlock=false");
 });
 
-test("an invalid stored host name leaves an unavailable view that recovers after repair", async () => {
+test("an invalid stored host leaves healthy inventory visible", async () => {
   sql("UPDATE mesh_nodes SET name='' WHERE name='never-connected'");
   try {
     const answer = await act("mesh.list", {});
-    // The baseline sends this row successfully; repaired servers refuse it with
-    // a logged storage error. Neither may silently drop the stored host.
-    if (answer.ok) expect((answer.body.nodes as Array<{node: {host: string}}>).some(n => n.node.host === "")).toBe(true);
-    else expect(answer.body.error).toBe("mesh unavailable");
+    expect(answer.ok).toBe(true);
+    const nodes = answer.body.nodes as Array<{node: {host: string}}>;
+    expect(nodes.length).toBeGreaterThan(0);
+    expect(nodes.some(n => n.node.host === "")).toBe(false);
     await page.reload();
     await page.locator(".cl-viewport").waitFor();
     await page.keyboard.press("Control+Shift+Digit2");
-    await expect(page.locator('.cl[data-view="mesh"] .cl-meshstate[data-open="true"]')).toContainText("Could not reach the mesh");
+    await expect(page.locator('.cl[data-view="mesh"] .cl-meshstate[data-open="true"]')).toHaveCount(0);
     await page.screenshot({path: tracerEvidencePath("mesh-unreachable", "invalid-row.png")});
-    console.log(`MESH_PROOF invalid_stored_name=${answer.ok ? "list_ok" : "mesh_unavailable"}_client_error`);
+    console.log("MESH_PROOF invalid_stored_name=skipped healthy_inventory=visible");
   } finally { sql("UPDATE mesh_nodes SET name='never-connected' WHERE name=''"); }
   await expect(page.locator('.cl[data-view="mesh"] .cl-meshstate[data-open="true"]')).toHaveCount(0, {timeout: 40_000});
 });

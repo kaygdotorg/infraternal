@@ -58,3 +58,27 @@ pub(crate) fn storage_sql_error(error: sqlx::Error) -> MeshApiError {
     };
     storage_error(reason)
 }
+
+/// Clones share the IDs already reported; retries never repeat a row diagnostic.
+/// Only IDs of malformed rows visible to a caller are retained, never row values.
+#[derive(Clone, Default)]
+pub(crate) struct InvalidHosts(std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<i64>>>);
+
+impl InvalidHosts {
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn report(&self, id: i64) {
+        let first = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id);
+        if first {
+            tracing::error!(
+                event = "mesh_invalid_host",
+                node_id = id,
+                "Mesh host row skipped"
+            );
+        }
+    }
+}

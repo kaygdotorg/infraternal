@@ -1,4 +1,4 @@
-//! Ensures unavailable Mesh snapshots explain storage failures without exposing stored values (#229).
+//! Ensures Mesh snapshots isolate malformed hosts and explain storage failures without stored values (#229).
 use super::*;
 use std::io::Write;
 
@@ -105,13 +105,51 @@ async fn malformed_unrelated_host_preserves_scoped_inventory() {
         .execute(&fixture.pool)
         .await
         .unwrap();
+    let (capture, _guard) = Capture::start();
     let after = service.list(MEMBER, MeshFilter::default(), NOW).await;
-    fixture.cleanup().await;
+    assert!(
+        capture.text().is_empty(),
+        "out-of-scope rows produce no diagnostics"
+    );
     assert_eq!(
         after,
         Ok(before),
         "invalid out-of-scope host must not hide valid inventory"
     );
+    // The same damaged row becomes visible without withdrawing the healthy
+    // member. Its references disappear and clones still report its ID once.
+    call(
+        service,
+        OWNER,
+        "mesh.tag.member.add",
+        json!({"tag":"visible","node_id":unrelated}),
+        NOW,
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        let snapshot = (*service)
+            .clone()
+            .list(MEMBER, MeshFilter::default(), NOW)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.nodes[0].node.id.0, visible);
+        assert!(
+            snapshot
+                .tags
+                .iter()
+                .all(|tag| tag.members.iter().all(|id| id.0 == visible))
+        );
+    }
+    let logs = capture.text();
+    let events: Vec<Value> = logs
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["fields"]["node_id"], unrelated);
+    fixture.cleanup().await;
 }
 
 #[tokio::test]
@@ -119,6 +157,33 @@ async fn malformed_host_keeps_healthy_inventory_readable() {
     let fixture = Fixture::new().await;
     let healthy = enroll(&fixture.service, "readable-host", 53).await;
     let invalid = enroll(&fixture.service, "legacy-host", 54).await;
+    call(
+        &fixture.service,
+        OWNER,
+        "mesh.tag.create",
+        json!({"name":"mixed"}),
+        NOW,
+    )
+    .await
+    .unwrap();
+    call(
+        &fixture.service,
+        OWNER,
+        "mesh.tag.member.add",
+        json!({"tag":"mixed","node_id":invalid}),
+        NOW,
+    )
+    .await
+    .unwrap();
+    call(
+        &fixture.service,
+        OWNER,
+        "mesh.grant.create",
+        json!({"name":"affected","from":{"Node":healthy},"to":{"Node":invalid},"both_ways":false}),
+        NOW,
+    )
+    .await
+    .unwrap();
     sqlx::query("UPDATE mesh_nodes SET name='' WHERE id=?")
         .bind(i64::try_from(invalid).unwrap())
         .execute(&fixture.pool)
@@ -131,6 +196,16 @@ async fn malformed_host_keeps_healthy_inventory_readable() {
     fixture.cleanup().await;
     let snapshot = answer.expect("one invalid host must not hide healthy inventory");
     assert!(snapshot.nodes.iter().any(|node| node.node.id.0 == healthy));
+    assert!(
+        snapshot
+            .tags
+            .iter()
+            .all(|tag| !tag.members.iter().any(|id| id.0 == invalid))
+    );
+    assert!(
+        snapshot.grants.is_empty(),
+        "skip references to the omitted host too"
+    );
     // A successful response must also be readable by the existing strict
     // clients. Returning the malformed name alongside healthy rows is no recovery.
     for node in snapshot.nodes {
@@ -171,13 +246,12 @@ async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
         .execute(&fixture.pool)
         .await
         .unwrap();
-    assert_eq!(
-        fixture
-            .service
-            .list(OWNER, MeshFilter::default(), NOW)
-            .await,
-        Err(MeshApiError::Storage)
-    );
+    let snapshot = fixture
+        .service
+        .list(OWNER, MeshFilter::default(), NOW)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.nodes.len(), 0);
     sqlx::query("UPDATE mesh_nodes SET id=? WHERE id=-1")
         .bind(id)
         .execute(&fixture.pool)
@@ -229,7 +303,11 @@ async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
     );
     let logs = capture.text();
     let errors = capture.errors();
-    assert_eq!(errors.len(), 4, "every Storage result needs a diagnostic");
+    assert_eq!(
+        errors.len(),
+        3,
+        "every distinct Storage result needs a diagnostic"
+    );
     let reasons: Vec<_> = errors
         .iter()
         .map(|event| event["fields"]["reason"].as_str().unwrap())
@@ -238,7 +316,6 @@ async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
         reasons,
         [
             "database table missing",
-            "stored node id invalid",
             "stored access ports JSON invalid",
             "stored item exceeds frame budget",
         ]
@@ -271,13 +348,13 @@ async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
     }
     assert!(!logs.contains("mesh_grants_unavailable"));
     println!(
-        "MESH_STORAGE_DIAGNOSTICS errors=4 reasons={reasons:?} stored_values_excluded=true repaired_list=ok"
+        "MESH_STORAGE_DIAGNOSTICS errors=3 reasons={reasons:?} stored_values_excluded=true repaired_list=ok"
     );
     fixture.cleanup().await;
 }
 
 #[tokio::test]
-async fn invalid_stored_column_is_a_logged_storage_error() {
+async fn invalid_stored_column_is_skipped_without_panicking() {
     use futures_util::FutureExt;
     let fixture = Fixture::new().await;
     enroll(&fixture.service, "public-column-marker", 18).await;
@@ -291,36 +368,44 @@ async fn invalid_stored_column_is_a_logged_storage_error() {
             .catch_unwind()
             .await;
     assert!(
-        matches!(answer, Ok(Err(MeshApiError::Storage))),
-        "invalid stored columns must refuse without panicking"
+        matches!(answer, Ok(Ok(ref snapshot)) if snapshot.nodes.is_empty()),
+        "invalid stored columns must be skipped without panicking"
     );
-    let errors = capture.errors();
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["fields"]["reason"], "stored column invalid");
+    assert_eq!(capture.errors().len(), 0);
+    assert!(capture.text().contains("mesh_invalid_host"));
     assert!(!capture.text().contains("public-column-marker"));
     fixture.cleanup().await;
 }
 
 #[tokio::test]
-async fn invalid_stored_host_name_is_a_logged_storage_error() {
+async fn invalid_stored_host_is_reported_once_by_id() {
     let fixture = Fixture::new().await;
-    enroll(&fixture.service, "public-name-marker", 19).await;
+    let id = enroll(&fixture.service, "public-name-marker", 19).await;
     let (capture, _guard) = Capture::start();
     sqlx::query("UPDATE mesh_nodes SET name=''")
         .execute(&fixture.pool)
         .await
         .unwrap();
-    assert_eq!(
-        fixture
+    for _ in 0..3 {
+        let snapshot = fixture
             .service
             .list(OWNER, MeshFilter::default(), NOW)
-            .await,
-        Err(MeshApiError::Storage)
-    );
-    let errors = capture.errors();
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["fields"]["reason"], "stored host name invalid");
-    assert!(!capture.text().contains("public-name-marker"));
+            .await
+            .unwrap();
+        assert_eq!(snapshot.nodes.len(), 0);
+    }
+    assert_eq!(capture.errors().len(), 0);
+    let logs = capture.text();
+    let events: Vec<Value> = logs
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 1);
+    let fields = events[0]["fields"].as_object().unwrap();
+    assert_eq!(fields["event"], "mesh_invalid_host");
+    assert_eq!(fields["node_id"], id);
+    assert_eq!(fields.len(), 3, "only static event/message and row id");
+    assert!(!logs.contains("public-name-marker"));
     fixture.cleanup().await;
 }
 
