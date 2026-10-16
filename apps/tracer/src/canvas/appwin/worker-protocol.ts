@@ -37,7 +37,7 @@ export interface WorkerStats {
   decoded: number;
   painted: number;
   dropped: number;
-  /** Frames replaced by a newer one before the display could take them. */
+  /** Decoded pictures discarded because newer work was already admitted. */
   superseded: number;
   repairs: number;
 }

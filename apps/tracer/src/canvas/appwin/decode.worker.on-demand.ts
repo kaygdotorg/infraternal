@@ -12,8 +12,9 @@
  * - an IDR repairs the reference state inside the running decoder, which is only reconfigured when the profile or the
  *   level in its parameter sets changed; closing it on every IDR would cancel valid queued output;
  * - decoded pictures are drawn directly from the decoder output callback, without a second display-clock queue.
- *   The canvas always holds the newest completed picture; the compositor may skip earlier draws when output bursts.
- *   Each picture is closed before the callback returns so no presentation wait pins decoder memory.
+ *   If a newer unit is already admitted, its older decoded picture is closed without conversion. Only decoded pictures
+ *   are skipped: the admitted coded units still establish codec references. Each picture is closed before the callback
+ *   returns, so no presentation queue pins decoder memory or holds newer work behind obsolete conversion.
  *
  * Nothing is scheduled while no unit arrives and nothing is drawn without a new picture: a window whose machine shows
  * the same pixels costs no work at all (D254). The worker exists only while its window streams; the page ends it when
@@ -81,6 +82,9 @@ function repair(): void {
 
 function output(frame: VideoFrame): void {
   stats.decoded++;
+  // Newer work is already admitted. Converting obsolete output would block its
+  // callback and can overload the bounded decoder with avoidable canvas work.
+  if (frame.timestamp < timestamp) { stats.superseded++; frame.close(); return; }
   if (!frame || !canvas || !context) { frame?.close(); return; }
   try {
     if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
