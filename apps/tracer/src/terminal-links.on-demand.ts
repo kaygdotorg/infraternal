@@ -296,6 +296,21 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     options.paint(nextRanges);
   };
 
+  const clearRevealedHighlights = (): void => {
+    if (!focusedLink && !openLinkModifierHeld && paintedRanges === null) return;
+    const hadFocus = focusedLink !== undefined;
+    focusedLink = undefined;
+    refreshHover = lastPoint !== undefined;
+    if (hadFocus) {
+      hideLinkTip();
+      options.canvas.style.cursor = "text";
+    }
+    if (paintedRanges !== null) {
+      paintedRanges = null;
+      options.paint(null);
+    }
+  };
+
   const setOpenLinkModifierHeld = (held: boolean): void => {
     if (held === openLinkModifierHeld) return;
     openLinkModifierHeld = held;
@@ -557,6 +572,8 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     },
     updateVisibleRows() {
       if (disposed) return;
+      // The terminal has already moved or repainted these screen-relative rows; remove old ink now.
+      clearRevealedHighlights();
       const visible = options.getVisibleRange();
       const rows: number[] = [];
       for (let y = visible.first; y <= visible.last; y += 1) rows.push(y);

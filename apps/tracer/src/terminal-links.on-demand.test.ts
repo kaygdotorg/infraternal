@@ -325,3 +325,57 @@ test("keeps unchanged candidate rows out of parsing while pending rows cannot ac
     else (globalThis as unknown as { window?: Window }).window = originalWindow;
   }
 });
+
+test("clears a revealed underline as soon as scrolling moves it out of the viewport", () => {
+  const target = "https://scroll.example.test/old";
+  const rows = [row(target, 100), row("blank", 101), row("other", 500), row("blank", 501)];
+  const callbacks: Array<() => void> = [];
+  const painted: Array<readonly { startX: number; startY: number; endX: number; endY: number }[] | null> = [];
+  const hostListeners = new Map<string, (event: PointerEvent) => void>();
+  const originalWindow = (globalThis as unknown as { window?: Window }).window;
+  (globalThis as unknown as { window?: Window }).window = {
+    requestIdleCallback(callback: () => void) { callbacks.push(callback); return callbacks.length; },
+    cancelIdleCallback() {},
+    setTimeout,
+    clearTimeout,
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as Window;
+  const host = {
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      if (typeof listener === "function") hostListeners.set(type, listener as (event: PointerEvent) => void);
+    },
+    removeEventListener() {},
+  } as unknown as HTMLElement;
+  const canvas = { style: {}, getBoundingClientRect: () => ({ left: 0, top: 0, right: 80, bottom: 20 } as DOMRect) } as unknown as HTMLCanvasElement;
+  let visible = { first: 100, last: 101 };
+  const controller = createTerminalLinkController({
+    host,
+    canvas,
+    getBufferLength: () => 502,
+    getVisibleRange: () => visible,
+    getRow: (y) => rows.find((candidate) => candidate.y === y),
+    getCellMetrics: () => ({ width: 1, height: 1 }),
+    paint: (ranges) => painted.push(ranges),
+    open: () => undefined,
+  });
+  try {
+    controller.updateVisibleRows();
+    callbacks.shift()?.();
+    hostListeners.get("pointermove")?.({
+      clientX: 5,
+      clientY: 0.5,
+      pointerType: "mouse",
+      ctrlKey: false,
+    } as PointerEvent);
+    expect(painted.at(-1)).toEqual([{ startX: 0, startY: 0, endX: target.length - 1, endY: 0 }]);
+
+    visible = { first: 500, last: 501 };
+    controller.updateVisibleRows();
+    expect(painted.at(-1)).toBeNull();
+  } finally {
+    controller.dispose();
+    if (originalWindow === undefined) delete (globalThis as unknown as { window?: Window }).window;
+    else (globalThis as unknown as { window?: Window }).window = originalWindow;
+  }
+});
