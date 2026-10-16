@@ -3,13 +3,14 @@
 
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
         net::UnixListener,
     },
     path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 const HOST: &str = "11111111111111111111111111111111";
@@ -21,13 +22,17 @@ struct MinimalHost {
 
 impl MinimalHost {
     fn new() -> Self {
-        let scratch = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ar3")
-            });
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let scratch = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ar3"),
+            PathBuf::from,
+        );
         fs::create_dir_all(&scratch).unwrap();
-        let root = scratch.join(format!("no-python-{}", std::process::id()));
+        let root = scratch.join(format!(
+            "r{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&root).unwrap();
         let fixture = Self { root };
         let base = fixture.base();
@@ -121,10 +126,7 @@ fn installer_constant(name: &str) -> &str {
         .0
 }
 
-#[test]
-#[ignore = "requires sudo -n Docker and the local debian:trixie-slim image"]
-fn review_stale_receipt_recovers_without_host_python() {
-    let host = MinimalHost::new();
+fn recovery_scripts() -> (String, String) {
     let preamble = format!(
         "set -euC\numask 077\nbase=\"$HOME/.local/share/infraternal\"\nhost={HOST}\ntransaction={TRANSACTION}\n"
     );
@@ -142,6 +144,14 @@ fn review_stale_receipt_recovers_without_host_python() {
         installer_constant("FRESH_CLEANUP"),
         installer_constant("ROLLBACK_TRANSACTION")
     );
+    (inspect, rollback)
+}
+
+#[test]
+#[ignore = "requires sudo -n Docker and the local debian:trixie-slim image"]
+fn review_stale_receipt_recovers_without_host_python() {
+    let host = MinimalHost::new();
+    let (inspect, rollback) = recovery_scripts();
     let mut inspection = Vec::new();
     let mut cleanup = Vec::new();
     // Retry must progress with the same exact receipt, rather than requiring
@@ -169,5 +179,57 @@ fn review_stale_receipt_recovers_without_host_python() {
             && !receipt_retained,
         "minimal host retry stops: inspection={inspection:?}, cleanup={cleanup:?}, receipt_retained={receipt_retained}, socket_retained={socket_retained}, without_socket={:?}",
         without_socket.status.code()
+    );
+}
+
+/// A process still owns its bound control socket during the bind-to-listen gap.
+#[test]
+fn review_bound_control_socket_before_listen_preserves_receipt() {
+    let host = MinimalHost::new();
+    let control = host.base().join("sessions/plugins.sock");
+    fs::remove_file(&control).unwrap();
+    // Relative bind plus chdir keeps cwd/descriptor paths from supplying an
+    // unrelated liveness signal. EOF proves the same holder can still listen.
+    let mut holder = Command::new("python3")
+        .args(["-u", "-c", "import os,socket,sys; s=socket.socket(socket.AF_UNIX); s.bind('sessions/plugins.sock'); os.chdir('/'); print('ready',flush=True); sys.stdin.read(); s.listen(); print('listening',flush=True)"])
+        .current_dir(host.base())
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut ready = [0; 6];
+    holder
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    let (inspect, rollback) = recovery_scripts();
+    let run = |script: &str| {
+        Command::new("/bin/sh")
+            .args(["-c", &script.replace("$HOME", host.root.to_str().unwrap())])
+            .output()
+            .unwrap()
+    };
+    let inspection = run(&inspect);
+    let cleanup = run(&rollback);
+    let socket_preserved = control.exists();
+    let receipt_retained = host.receipt().exists();
+    drop(holder.stdin.take());
+    let mut listening = [0; 10];
+    holder
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut listening)
+        .unwrap();
+    assert_eq!(&listening, b"listening\n");
+    assert!(holder.wait().unwrap().success());
+    assert!(
+        !inspection.status.success()
+            && !cleanup.status.success()
+            && socket_preserved
+            && receipt_retained,
+        "bound control endpoint removed: inspection={:?}, cleanup={:?}, socket_preserved={socket_preserved}, receipt_retained={receipt_retained}",
+        inspection.status.code(),
+        cleanup.status.code()
     );
 }
