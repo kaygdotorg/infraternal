@@ -56,3 +56,11 @@ describe("setupGuide", () => {
     expect(guide.effect).toContain("Try again in a moment.");
   });
 });
+
+// All corpus members are JSON values; none supplies executable coercion hooks.
+test("review malformed setup fields are dropped without coercion errors", () => {
+  const invalid = JSON.parse('{"toString":null,"valueOf":null}') as unknown;
+  for (const fields of [{ state: invalid }, { state: "failed", failed_step: invalid }]) {
+    expect(() => parseSetupEvent({ setup: { host_id: HOST, stage: "join", ...fields } })).not.toThrow();
+  }
+});
