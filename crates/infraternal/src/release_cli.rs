@@ -79,7 +79,7 @@ pub(crate) fn run(
         || json!({}),
         |channel| json!({"channel":channel,"confirmed":confirmed(Some(channel),yes)}),
     );
-    let result = runtime.block_on(async {
+    let result = crate::block_on(&runtime, async {
         use std::os::unix::fs::MetadataExt;
         let directory =
             std::fs::symlink_metadata(data).map_err(|_| "existing server unavailable")?;
