@@ -1,9 +1,8 @@
-//! Exercise real hardware encoder callbacks and access-unit conversion across frames and session reconfiguration (#146).
+//! Checks native completion/encoding decisions and real hardware access units for the selected desktop component (#146).
 #![cfg(all(target_os = "macos", feature = "desktop"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[test]
-fn hardware_encoder_delivers_repeated_frames_after_reconfiguration() {
+fn run_swift_fixture(name: &str, sources: &[&str], optimized: bool) {
     use std::{path::PathBuf, process::Command};
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let target = PathBuf::from(
@@ -11,15 +10,13 @@ fn hardware_encoder_delivers_repeated_frames_after_reconfiguration() {
             .expect("set CARGO_TARGET_DIR to the job's scratch build directory"),
     );
     std::fs::create_dir_all(&target).unwrap();
-    let binary = target.join(format!("desktop-encoder-test-{}", std::process::id()));
-    let build = Command::new("swiftc")
-        .arg("-O")
-        .args([
-            root.join("native/CaptureState.swift"),
-            root.join("native/LowDelaySPS.swift"),
-            root.join("native/Encoder.swift"),
-            root.join("tests/fixtures/encoder-session-test.swift"),
-        ])
+    let binary = target.join(format!("desktop-{name}-test-{}", std::process::id()));
+    let mut compiler = Command::new("swiftc");
+    if optimized {
+        compiler.arg("-O");
+    }
+    let build = compiler
+        .args(sources.iter().map(|source| root.join(source)))
         .arg("-o")
         .arg(&binary)
         .output()
@@ -36,5 +33,33 @@ fn hardware_encoder_delivers_repeated_frames_after_reconfiguration() {
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn hardware_encoder_delivers_repeated_frames_after_reconfiguration() {
+    run_swift_fixture(
+        "encoder",
+        &[
+            "native/CaptureState.swift",
+            "native/LowDelaySPS.swift",
+            "native/Encoder.swift",
+            "tests/fixtures/encoder-session-test.swift",
+        ],
+        true,
+    );
+}
+
+#[test]
+fn raw_encoder_drops_preserve_delta_references_and_refresh_quality() {
+    // This fixture also contains assert-based geometry, local-priority and
+    // bitrate checks. Keep assertions enabled rather than optimizing them away.
+    run_swift_fixture(
+        "state",
+        &[
+            "native/CaptureState.swift",
+            "tests/fixtures/control-state-test.swift",
+        ],
+        false,
     );
 }

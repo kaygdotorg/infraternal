@@ -48,13 +48,39 @@ import CoreGraphics
         assert(damage.next(at: 602) == .motion(keyframe: true))
         damage.completed(delivered: true)
         assert(damage.next(at: 603) == nil)
+        var rawDrop = DamageEncodingState()
+        rawDrop.changed(at: 0)
+        guard rawDrop.next(at: 0) == .motion(keyframe: true) else { fatalError("initial IDR missing") }
+        rawDrop.completed(delivered: true)
+        rawDrop.changed(at: 0.1)
+        guard rawDrop.next(at: 0.1) == .motion(keyframe: false),
+              !rawDrop.encoderDropped(.motion(keyframe: false)), rawDrop.next(at: 0.11) == nil else {
+            fatalError("a raw encoder drop must not create reference repair or an immediate retry")
+        }
+        guard rawDrop.next(at: 0.35) == .refresh, rawDrop.encoderDropped(.refresh),
+              rawDrop.next(at: 0.36) == .refresh else { fatalError("a dropped sharp refresh must retain its quality budget") }
+        rawDrop.completed(delivered: true)
+        rawDrop.changed(at: 0.5)
+        guard rawDrop.next(at: 0.5) == .motion(keyframe: false) else { fatalError("motion after a raw drop must remain a delta") }
+        rawDrop.completed(delivered: false)
+        guard rawDrop.next(at: 0.6) == .motion(keyframe: true),
+              rawDrop.encoderDropped(.motion(keyframe: true)),
+              rawDrop.next(at: 0.61) == .motion(keyframe: true) else { fatalError("lost encoded pictures and requested IDRs still require repair") }
+        rawDrop.completed(delivered: true)
+        guard rawDrop.next(at: 600) == .refresh else { fatalError("settled refresh must survive repair") }
+        rawDrop.completed(delivered: true)
+        guard rawDrop.next(at: 601) == nil else { fatalError("successful refresh must go idle") }
         var rate = AdaptiveBitrate(maximum: 12_000_000)
         assert(rate.feedback(at: 0, congested: true) == 8_400_000)
         assert(rate.feedback(at: 0.1, congested: true) == 8_400_000)
         for step in 1...100 { _ = rate.feedback(at: Double(step), congested: true) }
         assert(rate.current == 500_000)
         for step in 101...300 { _ = rate.feedback(at: Double(step), congested: false) }
+        // Recovery needs eight healthy feedbacks for each bounded increase; 200
+        // feedbacks demonstrate gradual recovery, not a jump from floor to maximum.
+        assert(rate.current > 500_000 && rate.current < 12_000_000)
+        for step in 301...1100 { _ = rate.feedback(at: Double(step), congested: false) }
         assert(rate.current == 12_000_000)
-        print("PASS coordinate cases=8 local-priority cases=8 damage frames=120 idle/repair/drop cases=7 bitrate simulations=302")
+        print("PASS geometry/local-priority/repair; motion_frames=120 raw_drop=skip refresh_drop=refresh encoded_gap=IDR bitrate_feedbacks=1102")
     }
 }
