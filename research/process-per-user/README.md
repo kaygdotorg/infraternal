@@ -350,8 +350,8 @@ longer than the RTT. Older captures without these clocks have no measured
 reader-CPU value; overlapping probe intervals must never be added together.
 
 `ppu_aged_tail.py` keeps one original mixed-workload invocation running for
-6,300 active seconds, retaining its readers, tasks, RNG and accumulated sample
-history. Full kernel tracing starts only after 5,400 seconds and stays within
+6,920 active seconds, retaining its readers, tasks, RNG and accumulated sample
+history. Full kernel tracing starts only after 6,020 seconds and stays within
 the existing 900-second limit. Wrap the whole fixture with `ppu_segment.py`;
 the full capture still fits one short hold. No intermediate survivor census,
 task restart or resize resets the observer or terminal state. Marker observation,
