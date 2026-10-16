@@ -260,6 +260,9 @@ export class MuxConnection {
   onWelcome(listener: () => void): () => void {
     this.welcomeListeners.add(listener);
     if (this.isWelcomed) listener();
+    // Control-only features need a transport before they can create a stream.
+    // An existing reconnect timer already owns the next attempt.
+    else if (!this.socket && !this.retryTimer && !this.closed) this.connect();
     return () => { this.welcomeListeners.delete(listener); };
   }
 
@@ -492,8 +495,10 @@ export class MuxConnection {
     this.forcedDrop = false;
     for (const s of [...this.streams.values()]) s.onDisconnected(forced);
     this.status("Connection lost. Reconnecting…");
-    // With no stream left there is nothing to restore; the next `openStream` connects again.
-    if (this.streams.size > 0) this.scheduleReconnect();
+    // Welcome waiters include inventory and native capture retirement before a
+    // replacement viewer exists. Their pending work also needs a fresh route;
+    // calls already sent on the retired route were rejected above, never replayed.
+    if (this.streams.size > 0 || this.welcomeListeners.size > 0) this.scheduleReconnect();
   }
 
   /** Match native response estimation without adding timers or changing probe frequency. */

@@ -6,7 +6,7 @@ import { AppStream } from "./stream";
 
 const settled = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 
-test("retry retains Stop across repeated disconnects before replacing the native session", async () => {
+for (const keepTerminal of [true, false]) test(`retry retains Stop across repeated disconnects ${keepTerminal ? "with a terminal" : "without any terminal"} before replacing the native session`, async () => {
   const originals = new Map<string, PropertyDescriptor | undefined>();
   const sockets: Socket[] = [];
   const timers = new Map<number, () => void>();
@@ -65,13 +65,16 @@ test("retry retains Stop across repeated disconnects before replacing the native
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
     }
     connection = new MuxConnection();
-    // The shared mux is already running when an app window opens.
+    // The canvas can contain only app windows. A Welcome waiter must also
+    // establish transport before Start, which precedes viewer registration.
     const seed: StreamHandler = { onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => false, onStatus() {} };
-    connection.openStream(seed); sockets[0]!.welcome();
+    if (keepTerminal) { connection.openStream(seed); sockets[0]!.welcome(); }
     stream = new AppStream({ connection, hostId: "host", target: { type: "screen", displayId: 1 }, coarse: false,
       events: { state() {}, control() {}, picture() {}, surface() {} }, makeWorker: () => worker as unknown as Worker });
     const css = { width: 800, height: 600, density: 1 };
-    await stream.open(css); stream.setVisible(true); await settled();
+    const opening = stream.open(css);
+    if (!keepTerminal) { expect(sockets).toHaveLength(1); sockets[0]!.welcome(); }
+    await opening; stream.setVisible(true); await settled();
     sockets[0]!.close();
     worker.onerror?.(new Event("error"));
     expect(stream.current.kind).toBe("failed");
