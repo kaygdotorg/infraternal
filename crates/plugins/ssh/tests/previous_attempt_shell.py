@@ -139,6 +139,42 @@ class EarlierSetup(unittest.TestCase):
         self.assertTrue(self.socket.exists())
         self.assertTrue(control.is_symlink())
 
+    def test_live_relative_control_socket_after_cwd_change_is_retained(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        previous = Path.cwd()
+        try:
+            os.chdir(self.base)
+            self.listener = socket.socket(socket.AF_UNIX)
+            self.listener.bind('sessions/plugins.sock')
+            self.listener.listen()
+        finally:
+            os.chdir(previous)
+        for body in ['\ninspect_previous', CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']]:
+            self.assertEqual(self.run_shell(body).returncode, 73)
+            self.assertTrue(control.exists())
+            self.assertTrue(self.receipt.exists())
+
+    def test_live_renamed_control_socket_is_retained(self):
+        # The filesystem inode remains live even when the kernel's saved name
+        # no longer resolves. A pathname-only guard cannot prove this stale.
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        self.listener.listen()
+        for body in ['\ninspect_previous', CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']]:
+            self.assertEqual(self.run_shell(body).returncode, 73)
+            self.assertTrue(control.exists())
+            self.assertTrue(self.receipt.exists())
+
+    def test_missing_socket_diagnostics_preserves_receipt(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        result = self.run_shell('ss() { return 1; }\n' + CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 75)
+        self.assertTrue(control.exists())
+        self.assertTrue(self.receipt.exists())
+
     def test_live_listener_is_refused(self):
         self.listener.listen()
         self.assertEqual(self.run_shell('\ninspect_previous').returncode, 73)

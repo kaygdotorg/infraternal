@@ -1590,7 +1590,7 @@ async fn control_listener_at(
 ) -> tokio::process::Child {
     use tokio::io::AsyncReadExt;
     let mut child = Command::new("python3")
-        .args(["-u", "-c", "import socket,os,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1],0o600); s.listen(); print('ready',flush=True); sys.stdin.read()"])
+        .args(["-u", "-c", "import socket,os,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1],0o600); s.listen(); os.chdir('/'); print('ready',flush=True); sys.stdin.read()"])
         .arg(binding)
         .current_dir(runtime)
         .stdin(std::process::Stdio::piped())
