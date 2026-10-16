@@ -108,7 +108,11 @@ export interface Adapters {
   /** Binds terminal windows to sessions (real in the product, previews in mockups). */
   sessions: SessionService;
   /** The terminal of the active window, for keyboard font size (D222); absent in mockups, where the font keys do nothing. */
-  activeTerminal?(): { adjustFontSize(step: number | "reset"): void } | undefined;
+  activeTerminal?(): {
+    adjustFontSize(step: number | "reset"): void;
+    linksOnScreen?(): readonly { target: string; openable: boolean }[];
+    openLinkFromPalette?(target: string): boolean;
+  } | undefined;
   /** Lists, names and ends sessions (D178, D183); absent until the lifecycle API exists, and the manager, the markers and the final-screen strip are then not offered. */
   inventory?: import("./sessions/inventory").SessionInventory;
   /** The "teach once" gate (`hints.ts`): true when an explanatory hint should show now. Absent: such hints stay quiet. */

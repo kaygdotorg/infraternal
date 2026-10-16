@@ -29,7 +29,7 @@ const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
 const MAX_TRACE_EVENTS = 120_000;
 const MAX_ATTACH_HISTORY = 64;
-const DIST_ROOT = resolve(import.meta.dirname, "../dist");
+const DIST_ROOT = resolve(process.env.TRACER_DIST ?? resolve(import.meta.dirname, "../dist"));
 const TEST_DOUBLE_HEADER = "X-Infraternal-Test-Double";
 
 interface MockOwner {

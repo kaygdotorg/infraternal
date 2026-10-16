@@ -10,6 +10,8 @@ import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
 import { MuxConnection, reconnectDelay, STABLE_CONNECTION_MS, type StreamHandler } from "./connection";
+import { onDemand } from "./on-demand";
+import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
 
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
@@ -47,6 +49,7 @@ interface GhosttyActivityControls {
     setTheme(theme: ITheme): void;
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
     renderCursor(x: number, y: number, line: unknown[] | null): void;
+    setHoveredLinkRange(range: { startX: number; startY: number; endX: number; endY: number } | null): void;
     naturalCellWidth?: number;
     ctx?: CanvasRenderingContext2D;
     devicePixelRatio?: number;
@@ -277,6 +280,13 @@ export class TerminalClient {
   /** Scoped only around synchronous renderer writes; keyboard input arrives in later event tasks. */
   private suppressTerminalResponses = false;
   private renderIdleTimer = 0;
+  /** Set by writes and consumed by the next renderer pass; link parsing itself waits for an idle callback. */
+  private linkRowsArmed = false;
+  private linkBufferType: string | undefined;
+  private linkController: TerminalLinkController | undefined;
+  private linkControllerLoading: Promise<void> | undefined;
+  private readonly pendingLinkRows = new Set<number>();
+  private readonly forcedLinkRows = new Set<number>();
   /** D249: the live cursor, a layer of its own that the compositor blinks; the renderer never draws it while this shows. */
   private cursorLayer: TerminalCursorLayer | undefined;
   private rendererCursorHidden = false;
@@ -305,6 +315,13 @@ export class TerminalClient {
     this.ghostty = terminal as unknown as GhosttyActivityControls;
     this.screen = config.screen ?? config.host.parentElement ?? config.host;
     this.terminal.open(config.host);
+    // Keep Ghostty's scrollbar drag handler, but let the on-demand controller own link scanning and activation.
+    (terminal as unknown as { linkDetector?: unknown }).linkDetector = undefined;
+    const write = terminal.write.bind(terminal);
+    terminal.write = (data, callback) => {
+      this.linkRowsArmed = true;
+      write(data, callback);
+    };
     // Ghostty focuses its input as it opens, and again on the next task. On a phone that focus is not a tap: no keyboard
     // follows, yet the cursor would look live. The terminal starts unfocused there (after Ghostty's own second focus)
     // and the first tap focuses it (D191).
@@ -347,6 +364,7 @@ export class TerminalClient {
       const rect = config.host.getBoundingClientRect();
       this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
       if (this.attached) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
+      this.linkController?.invalidateBuffer();
     });
     this.terminal.onData((data) => {
       this.wakeTerminal();
@@ -361,6 +379,7 @@ export class TerminalClient {
       else this.prediction?.returnToLiveViewport();
       config.host.dataset.scrolled = String(offset !== 0);
       config.onScroll?.(offset !== 0);
+      this.queueVisibleLinkRows();
     });
     const known = config.attachSessionId ?? config.initialSessionId;
     if (known && isCanonicalUuid(known)) {
@@ -639,7 +658,14 @@ export class TerminalClient {
     this.restoreSurface();
     this.scheduleFit();
     this.wakeTerminal();
+    this.linkController?.updateVisibleRows();
   }
+
+  /** Links already recognized in the active terminal's visible viewport, for the keyboard palette. */
+  linksOnScreen(): readonly TerminalLink[] { return this.linkController?.linksOnScreen() ?? []; }
+
+  /** Opens a target only while a matching, openable link is still visible in this terminal. */
+  openLinkFromPalette(target: string): boolean { return this.linkController?.openTarget(target) ?? false; }
 
   /** Recomputes the grid from the host's box (the window was resized). */
   refit(): void {
@@ -733,6 +759,10 @@ export class TerminalClient {
     if (this.closed) return;
     this.closed = true;
     this.cancelStreamRetry();
+    this.linkController?.dispose();
+    this.linkController = undefined;
+    this.pendingLinkRows.clear();
+    this.forcedLinkRows.clear();
     this.disposeTouch();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
@@ -1824,10 +1854,143 @@ export class TerminalClient {
     };
     const render = renderer.render.bind(renderer);
     renderer.render = (...args) => {
+      const changedRows = this.takeChangedLinkRows(args[0], args[1] === true);
       render(...args);
+      if (changedRows) this.queueLinkRows(changedRows.rows, changedRows.force);
       this.renderPasses += 1;
       this.syncCursorLayer();
     };
+  }
+
+  /** Reads the renderer's dirty rows before its pass clears them; no detection runs on the write or input path. */
+  private takeChangedLinkRows(value: unknown, forceAll: boolean): { rows: number[]; force: boolean } | undefined {
+    if (!this.linkRowsArmed || this.suspended) return undefined;
+    this.linkRowsArmed = false;
+    const active = this.terminal.buffer.active;
+    const bufferChanged = this.linkBufferType !== undefined && this.linkBufferType !== active.type;
+    this.linkBufferType = active.type;
+    if (bufferChanged) this.linkController?.invalidateBuffer();
+    // Dirty indices describe the live screen; compare the visible scrollback fingerprints after output in that view.
+    if (this.terminal.viewportY !== 0 && !bufferChanged) {
+      const visible = this.visibleLinkRange();
+      const rows: number[] = [];
+      for (let y = visible.first; y <= visible.last; y += 1) rows.push(y);
+      return { rows, force: false };
+    }
+    const buffer = value as {
+      isDirty?: () => boolean;
+      needsFullRedraw?: () => boolean;
+      isRowDirty?: (y: number) => boolean;
+    } | undefined;
+    if (!buffer?.isRowDirty) return undefined;
+    const visible = this.visibleLinkRange();
+    const full = bufferChanged || forceAll || buffer.needsFullRedraw?.() === true;
+    if (full) {
+      const all: number[] = [];
+      for (let y = visible.first; y <= visible.last; y += 1) all.push(y);
+      return { rows: all, force: true };
+    }
+    buffer.isDirty?.(); // Updates Ghostty's dirty snapshot once before the row checks.
+    const scrollback = active.type === "alternate" ? 0 : Math.max(0, active.length - this.terminal.rows);
+    const changed: number[] = [];
+    for (let row = 0; row < this.terminal.rows; row += 1) {
+      if (!buffer.isRowDirty(row)) continue;
+      const absolute = scrollback + row;
+      if (absolute >= visible.first && absolute <= visible.last) changed.push(absolute);
+    }
+    return { rows: changed, force: true };
+  }
+
+  /** Makes only the named rows available to the deferred detector. */
+  private queueLinkRows(rows: readonly number[], force = true): void {
+    if (this.closed || this.suspended || rows.length === 0) return;
+    for (const row of rows) {
+      this.pendingLinkRows.add(row);
+      if (force) this.forcedLinkRows.add(row);
+    }
+    if (this.linkController) this.flushLinkRows();
+    else this.loadLinkController();
+  }
+
+  /** A scroll exposes existing rows, so the deferred detector may inspect that viewport once. */
+  private queueVisibleLinkRows(): void {
+    if (this.closed || this.suspended) return;
+    const visible = this.visibleLinkRange();
+    const rows: number[] = [];
+    for (let row = visible.first; row <= visible.last; row += 1) rows.push(row);
+    this.queueLinkRows(rows, true);
+  }
+
+  private loadLinkController(): void {
+    if (this.linkController || this.linkControllerLoading || this.pendingLinkRows.size === 0) return;
+    this.linkControllerLoading = onDemand(() => import("./terminal-links.on-demand")).then(({ createTerminalLinkController }) => {
+      if (this.closed) return;
+      if (this.suspended) { this.linkControllerLoading = undefined; return; }
+      const canvas = this.terminal.renderer?.getCanvas();
+      if (!canvas) { this.linkControllerLoading = undefined; return; }
+      this.linkController = createTerminalLinkController({
+        host: this.config.host,
+        canvas,
+        getBufferLength: () => this.terminal.buffer.active.length,
+        getVisibleRange: () => this.visibleLinkRange(),
+        getRow: (y) => this.readLinkRow(y),
+        getCellMetrics: () => this.cellMetrics(),
+        paint: (range) => {
+          const renderer = this.ghostty.renderer;
+          const buffer = this.terminal.wasmTerm;
+          if (!renderer || !buffer || this.suspended || this.closed) return;
+          renderer.setHoveredLinkRange(range);
+          renderer.render(buffer, false, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+          this.wakeTerminal();
+        },
+        open: (link) => {
+          if (link.openable) window.open(link.target, "_blank", "noopener,noreferrer");
+        },
+      });
+      this.flushLinkRows();
+      this.linkControllerLoading = undefined;
+    }).catch(() => { this.linkControllerLoading = undefined; });
+  }
+
+  private flushLinkRows(): void {
+    const controller = this.linkController;
+    if (!controller || this.pendingLinkRows.size === 0 || this.suspended) return;
+    const rows = [...this.pendingLinkRows];
+    const forced = rows.filter((row) => this.forcedLinkRows.has(row));
+    const candidates = rows.filter((row) => !this.forcedLinkRows.has(row));
+    this.pendingLinkRows.clear();
+    this.forcedLinkRows.clear();
+    controller.updateRows(forced, true);
+    controller.updateRows(candidates, false);
+  }
+
+  private visibleLinkRange(): { first: number; last: number } {
+    const active = this.terminal.buffer.active;
+    const first = active.type === "alternate"
+      ? 0
+      : Math.max(0, active.length - this.terminal.rows - Math.floor(this.terminal.viewportY));
+    return { first, last: Math.min(active.length - 1, first + this.terminal.rows - 1) };
+  }
+
+  private readLinkRow(y: number): TerminalLinkRow | undefined {
+    const active = this.terminal.buffer.active;
+    const line = active.getLine(y);
+    if (!line) return undefined;
+    const scrollback = active.type === "alternate" ? 0 : Math.max(0, active.length - this.terminal.rows);
+    const wasm = this.terminal.wasmTerm;
+    const cells: TerminalLinkRow["cells"] = [];
+    for (let x = 0; x < line.length; x += 1) {
+      const cell = line.getCell(x);
+      if (!cell) { cells.push({ text: " " }); continue; }
+      const text = cell.getWidth() === 0 ? "" : cell.getChars() || (cell.getCodepoint() === 0 ? " " : "");
+      const target = cell.getHyperlinkId() === 0 || !wasm
+        ? null
+        : y < scrollback
+          ? wasm.getScrollbackHyperlinkUri(y, x)
+          : wasm.getHyperlinkUri(active.type === "alternate" ? y : y - scrollback, x);
+      cells.push({ text, ...(target === null ? {} : { target }) });
+    }
+    return { y, bufferType: active.type, wrapped: line.isWrapped, wrapKnown: active.type === "alternate" || y >= scrollback, cells };
   }
 
   /** Uses the same viewport slice the renderer uses for its cursor row. */

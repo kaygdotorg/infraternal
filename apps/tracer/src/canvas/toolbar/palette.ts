@@ -56,6 +56,19 @@ export function installPalette(cx: Ctx): () => void {
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free pan and zoom, in place", action: "canvas:canvaslock:off" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "All views", hint: "fit every view · Esc", action: "canvas:overview" });
     if (state.activeWin && isTerminal(state.activeWin)) {
+      const terminal = cx.adapters.activeTerminal?.();
+      const targets = new Set<string>();
+      for (const link of terminal?.linksOnScreen?.() ?? []) {
+        if (!link.openable || targets.has(link.target)) continue;
+        targets.add(link.target);
+        out.push({
+          group: "Links",
+          glyph: "↗",
+          label: `Open link: ${terminalLinkHostPart(link.target)}…`,
+          hint: "terminal",
+          action: `canvas:openlink:${encodeURIComponent(link.target)}`,
+        });
+      }
       out.push({ group: "Canvas", glyph: "▥", icon: ICONS.splitRight, label: "Split right", hint: `divides this window · ${bindingText("split-right")}`, action: "canvas:split:right" });
       out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: `divides this window · ${bindingText("split-down")}`, action: "canvas:split:down" });
       out.push({ group: "Canvas", glyph: "▥", icon: ICONS.newRight, label: "New window right", hint: `full size, beside · ${bindingText("new-window-right")}`, action: "canvas:new:right" });
@@ -86,6 +99,10 @@ export function installPalette(cx: Ctx): () => void {
   const onAction = (event: Event): void => {
     const detail = (event as CustomEvent<import("./palette-actions.on-demand").CanvasAction>).detail;
     if (!detail?.action?.startsWith("canvas:")) return;
+    if (detail.action.startsWith("canvas:openlink:")) {
+      try { cx.adapters.activeTerminal?.()?.openLinkFromPalette?.(decodeURIComponent(detail.action.slice("canvas:openlink:".length))); } catch { /* A malformed palette action has no effect. */ }
+      return;
+    }
     const selected = state.activeWin;
     // Loading an action never delays host registration or the initial terminal; disposal fences a late chunk.
     void onDemand(() => import("./palette-actions.on-demand")).then((module) => {
@@ -95,4 +112,14 @@ export function installPalette(cx: Ctx): () => void {
   window.addEventListener("tracer:canvas-action", onAction, { signal });
   const offHosts = cx.adapters.sessions.onChange(() => core.refreshPalette());
   return () => { offHosts(); removeProvider(); };
+}
+
+function terminalLinkHostPart(target: string): string {
+  try {
+    const url = new URL(target);
+    if (url.protocol === "mailto:") return url.pathname.split("@").at(-1) || url.pathname;
+    return url.host || url.hostname;
+  } catch {
+    return target;
+  }
 }

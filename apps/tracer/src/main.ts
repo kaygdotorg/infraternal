@@ -76,7 +76,8 @@ declare global {
       isConnected: () => boolean;
       dropConnection: () => void;
       screenText: () => string;
-      rendererMetrics: () => { outputSequence: string } | undefined;
+      terminalLinks: () => readonly { target: string; openable: boolean }[];
+      rendererMetrics: () => TerminalClient["rendererMetrics"] | undefined;
       currentView: () => string;
     };
   }
@@ -425,6 +426,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
             isConnected: () => client.isConnected,
             dropConnection: () => client.forceDrop(),
             screenText: () => client.readScreenText(),
+            terminalLinks: () => client.linksOnScreen(),
             rendererMetrics: () => client.rendererMetrics,
             currentView: () => (productCanvas as unknown as { canvas?: { cx?: { state?: { currentView?: string } } } } | undefined)
               ?.canvas?.cx?.state?.currentView ?? "",
