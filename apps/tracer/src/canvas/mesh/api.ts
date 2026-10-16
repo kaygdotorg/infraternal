@@ -137,6 +137,9 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     const release = client.watch({}, (ev) => {
       if (disposed) return;
       if (ev.type === "error") {
+        // A local refresh failure leaves the server watch installed. Keep it:
+        // the frozen wire has replacement subscriptions, but no unsubscribe.
+        if (ev.subscriptionActive) { toError(); return; }
         // The server ended the subscription. A withdrawn view: the Mesh goes. Anything else: ask again, with a new watch.
         // A failed client-side refresh can leave the wire watch alive. Release
         // it before retry installs another, including pending page work (#229).

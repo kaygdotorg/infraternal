@@ -117,7 +117,7 @@ export type MeshSubscriptionEvent =
 /** A refreshed inventory or sanitized subscription failure exposed to a view. */
 export type MeshClientEvent =
   | { type: "snapshot"; snapshot: MeshSnapshot }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string; /** A failed refresh leaves its server watch installed. */ subscriptionActive?: boolean };
 
 /** The action and subscription operations the existing multiplexed socket adapter must provide. */
 export interface MeshTransport {
@@ -375,7 +375,7 @@ export class MeshClient {
               continue;
             }
             pendingRevision = deliveredRevision;
-            listener({ type: "error", error: "mesh unavailable" });
+            listener({ type: "error", error: "mesh unavailable", subscriptionActive: true });
             break;
           }
           publish(snapshot);
@@ -387,7 +387,7 @@ export class MeshClient {
           && !(error instanceof SnapshotSuperseded)) {
           pendingRevision = deliveredRevision;
           if (!stopped) {
-            listener({ type: "error", error: "mesh unavailable" });
+            listener({ type: "error", error: "mesh unavailable", subscriptionActive: true });
           }
         }
       } finally {
@@ -422,7 +422,7 @@ export class MeshClient {
             if (generation === snapshotGeneration) publish(snapshot, true);
           }).catch(() => {
             if (!stopped && generation === snapshotGeneration) {
-              listener({ type: "error", error: "mesh unavailable" });
+              listener({ type: "error", error: "mesh unavailable", subscriptionActive: true });
             }
           });
         }
@@ -432,7 +432,7 @@ export class MeshClient {
         stopped = true;
         pendingRevision = deliveredRevision;
         disconnect();
-        listener(event);
+        listener({ type: "error", error: event.error });
       } else if (event.revision > deliveredRevision) {
         pendingRevision = Math.max(pendingRevision, event.revision);
         void refreshLatest();

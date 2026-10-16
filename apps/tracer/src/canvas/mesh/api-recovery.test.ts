@@ -19,7 +19,7 @@ function timers(): () => void {
   return () => { if (prior) Object.defineProperty(globalThis, "window", prior); else Reflect.deleteProperty(globalThis, "window"); };
 }
 
-test("failed watch refreshes release their subscription before retry and disposal", async () => {
+test("failed watch refreshes retain one subscription through retry and release it on disposal", async () => {
   const restore = timers();
   const watches = new Set<(event: Record<string, unknown>) => void>();
   let refuse = true;
@@ -34,7 +34,7 @@ test("failed watch refreshes release their subscription before retry and disposa
       for (const watch of [...watches]) watch({type: "changed", revision});
       await settle();
       expect(source.status()).toBe("error");
-      expect(watches.size).toBe(0);
+      expect(watches.size).toBe(1);
       refuse = false;
       source.retry();
       await settle();
