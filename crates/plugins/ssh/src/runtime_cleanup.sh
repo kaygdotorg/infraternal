@@ -1,5 +1,4 @@
 # Probe owned control sockets directly before retiring failed setup (#230).
-# Proof notes are beside RUNTIME_CLEANUP in install.rs [17][243].
 control_socket() {
     control="$base/sessions/plugins.sock"
     [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0

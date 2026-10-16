@@ -1,5 +1,4 @@
 # Classify earlier host provisioning using private ownership receipts; never adopt foreign data.
-# Proof notes are beside INSPECT in previous_attempt.rs [17][243].
 private_file() {
     [ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ "$(stat -c '%a:%h' "$1")" = 600:1 ] || exit 71
     [ "$(stat -c '%s' "$1")" -le 128 ] || exit 71

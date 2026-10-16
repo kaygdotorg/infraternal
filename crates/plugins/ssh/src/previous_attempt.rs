@@ -172,8 +172,9 @@ impl PreviousAttempt {
             self.sockets
         );
         let setup_lock = include_str!("setup_lock.sh");
+        // Revalidate listeners after ownership reads, immediately before removal.
         let body = format!(
-            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nidentity={}\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\nidentity={}\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
             crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&expected),
             crate::transport::shell_quote(&self.identity),
