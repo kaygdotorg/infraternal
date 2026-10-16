@@ -948,7 +948,22 @@ impl SocketPlugins {
         // Result from an exited worker cannot answer a retry with the same id.
         self.generation = generation;
         let reply_epoch = u64::from(generation);
-        let (requests, receiver) = mpsc::channel(4);
+        let request_slots = 4;
+        #[cfg(any(test, feature = "native-streams"))]
+        let request_slots = entry
+            .plugin
+            .descriptor()
+            .streams
+            .iter()
+            .filter_map(|stream| stream.wire)
+            .map(|wire| wire.max_streams)
+            .fold(request_slots, usize::max)
+            .min(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS);
+        // One socket read can contain a control for every declared native
+        // viewer before this worker is polled. Four RPC slots silently retired
+        // valid small native bursts. Native declarations bound this ingress;
+        // ordinary RPC-only plugins retain four slots and the RPC admission cap.
+        let (requests, receiver) = mpsc::channel(request_slots);
         tasks.retain(|task| {
             task.handle
                 .lock()

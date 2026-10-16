@@ -1,4 +1,4 @@
-//! Ensures socket authority withdraws even while another owner retains the host [D208].
+//! Checks socket authority withdrawal and bounded native ingress across viewer lifetimes [D198,D208].
 use super::*;
 use crate::socket_authority::SocketAuthority;
 use infraternal_plugin_api::{Operation, streams::Authority};
@@ -131,6 +131,98 @@ impl Plugin for NativeEcho {
         })
     }
 }
+#[cfg(feature = "desktop")]
+#[tokio::test]
+async fn native_ingress_preserves_a_valid_small_command_burst_before_worker_poll() {
+    use infraternal_protocol::desktop::{Delivery, Message};
+    let host: Arc<Host> = Arc::new_cyclic(|weak| {
+        Host(
+            SocketAuthority::admitted(weak.clone()),
+            std::sync::atomic::AtomicBool::new(true),
+        )
+    });
+    let runtime = PluginRuntime::new(vec![Arc::new(NativeEcho(8))], "server");
+    runtime.set_enabled("desktop", true).await.unwrap();
+    let mut socket = SocketPlugins::new(runtime, host);
+    socket.set_peer_capabilities(8);
+    let mut encode = Vec::new();
+    let mut opening = Vec::new();
+    encode_muxed_frame_into(
+        1,
+        &Frame::Desktop(Message::Attach {
+            session_id: &[3; 16],
+            delivery: Delivery::Reliable,
+        }),
+        &mut opening,
+    )
+    .unwrap();
+    assert!(matches!(
+        socket.dispatch(&bytes::Bytes::from(opening), &mut encode),
+        Dispatch::Queued
+    ));
+    let reply = socket.recv().await.unwrap();
+    assert!(socket.accept(reply, &mut encode).is_some());
+    // A single socket read can already contain all these canonical small
+    // commands. The plugin task has not been polled between admissions.
+    for index in 0..16 {
+        let mut command = Vec::new();
+        encode_muxed_frame_into(
+            1,
+            &Frame::Desktop(Message::Size {
+                width: 640 + index * 2,
+                height: 480,
+                density_milli: 1000,
+            }),
+            &mut command,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                socket.dispatch(&bytes::Bytes::from(command), &mut encode),
+                Dispatch::Queued
+            ),
+            "canonical native command {index} retired the stream at generic socket ingress"
+        );
+    }
+    for _ in 0..16 {
+        let reply = socket.recv().await.unwrap();
+        assert!(socket.accept(reply, &mut encode).is_some());
+    }
+    assert!(!socket.native[&1].closed);
+    let bound = socket.entries[0].requests.max_capacity();
+    assert_eq!(
+        bound,
+        infraternal_plugin_desktop::server_manifest::DESCRIPTOR
+            .streams
+            .iter()
+            .find_map(|definition| definition.wire)
+            .unwrap()
+            .max_streams
+    );
+    let mut command = Vec::new();
+    encode_muxed_frame_into(
+        1,
+        &Frame::Desktop(Message::Size {
+            width: 640,
+            height: 480,
+            density_milli: 1000,
+        }),
+        &mut command,
+    )
+    .unwrap();
+    let command = bytes::Bytes::from(command);
+    for _ in 0..bound {
+        assert!(matches!(
+            socket.dispatch(&command, &mut encode),
+            Dispatch::Queued
+        ));
+    }
+    assert!(matches!(
+        socket.dispatch(&command, &mut encode),
+        Dispatch::Refused(_)
+    ));
+}
+
 #[cfg(feature = "desktop")]
 #[tokio::test]
 async fn declared_native_streams_require_negotiation_preserve_bulk_bytes_and_withdraw() {
