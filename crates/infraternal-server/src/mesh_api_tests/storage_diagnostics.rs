@@ -44,6 +44,34 @@ impl Capture {
 }
 
 #[tokio::test]
+async fn repeated_storage_failure_has_bounded_diagnostics() {
+    let fixture = Fixture::new().await;
+    sqlx::query("ALTER TABLE mesh_grants RENAME TO mesh_grants_unavailable")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let (capture, guard) = Capture::start();
+    // Fifty viewers retrying the same unchanged failure must not each emit a
+    // fresh ERROR. This checks event count, independent of scheduler timing.
+    for _ in 0..50 {
+        assert_eq!(
+            fixture
+                .service
+                .list(OWNER, MeshFilter::default(), NOW)
+                .await,
+            Err(MeshApiError::Storage)
+        );
+    }
+    let count = capture.errors().len();
+    drop(guard);
+    fixture.cleanup().await;
+    assert!(
+        count < 50,
+        "unchanged failure emitted one ERROR per request: {count}"
+    );
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keep ordered failure/repair assertions under one real pool and capture.
 async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
     let fixture = Fixture::new().await;
