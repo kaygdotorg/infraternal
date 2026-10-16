@@ -123,7 +123,7 @@ async def echo(peer, marker, command=b''):
 async def soak(host, args, record, rng, *, profile_after=0, before_profile=None):
     # Aging stays inside the same workload invocation. Only the final bounded
     # interval owns a full trace; default callers retain their existing limit.
-    assert args.mode == 'soak' and 0 <= profile_after <= 5400 and 0 < args.seconds - profile_after <= 900
+    assert args.mode == 'soak' and 0 <= profile_after <= 6020 and 0 < args.seconds - profile_after <= 900
     scheduler = None
     started = None
     finished = False

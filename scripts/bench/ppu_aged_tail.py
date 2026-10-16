@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Age one real host before a bounded late-life stage/scheduler capture [D270].
 
-Keep the original mixed workload running continuously for 6,300 active seconds,
+Keep the original mixed workload running continuously for 6,920 active seconds,
 including its reader, tasks and accumulated samples. Enable the full kernel
-capture only after 5,400 seconds. Observer overhead makes this diagnostic, never
+capture only after 6,020 seconds. Observer overhead makes this diagnostic, never
 an unchanged admission run. Use ppu_segment.py around the whole fixture.
 SPDX-License-Identifier: AGPL-3.0-only
 """
@@ -24,7 +24,7 @@ import ppu_tail as tail
 import ppu_trace as trace
 from ppu_trace_process import CONTEXT, Drain
 
-AGE_SECONDS = 5400
+AGE_SECONDS = 6020
 
 
 async def boundary(host, root):

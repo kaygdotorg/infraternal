@@ -40,9 +40,9 @@ class Aging(unittest.IsolatedAsyncioTestCase):
         self.assertIs(actual_host, host)
         self.assertIs(actual_record, record)
         self.assertIs(actual_rng, rng)
-        self.assertEqual(options.seconds, 6300)
+        self.assertEqual(options.seconds, 6920)
         self.assertEqual(args.seconds, 900)
-        self.assertEqual(capture.await_args.kwargs['profile_after'], 5400)
+        self.assertEqual(capture.await_args.kwargs['profile_after'], 6020)
         self.assertFalse(result)
 
     async def test_extended_capture_is_refused_before_any_work(self):

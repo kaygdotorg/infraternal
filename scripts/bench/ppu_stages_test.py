@@ -34,6 +34,18 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(mode='soak', seconds=900), None, None, profile_after=600)
             create.assert_not_called()
 
+    async def test_known_late_batch_window_keeps_the_same_capture_limit(self):
+        with patch.object(stages.trace, 'Trace') as create, \
+             patch.object(stages, 'ORIGINAL_SOAK', AsyncMock(side_effect=ConnectionError('fixture refused'))) as original:
+            with self.assertRaisesRegex(ConnectionError, 'fixture refused'):
+                await stages.soak(SimpleNamespace(pid=123), SimpleNamespace(mode='soak', seconds=6920),
+                    None, None, profile_after=6020)
+            original.assert_awaited_once()
+            with self.assertRaises(AssertionError):
+                await stages.soak(SimpleNamespace(pid=123), SimpleNamespace(mode='soak', seconds=6921),
+                    None, None, profile_after=6021)
+            create.assert_not_called()
+
     async def test_delayed_capture_keeps_one_original_workload_invocation(self):
         scratch = Path.home() / '.cache/codex-scratch/process-per-user/tests'
         scratch.mkdir(parents=True, exist_ok=True)
