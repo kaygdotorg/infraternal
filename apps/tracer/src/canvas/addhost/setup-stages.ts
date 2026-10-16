@@ -4,7 +4,8 @@
  * Nothing here touches the DOM, so specs pin it.
  *
  * The real stream is `/v1/bootstrap/setup/ws` (contracts/host-setup.md); it also carries `session_id`, `window_id`,
- * `attempt` and `sequence`, of which the UI needs only `sequence` (to resume). `setup-feed.ts` is its client.
+ * `attempt`, `sequence` and `retry_available`. The UI resumes with `sequence` and offers retry only while the server
+ * permits another attempt. `setup-feed.ts` is its client.
  *
  * Order of events for one host (D255): the wizard's socket reports `done` as soon as the shell is attachable (the
  * window opens with a live prompt). The infraternal agent then installs, joins and starts in the background. Each
@@ -13,7 +14,7 @@
  * shape, and never invents progress from time:
  *
  *   { "setup": { "host_id": "<uuid>", "stage": "install" | "join" | "start" | "ready",
- *                "state": "running" | "done" | "failed",
+ *                "state": "running" | "done" | "failed", "retry_available": boolean,
  *                "failed_step"?: "connect" | "upload" | "install" | "join" | "start" | "readiness",   // with "failed"
  *                "message"?: "<the server's own words, shown only in details>" } }
  *
@@ -33,6 +34,8 @@ export interface SetupEvent {
   failedStep?: FailedStep;
   /** The server's per-host counter, used to resume a dropped subscription after the last event seen. */
   sequence?: number;
+  /** Server attempt eligibility; current authority and worker capacity still apply. */
+  retryAvailable?: boolean;
   /** The server's own text. Shown in details only, never as the headline, and never matched on. */
   message?: string;
 }
@@ -49,6 +52,8 @@ export interface SetupView {
   message?: string;
   /** Every stage is done. */
   complete: boolean;
+  /** False when the server has exhausted setup attempts. */
+  retryAvailable?: boolean;
 }
 
 export const freshSetup = (): SetupView => ({ stages: SETUP_STAGES.map(() => "pending"), complete: false });
@@ -68,6 +73,10 @@ export function parseSetupEvent(value: unknown): SetupEvent | undefined {
     if (STEPS.includes(body.failed_step)) event.failedStep = body.failed_step as FailedStep;
   }
   if (Number.isSafeInteger(body.sequence) && Number(body.sequence) >= 0) event.sequence = Number(body.sequence);
+  if (body.retry_available !== undefined) {
+    if (typeof body.retry_available !== "boolean") return undefined;
+    event.retryAvailable = body.retry_available;
+  }
   if (typeof body.message === "string") event.message = body.message.slice(0, 500);
   return event;
 }
@@ -95,7 +104,7 @@ export function foldSetup(view: SetupView, event: SetupEvent): SetupView {
   return {
     stages,
     complete: stages.every((state) => state === "done"),
-    ...(failed ? { failedStep: event.failedStep ?? (event.stage === "ready" ? "readiness" : event.stage), ...(event.message ? { message: event.message } : {}) } : {}),
+    ...(failed ? { retryAvailable: event.retryAvailable, failedStep: event.failedStep ?? (event.stage === "ready" ? "readiness" : event.stage), ...(event.message ? { message: event.message } : {}) } : {}),
   };
 }
 
@@ -128,5 +137,6 @@ export function setupGuide(host: string, view: SetupView): { title: string; effe
     start: `The infraternal agent didn't start on ${host}`,
     readiness: `${host} isn't ready yet`,
   } satisfies Record<FailedStep, string>)[step];
-  return { title, effect: `Your terminal keeps working. ${NEXT[step]}`, details: view.message ?? "" };
+  const next = view.retryAvailable === false ? "Setup has reached its retry limit. Open Add host to start a new setup." : NEXT[step];
+  return { title, effect: `Your terminal keeps working. ${next}`, details: view.message ?? "" };
 }

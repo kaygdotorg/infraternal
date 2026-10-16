@@ -66,3 +66,16 @@ test("review malformed setup fields are dropped without coercion errors", () => 
     expect(parseSetupEvent(message)).toBeUndefined();
   }
 });
+
+// The server attempt cap is authoritative; retrying a running stage clears the old refusal.
+test("exhausted setup preserves eligibility and explains a new setup", () => {
+  const event = parseSetupEvent({ setup: { host_id: HOST, stage: "join", state: "failed", retry_available: false } })!;
+  const view = foldSetup(freshSetup(), event);
+  expect(view.retryAvailable).toBe(false);
+  for (const retry_available of ["false", null, {}]) {
+    expect(parseSetupEvent({ setup: { host_id: HOST, stage: "join", state: "failed", retry_available } })).toBeUndefined();
+  }
+  expect(setupGuide("o2", view).effect).toContain("retry limit");
+  expect(setupGuide("o2", view).effect).toContain("Open Add host");
+  expect(foldSetup(view, ev("join", "running")).retryAvailable).toBeUndefined();
+});
