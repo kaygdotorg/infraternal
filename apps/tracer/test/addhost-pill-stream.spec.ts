@@ -5,12 +5,13 @@
  * the end state (system icon), with typing never blocked and reduced motion honoured.
  */
 import { expect, test, type Page } from "playwright/test";
+import { tracerEvidencePath } from "./evidence-path";
 
 const URL = "/?mock=1&proto=clusters&scene=3&theme=ink&bg=none";
 
-async function addHost(page: Page, name: string): Promise<void> {
+async function addHost(page: Page, name: string, theme = "ink"): Promise<void> {
   await page.request.post("/__mock/bootstrap/reset");
-  await page.goto(URL);
+  await page.goto(URL.replace("theme=ink", `theme=${theme}`));
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 45_000 });
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:addhost", source: "keyboard" } })));
   await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible();
@@ -79,23 +80,34 @@ test("reduced motion: the failure and the retry still show, with no flight", asy
 });
 
 // An exhausted attempt is authoritative even though the existing terminal stays open.
-test("review exhausted setup does not offer an enabled retry", async ({ page }) => {
-  await page.routeWebSocket("**/v1/bootstrap/setup/ws", (client) => {
-    const server = client.connectToServer();
-    server.onMessage((data) => {
-      if (typeof data !== "string") { client.send(data); return; }
-      const message = JSON.parse(data) as { setup?: { state?: string; attempt?: number; retry_available?: boolean } };
-      if (message.setup?.state === "failed") {
-        message.setup.attempt = 8;
-        message.setup.retry_available = false;
-      }
-      client.send(JSON.stringify(message));
+for (const [width, height] of [[1440, 900], [393, 852], [375, 667]] as const) {
+  for (const theme of ["ink", "paper"]) {
+    test(`review exhausted setup does not offer an enabled retry at ${width}px ${theme}`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.routeWebSocket("**/v1/bootstrap/setup/ws", (client) => {
+        const server = client.connectToServer();
+        server.onMessage((data) => {
+          if (typeof data !== "string") { client.send(data); return; }
+          const message = JSON.parse(data) as { setup?: { state?: string; attempt?: number; retry_available?: boolean } };
+          if (message.setup?.state === "failed") {
+            message.setup.attempt = 8;
+            message.setup.retry_available = false;
+          }
+          client.send(JSON.stringify(message));
+        });
+      });
+      await addHost(page, "instant-fail.lab", theme);
+      await expect(page.locator('.ui-window .ui-setup-fill[data-state="failed"]')).toHaveCount(1, { timeout: 30_000 });
+      await pillOf(page, "instant-fail.lab").click();
+      const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
+      await expect(tip).toBeVisible();
+      await expect(tip.getByRole("button", { name: "Try again", disabled: false })).toHaveCount(0);
+      await expect(tip).toContainText("retry limit");
+      await expect(tip).toContainText("Open Add host");
+      expect(errors).toEqual([]);
+      await page.screenshot({ path: tracerEvidencePath(`exhausted-retry-${width}-${theme}.png`) });
     });
-  });
-  await addHost(page, "instant-fail.lab");
-  await expect(page.locator('.ui-window .ui-setup-fill[data-state="failed"]')).toHaveCount(1, { timeout: 30_000 });
-  await pillOf(page, "instant-fail.lab").click();
-  const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
-  await expect(tip).toBeVisible();
-  await expect(tip.getByRole("button", { name: "Try again", disabled: false })).toHaveCount(0);
-});
+  }
+}

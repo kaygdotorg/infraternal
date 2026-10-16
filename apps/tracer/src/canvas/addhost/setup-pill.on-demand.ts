@@ -139,10 +139,11 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
   const stop = source.subscribe(hostId, (event) => {
     if (!alive) return;
     const was = view.complete;
+    const previousRetry = view.retryAvailable;
     view = foldSetup(view, event);
     paint();
     // A retry starts again after a failure: the explanation no longer applies.
-    if (tip && failedIndex(view) < 0) { tip.close(false); tip = undefined; }
+    if (tip && (failedIndex(view) < 0 || previousRetry !== view.retryAvailable)) { tip.close(false); tip = undefined; }
     if (view.complete && !was) {
       // A flight still in the air lands first, so the tick never starts under a copy that is still travelling.
       land();
@@ -171,10 +172,11 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
         title: guide.title,
         effect: guide.effect,
         confirmLabel: "Try again",
+        confirmDisabled: view.retryAvailable === false || !source.retry,
         cancelLabel: "Dismiss",
         confirmIcon: RETRY_ICON,
         boundary: card.root,
-        onConfirm: () => { tip = undefined; source.retry?.(hostId); },
+        onConfirm: () => { tip = undefined; if (view.retryAvailable !== false) source.retry?.(hostId); },
         onCancel: () => { tip = undefined; },
       });
       return true;
