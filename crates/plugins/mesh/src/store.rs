@@ -2,6 +2,7 @@
 use crate::{
     configuration,
     dataplane::{Config, DefaultPolicy},
+    diagnostics::{storage_error, storage_sql_error},
     policy::{
         address::AddressAllocator,
         coordinator::Coordinator,
@@ -44,7 +45,7 @@ impl Snapshot {
             configuration::compile(coordinator, node, *default, endpoints).map_err(|error| {
                 match error {
                     MeshError::UnknownNode => MeshApiError::NotFound,
-                    _ => MeshApiError::Storage,
+                    _ => storage_error("configuration compilation failed"),
                 }
             })?;
         config.version = *revision;
@@ -152,10 +153,7 @@ impl Store {
     }
     /// Retain one shared immutable inventory/policy snapshot, rather than a peer map per node.
     pub(crate) async fn snapshot(&self) -> Result<Snapshot, crate::api::MeshApiError> {
-        self.load()
-            .await
-            .map(Snapshot)
-            .map_err(|_| crate::api::MeshApiError::Storage)
+        self.load().await.map(Snapshot)
     }
     /// Page directed reach losses at one revision without allocating the pair matrix.
     /// # Errors
@@ -166,8 +164,7 @@ impl Store {
         cursor: Option<crate::api::MeshCursor>,
     ) -> Result<serde_json::Value, crate::api::MeshApiError> {
         use crate::api::{MAX_MESH_FRAME_LEN, MeshApiError, MeshCursor};
-        let (coordinator, _, default, revision) =
-            self.load().await.map_err(|_| MeshApiError::Storage)?;
+        let (coordinator, _, default, revision) = self.load().await?;
         if cursor.is_some_and(|cursor| cursor.revision != revision) {
             return Err(MeshApiError::Conflict);
         }
@@ -186,7 +183,7 @@ impl Store {
             for view in views.values() {
                 total = total
                     .checked_add(losses(view))
-                    .ok_or(MeshApiError::Storage)?;
+                    .ok_or_else(|| storage_error("reach count exhausted"))?;
             }
         }
         let offset = cursor.map_or(0, |cursor| cursor.offset);
@@ -217,7 +214,7 @@ impl Store {
                 }
                 let pair = (*node, *other);
                 let length = serde_json::to_vec(&pair)
-                    .map_err(|_| MeshApiError::Storage)?
+                    .map_err(|_| storage_error("reach pair serialization failed"))?
                     .len()
                     + 1;
                 if bytes + length > MAX_MESH_FRAME_LEN - 1024 {
@@ -229,7 +226,7 @@ impl Store {
         }
         let delivered = offset
             .checked_add(pairs.len())
-            .ok_or(MeshApiError::Storage)?;
+            .ok_or_else(|| storage_error("reach count exhausted"))?;
         let cursor = (delivered < total).then_some(MeshCursor {
             revision,
             offset: delivered,
@@ -238,13 +235,14 @@ impl Store {
             serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"next_cursor":cursor}),
         )
     }
-    async fn load(&self) -> Result<Loaded, &'static str> {
+    async fn load(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut cached = self.cache.lock().await;
         let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
             .fetch_one(&self.pool)
             .await
-            .map_err(|_| "Mesh storage unavailable.")?;
-        let revision = u64::try_from(revision).map_err(|_| "Mesh revision invalid.")?;
+            .map_err(|error| storage_sql_error(error))?;
+        let revision =
+            u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?;
         if let Some(loaded) = cached.as_ref()
             && loaded.3 == revision
         {
@@ -256,25 +254,25 @@ impl Store {
     }
     // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
     #[allow(clippy::too_many_lines)]
-    async fn load_uncached(&self) -> Result<Loaded, &'static str> {
+    async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|_| "Mesh storage unavailable.")?;
+            .map_err(|error| storage_sql_error(error))?;
         let serialized: Option<String> = sqlx::query_scalar::<_, Option<String>>(
             "SELECT allocation_json FROM mesh_dataplane WHERE singleton=1",
         )
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| "Mesh storage unavailable.")?
+        .map_err(|error| storage_sql_error(error))?
         .flatten();
         let rows = sqlx::query(
             "SELECT id,name,public_key,dataplane_host,endpoint FROM mesh_nodes ORDER BY id",
         )
         .fetch_all(&mut *tx)
         .await
-        .map_err(|_| "Mesh storage unavailable.")?;
+        .map_err(|error| storage_sql_error(error))?;
         let mut nodes = Vec::new();
         let mut endpoints = BTreeMap::new();
         let mut server = None;
@@ -283,46 +281,77 @@ impl Store {
             sqlx::query("SELECT node_id,tag_name FROM mesh_tag_members ORDER BY node_id,tag_name")
                 .fetch_all(&mut *tx)
                 .await
-                .map_err(|_| "Mesh storage unavailable.")?
+                .map_err(|error| storage_sql_error(error))?
         {
             tags_by_node
-                .entry(row.get("node_id"))
+                .entry(
+                    row.try_get("node_id")
+                        .map_err(|error| storage_sql_error(error))?,
+                )
                 .or_default()
-                .insert(row.get("tag_name"));
+                .insert(
+                    row.try_get("tag_name")
+                        .map_err(|error| storage_sql_error(error))?,
+                );
         }
         for row in rows {
             let id = NodeId(
-                u64::try_from(row.get::<i64, _>("id")).map_err(|_| "Mesh identity invalid.")?,
+                u64::try_from(
+                    row.try_get::<i64, _>("id")
+                        .map_err(|error| storage_sql_error(error))?,
+                )
+                .map_err(|_| storage_error("Mesh identity invalid."))?,
             );
             let tags = tags_by_node
-                .remove(&row.get::<i64, _>("id"))
+                .remove(
+                    &row.try_get::<i64, _>("id")
+                        .map_err(|error| storage_sql_error(error))?,
+                )
                 .unwrap_or_default();
-            let key: Vec<u8> = row.get("public_key");
-            let host: Option<String> = row.get("dataplane_host");
+            let key: Vec<u8> = row
+                .try_get("public_key")
+                .map_err(|error| storage_sql_error(error))?;
+            let host: Option<String> = row
+                .try_get("dataplane_host")
+                .map_err(|error| storage_sql_error(error))?;
             if host.as_deref() == Some("server") {
                 server = Some(id);
             }
-            if let Some(endpoint) = row.get::<Option<String>, _>("endpoint") {
-                endpoints.insert(id, endpoint.parse().map_err(|_| "Mesh endpoint invalid.")?);
+            if let Some(endpoint) = row
+                .try_get::<Option<String>, _>("endpoint")
+                .map_err(|error| storage_sql_error(error))?
+            {
+                endpoints.insert(
+                    id,
+                    endpoint
+                        .parse()
+                        .map_err(|_| storage_error("Mesh endpoint invalid."))?,
+                );
             }
             nodes.push(Node {
                 id,
-                public_key: PublicKey(key.try_into().map_err(|_| "Mesh identity invalid.")?),
-                host: row.get("name"),
+                public_key: PublicKey(
+                    key.try_into()
+                        .map_err(|_| storage_error("Mesh identity invalid."))?,
+                ),
+                host: row
+                    .try_get("name")
+                    .map_err(|error| storage_sql_error(error))?,
                 tags: tags.into_iter().collect(),
             });
         }
-        let server = server.ok_or("Mesh server node is not connected.")?;
+        let server = server.ok_or_else(|| storage_error("Mesh server node is not connected."))?;
         let mut state = if let Some(serialized) = serialized {
-            serde_json::from_str::<State>(&serialized).map_err(|_| "Mesh allocation invalid.")?
+            serde_json::from_str::<State>(&serialized)
+                .map_err(|_| storage_error("Mesh allocation invalid."))?
         } else {
             // Public random ULA deployment identifier, generated once and persisted before use.
             let random = uuid::Uuid::new_v4();
             let mut global = [0; 5];
             global.copy_from_slice(&random.as_bytes()[..5]);
             let settings = MeshSettings::new(global);
-            let allocation =
-                AddressAllocator::new(settings.clone(), &[]).map_err(|_| "Mesh range invalid.")?;
+            let allocation = AddressAllocator::new(settings.clone(), &[])
+                .map_err(|_| storage_error("Mesh range invalid."))?;
             State {
                 settings,
                 allocation,
@@ -331,7 +360,7 @@ impl Store {
             }
         };
         if state.server != server {
-            return Err("Mesh server identity changed.");
+            return Err(storage_error("Mesh server identity changed."));
         }
         let membership: BTreeSet<_> = nodes.iter().map(|node| node.id).collect();
         for id in &state.members {
@@ -344,7 +373,7 @@ impl Store {
             state
                 .allocation
                 .allocate(node.id)
-                .map_err(|_| "Mesh range exhausted.")?;
+                .map_err(|_| storage_error("Mesh range exhausted."))?;
         }
         let mut coordinator = Coordinator::new(
             state.settings.clone(),
@@ -352,37 +381,50 @@ impl Store {
             nodes
                 .iter()
                 .find(|node| node.id == server)
-                .ok_or("Mesh server is absent.")?
+                .ok_or_else(|| storage_error("Mesh server is absent."))?
                 .clone(),
         )
-        .map_err(|_| "Mesh inventory invalid.")?;
+        .map_err(|_| storage_error("Mesh inventory invalid."))?;
         for node in nodes.iter().filter(|node| node.id != server) {
             coordinator
                 .join(node.clone())
-                .map_err(|_| "Mesh inventory invalid.")?;
+                .map_err(|_| storage_error("Mesh inventory invalid."))?;
         }
         for row in sqlx::query(
             "SELECT id,from_kind,from_value,to_kind,to_value,both_ways,ports_json FROM mesh_grants",
         )
         .fetch_all(&mut *tx)
         .await
-        .map_err(|_| "Mesh storage unavailable.")?
+        .map_err(|error| storage_sql_error(error))?
         {
             let arrow = Arrow {
                 id: RuleId(
-                    u64::try_from(row.get::<i64, _>("id")).map_err(|_| "Mesh rule invalid.")?,
+                    u64::try_from(
+                        row.try_get::<i64, _>("id")
+                            .map_err(|error| storage_sql_error(error))?,
+                    )
+                    .map_err(|_| storage_error("Mesh rule invalid."))?,
                 ),
                 from: endpoint(
-                    &row.get::<String, _>("from_kind"),
-                    &row.get::<String, _>("from_value"),
+                    &row.try_get::<String, _>("from_kind")
+                        .map_err(|error| storage_sql_error(error))?,
+                    &row.try_get::<String, _>("from_value")
+                        .map_err(|error| storage_sql_error(error))?,
                 )?,
                 to: endpoint(
-                    &row.get::<String, _>("to_kind"),
-                    &row.get::<String, _>("to_value"),
+                    &row.try_get::<String, _>("to_kind")
+                        .map_err(|error| storage_sql_error(error))?,
+                    &row.try_get::<String, _>("to_value")
+                        .map_err(|error| storage_sql_error(error))?,
                 )?,
-                both_ways: row.get("both_ways"),
-                ports: serde_json::from_str::<TrafficPolicy>(&row.get::<String, _>("ports_json"))
-                    .map_err(|_| "Mesh rule invalid.")?,
+                both_ways: row
+                    .try_get("both_ways")
+                    .map_err(|error| storage_sql_error(error))?,
+                ports: serde_json::from_str::<TrafficPolicy>(
+                    &row.try_get::<String, _>("ports_json")
+                        .map_err(|error| storage_sql_error(error))?,
+                )
+                .map_err(|_| storage_error("Mesh rule invalid."))?,
             };
             // Deleted node endpoints remain dormant in the Access table; no other identity inherits them.
             if [&arrow.from, &arrow.to]
@@ -393,47 +435,51 @@ impl Store {
             }
             coordinator
                 .add_arrow(arrow)
-                .map_err(|_| "Mesh rule invalid.")?;
+                .map_err(|_| storage_error("Mesh rule invalid."))?;
         }
         let mut checkpoint = coordinator.checkpoint();
         checkpoint.allocation = state.allocation.clone();
-        coordinator =
-            Coordinator::restore(checkpoint, &[]).map_err(|_| "Mesh allocation invalid.")?;
+        coordinator = Coordinator::restore(checkpoint, &[])
+            .map_err(|_| storage_error("Mesh allocation invalid."))?;
         let policy: Option<String> = sqlx::query_scalar::<_, Option<String>>(
             "SELECT default_policy FROM mesh_dataplane WHERE singleton=1",
         )
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| "Mesh storage unavailable.")?
+        .map_err(|error| storage_sql_error(error))?
         .flatten();
         let default = match policy.as_deref() {
             Some("allow") => DefaultPolicy::Allow,
             Some("deny") => DefaultPolicy::Deny,
             None => DefaultPolicy::default(),
-            _ => return Err("Mesh default invalid."),
+            _ => return Err(storage_error("Mesh default invalid.")),
         };
         // Freeze the edition fallback on first use. A later edition build must
         // not silently change an already-running mesh without the Access preview.
-        sqlx::query("INSERT INTO mesh_dataplane(singleton,allocation_json,default_policy) VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET allocation_json=excluded.allocation_json,default_policy=COALESCE(mesh_dataplane.default_policy,excluded.default_policy)").bind(serde_json::to_string(&state).map_err(|_|"Mesh allocation invalid.")?).bind(if default==DefaultPolicy::Allow {"allow"} else {"deny"}).execute(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
+        sqlx::query("INSERT INTO mesh_dataplane(singleton,allocation_json,default_policy) VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET allocation_json=excluded.allocation_json,default_policy=COALESCE(mesh_dataplane.default_policy,excluded.default_policy)").bind(serde_json::to_string(&state).map_err(|_| storage_error("Mesh allocation invalid."))?).bind(if default==DefaultPolicy::Allow {"allow"} else {"deny"}).execute(&mut *tx).await.map_err(|error| storage_sql_error(error))?;
         let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
             .fetch_one(&mut *tx)
             .await
-            .map_err(|_| "Mesh storage unavailable.")?;
-        tx.commit().await.map_err(|_| "Mesh storage unavailable.")?;
+            .map_err(|error| storage_sql_error(error))?;
+        tx.commit()
+            .await
+            .map_err(|error| storage_sql_error(error))?;
         Ok((
             std::sync::Arc::new(coordinator),
             std::sync::Arc::new(endpoints),
             default,
-            u64::try_from(revision).map_err(|_| "Mesh revision invalid.")?,
+            u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?,
         ))
     }
 }
-fn endpoint(kind: &str, value: &str) -> Result<Endpoint, &'static str> {
+fn endpoint(kind: &str, value: &str) -> Result<Endpoint, crate::api::MeshApiError> {
     match kind {
         "node" => Ok(Endpoint::Node(NodeId(
-            value.parse().map_err(|_| "Mesh rule invalid.")?,
+            value
+                .parse()
+                .map_err(|_| storage_error("Mesh rule invalid."))?,
         ))),
         "tag" => Ok(Endpoint::Tag(value.to_owned())),
-        _ => Err("Mesh rule invalid."),
+        _ => Err(storage_error("Mesh rule invalid.")),
     }
 }

@@ -221,3 +221,72 @@ async fn invalid_stored_host_name_is_a_logged_storage_error() {
     assert!(!capture.text().contains("public-name-marker"));
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn coordinator_loading_preserves_missing_server_and_sql_reasons() {
+    let fixture = Fixture::new().await;
+    let store = fixture.service.dataplane();
+    let (capture, _guard) = Capture::start();
+    assert_eq!(
+        store.config(infraternal_mesh::model::NodeId(1)).await,
+        Err(MeshApiError::Storage)
+    );
+    let errors = capture.errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        errors[0]["fields"]["reason"],
+        "Mesh server node is not connected."
+    );
+    fixture.pool.close().await;
+    assert_eq!(
+        store.config(infraternal_mesh::model::NodeId(1)).await,
+        Err(MeshApiError::Storage)
+    );
+    let errors = capture.errors();
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[1]["fields"]["reason"], "database pool closed");
+    assert!(
+        errors[1]["fields"]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("store.rs")
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn coordinator_stored_column_refuses_without_panic_and_recovers_after_repair() {
+    use futures_util::FutureExt;
+    let fixture = Fixture::new().await;
+    let store = fixture.service.dataplane();
+    let (id, _) = store
+        .attach(
+            "server",
+            infraternal_mesh::model::PublicKey([31; 32]),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    let (capture, _guard) = Capture::start();
+    sqlx::query("UPDATE mesh_nodes SET name=zeroblob(1)")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let answer = std::panic::AssertUnwindSafe(store.config(id))
+        .catch_unwind()
+        .await;
+    assert!(
+        matches!(answer, Ok(Err(MeshApiError::Storage))),
+        "coordinator columns must refuse without panicking"
+    );
+    let errors = capture.errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0]["fields"]["reason"], "stored column invalid");
+    sqlx::query("UPDATE mesh_nodes SET name='server'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(store.config(id).await.is_ok());
+    fixture.cleanup().await;
+}
