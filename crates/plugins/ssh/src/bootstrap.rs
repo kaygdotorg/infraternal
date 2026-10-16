@@ -582,193 +582,197 @@ impl Bootstrap {
         clippy::too_many_lines,
         reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
     )]
-    async fn run(
-        &self,
-        batch: &BatchInner,
-        target: &Target,
+    fn run<'a>(
+        &'a self,
+        batch: &'a BatchInner,
+        target: &'a Target,
         attempt: u32,
         started: Instant,
-        resources: &mut AttemptResources,
+        resources: &'a mut AttemptResources,
         auth_once: Option<OneUseAuth>,
-    ) -> Result<(), Failure> {
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Check,
-            "Checking the SSH host.",
-            started,
-            None,
-        );
-        let resolved = self.resolve_attempt(batch, target, auth_once).await?;
-        let session = self
-            .transport
-            .open(resolved.destination, resolved.credentials, resolved.mesh)
-            .await
-            .map_err(|error| error.at(InstallStep::Connect))?;
-        let owns_cleanup = lock(&batch.states)
-            .get(&target.id)
-            .is_some_and(|state| state.cleanup.is_some());
-        // Stored coordinates already authorize this attempt's rollback. Restore
-        // it before inspecting earlier attempts; its own lease is not foreign.
-        let script = if owns_cleanup {
-            format!(
-                "{}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'",
-                crate::probe::CHECK_SCRIPT
-            )
-        } else {
-            previous_attempt::check_script(target.mode)
-        };
-        let output = match session.run(&script, Input::Empty).await {
-            Err(error) if error.exit_status == Some(76) => {
-                // Old hosts may have no helper, or a cached binary predating it.
-                // Resolve and verify our executable before inspecting again; never
-                // ask the host to install an interpreter or trust its PATH.
-                let sniff = session
-                    .run(crate::probe::CHECK_SCRIPT, Input::Empty)
-                    .await?;
-                let check = crate::probe::Check::parse(&sniff.stdout)?;
-                check.authorize_mode(target.mode)?;
-                let binary = self
-                    .payload(batch, target, attempt, started, check.architecture)
-                    .await?;
-                Installation::prepare_recovery(session.as_ref(), target, &binary).await?;
-                session.run(&script, Input::Empty).await
-            }
-            result => result,
-        }
-        .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
-        // Preserve method evidence even if the authenticated host is unsupported.
-        // Public metadata only; no provider or private material enters replay state.
-        if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
-            metadata.authentication = session.authentication();
-        }
-        let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
-        check.authorize_mode(target.mode)?;
-        match restore_previous(batch, target, attempt, started, session.clone()).await {
-            Err(error) if error.exit_status == Some(76) => {
-                let binary = self
-                    .payload(batch, target, attempt, started, check.architecture)
-                    .await?;
-                Installation::prepare_recovery(session.as_ref(), target, &binary).await?;
-                restore_previous(batch, target, attempt, started, session.clone()).await?;
-            }
-            result => result?,
-        }
-        if let Some(previous) = previous {
-            let automatic = self
-                .backend
-                .owns_failed_setup(
-                    &batch.authority,
-                    target,
-                    &check,
-                    previous.host,
-                    session.trust_lookup(),
-                )
-                .await?;
-            self.await_start_fresh(
+    ) -> Operation<'a, ()> {
+        // One setup state machine is shared with the deadline/cancellation driver [243].
+        // The allocation ends with this host attempt and is never on a session path.
+        Box::pin(async move {
+            emit(
                 batch,
                 target,
                 attempt,
+                Step::Check,
+                "Checking the SSH host.",
                 started,
-                session.as_ref(),
-                &previous,
-                automatic,
-            )
-            .await?;
-        }
-        // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
-        // Durable publication can outlive a cancelled acknowledgement. Bind
-        // cleanup ownership before the backend can enqueue its commit.
-        let mut register = |host| {
-            resources.host = Some(host);
-            Ok(())
-        };
-        let join = self
-            .backend
-            .invitation_registered(
-                &batch.authority,
-                target,
-                &check,
-                session.trust_lookup(),
-                &mut register,
-            )
-            .await?;
-        resources.host = Some(join.host);
-        if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
-            metadata.host_id = Some(join.host);
-        }
-        let payload = self
-            .payload(batch, target, attempt, started, check.architecture)
-            .await?;
-        resources.installation = Some(Installation::new(session, target, &join)?);
-        let transaction = resources
-            .installation
-            .as_ref()
-            .ok_or_else(|| Failure::install("The installation transaction is unavailable."))?;
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Install,
-            "Installing the infraternal agent.",
-            started,
-            None,
-        );
-        transaction.stage(&payload).await.map_err(|mut error| {
-            if error.message == "The matching static infraternal binary is unavailable." {
-                error.missing_binary = Some(Box::new(crate::model::MissingBinary {
-                    architecture: match check.architecture {
-                        crate::probe::Architecture::X86_64 => "x86_64",
-                        crate::probe::Architecture::Aarch64 => "aarch64",
-                    },
-                    path: payload.display().to_string(),
-                }));
+                None,
+            );
+            let resolved = self.resolve_attempt(batch, target, auth_once).await?;
+            let session = self
+                .transport
+                .open(resolved.destination, resolved.credentials, resolved.mesh)
+                .await
+                .map_err(|error| error.at(InstallStep::Connect))?;
+            let owns_cleanup = lock(&batch.states)
+                .get(&target.id)
+                .is_some_and(|state| state.cleanup.is_some());
+            // Stored coordinates already authorize this attempt's rollback. Restore
+            // it before inspecting earlier attempts; its own lease is not foreign.
+            let script = if owns_cleanup {
+                format!(
+                    "{}\nprintf 'INFRATERNAL_SETUP_CLEAR\\n'",
+                    crate::probe::CHECK_SCRIPT
+                )
+            } else {
+                previous_attempt::check_script(target.mode)
+            };
+            let output = match session.run(&script, Input::Empty).await {
+                Err(error) if error.exit_status == Some(76) => {
+                    // Old hosts may have no helper, or a cached binary predating it.
+                    // Resolve and verify our executable before inspecting again; never
+                    // ask the host to install an interpreter or trust its PATH.
+                    let sniff = session
+                        .run(crate::probe::CHECK_SCRIPT, Input::Empty)
+                        .await?;
+                    let check = crate::probe::Check::parse(&sniff.stdout)?;
+                    check.authorize_mode(target.mode)?;
+                    let binary = self
+                        .payload(batch, target, attempt, started, check.architecture)
+                        .await?;
+                    Installation::prepare_recovery(session.as_ref(), target, &binary).await?;
+                    session.run(&script, Input::Empty).await
+                }
+                result => result,
             }
-            error
-        })?;
-        transaction.enroll_and_start(&join).await?;
-        drop(join); // Capability plaintext is erased immediately after its stdin handoff.
-        if !transaction.enable_linger().await? {
+            .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
+            // Preserve method evidence even if the authenticated host is unsupported.
+            // Public metadata only; no provider or private material enters replay state.
+            if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+                metadata.authentication = session.authentication();
+            }
+            let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
+            check.authorize_mode(target.mode)?;
+            match restore_previous(batch, target, attempt, started, session.clone()).await {
+                Err(error) if error.exit_status == Some(76) => {
+                    let binary = self
+                        .payload(batch, target, attempt, started, check.architecture)
+                        .await?;
+                    Installation::prepare_recovery(session.as_ref(), target, &binary).await?;
+                    restore_previous(batch, target, attempt, started, session.clone()).await?;
+                }
+                result => result?,
+            }
+            if let Some(previous) = previous {
+                let automatic = self
+                    .backend
+                    .owns_failed_setup(
+                        &batch.authority,
+                        target,
+                        &check,
+                        previous.host,
+                        session.trust_lookup(),
+                    )
+                    .await?;
+                self.await_start_fresh(
+                    batch,
+                    target,
+                    attempt,
+                    started,
+                    session.as_ref(),
+                    &previous,
+                    automatic,
+                )
+                .await?;
+            }
+            // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
+            // Durable publication can outlive a cancelled acknowledgement. Bind
+            // cleanup ownership before the backend can enqueue its commit.
+            let mut register = |host| {
+                resources.host = Some(host);
+                Ok(())
+            };
+            let join = self
+                .backend
+                .invitation_registered(
+                    &batch.authority,
+                    target,
+                    &check,
+                    session.trust_lookup(),
+                    &mut register,
+                )
+                .await?;
+            resources.host = Some(join.host);
+            if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
+                metadata.host_id = Some(join.host);
+            }
+            let payload = self
+                .payload(batch, target, attempt, started, check.architecture)
+                .await?;
+            resources.installation = Some(Installation::new(session, target, &join)?);
+            let transaction = resources
+                .installation
+                .as_ref()
+                .ok_or_else(|| Failure::install("The installation transaction is unavailable."))?;
             emit(
                 batch,
                 target,
                 attempt,
                 Step::Install,
-                "Host policy did not enable user linger; the service may stop after logout.",
+                "Installing the infraternal agent.",
                 started,
                 None,
             );
-        }
-        let host = resources
-            .host
-            .ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Facts,
-            "Waiting for authenticated host facts.",
-            started,
-            None,
-        );
-        self.backend.connected_facts(&batch.authority, host).await?;
-        emit(
-            batch,
-            target,
-            attempt,
-            Step::Connect,
-            "Checking a terminal through the infraternal agent.",
-            started,
-            None,
-        );
-        self.backend.terminal_canary(&batch.authority, host).await?;
-        transaction.commit().await?;
-        // Completion also discharges durable retirement ownership. Reporting
-        // Done without that acknowledgement would promise authority that a
-        // subsequent startup correctly retires as unfinished provisioning.
-        self.backend.completed(&batch.authority, host).await?;
-        Ok(())
+            transaction.stage(&payload).await.map_err(|mut error| {
+                if error.message == "The matching static infraternal binary is unavailable." {
+                    error.missing_binary = Some(Box::new(crate::model::MissingBinary {
+                        architecture: match check.architecture {
+                            crate::probe::Architecture::X86_64 => "x86_64",
+                            crate::probe::Architecture::Aarch64 => "aarch64",
+                        },
+                        path: payload.display().to_string(),
+                    }));
+                }
+                error
+            })?;
+            transaction.enroll_and_start(&join).await?;
+            drop(join); // Capability plaintext is erased immediately after its stdin handoff.
+            if !transaction.enable_linger().await? {
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Install,
+                    "Host policy did not enable user linger; the service may stop after logout.",
+                    started,
+                    None,
+                );
+            }
+            let host = resources
+                .host
+                .ok_or_else(|| Failure::install("The enrolled host identity is unavailable."))?;
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Facts,
+                "Waiting for authenticated host facts.",
+                started,
+                None,
+            );
+            self.backend.connected_facts(&batch.authority, host).await?;
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Connect,
+                "Checking a terminal through the infraternal agent.",
+                started,
+                None,
+            );
+            self.backend.terminal_canary(&batch.authority, host).await?;
+            transaction.commit().await?;
+            // Completion also discharges durable retirement ownership. Reporting
+            // Done without that acknowledgement would promise authority that a
+            // subsequent startup correctly retires as unfinished provisioning.
+            self.backend.completed(&batch.authority, host).await?;
+            Ok(())
+        })
     }
 
     /// Confirm only this failed attempt's public observation; the caller supplies
