@@ -143,16 +143,18 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,594,856 bytes |
+  | `x86_64-unknown-linux-musl` | 21,332,464 bytes |
+  | `aarch64-unknown-linux-musl` | 19,528,712 bytes |
 
-  These are the #198 measurements of the full-feature release recipe after
-  unused native APIs, duplicated action metadata construction, OpenSSL's
+  These are the #230 measurements of the full-feature release recipe after
+  sharing the SSH setup-lock literal and optimizing its management crate for size.
+  The earlier #198 reductions remain: unused native APIs, duplicated action
+  metadata construction, OpenSSL's
   unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
   cut (D243, D264, #198). The x86_64 build retains AES-NI and generic AES-GCM
   dispatch, checked against a NIST vector
   using the shipping static crypto archive.
-  The release and host-facts plugins use size optimization; terminal and mesh
+  The release, host-facts and SSH plugins use size optimization; terminal and mesh
   data paths retain speed optimization (D243).
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
