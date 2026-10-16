@@ -1,4 +1,4 @@
-# Validate and retire only the stopped daemon's fixed local control socket (#230).
+# Validate stopped control sockets and receipt-authorized staging before retiring failed setup (#230).
 validate_control_socket() {
     control="$base/sessions/plugins.sock"
     [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0
@@ -42,4 +42,45 @@ retire_control_socket() {
         [ ! -L "$control" ] && [ "$(stat -c '%d:%i' "$control")" = "$control_identity" ] || exit 71
         rm -- "$control"
     fi
+}
+
+# An outside receipt is written only after service rollback, before retiring
+# stage. Its surviving markers may be any subset; validate known artifacts
+# without reading enrollment contents or following links before resuming removal.
+validate_retired_stage() {
+    stage="$base/.bootstrap-lock"
+    [ -e "$stage" ] || [ -L "$stage" ] || return 0
+    [ -d "$stage" ] && [ ! -L "$stage" ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 71
+    for entry in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        case "${entry##*/}" in
+            state|cache)
+                [ -d "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 700 ] || exit 71
+                bad=$(find "$entry" \( ! -uid "$(id -u)" -o ! \( -type d -o -type f \) -o -perm /077 -o \( -type d ! -perm 0700 \) \) -print -quit) || exit 71
+                [ -z "$bad" ] || exit 71
+                count=$(find "$entry" -printf . | wc -c)
+                [ "$count" -le 1024 ] || exit 75
+                continue;;
+            current|launcher)
+                [ -L "$entry" ] || exit 71
+                case "${entry##*/}:$(readlink "$entry")" in
+                    "current:$base/bin/live"|"launcher:$base/bin/current") continue;;
+                    *) exit 71;;
+                esac;;
+            payload)
+                [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || exit 71
+                case "$(stat -c '%a' "$entry")" in 600|700) continue;; *) exit 71;; esac;;
+            transaction|kind|lease|unit|activating|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested) :;;
+            *) exit 75;;
+        esac
+        [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 600:1 ] || exit 71
+        [ "$(stat -c '%s' "$entry")" -le 4096 ] || exit 71
+        case "${entry##*/}" in
+            transaction) [ "$(cat "$entry")" = "$1" ] || exit 75;;
+            kind) [ "$(cat "$entry")" = fresh ] || exit 75;;
+            unit) grep -Fxq "# infraternal bootstrap $2" "$entry" || exit 71;;
+            lease) [ "$(stat -c '%s' "$entry")" -le 64 ] || exit 71;;
+            *) [ "$(stat -c '%s' "$entry")" = 0 ] || exit 71;;
+        esac
+    done
 }

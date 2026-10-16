@@ -484,10 +484,16 @@ fi
 pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
-    if [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
-        finish_fresh
-        exit 0
+    # This receipt means service rollback is complete. Do not repeat service
+    # changes after a stop inside stage retirement, even if its markers are gone.
+    stage="$base/.bootstrap-lock"
+    if [ -e "$stage" ] || [ -L "$stage" ]; then
+        validate_retired_stage "$transaction" "$host"
+        retire_setup_lease
+        rm -rf "$stage"
     fi
+    finish_fresh
+    exit 0
 fi
 if [ ! -e "$base" ] && [ ! -L "$base" ]; then exit 0; fi
 [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71

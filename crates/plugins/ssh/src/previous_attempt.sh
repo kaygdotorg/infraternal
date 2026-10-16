@@ -119,6 +119,7 @@ inspect_previous() {
             done
         else
             private_file "$base/.bootstrap-owner"
+            [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
             [ "$(cat "$base/.bootstrap-owner")" = "$previous_host" ] || exit 75
         fi
     else
@@ -145,7 +146,9 @@ inspect_previous() {
         hex_id "$previous_transaction"
     fi
     not_live
-    if [ -e "$base/.bootstrap-lock" ] || [ -L "$base/.bootstrap-lock" ]; then
+    if [ -n "$receipt" ]; then
+        validate_retired_stage "$previous_transaction" "$previous_host"
+    elif [ -e "$base/.bootstrap-lock" ] || [ -L "$base/.bootstrap-lock" ]; then
         stage="$base/.bootstrap-lock"
         [ -d "$stage" ] && [ ! -L "$stage" ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 71
         # Receipt and any surviving lock must describe the same fresh attempt.

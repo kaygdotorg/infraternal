@@ -175,6 +175,44 @@ class EarlierSetup(unittest.TestCase):
         self.assertTrue(control.exists())
         self.assertTrue(self.receipt.exists())
 
+    def test_partial_stage_retirement_never_adopts_another_transaction(self):
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        marker = stage / 'transaction'
+        marker.write_text('4' * 32 + '\n')
+        marker.chmod(0o600)
+        self.assertEqual(self.run_shell('\ninspect_previous').returncode, 75)
+        self.assertTrue(marker.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_partial_stage_retirement_keeps_unknown_files(self):
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        unknown = stage / 'retained'
+        unknown.write_text('retained data')
+        unknown.chmod(0o600)
+        self.assertEqual(self.recover().returncode, 75)
+        self.assertTrue(unknown.exists())
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_partial_stage_retirement_never_follows_a_nested_link(self):
+        self.listener.close()
+        stage = self.base / '.bootstrap-lock'
+        state = stage / 'state'
+        stage.mkdir(mode=0o700)
+        state.mkdir(mode=0o700)
+        retained = self.base.parent / 'retained'
+        retained.write_text('retained data')
+        retained.chmod(0o600)
+        (state / 'link').symlink_to(retained)
+        self.assertEqual(self.recover().returncode, 71)
+        self.assertTrue((state / 'link').is_symlink())
+        self.assertTrue(retained.exists())
+        self.assertTrue(self.receipt.exists())
+
     def test_live_listener_is_refused(self):
         self.listener.listen()
         self.assertEqual(self.run_shell('\ninspect_previous').returncode, 73)

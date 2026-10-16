@@ -1946,3 +1946,60 @@ async fn review_live_relative_control_socket_preserves_its_receipt() {
         cleanup.as_ref().err().and_then(|error| error.exit_status),
     );
 }
+
+/// Final receipt authority must survive partial retirement of the staging journal too.
+#[tokio::test]
+async fn restart_recovers_partial_stage_retirement() {
+    for retired in ["transaction", "kind", "both"] {
+        let fixture = Fixture::new();
+        let transaction = fixture.transaction();
+        transaction.stage(&fixture.binary).await.unwrap();
+        // Include an unfinished enrollment directory: retirement must validate
+        // its private tree without reading identity contents or following links.
+        let staged = fixture.base().join(".bootstrap-lock/state");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(staged.join("proof"), b"private fixture state").unwrap();
+        std::fs::set_permissions(staged.join("proof"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let stage = fixture.base().join(".bootstrap-lock");
+        let names = if retired == "both" {
+            "transaction kind"
+        } else {
+            retired
+        };
+        executable(
+            &fixture.root.join("tools/rm"),
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in '-rf {}') for name in {names}; do /usr/bin/rm -f \"{}/$name\"; done; exit 1;; esac\nexec /usr/bin/rm \"$@\"\n",
+                stage.display(),
+                stage.display()
+            ),
+        );
+        assert!(transaction.rollback().await.is_err());
+        let receipt = fixture.receipt();
+        std::fs::remove_file(fixture.root.join("tools/rm")).unwrap();
+        let session = Local {
+            root: fixture.root.clone(),
+        };
+        let output = session
+            .run(
+                &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+                Input::Empty,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{retired}: {error:?}"));
+        let (_, previous) =
+            infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout).unwrap();
+        previous
+            .unwrap()
+            .start_fresh(&session, &fixture.target)
+            .await
+            .unwrap();
+        assert!(!receipt.exists());
+        assert!(!fixture.base().exists());
+        let retry = fixture.transaction();
+        retry.stage(&fixture.binary).await.unwrap();
+        retry.rollback().await.unwrap();
+    }
+}
