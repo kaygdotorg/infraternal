@@ -349,6 +349,16 @@ inside that probe. Reports refuse missing halves, reversed clocks or CPU spans
 longer than the RTT. Older captures without these clocks have no measured
 reader-CPU value; overlapping probe intervals must never be added together.
 
+`ppu_aged_tail.py` retains one host through 5,400 active seconds of the original
+mixed workload before the existing 900-second diagnostic. Wrap the entire
+6,300-second fixture with `ppu_segment.py`; the full kernel capture still fits
+one short hold. Its phase boundary includes a survivor census, task restart and
+resize pair, so this preconditioned capture cannot replace unchanged admission.
+The native stage ring remains bounded while aging. Preserve its raw prefix,
+including any preconditioning overflow, and use `preconditioning.json`'s fenced
+byte offset with `stage_window` to derive a separate capture-only log. Never
+truncate the native process's open file or ignore overflow inside the capture.
+
 `ppu_baseline_tail.py` observes the shipping control without requesting a
 native stage header or sending profiling signals to it. Independent launch
 records bind each shim to its own shell; the same marker matcher and batch
