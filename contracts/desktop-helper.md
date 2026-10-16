@@ -74,10 +74,28 @@ forced IDR [D200 V2]. Encode at requested output dimensions.
 
 AX uses points. Desired source pixels are canvas size × backing scale; divide
 by the source display’s actual backing scale before setting AX size. Save original point position/size
-once, restore on stop and disconnect. Verify actual size after setting it;
+once, restore on stop and disconnect unless the desktop owns its geometry. Verify actual size after setting it;
 refusal or local input in the last 60 seconds means letterbox, with an explicit
-content rectangle. Retry following when idle [D208 A2]. Input coordinates use
+content rectangle. Follow once local input becomes idle [D208 A2]. Input coordinates use
 output pixels and map through that rectangle; bands accept no clicks.
+
+Managed desktops are detected without a setting [D290]. Before a geometry write,
+inspect process executable names for a known tiling manager; never inspect its
+arguments, configuration or control socket. Independently, one own-window AX
+size notification that differs from our requested size within two monotonic
+seconds permanently yields that window to the desktop. Move notifications also
+refresh its actual frame. The state lasts for the session, including stop and
+disconnect: no further native resize or original-geometry restoration is allowed.
+A refused identical size is not retried by the reconciliation timer. A different
+canvas size still resizes an unmanaged window. The capture rectangle follows the
+real window and its picture fits the canvas with its aspect preserved.
+
+Window Geometry/Status JSON adds `managed:boolean`, `resize_requests:integer`
+(cumulative native following requests) and reason `managed`. These diagnostics
+are additive; existing readers can ignore them. The signed native regression
+checks a managing desktop for 30 seconds across three canvas sizes, with zero
+native resize requests and zero source frame-size changes. Run it under the Mac
+hardware lock with an owned document; it never changes the window manager.
 
 Bring the selected app forward before accepted remote input. Local physical
 mouse/keyboard activity pauses injection for 2 seconds; synthetic remote events
