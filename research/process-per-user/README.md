@@ -299,6 +299,36 @@ direct masters; its different reader prevents treating that result as a hard
 latency lower bound. The unchanged two-hour `ppu-run --phase soak` remains the
 admission workload. Before/after tables and raw receipts live on #205.
 
+The current-dev control uses `scripts/bench/ppu_compare.py
+--independent-sessions` with a separately built shipping image. The adapter
+launches one ordinary shim per session and preserves the original timed echo,
+shell commands, mix, seed and cadence. Resource rows sum shim processes and
+exclude shells; the wakeup counter observes only the first baseline shim, so
+its count is not comparable with the shared host's total. Aggregate resource
+sampling and lock metadata are outside timed cohorts but still add observer
+work. Use equal durations and warmups; do not treat a short control as a
+completed admission run.
+
+Both comparison modes append lock inode/holder, owner file, load and scope CPU
+snapshots after each native echo cohort. Captured process ancestry identifies
+the fixture's control connection. `ppu_compare_report.py` reports each completed
+lock segment separately, retains native outcomes and records every exclusion.
+Missing ownership, observed foreign scope CPU activity and ambiguous windows
+cannot become clean timing rows. Snapshots do not continuously certify that
+arbitrary work outside the flock was absent. A baseline miss establishes a
+measured comparison, not permission to change D41 or to subtract percentiles.
+
+`ppu_tail.py` combines corrected host stages with scheduler events for the
+host, reader and all 100 probed shells. Syscalls, kernel wait stacks, fault and
+reclaim events cover the host, reader and two selected shells. Per-task fault,
+run-queue and timer-slack counters accompany completed cohorts. A private
+collector process discards syscall arguments and fault addresses; it retains
+kernel symbols, not user stack unwinds. `ppu_tail_report.py` intersects exact
+probe windows, retains unknown scheduler coverage and treats scheduled-running
+as an upper bound that can include interrupts or virtual CPU steal. PID setup,
+stage flushing and tracing affect scheduling; these are diagnostic captures,
+never admission results or a substitute for the uninstrumented control.
+
 The native `ppu_wire_probe` example is a diagnostic observer. It opens additional
 viewer sockets with a distinct durable writer, finishes setup before timing,
 and checks output offsets and shell-generated markers. Those extra connections
