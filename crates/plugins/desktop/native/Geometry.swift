@@ -33,7 +33,7 @@ final class WindowGeometry {
     private var interactive: [CGRect] = []
 
     init(id: UInt32, pid: Int32, size: [String: Any]) throws {
-        guard AXIsProcessTrusted(), let entry = windowSnapshot().first(where: {
+        guard AXIsProcessTrusted(), let entry = windowSnapshot(applicationMetadata: false).first(where: {
             ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid
         }), let frame = entry["frame"] as? [String: Any] else { throw HelperFailure.permission }
         self.pid = pid; self.id = id; original = try rect(frame); actual = original
@@ -90,7 +90,7 @@ final class WindowGeometry {
     }
 
     func follow() {
-        let snapshot = windowSnapshot()
+        let snapshot = windowSnapshot(applicationMetadata: false)
         guard let selected = snapshot.first(where: { ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid }),
               let raw = selected["frame"] as? [String: Any], let cgFrame = try? rect(raw) else {
             exists = false; interactive = []; reason = "closed"; return

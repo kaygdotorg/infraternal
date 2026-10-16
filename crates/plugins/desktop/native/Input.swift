@@ -144,7 +144,7 @@ final class RemoteControl {
             } else { point = nil }
             guard let point else { return ["accepted": false, "reason": "letterbox"] }
             if let geometry {
-                let front = windowSnapshot().first { entry in
+                let front = windowSnapshot(applicationMetadata: false).first { entry in
                     guard entry["on_screen"] as? Bool == true, let raw = entry["frame"] as? [String:Any], let frame = try? rect(raw) else { return false }
                     return frame.contains(point)
                 }

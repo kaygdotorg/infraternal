@@ -86,4 +86,5 @@ fn native_typing_stays_within_the_source_control_reply_budget() {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
+    println!("{}", String::from_utf8_lossy(&result.stdout));
 }

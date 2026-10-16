@@ -2,22 +2,28 @@
 import AppKit
 import CoreGraphics
 
-func windowSnapshot() -> [[String: Any]] {
+// Input and geometry need ownership and bounds, not application labels. Keep
+// their projection on the same validated CG entries without LaunchServices work
+// per window on every keystroke or AX notification. The picker retains labels.
+func windowSnapshot(applicationMetadata: Bool = true) -> [[String: Any]] {
     let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
     return entries.compactMap { entry in
         guard let id = entry[kCGWindowNumber as String] as? UInt32,
               let pid = entry[kCGWindowOwnerPID as String] as? Int32,
               let raw = entry[kCGWindowBounds as String] as? [String: CGFloat],
               let x = raw["X"], let y = raw["Y"], let w = raw["Width"], let h = raw["Height"], w > 0, h > 0 else { return nil }
-        let app = NSRunningApplication(processIdentifier: pid)
         // Dialogs, menu-bar apps and off-screen windows remain selectable [A5].
-        return ["window_id": id, "owner_pid": pid,
-                "bundle_id": app?.bundleIdentifier as Any? ?? NSNull(),
-                "app_name": app?.localizedName as Any? ?? NSNull(),
+        var window: [String: Any] = ["window_id": id, "owner_pid": pid,
                 "title": entry[kCGWindowName as String] ?? NSNull(),
                 "layer": entry[kCGWindowLayer as String] ?? 0,
                 "frame": rectJSON(CGRect(x:x,y:y,width:w,height:h)),
                 "on_screen": entry[kCGWindowIsOnscreen as String] ?? false]
+        if applicationMetadata {
+            let app = NSRunningApplication(processIdentifier: pid)
+            window["bundle_id"] = app?.bundleIdentifier as Any? ?? NSNull()
+            window["app_name"] = app?.localizedName as Any? ?? NSNull()
+        }
+        return window
     }
 }
 
