@@ -14,7 +14,8 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
   let relaying = false;
   let lastMessage: string | undefined;
   let lastShownAt = 0;
-  let toastOwned = false;
+  let nextToastIdentity = 0;
+  let ownedToastIdentity: number | undefined;
   let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
   const observer = new MutationObserver(() => {
     const message = element.textContent?.trim() ?? "";
@@ -25,14 +26,18 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
       const connectionFailure = message === "The connection to the server ended." || message === "The server closed the connection." || message === "The connection did not respond in time.";
       // A retry changes the hidden status several times. Keep its reason visible across those routine states, and
       // do not recreate the same toast on every immediate close. The toast's own timeout bounds each display.
-      if (message !== lastMessage || !toastOwned || (!connectionFailure && Date.now() - lastShownAt >= 5000)) {
+      const repeatedConnectionReason = connectionFailure && message === lastMessage;
+      if (!repeatedConnectionReason && (message !== lastMessage || ownedToastIdentity === undefined || Date.now() - lastShownAt >= 5000)) {
         lastMessage = message;
         lastShownAt = Date.now();
+        const identity = ++nextToastIdentity;
+        ownedToastIdentity = identity;
         // Whatever passes the filter is bad news (a lost connection, a refusal or an ended terminal), never a
         // confirmation. The old guess by wording missed "The connection to the server ended."
         // Keep a connection reason visible until the status clears after a stable attach.
-        toast.show({ message, tone: "error", duration: connectionFailure ? 0 : 5000, onClose: () => { toastOwned = false; } });
-        toastOwned = true;
+        toast.show({ message, tone: "error", duration: connectionFailure ? 0 : 5000, onClose: () => {
+          if (ownedToastIdentity === identity) ownedToastIdentity = undefined;
+        } });
       }
     } else if (!message && relaying) {
       clearTimeout(clearTimer);
@@ -42,8 +47,8 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
         relaying = false;
         lastMessage = undefined;
         lastShownAt = 0;
-        if (toastOwned) toast.dismiss();
-        toastOwned = false;
+        if (ownedToastIdentity !== undefined) toast.dismiss();
+        ownedToastIdentity = undefined;
       }, 300);
     } else {
       // A retry that starts before the settle window completes keeps the existing reason in place.
@@ -58,8 +63,8 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
       observer.disconnect();
       clearTimeout(clearTimer);
       clearTimer = 0;
-      if (toastOwned) toast.dismiss();
-      toastOwned = false;
+      if (ownedToastIdentity !== undefined) toast.dismiss();
+      ownedToastIdentity = undefined;
     },
   };
 }

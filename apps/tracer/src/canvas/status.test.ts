@@ -46,6 +46,40 @@ test("repeated connection closes do not reopen the persistent reason toast", () 
   }
 });
 
+test("a repeated close does not retake the shared toast after a newer message replaces it", () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const original = { document: globals.document, MutationObserver: globals.MutationObserver };
+  const callbacks: Array<() => void> = [];
+  const shown: string[] = [];
+  const element = { hidden: false, textContent: "" };
+  let currentClose: (() => void) | undefined;
+  globals.document = { createElement: () => element };
+  globals.MutationObserver = class { constructor(callback: () => void) { callbacks.push(callback); } observe() {} disconnect() {} };
+  const toast = {
+    show(value: { message: string; onClose?: () => void }) {
+      currentClose?.();
+      shown.push(value.message);
+      currentClose = value.onClose;
+    },
+    dismiss() { const close = currentClose; currentClose = undefined; close?.(); },
+    dispose() {},
+  };
+  const relay = createStatusRelay(toast as never);
+  const say = (message: string): void => { element.textContent = message; for (const callback of callbacks) callback(); };
+  try {
+    say("The connection to the server ended.");
+    toast.show({ message: "A newer operation finished." });
+    say("Connection lost. Reconnecting…");
+    say("The connection to the server ended.");
+    expect(shown).toEqual(["The connection to the server ended.", "A newer operation finished."]);
+  } finally {
+    relay.dispose();
+    for (const key of ["document", "MutationObserver"] as const) {
+      if (original[key] === undefined) delete globals[key]; else globals[key] = original[key];
+    }
+  }
+});
+
 test("a close reason stays visible through a quick reconnect and clears after a stable attach", async () => {
   const state = relay();
   state.say("The connection to the server ended.");
