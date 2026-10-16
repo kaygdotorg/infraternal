@@ -55,3 +55,9 @@ Compile the complete native companion with `native/Permissions.swift` too; its
 `--check-permissions` mode must return exactly two JSON boolean fields and exit.
 For a real permission check, use the installed signed bundle and the same local
 companion path as production; do not request permissions from this fixture.
+
+`native-pipe-faults.py` serves the real-pipe deadline tests through private
+per-run symlinks: `pixel-reader.py` reports its PID and never drains input;
+`reply-ordering.py` emits an old inventory reply before the next status reply.
+The executable is checked in so concurrent tests never write the script they
+are about to execute. Each run exclusively creates its receipt directory.

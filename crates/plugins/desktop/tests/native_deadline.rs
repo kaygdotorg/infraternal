@@ -10,31 +10,46 @@ use infraternal_plugin_desktop::protocol;
 #[path = "../src/native.rs"]
 mod native;
 
+/// Publish an existing executable without opening its inode for writing. Parallel
+/// child launches can inherit a transient writer until exec closes it; keeping
+/// fixture code read-only avoids that executable-publication race altogether.
+/// Exclusive directories also keep an earlier run's PID receipt out of this run.
+fn fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::{fs, io, os::unix::fs::DirBuilderExt, path::PathBuf};
+    let root =
+        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
+    fs::create_dir_all(&root).unwrap();
+    let mut attempt = 0_u64;
+    loop {
+        let dir = root.join(format!(
+            "desktop-native-{name}-{}-{attempt}",
+            std::process::id()
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                let executable = dir.join(name);
+                let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/native-pipe-faults.py");
+                std::os::unix::fs::symlink(source, &executable).unwrap();
+                return (dir, executable);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                attempt = attempt.checked_add(1).expect("fixture namespace exhausted");
+            }
+            Err(error) => panic!("cannot create private native fixture: {error}"),
+        }
+    }
+}
+
 #[test]
 fn unresponsive_native_pixel_reader_obeys_operation_deadline() {
     use nix::{
         sys::signal::{Signal, kill},
         unistd::Pid,
     };
-    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::mpsc, time::Duration};
+    use std::{fs, sync::mpsc, time::Duration};
 
-    let root =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
-    let dir = root.join(format!("desktop-native-deadline-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let executable = dir.join("native-fixture.py");
-    fs::write(
-        &executable,
-        r"#!/usr/bin/env python3
-# Role: emulate a native framework child that has stopped draining its input.
-import os, signal, sys
-with open(sys.argv[0] + '.pid', 'w') as output:
-    output.write(str(os.getpid()))
-signal.pause()
-",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let (dir, executable) = fixture("pixel-reader.py");
     let mut companion = native::Native::spawn(&executable).unwrap();
     let pid_file = executable.with_extension("py.pid");
     let ready_deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -73,36 +88,8 @@ signal.pause()
 
 #[test]
 fn timed_out_native_reply_cannot_answer_the_next_command() {
-    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
-    let root =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
-    let dir = root.join(format!("desktop-native-ordering-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let executable = dir.join("native-fixture.py");
-    fs::write(
-        &executable,
-        r"#!/usr/bin/env python3
-# Role: withhold the first reply until a subsequent command arrives.
-import struct, sys
-source = sys.stdin.buffer
-sink = sys.stdout.buffer
-def request():
-    prefix = source.read(4)
-    if len(prefix) != 4:
-        sys.exit(0)
-    length, = struct.unpack('>I', prefix)
-    body = source.read(length)
-    if len(body) != length:
-        sys.exit(0)
-request()
-request()
-sink.write(struct.pack('>IBB', 4, 1, 65) + b'{}')
-sink.write(struct.pack('>IBB', 4, 1, 68) + b'{}')
-sink.flush()
-",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    use std::fs;
+    let (dir, executable) = fixture("reply-ordering.py");
     let mut companion = native::Native::spawn(&executable).unwrap();
     let first = companion.call(protocol::Kind::List, b"{}");
     let second = companion.call(protocol::Kind::Status, b"{}");
