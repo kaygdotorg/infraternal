@@ -135,6 +135,16 @@ rust_check_cli_plugin_compile_out() {
     fi
 
     printf 'disabled CLI plugin dependencies: absent from normal dependency graph\n'
+
+    # The Mac desktop component cannot build the Linux-only terminal shim.
+    # Resolve the actual target graph: a duplicate generic dependency can undo
+    # the target-scoped declaration even while every Linux build stays green.
+    dependency_tree="$(cargo tree --locked --package infraternal-agent --features desktop --target aarch64-apple-darwin --edges normal --prefix none)" || return $?
+    if grep -Fq 'infraternal-shim v' <<<"$dependency_tree"; then
+        printf 'Mac desktop dependency graph contains the Linux terminal shim\n' >&2
+        return 1
+    fi
+    printf 'Mac desktop Linux-only shim dependency: absent from normal dependency graph\n'
     cargo test --locked --package infraternal --bin infraternal --no-default-features
 }
 
