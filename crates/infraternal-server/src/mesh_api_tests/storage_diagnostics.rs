@@ -314,3 +314,87 @@ async fn settings_storage_failure_has_a_safe_original_reason() {
     );
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn sqlite_admission_failures_have_distinct_safe_reasons() {
+    let fixture = Fixture::new().await;
+    // Separate single-connection pools make the failure boundary deterministic
+    // without changing host limits or another fixture's database settings.
+    let options = SqliteConnectOptions::new()
+        .filename(&fixture.path)
+        .busy_timeout(Duration::ZERO);
+    let busy = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await
+        .unwrap();
+    let readonly = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone().read_only(true))
+        .await
+        .unwrap();
+    let saturated = SqlitePoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(1))
+        .connect_with(options)
+        .await
+        .unwrap();
+    let (capture, _guard) = Capture::start();
+    let writer = fixture.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    assert_eq!(
+        call(
+            &MeshService::new(busy.clone()),
+            OWNER,
+            "mesh.tag.create",
+            json!({"name":"bounded-write"}),
+            NOW
+        )
+        .await,
+        Err(MeshApiError::Storage)
+    );
+    writer.rollback().await.unwrap();
+    assert_eq!(
+        call(
+            &MeshService::new(readonly.clone()),
+            OWNER,
+            "mesh.tag.create",
+            json!({"name":"bounded-write"}),
+            NOW
+        )
+        .await,
+        Err(MeshApiError::Storage)
+    );
+    let held = saturated.acquire().await.unwrap();
+    assert_eq!(
+        MeshService::new(saturated.clone())
+            .list(OWNER, MeshFilter::default(), NOW)
+            .await,
+        Err(MeshApiError::Storage)
+    );
+    drop(held);
+    let errors = capture.errors();
+    let reasons: Vec<_> = errors
+        .iter()
+        .map(|event| event["fields"]["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "database locked or busy",
+            "database is read-only",
+            "database pool acquisition timed out"
+        ]
+    );
+    println!("MESH_STORAGE_ADMISSION reasons={reasons:?}");
+    busy.close().await;
+    readonly.close().await;
+    saturated.close().await;
+    assert!(
+        fixture
+            .service
+            .list(OWNER, MeshFilter::default(), NOW)
+            .await
+            .is_ok()
+    );
+    fixture.cleanup().await;
+}
