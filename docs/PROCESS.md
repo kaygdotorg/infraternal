@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,320,560 bytes |
-  | `aarch64-unknown-linux-musl` | 19,513,808 bytes |
+  | `x86_64-unknown-linux-musl` | 21,320,400 bytes |
+  | `aarch64-unknown-linux-musl` | 19,513,440 bytes |
 
   These ceilings pin the normalized combined-source artifacts measured on #201.
   A fresh checkout and empty target reproduce the x86 artifact byte for byte.
