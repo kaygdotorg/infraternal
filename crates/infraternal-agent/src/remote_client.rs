@@ -173,19 +173,23 @@ async fn run_inner(
             if local.is_none() {
                 #[cfg(any(test, feature = "native-streams"))]
                 let supplied_service = match supplied {
-                    Some(registry) => Some(crate::plugin_control::Service::with_registry(&state, registry).await?),
+                    Some(registry) => {
+                        Some(crate::plugin_control::Service::with_registry(&state, registry).await?)
+                    }
                     None => None,
                 };
                 #[cfg(not(any(test, feature = "native-streams")))]
                 let supplied_service = None;
                 *local = Some(match supplied_service {
                     Some(service) => service,
-                    None => crate::plugin_control::Service::start(
-                        &state,
-                        crate::plugins::ExecutionMode::Remote,
-                        installation,
-                    )
-                    .await?,
+                    None => {
+                        crate::plugin_control::Service::start(
+                            &state,
+                            crate::plugins::ExecutionMode::Remote,
+                            installation,
+                        )
+                        .await?
+                    }
                 });
             }
             let plugins = local
@@ -196,14 +200,22 @@ async fn run_inner(
             drop(local);
             #[cfg(any(test, feature = "native-streams"))]
             let _availability = Availability(plugins.clone());
-            server_path::run_observed(identity, state, renewal, plugins, connected,
-                #[cfg(any(test, feature = "native-streams"))]
-                observer,
-            ).await
+            #[cfg(any(test, feature = "native-streams"))]
+            if let Some(observer) = observer {
+                return server_path::run_observed(
+                    identity,
+                    state,
+                    renewal,
+                    plugins,
+                    connected,
+                    Some(observer),
+                )
+                .await;
+            }
+            server_path::run(identity, state, renewal, plugins, connected).await
         }
     })
     .await
-
 }
 
 // Keep the race in its own future. Its losing socket is dropped when this
