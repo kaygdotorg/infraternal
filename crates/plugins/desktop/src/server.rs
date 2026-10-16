@@ -777,7 +777,10 @@ async fn viewer_loop(
                                 _ = stopped.changed() => return Ok(()),
                                 result = viewer.input_wait(input) => result.map_err(|_| ())?,
                             },
-                            Frame::Desktop(Message::Size { width, height, density_milli }) => viewer.resize(width, height, density_milli).map_err(|_| ())?,
+                            Frame::Desktop(Message::Size { width, height, density_milli }) => tokio::select! { biased;
+                                _ = stopped.changed() => return Ok(()),
+                                result = viewer.resize_wait(width, height, density_milli) => result.map_err(|_| ())?,
+                            },
                             Frame::Desktop(Message::Repair { .. }) => viewer.request_keyframe().map_err(|_| ())?,
                             _ => return Err(()),
                         }
@@ -839,6 +842,13 @@ mod viewer_tests {
     }
     #[tokio::test]
     async fn waiting_input_cannot_cross_a_controller_handover() {
+        waiting_command_cannot_cross_a_controller_handover(false).await;
+    }
+    #[tokio::test]
+    async fn waiting_resize_cannot_cross_a_controller_handover() {
+        waiting_command_cannot_cross_a_controller_handover(true).await;
+    }
+    async fn waiting_command_cannot_cross_a_controller_handover(resize: bool) {
         use infraternal_protocol::desktop::Input;
         use std::{future::Future, task::Poll};
         let (session, mut commands) =
@@ -849,15 +859,27 @@ mod viewer_tests {
         first.take_control().unwrap();
         commands.recv().await.unwrap();
         for _ in 0..8 {
-            first
-                .input(Input::Text {
-                    scalar: u32::from('a'),
-                })
-                .unwrap();
+            if resize {
+                first.resize(640, 480, 1000).unwrap();
+            } else {
+                first
+                    .input(Input::Text {
+                        scalar: u32::from('a'),
+                    })
+                    .unwrap();
+            }
         }
-        let pending = first.input_wait(Input::Text {
-            scalar: u32::from('b'),
-        });
+        let pending = async {
+            if resize {
+                first.resize_wait(800, 600, 1000).await
+            } else {
+                first
+                    .input_wait(Input::Text {
+                        scalar: u32::from('b'),
+                    })
+                    .await
+            }
+        };
         tokio::pin!(pending);
         // Poll once against a full real host queue, then change control before
         // the waiting sender can publish its reserved slot. No scheduler sleep.
@@ -871,9 +893,14 @@ mod viewer_tests {
         second.take_control().unwrap();
         assert_eq!(pending.await, Err(Error::Forbidden));
         while let Ok(command) = commands.try_recv() {
-            assert!(
+            assert!(if resize {
+                !matches!(
+                    command,
+                    crate::session::HostCommand::Size { width: 800, .. }
+                )
+            } else {
                 !matches!(command, crate::session::HostCommand::Input { input: Input::Text { scalar }, .. } if scalar == u32::from('b'))
-            );
+            });
         }
     }
     #[tokio::test]
@@ -1546,6 +1573,29 @@ mod slow_action_tests {
     /// the existing attachment usable after bounded command forwarding [D208].
     #[tokio::test]
     async fn finite_text_burst_preserves_viewer_control() {
+        finite_burst_preserves_viewer_control(false).await;
+    }
+
+    #[tokio::test]
+    async fn finite_resize_burst_preserves_viewer_control() {
+        finite_burst_preserves_viewer_control(true).await;
+    }
+
+    fn burst_message(resize: bool, index: usize, scalar: char) -> Message<'static> {
+        if resize {
+            Message::Size {
+                width: 640 + 2 * u16::try_from(index).unwrap(),
+                height: 480,
+                density_milli: 1000,
+            }
+        } else {
+            Message::Input(infraternal_protocol::desktop::Input::Text {
+                scalar: u32::from(scalar),
+            })
+        }
+    }
+
+    async fn finite_burst_preserves_viewer_control(resize: bool) {
         let server = DesktopServer::new(1);
         server.configure(true);
         let (session, mut host_commands) =
@@ -1586,27 +1636,29 @@ mod slow_action_tests {
         // Drain the real host queue independently. The burst fits the socket's
         // finite ingress queue, without sleeps or any artificial CPU load.
         let drain = tokio::spawn(async move {
-            let mut texts = 0;
+            let mut forwarded = 0;
             while let Some(command) = host_commands.recv().await {
-                texts += usize::from(matches!(
-                    command,
-                    crate::session::HostCommand::Input {
-                        input: infraternal_protocol::desktop::Input::Text { .. },
-                        ..
-                    }
-                ));
+                forwarded += usize::from(if resize {
+                    matches!(command, crate::session::HostCommand::Size { .. })
+                } else {
+                    matches!(
+                        command,
+                        crate::session::HostCommand::Input {
+                            input: infraternal_protocol::desktop::Input::Text { .. },
+                            ..
+                        }
+                    )
+                });
             }
-            texts
+            forwarded
         });
         // Sixteen scalars fit the existing ingress queue exactly. Populate it
         // before yielding, matching a coalesced browser/socket delivery.
-        for scalar in "ordinary text 🐈!".chars() {
+        for (index, scalar) in "ordinary text 🐈!".chars().enumerate() {
             let mut wire = Vec::new();
             encode_muxed_frame_into(
                 1,
-                &Frame::Desktop(Message::Input(infraternal_protocol::desktop::Input::Text {
-                    scalar: u32::from(scalar),
-                })),
+                &Frame::Desktop(burst_message(resize, index, scalar)),
                 &mut wire,
             )
             .unwrap();
@@ -1637,11 +1689,11 @@ mod slow_action_tests {
         worker.await.unwrap();
         server.configure(false);
         drop(server);
-        let texts = drain.await.unwrap();
+        let forwarded = drain.await.unwrap();
         assert!(
             matches!(retained, Ok(true)),
-            "finite text burst retired its viewer (forwarded_texts={texts})"
+            "finite burst retired its viewer (resize={resize}, forwarded={forwarded})"
         );
-        assert_eq!(texts, "ordinary text 🐈!".chars().count());
+        assert_eq!(forwarded, "ordinary text 🐈!".chars().count());
     }
 }

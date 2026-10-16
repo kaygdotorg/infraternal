@@ -565,7 +565,9 @@ impl Viewer {
     /// # Errors
     /// Refuses invalid input, retirement, a changed controller or a stalled host.
     pub async fn input_wait(&self, input: Input) -> Result<(), Error> {
-        let command = self.input_command(input)?;
+        self.queue_command(self.input_command(input)?).await
+    }
+    async fn queue_command(&self, command: HostCommand) -> Result<(), Error> {
         // Authority cancellation and the forwarding fence keep queued input from
         // inheriting a later controller, including a quick handover back.
         tokio::time::timeout(
@@ -602,6 +604,29 @@ impl Viewer {
     /// # Errors
     /// Refuses invalid dimensions, withdrawn access, missing control or overload.
     pub fn resize(&self, width: u16, height: u16, density_milli: u16) -> Result<(), Error> {
+        self.session
+            .commands
+            .try_send(self.resize_command(width, height, density_milli)?)
+            .map_err(|_| Error::Busy)
+    }
+    /// Wait for bounded size forwarding under the originating controller lease.
+    /// # Errors
+    /// Refuses invalid dimensions, retirement, handover or a stalled host.
+    pub async fn resize_wait(
+        &self,
+        width: u16,
+        height: u16,
+        density_milli: u16,
+    ) -> Result<(), Error> {
+        self.queue_command(self.resize_command(width, height, density_milli)?)
+            .await
+    }
+    fn resize_command(
+        &self,
+        width: u16,
+        height: u16,
+        density_milli: u16,
+    ) -> Result<HostCommand, Error> {
         infraternal_protocol::desktop::Message::Size {
             width,
             height,
@@ -615,16 +640,13 @@ impl Viewer {
         if state.closed || state.controller != Some(self.id) {
             return Err(Error::Forbidden);
         }
-        self.session
-            .commands
-            .try_send(HostCommand::Size {
-                viewer: self.id,
-                lease: state.controller_lease,
-                width,
-                height,
-                density_milli,
-            })
-            .map_err(|_| Error::Busy)
+        Ok(HostCommand::Size {
+            viewer: self.id,
+            lease: state.controller_lease,
+            width,
+            height,
+            density_milli,
+        })
     }
     /// A writer that discarded a stale frame seals deltas until the next IDR.
     /// # Errors
