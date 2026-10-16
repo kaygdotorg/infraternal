@@ -101,6 +101,8 @@ test("re-detects a wrapped URL in scrollback using cached wrap flags", () => {
     cancelIdleCallback() {},
     setTimeout,
     clearTimeout,
+    addEventListener() {},
+    removeEventListener() {},
   } as unknown as Window;
   (globalThis as unknown as { window?: Window }).window = fakeWindow;
   const host = {
@@ -158,6 +160,8 @@ test("does not expose a valid prefix when scrollback wrap history is unknown", (
     cancelIdleCallback() {},
     setTimeout,
     clearTimeout,
+    addEventListener() {},
+    removeEventListener() {},
   } as unknown as Window;
   (globalThis as unknown as { window?: Window }).window = fakeWindow;
   const host = { addEventListener() {}, removeEventListener() {} } as unknown as HTMLElement;
@@ -193,6 +197,8 @@ test("waits for a wrapped URL to leave the visible edge before offering it", () 
     cancelIdleCallback() {},
     setTimeout,
     clearTimeout,
+    addEventListener() {},
+    removeEventListener() {},
   } as unknown as Window;
   (globalThis as unknown as { window?: Window }).window = fakeWindow;
   const host = { addEventListener() {}, removeEventListener() {} } as unknown as HTMLElement;
@@ -236,6 +242,8 @@ test("drops a changed row's cached link before deferred detection runs", () => {
     cancelIdleCallback() {},
     setTimeout,
     clearTimeout,
+    addEventListener() {},
+    removeEventListener() {},
   } as unknown as Window;
   const host = { addEventListener() {}, removeEventListener() {} } as unknown as HTMLElement;
   const canvas = { style: {}, getBoundingClientRect: () => new DOMRect(0, 0, 80, 40) } as unknown as HTMLCanvasElement;
@@ -277,6 +285,8 @@ test("keeps unchanged candidate rows out of parsing while pending rows cannot ac
     cancelIdleCallback() {},
     setTimeout,
     clearTimeout,
+    addEventListener() {},
+    removeEventListener() {},
   } as unknown as Window;
   const host = { addEventListener() {}, removeEventListener() {} } as unknown as HTMLElement;
   const canvas = { style: {}, getBoundingClientRect: () => new DOMRect(0, 0, 80, 40) } as unknown as HTMLCanvasElement;
