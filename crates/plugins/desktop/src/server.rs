@@ -411,11 +411,24 @@ impl Plugin for DesktopServer {
             let mut viewers: HashMap<u32, ViewerHandle> = HashMap::new();
             let mut workers = JoinSet::new();
             let mut calls = JoinSet::new();
-            // One live login lease owns the socket's tasks. Viewer count must
-            // not multiply the database watchdog; packet and input projections
-            // still check current session, node, login and controller authority.
-            let outcome = host.authorized(Box::pin(async {
+            let mut pending = None;
+            // One live login lease owns all active socket tasks. An idle socket
+            // holds no watchdog: the next request must enter a fresh scope before
+            // dispatch. Packet/input projections retain their authority checks.
+            let outcome = loop {
+                if viewers.is_empty() && workers.is_empty() && calls.is_empty() {
+                    pending = requests.recv().await;
+                    if pending.is_none() {
+                        break Ok(());
+                    }
+                }
+                let mut idle = false;
+                let outcome = host.authorized(Box::pin(async {
                 loop {
+                    if pending.is_none() && viewers.is_empty() && workers.is_empty() && calls.is_empty() {
+                        idle = true;
+                        break;
+                    }
                     tokio::select! {
                         result = calls.join_next(), if !calls.is_empty() => {
                             if !matches!(result, Some(Ok(Ok(())))) { break; }
@@ -426,7 +439,7 @@ impl Plugin for DesktopServer {
                             if let Some(Ok((task, stream))) = ended
                                 && viewers.get(&stream).is_some_and(|viewer| viewer.task == task) { viewers.remove(&stream); }
                         }
-                        request = requests.recv() => {
+                        request = async { match pending.take() { Some(wire) => Some(wire), None => requests.recv().await } } => {
                             let Some(wire) = request else { break; };
                             let Ok(decoded) = decode_muxed_frame(&wire) else { break; };
                             let stream = decoded.stream_id;
@@ -475,7 +488,11 @@ impl Plugin for DesktopServer {
                     }
                 }
                 Ok(())
-            })).await;
+                })).await;
+                if outcome.is_err() || !idle {
+                    break outcome;
+                }
+            };
             // Fixed states only: diagnostics never contain login, target or input data.
             if std::env::var_os("INFRATERNAL_NATIVE_DIAGNOSTICS").is_some() {
                 eprintln!(
@@ -1042,6 +1059,7 @@ mod slow_action_tests {
         active: Arc<std::sync::atomic::AtomicUsize>,
         started: Arc<std::sync::atomic::AtomicUsize>,
         cancelled: watch::Receiver<bool>,
+        released: Arc<tokio::sync::Notify>,
     }
     impl SocketHost for CountedHost {
         fn user_id(&self) -> &'static str {
@@ -1059,15 +1077,16 @@ mod slow_action_tests {
         ) -> Operation<'a, Result<(), ()>> {
             Box::pin(async move {
                 use std::sync::atomic::Ordering::SeqCst;
-                struct Lease<'a>(&'a std::sync::atomic::AtomicUsize);
+                struct Lease<'a>(&'a std::sync::atomic::AtomicUsize, &'a tokio::sync::Notify);
                 impl Drop for Lease<'_> {
                     fn drop(&mut self) {
                         self.0.fetch_sub(1, SeqCst);
+                        self.1.notify_one();
                     }
                 }
                 self.started.fetch_add(1, SeqCst);
                 self.active.fetch_add(1, SeqCst);
-                let _lease = Lease(&self.active);
+                let _lease = Lease(&self.active, &self.released);
                 let mut cancelled = self.cancelled.clone();
                 tokio::select! {
                     result = operation => result,
@@ -1108,6 +1127,7 @@ mod slow_action_tests {
             active: active.clone(),
             started: started.clone(),
             cancelled: cancelled.clone(),
+            released: Arc::new(tokio::sync::Notify::new()),
         });
         let (sender, requests) = mpsc::channel(16);
         let (replies, receiver) = mpsc::channel(16);
@@ -1132,6 +1152,66 @@ mod slow_action_tests {
             },
         )
         .await;
+    }
+    #[tokio::test]
+    async fn completed_inventory_releases_login_watchdog_until_next_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let server = DesktopServer::new(1);
+        server.configure(true);
+        let active = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(tokio::sync::Notify::new());
+        let (_cancel, cancelled) = watch::channel(false);
+        let node = Arc::new(SlowNode {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let host = Arc::new(CountedHost {
+            host: Host(node.clone()),
+            active: active.clone(),
+            started: started.clone(),
+            cancelled,
+            released: released.clone(),
+        });
+        let (sender, requests) = mpsc::channel(16);
+        let (replies, mut receiver) = mpsc::channel(16);
+        let worker = tokio::spawn(server.run(
+            host,
+            requests,
+            ReplySender::new(replies, "desktop", 1),
+            Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU64::new(0)
+            })),
+        ));
+        for expected in 1..=2 {
+            hold_inventory(&sender).await;
+            node.started.notified().await;
+            assert_eq!(
+                active.load(SeqCst),
+                1,
+                "pending inventory needs live authority"
+            );
+            assert_eq!(
+                started.load(SeqCst),
+                expected,
+                "each new idle request needs fresh authority"
+            );
+            node.release.notify_one();
+            let reply = receiver.recv().await.unwrap();
+            assert!(matches!(
+                decode_muxed_frame(&reply.wire).unwrap().frame,
+                Frame::Result { .. }
+            ));
+            // The lease-drop receipt is a causal barrier, not a scheduler sleep.
+            let idle = tokio::time::timeout(Duration::from_secs(1), released.notified()).await;
+            assert!(
+                idle.is_ok(),
+                "completed inventory retained a database watchdog on an idle socket"
+            );
+            assert_eq!(active.load(SeqCst), 0);
+        }
+        drop(sender);
+        worker.await.unwrap();
     }
     /// Retiring an attachment must not consume the replacement stream identity.
     #[tokio::test]
