@@ -211,7 +211,10 @@ or admission images, and the diagnostic build's memory/scheduling costs must
 be reported separately.
 Each flush marks its own synchronous I/O span so a recorder stall remains
 visible in the diagnosis. The driver validates the private format header
-before sending SIGUSR1 and limits a diagnostic profile to 300 seconds.
+before sending SIGUSR1 and limits a diagnostic profile to 900 seconds. This permits an aged capture
+after the admission warmup while remaining inside one short perf-lock hold.
+The multi-role tail collector streams numeric events to disk instead of
+retaining the longer scheduler capture in the workload interpreter.
 
 Input credit is recorded inside the existing per-writer ledger, including
 partial writes across ownership segments. Output records distinguish PTY read,
