@@ -143,8 +143,6 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
 
 // Only the seven kernel columns are whitespace-separated. The remaining
 // socket name is opaque: a home-directory space cannot shorten its identity.
-#[cold]
-#[inline(never)]
 fn legacy_row(row: &str) -> io::Result<Option<(u32, &str)>> {
     let mut rest = row;
     let mut inode = "";
@@ -203,8 +201,6 @@ struct SocketOwner {
     inode: u32,
     device: u32,
 }
-#[cold]
-#[inline(never)]
 fn diagnostic_owner(data: &[u8], inode: u32) -> Option<SocketOwner> {
     if data.len() != 60
         || data[0..4] != 60_u32.to_ne_bytes()

@@ -992,22 +992,6 @@ async fn restore_previous(
         .get(&target.id)
         .and_then(|state| state.cleanup);
     if let Some(cleanup) = cleanup {
-        finish_retained_cleanup(batch, target, attempt, started, session, cleanup).await?;
-    }
-    Ok(())
-}
-
-// Share retained recovery between the initial call and its earlier-cache retry.
-// The ordinary happy path returns above before allocating this cleanup poller [243].
-fn finish_retained_cleanup<'a>(
-    batch: &'a BatchInner,
-    target: &'a Target,
-    attempt: u32,
-    started: Instant,
-    session: Arc<dyn SshSession>,
-    cleanup: Cleanup,
-) -> Operation<'a, ()> {
-    Box::pin(async move {
         emit(
             batch,
             target,
@@ -1023,8 +1007,8 @@ fn finish_retained_cleanup<'a>(
         if let Some(state) = lock(&batch.states).get_mut(&target.id) {
             state.cleanup = None;
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 /// Mutation resources belong to one attempt, including its rollback and host retirement.
