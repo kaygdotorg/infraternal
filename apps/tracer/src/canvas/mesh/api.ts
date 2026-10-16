@@ -53,7 +53,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   let grants: Grant[] = [];
   const grantById = new Map<string, Grant>();
   let serial = 0;
-  let generation = 0;
+  let generation = 0, publication = 0;
   let disposed = false;
   let retryTimer = 0, notifyTimer = 0, retryStep = 0;
   let notifyQueued = false;
@@ -81,11 +81,12 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   };
 
   const apply = (s: Snapshot): void => {
-    // A published snapshot supersedes every older list, including its failure.
-    generation += 1;
+    // A pushed recovery supersedes pending failures; successful replies still
+    // follow the server revision, so a newer retry snapshot can advance it.
+    publication += 1;
     if (retryTimer) { window.clearTimeout(retryTimer); retryTimer = 0; }
     rev = s.rev; access = s.access;
-    if (!access.view) { status = "unavailable"; notify(true); return; }
+    if (!access.view) { generation += 1; status = "unavailable"; notify(true); return; }
     nodes = new Map(s.nodes.map((n) => [n.name, n]));
     idOf = new Map(s.nodes.map((n) => [n.name, n.id]));
     tags = s.tags;
@@ -101,18 +102,18 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   const refresh = (): void => {
     if (disposed) return;
     if (inflight > 0) { dirty = true; return; }
-    const mine = ++generation;
+    const mine = ++generation, published = publication;
     window.clearTimeout(retryTimer); retryTimer = 0;
     if (status === "error") status = "loading";
     client.list().then((raw) => {
       if (disposed || mine !== generation) return;
       const snap = parseSnapshot(raw);
-      if (!snap) { toError(); return; }
+      if (!snap) { if (published === publication) toError(); return; }
       if (snap.rev < rev) return; // an answer that raced a newer edit
       apply(snap);
       watch();
     }, (error: unknown) => {
-      if (disposed || mine !== generation) return;
+      if (disposed || mine !== generation || published !== publication) return;
       // Refused (not allowed, or no such action here): the person has no Mesh. A server that could not answer is an error.
       if (error instanceof ActionRefused && error.reason !== "mesh unavailable") { withdraw(); return; }
       toError();

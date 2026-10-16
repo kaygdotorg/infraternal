@@ -120,6 +120,33 @@ test("a pushed recovery supersedes an outstanding retry failure", async () => {
   } finally { source.dispose(); restore(); }
 });
 
+for (const [revision, accepted] of [[1, false], [3, true]] as const)
+  test(`a retry snapshot at revision ${revision} is ordered against a pushed recovery`, async () => {
+    const restore = timers();
+    let deliver: ((event: Record<string, unknown>) => void) | undefined;
+    let resolveRetry: ((value: Record<string, unknown>) => void) | undefined;
+    let retrying = false;
+    const source = createMeshApi({prime, transport: {
+      call: () => retrying
+        ? new Promise(resolve => { resolveRetry = resolve; })
+        : Promise.reject(new Error("connection lost")),
+      onReady: () => () => {},
+      subscribe: (_topic, listener) => { deliver = listener; return () => {}; },
+    }});
+    try {
+      deliver!({type: "changed", revision: 1});
+      await settle();
+      retrying = true;
+      source.retry();
+      await settle();
+      deliver!({type: "resync", snapshot: {...raw, revision: 2}});
+      resolveRetry!({...raw, revision, nodes: [{node: {id: 1, host: "retry-host", tags: []}}]});
+      await settle();
+      expect(source.status()).toBe("ready");
+      expect(source.data().nodes.has("retry-host")).toBe(accepted);
+    } finally { source.dispose(); restore(); }
+  });
+
 test("a forbidden withdrawal cancels retry work from the retained watch", async () => {
   const pending = new Set<number>();
   const restore = timers(pending);
