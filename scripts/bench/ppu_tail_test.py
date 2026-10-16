@@ -25,5 +25,23 @@ class Events(unittest.TestCase):
         self.assertEqual(tail.numeric_events(line, {99}), [])
 
 
+class Futex(unittest.TestCase):
+    def test_counter_and_reader_share_identity_without_exposing_address(self):
+        identities = {}
+        line = b'sys_futex(uaddr: deadbeef, op: 89)'
+        first = tail.futex_fields(line, 'sys_enter_futex', 10, 10, 20, identities)
+        second = tail.futex_fields(line, 'sys_enter_futex', 20, 10, 20, identities)
+        other = tail.futex_fields(line, 'sys_enter_futex', 30, 10, 20, identities)
+        self.assertEqual(first, dict(futex_lock=1, futex_op=137))
+        self.assertEqual(first, second)
+        self.assertNotEqual(first['futex_lock'], other['futex_lock'])
+        self.assertNotIn('deadbeef', str(first))
+
+    def test_timeout_result_supports_both_kernel_printers(self):
+        for line in (b'sys_exit_futex: ret=-110', b'sys_futex -> 0xffffffffffffff92'):
+            self.assertEqual(tail.futex_fields(line, 'sys_exit_futex', 10, 10, 20, {}),
+                             dict(futex_result=-110))
+
+
 if __name__ == '__main__':
     unittest.main()

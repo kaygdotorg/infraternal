@@ -17,6 +17,7 @@ import time
 from types import SimpleNamespace
 
 import ppu_compare as compare
+from ppu_delivery import number
 import ppu_soak as suite
 import ppu_stages as stages
 import ppu_trace as trace
@@ -59,6 +60,30 @@ def numeric_events(line, known):
     if kind.startswith((b'page_fault_', b'mm_vmscan_', b'mm_shrink_')) or b'<stack trace>' in body:
         return [(stamp, pid, 'stack' if b'<stack trace>' in body else kind.decode(), '')]
     return []
+
+
+def futex_fields(line, kind, pid, reader, counter, identities):
+    """Keep relative wait identities and return codes, never native addresses."""
+    if kind == 'sys_enter_futex':
+        address = number(line, b'uaddr')
+        if address is None:
+            address = number(line, b'uaddr1')
+        operation = number(line, b'op')
+        if address is not None and operation is not None:
+            owner = reader if pid in (reader, counter) else pid
+            identity = identities.setdefault((owner, address), len(identities) + 1)
+            return dict(futex_lock=identity, futex_op=operation)
+    elif kind == 'sys_exit_futex':
+        result = number(line, b'ret')
+        if result is None:
+            match = re.search(rb'->\s*(-?(?:0x)?[0-9a-fA-F]+)\b', line)
+            if match:
+                result = int(match[1], 16)
+                if result >= 1 << 63:
+                    result -= 1 << 64
+        if result is not None:
+            return dict(futex_result=result)
+    return {}
 
 
 def task_counters(pid):
@@ -119,6 +144,7 @@ class RoleTrace(BASE_TRACE):
         pending = b''
         stack = None
         events = stacks = 0
+        identities = {}
         with (ROOT / 'tail-events.jsonl').open('w', buffering=1048576) as output:
             def emit(row):
                 output.write(json.dumps(row, separators=(',', ':')) + '\n')
@@ -145,7 +171,9 @@ class RoleTrace(BASE_TRACE):
                             if kind == 'stack':
                                 stack = dict(kind='stack', ns=round(stamp * 1e9), pid=pid, symbols=[])
                             else:
-                                emit(dict(kind=kind, ns=round(stamp * 1e9), pid=pid, state=state))
+                                emit(dict(kind=kind, ns=round(stamp * 1e9), pid=pid, state=state,
+                                    **futex_fields(line, kind, pid, ROLES['reader'],
+                                                   self.counter_tid.value, identities)))
                                 events += 1
             if stack is not None:
                 emit(stack)
