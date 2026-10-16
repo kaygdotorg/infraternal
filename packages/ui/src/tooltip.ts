@@ -17,6 +17,7 @@
  * - Reduced motion: opacity only.
  * - Components can request a timed confirmation label with flashTip(); its temporary
  *   data-tip is restored when the label expires.
+ * - Point-anchored calls can opt into two lines and a side for that call only.
  *
  * Which elements: anything with `data-tip`, plus every button or link that has an
  * aria-label and no visible text. The rule is therefore enforced automatically.
@@ -33,25 +34,31 @@ const GAP = 8, MARGIN = 8;
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 
 type Side = "top" | "bottom";
+/** Optional layout for one point-anchored tooltip; trigger tooltips keep their single-line layout. */
+export interface PointTooltipOptions {
+  /** Permit a two-line label with the shared content-width rule. */
+  lines?: 2;
+  /** Place the tooltip above or below the point anchor's corresponding edge. */
+  side?: Side;
+}
 const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 let pos: HTMLDivElement, surface: HTMLDivElement, arrow: HTMLDivElement, measure: HTMLSpanElement;
 let current: HTMLElement | null = null;
 let openTimer = 0, closeTimer = 0, pressTimer = 0, warmUntil = 0, shown = false;
 let swallowClick = false, press0: { x: number; y: number } | null = null;
-let pointAnchor: HTMLElement | null = null, pointLabel = "", pointRect: DOMRect | undefined;
+let pointAnchor: HTMLElement | null = null, pointLabel = "", pointRect: DOMRect | undefined, pointOptions: PointTooltipOptions | undefined;
 const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; timer: number }>();
 
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
 .tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; max-width: 280px; overflow: hidden;
   font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
-.tip-label { display: block; }
 .tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
 .tip-measure { position: fixed; visibility: hidden; width: max-content; max-width: 260px; pointer-events: none;
-  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); }
+  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(340px, calc(100vw - 24px)); gap: 12px; padding: 14px 14px 12px;
   border-radius: 14px; opacity: 0; transform: scale(0.96); pointer-events: none;
@@ -295,6 +302,8 @@ function triggerOf(target: EventTarget | null): HTMLElement | null {
 }
 
 function sideOf(el: HTMLElement, r: DOMRect, h: number): Side {
+  const pointSide = pointAnchor === el ? pointOptions?.side : undefined;
+  if (pointSide) return pointSide;
   const want = el.dataset.tipSide as Side | undefined;
   if (want) return want;
   return r.top - GAP - h < MARGIN ? "bottom" : "top";
@@ -303,8 +312,13 @@ function sideOf(el: HTMLElement, r: DOMRect, h: number): Side {
 /** Places the surface for `el`; returns the travel direction (−1 left, 1 right). */
 function place(el: HTMLElement, animateMove: boolean): number {
   const text = labelOf(el);
+  const twoLines = pointAnchor === el && pointOptions?.lines === 2;
+  if (twoLines) { pos.dataset.tipLines = "2"; measure.dataset.tipLines = "2"; }
+  else { delete pos.dataset.tipLines; delete measure.dataset.tipLines; }
   measure.textContent = text;
-  const w = Math.ceil(measure.getBoundingClientRect().width) + 22, h = 27;
+  // The shared measurement node gets the same CSS width as the surface, so its height also positions the arrow.
+  const measured = measure.getBoundingClientRect();
+  const w = Math.ceil(measured.width) + 22, h = twoLines ? measured.height + 14 : 27;
   const r = pointAnchor === el && pointRect ? pointRect : el.getBoundingClientRect();
   const side = sideOf(el, r, h);
   const cx = r.left + r.width / 2;
@@ -336,11 +350,11 @@ function setLabel(text: string, dir: number) {
   next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE });
 }
 
-function show(el: HTMLElement, how: "pop" | "instant") {
+function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   if (!pos) build();
   clearTimeout(closeTimer); clearTimeout(openTimer);
   // Point labels belong to one trigger; a later normal tooltip must not inherit the previous target or position.
-  if (pointAnchor && pointAnchor !== el) clearPointAnchor();
+  if (pointAnchor && (pointAnchor !== el || !pointCall)) clearPointAnchor();
   const travelling = shown && current !== el;
   current = el;
   const dir = place(el, travelling);
@@ -431,31 +445,33 @@ export function peekTip(el: HTMLElement, duration = 2600): void {
 }
 
 /** Shows the shared warm tooltip at a pointer position while it remains over `anchor`. */
-export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number): void {
+export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number, options: PointTooltipOptions = {}): void {
   pointAnchor = anchor;
   pointLabel = text;
   pointRect = new DOMRect(x, y, 0, 0);
+  pointOptions = options;
   if (warm()) {
     byHover = true;
-    show(anchor, "instant");
+    show(anchor, "instant", true);
   } else {
     clearTimeout(openTimer);
     current = anchor;
     openTimer = window.setTimeout(() => {
       if (current !== anchor || !anchor.matches(":hover")) return;
       byHover = true;
-      show(anchor, "pop");
+      show(anchor, "pop", true);
     }, DELAY);
   }
 }
 
 /** Shows a shared tooltip at a pointer position for a short touch or click confirmation. */
-export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600): void {
+export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600, options: PointTooltipOptions = {}): void {
   pointAnchor = anchor;
   pointLabel = text;
   pointRect = new DOMRect(x, y, 0, 0);
+  pointOptions = options;
   byHover = false;
-  show(anchor, shown ? "instant" : "pop");
+  show(anchor, shown ? "instant" : "pop", true);
   const mine = current;
   window.clearTimeout(closeTimer);
   closeTimer = window.setTimeout(() => { if (shown && current === mine) hide(); }, duration);
@@ -472,6 +488,9 @@ function clearPointAnchor(): void {
   pointAnchor = null;
   pointLabel = "";
   pointRect = undefined;
+  pointOptions = undefined;
+  if (pos) delete pos.dataset.tipLines;
+  if (measure) delete measure.dataset.tipLines;
 }
 
 /** Installs the page-wide tooltip group. Call once; works for elements added later. */

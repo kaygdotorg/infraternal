@@ -46,6 +46,13 @@
 /* Form controls reset text-shadow in the browser's own styles; they take the halo too. */
 .ui-overlay-surface :is(button, input, textarea, select) { text-shadow: inherit; }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
+/* Trigger labels stay one line; only point previews carrying this per-call attribute may wrap. */
+.tip-label { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip-pos[data-tip-lines="2"], .tip-measure[data-tip-lines="2"] { --tip-content-max: min(258px, calc(100vw - 38px)); }
+.tip-pos[data-tip-lines="2"] .tip { max-width: calc(var(--tip-content-max) + 22px); }
+.tip-pos[data-tip-lines="2"] .tip-label:not(.is-leaving) { display: -webkit-box; max-height: 2.4em; overflow: hidden; overflow-wrap: anywhere;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; text-overflow: ellipsis; white-space: normal; }
+.tip-measure[data-tip-lines="2"] { box-sizing: border-box; max-width: var(--tip-content-max); line-height: 1.2; overflow-wrap: anywhere; white-space: normal; }
 .ui-button {
   min-height: var(--ui-button-height, 44px);
   padding: var(--ui-button-padding, 0 12px);
