@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["server"]
-server = ["dep:uuid"]
+server = ["dep:uuid", "dep:tracing"]
 ee = []
 # Diagnostic stage logging is removable and never enabled by a shipping role.
 cutoff-measure = ["nix?/time"]
@@ -23,6 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tracing = { workspace = true, optional = true }
 
 nix = { workspace = true, optional = true, features = ["net"] }
 openssl = { workspace = true, optional = true }
