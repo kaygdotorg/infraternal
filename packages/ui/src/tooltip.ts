@@ -14,6 +14,8 @@
  * - Keyboard focus shows the tooltip at once with no motion. Escape hides it.
  * - Touch: a 500 ms long press shows the label. The click that ends that press is
  *   swallowed, because the user asked "what is this?", not "do this".
+ * - Point-anchored link previews keep the scheme and host readable, shorten a long
+ *   destination with a middle ellipsis, and sit clear of the link's hit rows.
  * - Reduced motion: opacity only.
  * - Components can request a timed confirmation label with flashTip(); its temporary
  *   data-tip is restored when the label expires.
@@ -44,14 +46,15 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
-.tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; max-width: 280px; overflow: hidden;
+.tip-pos, .tip-measure { --tip-content-max: min(260px, calc(100vw - 36px)); }
+.tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; max-width: calc(var(--tip-content-max) + 22px); overflow: hidden;
   font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
-.tip-label { display: block; }
-.tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
+.tip-label { display: block; white-space: normal; overflow-wrap: anywhere; }
+.tip-label.is-leaving { position: absolute; left: 10px; top: 6px; right: 10px; }
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
-.tip-measure { position: fixed; visibility: hidden; width: max-content; max-width: 260px; pointer-events: none;
-  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); }
+.tip-measure { position: fixed; box-sizing: border-box; visibility: hidden; width: max-content; max-width: var(--tip-content-max); pointer-events: none;
+  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(340px, calc(100vw - 24px)); gap: 12px; padding: 14px 14px 12px;
   border-radius: 14px; opacity: 0; transform: scale(0.96); pointer-events: none;
@@ -296,20 +299,60 @@ function triggerOf(target: EventTarget | null): HTMLElement | null {
 
 function sideOf(el: HTMLElement, r: DOMRect, h: number): Side {
   const want = el.dataset.tipSide as Side | undefined;
-  if (want) return want;
-  return r.top - GAP - h < MARGIN ? "bottom" : "top";
+  const topSpace = r.top - GAP - MARGIN;
+  const bottomSpace = innerHeight - r.bottom - GAP - MARGIN;
+  const topFits = topSpace >= h;
+  const bottomFits = bottomSpace >= h;
+  if (want === "top" && topFits) return "top";
+  if (want === "bottom" && bottomFits) return "bottom";
+  if (topFits) return "top";
+  if (bottomFits) return "bottom";
+  return topSpace >= bottomSpace ? "top" : "bottom";
+}
+
+const LINK_TOOLTIP_MAX = 56;
+const LINK_ORIGIN = /^(?:https?:\/\/[^/?#]+|mailto:[^?#]*|file:\/\/)/iu;
+
+/** Shortens only the destination tail; grapheme segmentation keeps the visible ellipsis on glyph boundaries. */
+function linkTooltipText(target: string): string {
+  if (target.length <= LINK_TOOLTIP_MAX) return target;
+  const prefix = LINK_ORIGIN.exec(target)?.[0] ?? "";
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  const prefixLength = Array.from(segmenter.segment(prefix)).length;
+  if (prefixLength >= LINK_TOOLTIP_MAX) return prefix;
+  const tail = Array.from(segmenter.segment(target.slice(prefix.length)), (part) => part.segment);
+  const allowance = LINK_TOOLTIP_MAX - prefixLength;
+  if (tail.length <= allowance) return target;
+  const retained = allowance - 1;
+  // Keep a short tail intact (often the final query parameter), and spend the remaining
+  // room on the start of the path after the full scheme and host.
+  const trailing = Math.min(20, retained);
+  const leading = retained - trailing;
+  return `${prefix}${tail.slice(0, leading).join("")}…${trailing ? tail.slice(-trailing).join("") : ""}`;
 }
 
 /** Places the surface for `el`; returns the travel direction (−1 left, 1 right). */
 function place(el: HTMLElement, animateMove: boolean): number {
   const text = labelOf(el);
   measure.textContent = text;
-  const w = Math.ceil(measure.getBoundingClientRect().width) + 22, h = 27;
+  measure.style.width = "max-content";
+  measure.style.whiteSpace = "nowrap";
+  measure.style.overflowWrap = "normal";
+  const contentWidth = Math.ceil(measure.getBoundingClientRect().width);
+  // The surface adds 20 px of padding and a 1 px border on each side; matching all 22 px keeps
+  // the visible label's content width identical to the measure element's width.
+  const w = contentWidth + 22;
+  // Reflow at the exact content width used by .tip, so its measured height and rendered wraps agree.
+  measure.style.width = `${contentWidth}px`;
+  measure.style.whiteSpace = "normal";
+  measure.style.overflowWrap = "anywhere";
+  const h = Math.ceil(measure.getBoundingClientRect().height) + 14;
   const r = pointAnchor === el && pointRect ? pointRect : el.getBoundingClientRect();
   const side = sideOf(el, r, h);
   const cx = r.left + r.width / 2;
   const x = Math.min(Math.max(MARGIN, cx - w / 2), innerWidth - MARGIN - w);
-  const y = side === "top" ? r.top - GAP - h : r.bottom + GAP;
+  const rawY = side === "top" ? r.top - GAP - h : r.bottom + GAP;
+  const y = Math.max(MARGIN, Math.min(innerHeight - MARGIN - h, rawY));
   const prev = new DOMMatrix(getComputedStyle(pos).transform).m41;
   pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE}` : "none";
   pos.style.transform = `translate(${x}px, ${y}px)`;
@@ -430,11 +473,11 @@ export function peekTip(el: HTMLElement, duration = 2600): void {
   closeTimer = window.setTimeout(() => { if (shown && current === mine) hide(); }, duration);
 }
 
-/** Shows the shared warm tooltip at a pointer position while it remains over `anchor`. */
-export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number): void {
+/** Shows the shared warm link tooltip at the pointer, using the link's full row range when supplied. */
+export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number, bounds?: DOMRect): void {
   pointAnchor = anchor;
-  pointLabel = text;
-  pointRect = new DOMRect(x, y, 0, 0);
+  pointLabel = linkTooltipText(text);
+  pointRect = bounds ?? new DOMRect(x, y, 0, 0);
   if (warm()) {
     byHover = true;
     show(anchor, "instant");
@@ -449,11 +492,11 @@ export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: numb
   }
 }
 
-/** Shows a shared tooltip at a pointer position for a short touch or click confirmation. */
-export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600): void {
+/** Shows the shared link tooltip at a pointer position for a short touch or click confirmation. */
+export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600, bounds?: DOMRect): void {
   pointAnchor = anchor;
-  pointLabel = text;
-  pointRect = new DOMRect(x, y, 0, 0);
+  pointLabel = linkTooltipText(text);
+  pointRect = bounds ?? new DOMRect(x, y, 0, 0);
   byHover = false;
   show(anchor, shown ? "instant" : "pop");
   const mine = current;
