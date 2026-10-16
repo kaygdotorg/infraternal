@@ -11,6 +11,41 @@ mod instant;
 mod browser;
 static FULLY_JOINED: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Own only this live controller's private fixture files until its bindings drop.
+struct LiveFixtureDirectory(PathBuf);
+impl Drop for LiveFixtureDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn live_fixture(scratch: &std::path::Path) -> (LiveFixtureDirectory, Fixture) {
+    let directory = LiveFixtureDirectory(scratch.join(format!("live-authority-{}", Uuid::new_v4())));
+    // Use the runtime's private persistent pool, including its connection and
+    // journal settings. A cancelled acquisition must not reset authority.
+    let pool = crate::runtime::test_open_database(&directory.0).await.unwrap();
+    let (store, pool, prior) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
+    (directory, fixture_with_store(true, store, pool, prior).await)
+}
+
+#[tokio::test]
+async fn live_fixture_keeps_authority_after_connection_retirement() {
+    let scratch = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/addhost-instant"),
+        PathBuf::from,
+    );
+    // Retain the file owner until after the fixture and its pool handles drop.
+    let (_directory, fixture) = live_fixture(&scratch).await;
+    let connection = fixture.pool.acquire().await.unwrap();
+    connection.close().await.unwrap();
+    let owners: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id='owner'")
+        .fetch_one(&fixture.pool).await.unwrap();
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(&fixture.cookie)).fetch_one(&fixture.pool).await.unwrap();
+    assert_eq!(owners, 1);
+    assert_eq!(sessions, 1);
+}
+
 // Fixture images are explicit trusted inputs, independent of release HTTP/signing tests.
 struct FixturePayloads {
     binaries: BinaryPaths,
@@ -497,7 +532,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         .read_to_end(&mut private)
         .unwrap();
     assert!(private.len() <= 24576);
-    let mut f = fixture(true).await;
+    let (_directory, mut f) = live_fixture(&scratch).await;
     let (identity, material) =
         crate::remote_runtime::tests::server_material_for_name("addhost-breakit2.test");
     let source: Arc<dyn CaKeySource> = Arc::new(Signer(Some(material.clone())));

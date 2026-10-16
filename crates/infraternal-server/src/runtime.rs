@@ -1532,3 +1532,11 @@ mod temporal_admission_tests {
         );
     }
 }
+
+/// Share the live runtime pool with verification so connection replacement keeps authority.
+#[cfg(all(test, feature = "remote", feature = "ssh"))]
+pub(crate) async fn test_open_database(
+    data_dir: &std::path::Path,
+) -> Result<SqlitePool, ServerError> {
+    open_database(data_dir).await
+}
