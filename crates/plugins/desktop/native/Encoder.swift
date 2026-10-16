@@ -36,7 +36,14 @@ private func annexB(_ sample: CMSampleBuffer, parameters: LowDelayParameterSets)
         for index in 0..<parameterCount {
             guard parameter(index, count:nil, length:nil) == noErr,
                   let pointer, parameterSize > 0, parameterSize <= 1024 else { throw HelperFailure.unavailable }
-            result.append(try parameters.packet(Data(bytes:pointer,count:parameterSize)))
+            let nal = Data(bytes:pointer,count:parameterSize)
+            do { result.append(try parameters.packet(nal)) }
+            catch {
+                // Parameter bytes describe the codec, never desktop picture data.
+                let prefix = nal.prefix(64).map { String(format:"%02x",$0) }.joined()
+                fputs("ENCODER parameter_rejected bytes=\(nal.count) prefix=\(prefix)\n",stderr)
+                throw error
+            }
         }
     }
     var offset = 0
@@ -52,20 +59,37 @@ private func annexB(_ sample: CMSampleBuffer, parameters: LowDelayParameterSets)
     return (result,key)
 }
 
-private final class EncodeResult {
+final class EncodeResult {
     let done = DispatchSemaphore(value:0)
     let parameters: LowDelayParameterSets
     init(parameters: LowDelayParameterSets) { self.parameters = parameters }
     var payload: Data?
+    var dropped = false
+    func completedPayload(timeout: DispatchTime) throws -> Data? {
+        guard done.wait(timeout: timeout) == .success else {
+            fputs("ENCODER callback_timeout\n",stderr); throw HelperFailure.unavailable
+        }
+        // A successful dropped-frame callback owns no sample. It still completes
+        // the submission and releases its input; it does not invalidate the session.
+        if dropped { return nil }
+        guard let payload else { fputs("ENCODER payload_missing\n",stderr); throw HelperFailure.unavailable }
+        return payload
+    }
 }
 
-private let encodedCallback: VTCompressionOutputCallback = { _, context, status, _, sample in
+let encodedCallback: VTCompressionOutputCallback = { _, context, status, flags, sample in
     guard let context else { return }
     // The submitter retains this object until completion or invalidation.
     let result = Unmanaged<EncodeResult>.fromOpaque(context).takeUnretainedValue()
     defer { result.done.signal() }
-    guard status == noErr, let sample, CMSampleBufferDataIsReady(sample), let (bytes,key) = try? annexB(sample, parameters:result.parameters) else { return }
-    result.payload = Data([key ? 1 : 0]) + bytes
+    guard status == noErr else { fputs("ENCODER callback_status=\(status)\n",stderr); return }
+    if flags.contains(.frameDropped) { result.dropped = true; return }
+    guard let sample else { fputs("ENCODER callback_no_sample flags=\(flags.rawValue)\n",stderr); return }
+    guard CMSampleBufferDataIsReady(sample) else { fputs("ENCODER callback_not_ready\n",stderr); return }
+    do {
+        let (bytes,key) = try annexB(sample, parameters:result.parameters)
+        result.payload = Data([key ? 1 : 0]) + bytes
+    } catch { fputs("ENCODER conversion_error=\(error)\n",stderr) }
 }
 
 final class Encoder {
@@ -140,14 +164,19 @@ final class Encoder {
         }
         CVPixelBufferUnlockBaseAddress(pixel,[])
         let budget = sharp ? min(adaptation.maximum * 4, adaptation.current * 4) : adaptation.current
-        let body = try encodeSurface(pixel, ticks:ticks, force:sharp, bitrate:budget)
+        // The owned-pixel request owes its caller one bounded reply. A rate-control
+        // drop gets one forced-keyframe retry with the same captured pixels/timestamp;
+        // repeated drops refuse the request rather than spinning or extending its deadline.
+        let first = try encodeSurface(pixel, ticks:ticks, force:sharp, bitrate:budget)
+        let recovered = try first ?? encodeSurface(pixel, ticks:ticks, force:true, bitrate:budget)
+        guard let body = recovered else { throw HelperFailure.unavailable }
         _ = adaptation.feedback(at:ProcessInfo.processInfo.systemUptime, congested:false)
         return body
     }
 
     // The caller retains the framework buffer until callback completion. There is
     // no IOSurface ID lookup, base-address lock, pixel copy or cross-process handoff.
-    func encodeSurface(_ pixel: CVPixelBuffer, ticks: UInt64, force: Bool, bitrate: Int) throws -> Data {
+    func encodeSurface(_ pixel: CVPixelBuffer, ticks: UInt64, force: Bool, bitrate: Int) throws -> Data? {
         guard CVPixelBufferGetWidth(pixel) == width, CVPixelBufferGetHeight(pixel) == height, let session else { throw HelperFailure.invalid }
         let begin = mach_absolute_time()
         // A settled refresh gets a larger intra-frame budget; restore the motion
@@ -162,9 +191,16 @@ final class Encoder {
         let time = CMTime(value:Int64(nanos(mach_absolute_time())),timescale:1_000_000_000)
         let status = VTCompressionSessionEncodeFrame(session,imageBuffer:pixel,presentationTimeStamp:time,duration:CMTime(value:1,timescale:Int32(frameRate)),frameProperties:options,sourceFrameRefcon:pointer,infoFlagsOut:nil)
         guard status == noErr else { fputs("ENCODER submit_status=\(status)\n",stderr); throw HelperFailure.unavailable }
-        guard result.done.wait(timeout:.now()+2) == .success, let payload = result.payload else {
+        let payload: Data
+        do {
+            guard let completed = try result.completedPayload(timeout:.now()+2) else {
+                if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil { fputs("METRIC encoder_drop=1\n",stderr) }
+                return nil
+            }
+            payload = completed
+        } catch {
             // Invalidate synchronizes callbacks before result and source are released.
-            fputs("ENCODER completion_missing\n",stderr); stop(); throw HelperFailure.unavailable
+            stop(); throw error
         }
         if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil {
             fputs("METRIC encode_ns=\(nanos(mach_absolute_time()-begin)) encode_finished_ns=\(nanos(mach_absolute_time())) bytes=\(payload.count-1) capture_ns=\(nanos(ticks)) codec=\(codec == kCMVideoCodecType_HEVC ? "hevc" : "h264")\n",stderr)

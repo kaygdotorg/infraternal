@@ -92,6 +92,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func drain() {
+        var retryDroppedFrame = false
         do {
             try encoder.configure(width: Int(size.width), height: Int(size.height), hevc: hevc, fps: fps)
             while true {
@@ -109,13 +110,22 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if repair { damageState.repair() }
                 guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
-                let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget)
+                guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
+                    damageState.completed(delivered: false)
+                    retryDroppedFrame = true
+                    break
+                }
                 let began = ProcessInfo.processInfo.systemUptime
                 try output(70, body)
                 damageState.completed(delivered: true)
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }
-            if let deadline = damageState.refreshDeadline {
+            // Rate control may drop even a complete capture. Keep its surface and
+            // repair on the next source-rate opportunity, including a static window
+            // with no further damage callbacks. Reuse the existing one-shot timer;
+            // never spin on the retained frame or leave a timer on after success/Stop.
+            let deadline = retryDroppedFrame ? ProcessInfo.processInfo.systemUptime + 1 / Double(fps) : damageState.refreshDeadline
+            if let deadline {
                 if refresh == nil {
                     let timer = DispatchSource.makeTimerSource(queue: encodingQueue)
                     timer.setEventHandler { [weak self] in
