@@ -35,10 +35,13 @@ impl Capture {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
     }
     fn errors(&self) -> Vec<Value> {
+        self.events("mesh_storage_error")
+    }
+    fn events(&self, name: &str) -> Vec<Value> {
         self.text()
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|event| event["fields"]["event"] == "mesh_storage_error")
+            .filter(|event| event["fields"]["event"] == name)
             .collect()
     }
 }
@@ -50,10 +53,73 @@ async fn repeated_storage_failure_has_bounded_diagnostics() {
         .execute(&fixture.pool)
         .await
         .unwrap();
-    let (capture, guard) = Capture::start();
-    // Fifty viewers retrying the same unchanged failure must not each emit a
-    // fresh ERROR. This checks event count, independent of scheduler timing.
-    for _ in 0..50 {
+    let (capture, _guard) = Capture::start();
+    for index in 0..50 {
+        let answer = if index % 2 == 0 {
+            fixture
+                .service
+                .list(OWNER, MeshFilter::default(), NOW)
+                .await
+                .map(|_| ())
+        } else {
+            fixture
+                .service
+                .execute(OWNER, "mesh.list", b"{}", NOW)
+                .await
+                .map(|_| ())
+        };
+        assert_eq!(answer, Err(MeshApiError::Storage));
+    }
+    assert_eq!(
+        capture.errors().len(),
+        1,
+        "viewers and adapters share one failure"
+    );
+    sqlx::query("ALTER TABLE mesh_grants_unavailable RENAME TO mesh_grants")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .list(OWNER, MeshFilter::default(), NOW)
+        .await
+        .unwrap();
+    let recovered = capture.events("mesh_storage_recovered");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0]["fields"]["count"], 50);
+    assert_eq!(recovered[0]["fields"]["operation"], "mesh.list");
+    sqlx::query("ALTER TABLE mesh_grants RENAME TO mesh_grants_unavailable")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .list(OWNER, MeshFilter::default(), NOW)
+            .await,
+        Err(MeshApiError::Storage)
+    );
+    assert_eq!(
+        capture.errors().len(),
+        2,
+        "recurrence starts a new counted failure"
+    );
+    assert!(!capture.text().contains("mesh_grants_unavailable"));
+    fixture.cleanup().await;
+    println!(
+        "MESH_STORAGE_REPEAT requests=50 first_events=1 recovered_count=50 recurrence_events=1"
+    );
+}
+
+#[tokio::test]
+async fn changed_storage_failure_reports_the_previous_count() {
+    let fixture = Fixture::new().await;
+    sqlx::query("ALTER TABLE mesh_grants RENAME TO mesh_grants_unavailable")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let (capture, _guard) = Capture::start();
+    for _ in 0..3 {
         assert_eq!(
             fixture
                 .service
@@ -62,13 +128,66 @@ async fn repeated_storage_failure_has_bounded_diagnostics() {
             Err(MeshApiError::Storage)
         );
     }
-    let count = capture.errors().len();
-    drop(guard);
-    fixture.cleanup().await;
-    assert!(
-        count < 50,
-        "unchanged failure emitted one ERROR per request: {count}"
+    fixture.pool.close().await;
+    assert_eq!(
+        fixture
+            .service
+            .list(OWNER, MeshFilter::default(), NOW)
+            .await,
+        Err(MeshApiError::Storage)
     );
+    let errors = capture.errors();
+    fixture.cleanup().await;
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0]["fields"]["reason"], "database table missing");
+    assert_eq!(errors[1]["fields"]["reason"], "database pool closed");
+    assert_eq!(errors[1]["fields"]["previous_count"], 3);
+}
+
+#[tokio::test]
+async fn unrelated_success_does_not_reset_a_persistent_write_failure() {
+    let fixture = Fixture::new().await;
+    let readonly = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&fixture.path)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    let service = MeshService::new(readonly.clone());
+    let (capture, _guard) = Capture::start();
+    for _ in 0..5 {
+        assert_eq!(
+            call(
+                &service,
+                OWNER,
+                "mesh.tag.create",
+                json!({"name":"bounded-write"}),
+                NOW
+            )
+            .await,
+            Err(MeshApiError::Storage)
+        );
+        assert!(
+            service
+                .execute(OWNER, "mesh.default.get", b"{}", NOW)
+                .await
+                .is_ok()
+        );
+    }
+    let errors = capture.errors();
+    let recoveries = capture.events("mesh_storage_recovered");
+    readonly.close().await;
+    fixture.cleanup().await;
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0]["fields"]["operation"], "mesh.tag.create");
+    assert!(
+        recoveries.is_empty(),
+        "a different successful action proves no repair"
+    );
+    assert!(!capture.text().contains("bounded-write"));
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! SQLite-backed Mesh inventory, named grants, action authorization, and change revisions [154,163,164,166,187].
 
-use crate::diagnostics::{storage_error, storage_sql_error};
+use crate::diagnostics::{ActionDiagnostics, StorageDiagnostics, storage_error, storage_sql_error};
 use infraternal_mesh::{
     model::{Node, NodeId, PublicKey},
     rules::{Arrow, Endpoint, RuleId, TrafficPolicy},
@@ -495,6 +495,10 @@ pub struct MeshService {
     fresh_authority: Option<String>,
     store: crate::store::Store,
     invalid_hosts: crate::diagnostics::InvalidHosts,
+    list_diagnostics: StorageDiagnostics,
+    action_diagnostics: ActionDiagnostics,
+    change_diagnostics: StorageDiagnostics,
+    deadline_diagnostics: StorageDiagnostics,
 }
 
 impl MeshService {
@@ -508,6 +512,10 @@ impl MeshService {
             updates,
             fresh_authority: None,
             invalid_hosts: crate::diagnostics::InvalidHosts::default(),
+            list_diagnostics: StorageDiagnostics::new("mesh.list"),
+            action_diagnostics: ActionDiagnostics::default(),
+            change_diagnostics: StorageDiagnostics::new("mesh.watch.access"),
+            deadline_diagnostics: StorageDiagnostics::new("mesh.watch.deadline"),
         }
     }
 
@@ -557,42 +565,46 @@ impl MeshService {
         filter: &MeshFilter,
         change: &MeshChange,
     ) -> Result<bool, MeshApiError> {
-        let mut tx = self
-            .pool
-            .begin()
+        self.change_diagnostics
+            .run(async {
+                let mut tx = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|error| map_sql_error(error))?;
+                if let Some(tag) = &filter.tag {
+                    validate_name(tag)?;
+                    if sqlx::query("SELECT 1 FROM mesh_tags WHERE name=?")
+                        .bind(tag)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(|error| map_sql_error(error))?
+                        .is_none()
+                    {
+                        return Err(MeshApiError::NotFound);
+                    }
+                }
+                let access = view_access(&mut tx, actor).await?;
+                if let Some(tag) = &filter.tag
+                    && !access.all
+                    && !access.tags.contains(tag)
+                {
+                    return Err(MeshApiError::Denied);
+                }
+                let Some(changed_tags) = &change.scopes else {
+                    return Ok(true);
+                };
+                // Global permission authorizes a filter; it never widens that filter.
+                // Scope every tag-specific invalidation to the requested view [D154, D187].
+                if let Some(tag) = &filter.tag {
+                    Ok(changed_tags.contains(tag))
+                } else if access.all {
+                    Ok(true)
+                } else {
+                    Ok(access.tags.iter().any(|tag| changed_tags.contains(tag)))
+                }
+            })
             .await
-            .map_err(|error| map_sql_error(error))?;
-        if let Some(tag) = &filter.tag {
-            validate_name(tag)?;
-            if sqlx::query("SELECT 1 FROM mesh_tags WHERE name=?")
-                .bind(tag)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sql_error(error))?
-                .is_none()
-            {
-                return Err(MeshApiError::NotFound);
-            }
-        }
-        let access = view_access(&mut tx, actor).await?;
-        if let Some(tag) = &filter.tag
-            && !access.all
-            && !access.tags.contains(tag)
-        {
-            return Err(MeshApiError::Denied);
-        }
-        let Some(changed_tags) = &change.scopes else {
-            return Ok(true);
-        };
-        // Global permission authorizes a filter; it never widens that filter.
-        // Scope every tag-specific invalidation to the requested view [D154, D187].
-        if let Some(tag) = &filter.tag {
-            Ok(changed_tags.contains(tag))
-        } else if access.all {
-            Ok(true)
-        } else {
-            Ok(access.tags.iter().any(|tag| changed_tags.contains(tag)))
-        }
     }
 
     /// Find the next visible expiry without copying or paging inventory.
@@ -605,34 +617,36 @@ impl MeshService {
         filter: &MeshFilter,
         now: i64,
     ) -> Result<Option<i64>, MeshApiError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| map_sql_error(error))?;
-        let access = view_access(&mut tx, actor).await?;
-        let all = access.all && filter.tag.is_none();
-        let tags = if let Some(tag) = &filter.tag {
-            if !access.all && !access.tags.contains(tag) {
-                return Err(MeshApiError::Denied);
-            }
-            BTreeSet::from([tag.clone()])
-        } else {
-            access.tags
-        };
-        let tags = serde_json::to_string(&tags)
-            .map_err(|_| storage_error("watch tag serialization failed"))?;
-        // Match the complete view, including nodes beyond the first wire page.
-        // Inclusive liveness ends at last_seen + 31, exactly as snapshots do.
-        sqlx::query_scalar("SELECT MIN(n.last_seen) FROM mesh_nodes AS n WHERE n.last_seen BETWEEN ? AND ? AND (? OR EXISTS(SELECT 1 FROM mesh_tag_members AS m WHERE m.node_id=n.id AND m.tag_name IN (SELECT value FROM json_each(?))))")
-            .bind(now.saturating_sub(NODE_LIVE_SECONDS))
-            .bind(now)
-            .bind(all)
-            .bind(tags)
-            .fetch_one(&mut *tx)
-            .await
-            .map(|seen: Option<i64>| seen.and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1)))
-            .map_err(|error| map_sql_error(error))
+        self.deadline_diagnostics.run(async {
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| map_sql_error(error))?;
+            let access = view_access(&mut tx, actor).await?;
+            let all = access.all && filter.tag.is_none();
+            let tags = if let Some(tag) = &filter.tag {
+                if !access.all && !access.tags.contains(tag) {
+                    return Err(MeshApiError::Denied);
+                }
+                BTreeSet::from([tag.clone()])
+            } else {
+                access.tags
+            };
+            let tags = serde_json::to_string(&tags)
+                .map_err(|_| storage_error("watch tag serialization failed"))?;
+            // Match the complete view, including nodes beyond the first wire page.
+            // Inclusive liveness ends at last_seen + 31, exactly as snapshots do.
+            sqlx::query_scalar("SELECT MIN(n.last_seen) FROM mesh_nodes AS n WHERE n.last_seen BETWEEN ? AND ? AND (? OR EXISTS(SELECT 1 FROM mesh_tag_members AS m WHERE m.node_id=n.id AND m.tag_name IN (SELECT value FROM json_each(?))))")
+                .bind(now.saturating_sub(NODE_LIVE_SECONDS))
+                .bind(now)
+                .bind(all)
+                .bind(tags)
+                .fetch_one(&mut *tx)
+                .await
+                .map(|seen: Option<i64>| seen.and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1)))
+                .map_err(|error| map_sql_error(error))
+        }).await
     }
 
     /// Execute a validated action for an authenticated account.
@@ -646,7 +660,28 @@ impl MeshService {
         input: &[u8],
         now: i64,
     ) -> Result<Value, MeshApiError> {
-        match parse_action(action, input)? {
+        // Direct reads and action-adapted reads share one outage counter.
+        let request = parse_action(action, input)?;
+        let diagnostics = if action == "mesh.list" {
+            self.list_diagnostics.clone()
+        } else {
+            self.action_diagnostics.for_action(action)
+        };
+        diagnostics
+            .run(self.execute_request(actor, action, input, now, request))
+            .await
+    }
+
+    // Keep one parsed dispatch inside the entry point's diagnostic scope.
+    async fn execute_request(
+        &self,
+        actor: &str,
+        action: &str,
+        input: &[u8],
+        now: i64,
+        request: MeshRequest,
+    ) -> Result<Value, MeshApiError> {
+        match request {
             MeshRequest::Default(_) => {
                 let value = crate::settings::execute(
                     &self.pool,
@@ -755,67 +790,73 @@ impl MeshService {
         filter: MeshFilter,
         now: i64,
     ) -> Result<(MeshSnapshot, Option<i64>), MeshApiError> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| map_sql_error(error))?;
-        let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|error| map_sql_error(error))?;
-        let access = view_access(&mut transaction, actor).await?;
-        let restrict_to_filter = filter.tag.is_some();
-        let visible_tags = if let Some(tag) = filter.tag {
-            if !access.all && !access.tags.contains(&tag) {
-                return Err(MeshApiError::Denied);
-            }
-            if sqlx::query("SELECT 1 FROM mesh_tags WHERE name=?")
-                .bind(&tag)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(|error| map_sql_error(error))?
-                .is_none()
-            {
-                return Err(MeshApiError::NotFound);
-            }
-            BTreeSet::from([tag])
-        } else if access.all {
-            sqlx::query_scalar::<_, String>("SELECT name FROM mesh_tags ORDER BY name")
-                .fetch_all(&mut *transaction)
-                .await
-                .map_err(|error| map_sql_error(error))?
-                .into_iter()
-                .collect()
-        } else {
-            access.tags
-        };
-        let snapshot = read_snapshot(
-            &mut transaction,
-            revision,
-            now,
-            access.all && !restrict_to_filter,
-            &visible_tags,
-            &self.invalid_hosts,
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| map_sql_error(error))?;
-        let snapshot = filter_snapshot(snapshot, access.all && !restrict_to_filter, &visible_tags);
-        // A node is live through last_seen + 30 inclusive. The first offline
-        // second is +31. Compute before paging so later-page nodes still expire.
-        let deadline = snapshot
-            .nodes
-            .iter()
-            .filter(|node| node.live)
-            .filter_map(|node| {
-                node.last_seen
-                    .and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1))
+        self.list_diagnostics
+            .run(async {
+                let mut transaction = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|error| map_sql_error(error))?;
+                let revision: i64 =
+                    sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+                        .fetch_one(&mut *transaction)
+                        .await
+                        .map_err(|error| map_sql_error(error))?;
+                let access = view_access(&mut transaction, actor).await?;
+                let restrict_to_filter = filter.tag.is_some();
+                let visible_tags = if let Some(tag) = filter.tag {
+                    if !access.all && !access.tags.contains(&tag) {
+                        return Err(MeshApiError::Denied);
+                    }
+                    if sqlx::query("SELECT 1 FROM mesh_tags WHERE name=?")
+                        .bind(&tag)
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(|error| map_sql_error(error))?
+                        .is_none()
+                    {
+                        return Err(MeshApiError::NotFound);
+                    }
+                    BTreeSet::from([tag])
+                } else if access.all {
+                    sqlx::query_scalar::<_, String>("SELECT name FROM mesh_tags ORDER BY name")
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(|error| map_sql_error(error))?
+                        .into_iter()
+                        .collect()
+                } else {
+                    access.tags
+                };
+                let snapshot = read_snapshot(
+                    &mut transaction,
+                    revision,
+                    now,
+                    access.all && !restrict_to_filter,
+                    &visible_tags,
+                    &self.invalid_hosts,
+                )
+                .await?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| map_sql_error(error))?;
+                let snapshot =
+                    filter_snapshot(snapshot, access.all && !restrict_to_filter, &visible_tags);
+                // A node is live through last_seen + 30 inclusive. The first offline
+                // second is +31. Compute before paging so later-page nodes still expire.
+                let deadline = snapshot
+                    .nodes
+                    .iter()
+                    .filter(|node| node.live)
+                    .filter_map(|node| {
+                        node.last_seen
+                            .and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1))
+                    })
+                    .min();
+                Ok((page_snapshot(snapshot, filter.cursor)?, deadline))
             })
-            .min();
-        Ok((page_snapshot(snapshot, filter.cursor)?, deadline))
+            .await
     }
 
     async fn enroll_node(
