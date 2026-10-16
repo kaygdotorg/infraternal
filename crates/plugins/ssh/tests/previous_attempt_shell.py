@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-INSPECT = (ROOT / 'src/setup_lock.sh').read_text() + (ROOT / 'src/previous_attempt.sh').read_text()
+INSPECT = (ROOT / 'src/setup_lock.sh').read_text() + (ROOT / 'src/runtime_cleanup.sh').read_text() + (ROOT / 'src/previous_attempt.sh').read_text()
 SOURCE = (ROOT / 'src/install.rs').read_text()
 CONSTANTS = dict(re.findall(r'(?:pub\(crate\) )?const (\w+): &str = r#"(.*?)"#;', SOURCE, re.S))
 HOST, TRANSACTION = '1' * 32, '2' * 32

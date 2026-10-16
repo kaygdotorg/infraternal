@@ -65,7 +65,18 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = common::scratch().join(format!("ssh-install-{}", uuid::Uuid::new_v4().simple()));
+        // Keep real control socket paths within sun_path. Exclusive creation
+        // preserves isolation even if a shortened random fixture id collides.
+        let scratch = common::scratch();
+        let root = loop {
+            let id = uuid::Uuid::new_v4().simple().to_string();
+            let candidate = scratch.join(format!("i{}", &id[..12]));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("fixture directory: {error}"),
+            }
+        };
         std::fs::create_dir_all(root.join("tools")).unwrap();
         executable(
             &root.join("tools/loginctl"),
@@ -1535,4 +1546,191 @@ async fn installed_infraternal_agent_always_restarts_without_start_limit() {
     assert!(unit.lines().any(|line| line == "RestartSec=2"));
     assert!(unit.lines().any(|line| line == "StartLimitIntervalSec=0"));
     transaction.rollback().await.unwrap();
+}
+
+/// Bind a canonical fixture path so parallel listeners cannot share a relative basename.
+async fn control_listener(runtime: &std::path::Path) -> tokio::process::Child {
+    use tokio::io::AsyncReadExt;
+    let mut child = Command::new("python3")
+        .args(["-u", "-c", "import socket,os,sys; s=socket.socket(socket.AF_UNIX); s.bind(os.getcwd()+'/plugins.sock'); os.chmod('plugins.sock',0o600); s.listen(); print('ready',flush=True); sys.stdin.read()"])
+        .current_dir(runtime)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true).spawn().unwrap();
+    let mut ready = [0; 6];
+    child
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .await
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    child
+}
+
+/// The daemon binds its local control socket before attempting its server connection.
+#[tokio::test]
+async fn facts_timeout_retires_stale_plugin_control_socket_before_retry() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(runtime.join("sessions")).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut listener = control_listener(&runtime).await;
+    listener.kill().await.unwrap(); // Service-manager SIGTERM also leaves the socket inode.
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.enroll_and_start(&fixture.join).await.unwrap();
+    retry.commit().await.unwrap();
+}
+
+/// An interrupted cleanup retains exact coordinates; another transaction cannot use them.
+#[tokio::test]
+async fn interrupted_control_cleanup_is_resumed_only_by_its_original_attempt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = runtime.join("plugins.sock");
+    let mut listener = control_listener(&runtime).await;
+    assert!(
+        transaction.rollback().await.is_err(),
+        "live control listener must survive"
+    );
+    assert!(socket.exists());
+    assert!(fixture.transaction().stage(&fixture.binary).await.is_err());
+    let foreign = Installation::new(
+        Arc::new(Local {
+            root: fixture.root.clone(),
+        }),
+        &fixture.target,
+        &JoinMaterial {
+            host: uuid::Uuid::new_v4(),
+            url: fixture.join.url.clone(),
+            stdin: Secret::new(Vec::new()),
+        },
+    )
+    .unwrap();
+    assert!(foreign.rollback().await.is_err());
+    assert!(socket.exists());
+    listener.kill().await.unwrap();
+    let cleanup = Installation::resume_cleanup(
+        Arc::new(Local {
+            root: fixture.root.clone(),
+        }),
+        &fixture.target,
+        transaction.cleanup_coordinates(),
+    )
+    .unwrap();
+    cleanup.rollback().await.unwrap();
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn control_cleanup_never_follows_a_socket_symlink_or_removes_regular_data() {
+    use std::os::unix::fs::symlink;
+    for linked in [false, true] {
+        let fixture = Fixture::new();
+        let transaction = fixture.transaction();
+        transaction.stage(&fixture.binary).await.unwrap();
+        let runtime = fixture.base().join("sessions");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = runtime.join("plugins.sock");
+        let foreign = fixture.root.join("preserved");
+        std::fs::write(&foreign, b"preserve").unwrap();
+        if linked {
+            symlink(&foreign, &socket).unwrap();
+        } else {
+            std::fs::write(&socket, b"preserve").unwrap();
+        }
+        assert!(transaction.rollback().await.is_err());
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"preserve");
+        assert_eq!(std::fs::read(&socket).unwrap(), b"preserve");
+    }
+}
+
+/// Concurrent commands must leave exactly one original journal and reject the loser.
+#[tokio::test]
+async fn concurrent_attempts_cannot_replace_or_clean_each_others_transaction() {
+    let fixture = Fixture::new();
+    let first = fixture.transaction();
+    let second = fixture.transaction();
+    let (one, two) = tokio::join!(first.stage(&fixture.binary), second.stage(&fixture.binary));
+    assert_ne!(one.is_ok(), two.is_ok());
+    let (winner, loser) = if one.is_ok() {
+        (&first, &second)
+    } else {
+        (&second, &first)
+    };
+    let original = std::fs::read(fixture.base().join(".bootstrap-lock/transaction")).unwrap();
+    let lease = std::fs::read_to_string(fixture.base().join(".bootstrap-lock/lease")).unwrap();
+    let pid = lease.split_whitespace().next().unwrap();
+    let descriptor = PathBuf::from(format!("/proc/{pid}/fd/7"));
+    assert!(loser.rollback().await.is_err());
+    assert_eq!(
+        std::fs::read_link(&descriptor).unwrap(),
+        fixture.base().join(".bootstrap-lock"),
+        "the losing attempt retired the winner's setup lease"
+    );
+    assert_eq!(
+        std::fs::read(fixture.base().join(".bootstrap-lock/transaction")).unwrap(),
+        original
+    );
+    winner.rollback().await.unwrap();
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+/// A command disappearing after publishing its unit retains enough journal to restore it.
+#[tokio::test]
+async fn crash_mid_install_can_roll_back_and_retry() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    executable(
+        &fixture.root.join("tools/mv"),
+        "#!/bin/sh\n/usr/bin/mv \"$@\" || exit $?\ncase \"$*\" in *infraternal-agent.service) kill -TERM \"$PPID\";; esac\n",
+    );
+    assert!(transaction.enroll_and_start(&fixture.join).await.is_err());
+    std::fs::remove_file(fixture.root.join("tools/mv")).unwrap();
+    transaction.rollback().await.unwrap();
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.enroll_and_start(&fixture.join).await.unwrap();
+    retry.commit().await.unwrap();
+}
+
+/// Service-manager umasks determine socket mode; the private parent protects access.
+#[tokio::test]
+async fn stopped_control_socket_modes_from_service_manager_are_recoverable() {
+    for mode in [0o600, 0o700, 0o755, 0o775] {
+        let fixture = Fixture::new();
+        let transaction = fixture.transaction();
+        transaction.stage(&fixture.binary).await.unwrap();
+        transaction.enroll_and_start(&fixture.join).await.unwrap();
+        let runtime = fixture.base().join("sessions");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut listener = control_listener(&runtime).await;
+        std::fs::set_permissions(
+            runtime.join("plugins.sock"),
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+        listener.kill().await.unwrap();
+        transaction.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+    }
 }

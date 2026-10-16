@@ -387,13 +387,18 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     pub async fn rollback(&self) -> Result<(), Failure> {
         self.session
             .run(
-                &self.script(&format!("{FRESH_CLEANUP}\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}")),
+                &self.script(&format!(
+                    "{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\n{ROLLBACK_TRANSACTION}"
+                )),
                 Input::Empty,
             )
-            .await?;
+            .await
+            .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         Ok(())
     }
 }
+
+pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats
 // ownership, link, private-parent and fixed-marker checks before any content read.
@@ -532,6 +537,9 @@ case "$kind" in
     upgrade) :;;
     *) exit 71;;
 esac
+# Only the validated original transaction may retire its cross-command lease.
+# A losing installer must not stop another attempt's lease before refusing it.
+retire_setup_lease
 if [ -f "$stage/activating" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
 fi
@@ -637,6 +645,7 @@ finish_fresh() {
         # Never recursively delete unjournaled contents. Unexpected data keeps
         # the receipt and makes cleanup fail rather than claiming success.
         rm -f "$base/.bootstrap-ready"
+        retire_control_socket
         rmdir "$base/bin" 2>/dev/null || :
         # The service creates these rendezvous directories before its first PTY.
         # Remove only empty owned directories; never follow a parent link or

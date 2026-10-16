@@ -138,7 +138,8 @@ impl PreviousAttempt {
             self.sockets
         );
         let body = format!(
-            "{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nnot_live\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{INSPECT}\n{}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nnot_live\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&expected),
             crate::install::FRESH_CLEANUP,
             crate::install::ROLLBACK_TRANSACTION
