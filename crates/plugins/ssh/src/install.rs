@@ -176,16 +176,21 @@ if [ "$kind" = fresh ]; then handoff_setup_lease "$stage/payload" yes; fi
     /// Publish only the trusted executable cache when legacy recovery needs a newer helper.
     /// # Errors
     /// Refuses unsafe cache/parent ownership or a partial/mismatched transfer.
-    pub async fn prepare_recovery(
-        session: &dyn SshSession,
-        target: &Target,
-        binary: &Path,
-    ) -> Result<(), Failure> {
-        target.validate()?;
-        let digest = binary_digest(binary).await?;
-        let setup_lock = include_str!("setup_lock.sh");
-        let body = format!(
-            r#"{setup_lock}
+    #[cold]
+    #[inline(never)]
+    pub fn prepare_recovery<'a>(
+        session: &'a dyn SshSession,
+        target: &'a Target,
+        binary: &'a Path,
+    ) -> crate::transport::Operation<'a, ()> {
+        // Share the recovery poller through the existing operation boundary.
+        // Its temporary allocation is confined to migration of an earlier cache [243].
+        Box::pin(async move {
+            target.validate()?;
+            let digest = binary_digest(binary).await?;
+            let setup_lock = include_str!("setup_lock.sh");
+            let body = format!(
+                r#"{setup_lock}
 setup_guard
 {PAYLOAD_CACHE}
 validate_cache
@@ -203,17 +208,20 @@ else
     [ ! -e "$prepared" ] || exit 71
 fi
 "#,
-            shell_quote(&digest),
-        );
-        session
-            .run(
-                &Self::script_for(target.mode, uuid::Uuid::nil(), uuid::Uuid::new_v4(), &body),
-                Input::File(binary),
-            )
-            .await?;
-        Ok(())
+                shell_quote(&digest),
+            );
+            session
+                .run(
+                    &Self::script_for(target.mode, uuid::Uuid::nil(), uuid::Uuid::new_v4(), &body),
+                    Input::File(binary),
+                )
+                .await?;
+            Ok(())
+        })
     }
 
+    #[cold]
+    #[inline(never)]
     fn script(&self, body: &str) -> String {
         // A local binding shares this literal across format programs instead
         // of embedding another copy of the setup-lock program in each one.
@@ -230,6 +238,8 @@ fi
         Self::script_for(self.mode, self.host, self.transaction, &guarded)
     }
 
+    #[cold]
+    #[inline(never)]
     pub(crate) fn script_for(
         mode: InstallMode,
         host: uuid::Uuid,
@@ -256,8 +266,9 @@ fi
         } else {
             "default.target"
         };
+        // Existing data must be private to the execution uid before any read or write.
         let script = format!(
-            "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\n# Existing data must be private to the execution uid before any read or write.\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
+            "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -287,16 +298,16 @@ fi
             ));
         }
         let join_body = format!(
+            // Retain the host's existing identity for immutable same-key re-enrollment.
+            // The copy stays in its private host-local transaction, never crossing SSH.
+            // Enrollment writes only the staged identity and returns before service activation.
+            // Shim rendezvous belongs to the live service, outside identity replacement.
             r#"
 stage="$base/.bootstrap-lock"
 [ -f "$stage/kind" ] && [ ! -L "$stage" ] || exit 71
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 [ ! -e "$stage/state" ] && [ ! -L "$stage/state" ] || exit 71
-# Retain the host's existing identity for immutable same-key re-enrollment.
-# The copy stays in its private host-local transaction, never crossing SSH.
 if [ -d "$base/state" ]; then cp -a "$base/state" "$stage/state"; fi
-# Enrollment writes only the staged identity and returns before service activation.
-# Shim rendezvous belongs to the live service, outside identity replacement.
 "$stage/payload" agent --data "$stage/state" join {} --enroll-only >/dev/null
 "#,
             shell_quote(&join.url)
@@ -307,6 +318,16 @@ if [ -d "$base/state" ]; then cp -a "$base/state" "$stage/state"; fi
             .map_err(|error| error.at(InstallStep::Join).in_mode(self.mode))?;
         // Never replace unrelated launcher/unit files. A previous installation is
         // recognizable only through the same host marker and exact launcher target.
+        // Conventional replacement suffixes may belong to another writer. Refuse them
+        // before activation; build all our replacements inside the owned transaction.
+        // Rename the old live binary/state into the transaction, not into a disposable
+        // upload file. This makes failures after a service stop explicitly reversible.
+        // Replacing a running daemon requires an acknowledged stop; otherwise its old
+        // authenticated connection could conceal a failed upgrade.
+        // Intent survives an interrupted reply after the manager stopped the old service.
+        // Transfer lifetime ownership from the staging lease while replacing artifacts.
+        // Journal ownership before replacement, after stopping the previous service.
+        // A refused prior stop is separate from an unknown/interrupted reply.
         let start_body = r##"
 stage="$base/.bootstrap-lock"
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
@@ -320,17 +341,10 @@ if [ -e "$unit" ] || [ -L "$unit" ]; then
 fi
 $manager is-enabled infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-enabled" || :
 $manager is-active infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-active" || :
-# Conventional replacement suffixes may belong to another writer. Refuse them
-# before activation; build all our replacements inside the owned transaction.
 for replacement in "$base/bin/current.new" "$launcher.new" "$unit.new"; do
     [ ! -e "$replacement" ] && [ ! -L "$replacement" ] || exit 71
 done
 mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
-# Rename the old live binary/state into the transaction, not into a disposable
-# upload file. This makes failures after a service stop explicitly reversible.
-# Replacing a running daemon requires an acknowledged stop; otherwise its old
-# authenticated connection could conceal a failed upgrade.
-# Intent survives an interrupted reply after the manager stopped the old service.
 : > "$stage/stopping"
 if [ -f "$stage/was-active" ]; then
     if ! $manager stop infraternal-agent.service >/dev/null 2>&1; then
@@ -340,10 +354,7 @@ if [ -f "$stage/was-active" ]; then
 else
     $manager stop infraternal-agent.service >/dev/null 2>&1 || :
 fi
-# Transfer lifetime ownership from the staging lease while replacing artifacts.
 handoff_setup_lease "$stage/payload" yes
-# Journal ownership before replacement, after stopping the previous service.
-# A refused prior stop is separate from an unknown/interrupted reply.
 : > "$stage/activating"
 if [ -e "$base/bin/live" ]; then : > "$stage/had-binary"; mv "$base/bin/live" "$stage/previous-binary"; fi
 : > "$stage/replacing-binary"
@@ -391,17 +402,17 @@ $manager enable --now infraternal-agent.service
         if self.mode == InstallMode::Root {
             return Ok(true);
         }
+        // Intent precedes mutation so interrupted policy calls remain reversible.
+        // An acknowledged refusal owns no policy change. Interrupted calls retain
+        // intent, but later external enablement must not belong to this attempt.
         let output = self.session.run(&self.script(r#"
 stage="$base/.bootstrap-lock"
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 if ! command -v loginctl >/dev/null 2>&1; then printf 'no\n'; exit 0; fi
 uid=$(id -u)
 if [ "$(loginctl show-user "$uid" -p Linger --value 2>/dev/null || :)" = yes ]; then printf 'yes\n'; exit 0; fi
-# Intent precedes mutation so interrupted policy calls remain reversible.
 : > "$stage/linger-requested"
 if ! loginctl --no-ask-password enable-linger "$uid" >/dev/null 2>&1; then
-    # An acknowledged refusal owns no policy change. Interrupted calls retain
-    # intent, but later external enablement must not belong to this attempt.
     rm -f "$stage/linger-requested"
     printf 'no\n'
     exit 0
@@ -489,17 +500,19 @@ validate_cache() {
 
 // Setup retains its existing attempt lock and ownership proof irrespective of
 // whether the payload arrives through stdin or a verified cache hard link.
+// Admission and cleanup share the same private-parent rule. Refuse a parent
+// that cannot protect a rollback receipt before creating any installation data.
+// A retired fresh transaction still owns final cleanup outside the base.
+// Admit no replacement until its receipt is removed after successful cleanup.
+// The private acquisition journal precedes mkdir. It proves this attempt's
+// empty lock if the command stops before the lock's ordinary receipts exist.
 const STAGE_TRANSACTION: &str = r#"
-# Admission and cleanup share the same private-parent rule. Refuse a parent
-# that cannot protect a rollback receipt before creating any installation data.
 parent=$(dirname "$base")
 if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
 [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
 parent_mode=$(stat -c '%a' "$parent")
 [ "$((0$parent_mode & 022))" -eq 0 ] || exit 71
 setup_guard
-# A retired fresh transaction still owns final cleanup outside the base.
-# Admit no replacement until its receipt is removed after successful cleanup.
 for receipt in "$base".bootstrap-rollback-*; do
     [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
 done
@@ -518,8 +531,6 @@ if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
 else
     kind=fresh
 fi
-# The private acquisition journal precedes mkdir. It proves this attempt's
-# empty lock if the command stops before the lock's ordinary receipts exist.
 printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
 mkdir "$stage" || exit 72
 printf '%s\n' "$transaction" > "$stage/transaction"
