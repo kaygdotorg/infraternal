@@ -445,8 +445,9 @@ async def soak(host, args, record, rng):
         except Exception as error:
             errors.append(type(error).__name__ + ': ' + str(error))
             stop.set()
-    # Exercise both geometries for every terminal before warmup so normal first
-    # VT materialization is not mistaken for a retention leak hours later.
+    # Exercise both geometries before starting load and probe tasks. Quiet
+    # sessions may retain a lazy resize transcript; active output can still
+    # materialize VT later, so resource stability is assessed after warmup.
     for peer in host.peers:
         await peer.send(0x12, struct.pack('<HHHH', 81, 24, 0, 0))
         await peer.send(0x12, struct.pack('<HHHH', 80, 24, 0, 0))
