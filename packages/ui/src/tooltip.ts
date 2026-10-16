@@ -137,6 +137,8 @@ export interface ConfirmTipOptions {
   titleNode?: Node;
   effectNode?: Node;
   confirmLabel: string;
+  /** Disable the confirming action while keeping its explanation visible. */
+  confirmDisabled?: boolean;
   cancelLabel: string;
   /**
    * Inner SVG markup (24 px grid, stroked) for the confirming button instead of the tick. The tick means "yes, do it";
@@ -196,6 +198,7 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   if (options.named) { cancel.querySelector("span")!.textContent = options.cancelLabel; tip.dataset.named = ""; }
   const confirm = document.createElement("button");
   confirm.type = "button";
+  confirm.disabled = options.confirmDisabled ?? false;
   confirm.className = "ui-confirm-yes";
   confirm.setAttribute("aria-label", options.confirmLabel);
   confirm.dataset.tip = options.confirmLabel;
