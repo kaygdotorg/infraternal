@@ -15,7 +15,7 @@ target="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target" = /* ]] || target="$root/$target"
 if [[ "${3:-}" != --built ]]; then
     scripts/auth-toolchain
-    for arch in x86_64 aarch64; do cargo build --locked --release -p infraternal --target "$arch-unknown-linux-musl"; done
+    for arch in x86_64 aarch64; do scripts/static-cargo build --locked --release -p infraternal --target "$arch-unknown-linux-musl"; done
 fi
 # Validate the complete set before publishing; a partial directory is never a release.
 for arch in x86_64 aarch64; do

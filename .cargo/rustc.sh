@@ -8,7 +8,13 @@ compiler="$(cd "$root" && rustup which rustc)"
 cargo_root="${CARGO_HOME:-$HOME/.cargo}"
 target_root="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target_root" = /* ]] || target_root="$root/$target_root"
+# Registry checkout names vary by Cargo mirror; normalize each source root too.
+registry_maps=()
+for registry in "$cargo_root"/registry/src/*; do
+    [[ ! -d "$registry" ]] || registry_maps+=("--remap-path-prefix=$registry=/cargo")
+done
 exec "$compiler" "$@" \
     "--remap-path-prefix=$root=/infraternal" \
     "--remap-path-prefix=$cargo_root=/cargo" \
-    "--remap-path-prefix=$target_root=/build"
+    "--remap-path-prefix=$target_root=/build" \
+    "${registry_maps[@]}"

@@ -1,5 +1,10 @@
 //! Owner-only Mesh default preview and revision-checked fresh-passkey updates [28,211,216].
-use crate::{api::MeshApiError, dataplane::DefaultPolicy, store::Store};
+use crate::{
+    api::MeshApiError,
+    dataplane::DefaultPolicy,
+    diagnostics::{storage_error, storage_sql_error},
+    store::Store,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -87,7 +92,7 @@ pub async fn execute(
             .bind(actor)
             .fetch_one(pool)
             .await
-            .map_err(|_| MeshApiError::Storage)?;
+            .map_err(|error| storage_sql_error(error))?;
     if !owner {
         return Err(MeshApiError::Denied);
     }
@@ -98,13 +103,13 @@ pub async fn execute(
             )
             .fetch_optional(pool)
             .await
-            .map_err(|_| MeshApiError::Storage)?
+            .map_err(|error| storage_sql_error(error))?
             .flatten();
             let default = match default.as_deref() {
                 Some("allow") => DefaultPolicy::Allow,
                 Some("deny") => DefaultPolicy::Deny,
                 None => DefaultPolicy::default(),
-                _ => return Err(MeshApiError::Storage),
+                _ => return Err(storage_error("stored default invalid")),
             };
             Ok(json!({"default_policy":default}))
         }
@@ -131,14 +136,14 @@ async fn set_default(
 ) -> Result<Value, MeshApiError> {
     let mut tx = infraternal_plugin_api::storage::begin_immediate(pool)
         .await
-        .map_err(|_| MeshApiError::Storage)?;
+        .map_err(|error| storage_sql_error(error))?;
     // Recheck after the writer wait, where rollback still fences authority.
     let owner: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND owner=1)")
             .bind(actor)
             .fetch_one(&mut *tx)
             .await
-            .map_err(|_| MeshApiError::Storage)?;
+            .map_err(|error| storage_sql_error(error))?;
     if !owner {
         return Err(MeshApiError::Denied);
     }
@@ -151,7 +156,7 @@ async fn set_default(
             infraternal_plugin_api::FRESH_SECONDS,
         )
         .await
-        .map_err(|_| MeshApiError::Storage)?
+        .map_err(|error| storage_sql_error(error))?
     {
         return Err(MeshApiError::FreshRequired);
     }
@@ -159,23 +164,25 @@ async fn set_default(
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
         .fetch_one(&mut *tx)
         .await
-        .map_err(|_| MeshApiError::Storage)?;
+        .map_err(|error| storage_sql_error(error))?;
     if revision != expected_revision {
         return Err(MeshApiError::Conflict);
     }
-    let next = revision.checked_add(1).ok_or(MeshApiError::Storage)?;
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| storage_error("revision exhausted"))?;
     let value = if default_policy == DefaultPolicy::Allow {
         "allow"
     } else {
         "deny"
     };
-    sqlx::query("INSERT INTO mesh_dataplane(singleton,default_policy) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET default_policy=excluded.default_policy").bind(value).execute(&mut *tx).await.map_err(|_|MeshApiError::Storage)?;
+    sqlx::query("INSERT INTO mesh_dataplane(singleton,default_policy) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET default_policy=excluded.default_policy").bind(value).execute(&mut *tx).await.map_err(|error| storage_sql_error(error))?;
     sqlx::query("UPDATE mesh_state SET revision=? WHERE singleton=1")
         .bind(next)
         .execute(&mut *tx)
         .await
-        .map_err(|_| MeshApiError::Storage)?;
-    sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES(?,'mesh.default.set','mesh',?,?,?)").bind(actor).bind(next).bind(now).bind(serde_json::to_string(&default_policy).map_err(|_|MeshApiError::Storage)?).execute(&mut *tx).await.map_err(|_|MeshApiError::Storage)?;
+        .map_err(|error| storage_sql_error(error))?;
+    sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES(?,'mesh.default.set','mesh',?,?,?)").bind(actor).bind(next).bind(now).bind(serde_json::to_string(&default_policy).map_err(|_| storage_error("default serialization failed"))?).execute(&mut *tx).await.map_err(|error| storage_sql_error(error))?;
     if let Some(hash) = fresh
         && !infraternal_plugin_api::fresh_session_tx(
             &mut tx,
@@ -185,11 +192,13 @@ async fn set_default(
             infraternal_plugin_api::FRESH_SECONDS,
         )
         .await
-        .map_err(|_| MeshApiError::Storage)?
+        .map_err(|error| storage_sql_error(error))?
     {
         return Err(MeshApiError::FreshRequired);
     }
-    tx.commit().await.map_err(|_| MeshApiError::Storage)?;
+    tx.commit()
+        .await
+        .map_err(|error| storage_sql_error(error))?;
     Ok(json!({"default_policy":default_policy,"revision":next}))
 }
 

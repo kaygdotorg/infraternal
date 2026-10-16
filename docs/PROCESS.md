@@ -143,15 +143,18 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,320,400 bytes |
-  | `aarch64-unknown-linux-musl` | 19,513,440 bytes |
+  | `x86_64-unknown-linux-musl` | 21,300,016 bytes |
+  | `aarch64-unknown-linux-musl` | 19,500,376 bytes |
 
-  These ceilings pin the normalized combined-source artifacts measured on #201.
-  A fresh checkout and empty target reproduce the x86 artifact byte for byte.
+  These ceilings pin the normalized combined-source artifacts measured on #201
+  and #229. Direct Cargo builds and packaging share `.cargo/rustc.sh`, which
+  remaps repository, build and dependency source roots once. The native wrapper
+  normalizes generated compiler metadata and only build-owned module defaults;
+  explicit runtime paths remain intact.
   The recipe retains the approved native AES-GCM fallback and size optimization
   for release and host-facts plugins; terminal, mesh and cryptographic
   dependencies retain speed optimization (D243, D264, D272). Combined-source
-  size and runtime receipts are required before the final downward ratchet.
+  size and runtime validation are tracked on both issues.
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later

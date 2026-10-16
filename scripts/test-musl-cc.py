@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the pinned C wrappers' D244 and D264 policies for both musl targets."""
+"""Exercise the pinned C wrappers' D243, D244 and D264 build rules for both musl targets."""
 
 import os
 from pathlib import Path
@@ -9,7 +9,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SCRATCH = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
 SCRATCH.mkdir(parents=True, exist_ok=True)
-with tempfile.TemporaryDirectory(prefix='wrapper-test-', dir=SCRATCH) as directory:
+with tempfile.TemporaryDirectory(prefix='wrapper test-', dir=SCRATCH) as directory:
     tool = Path(directory) / 'auth-tools/zig/zig'
     tool.parent.mkdir(parents=True)
     tool.write_text('#!/usr/bin/env python3\nimport sys\nprint("\\n".join(sys.argv[1:]))\n')
@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='wrapper-test-', dir=SCRATCH) as directo
             f'-DENGINESDIR="{directory}/native/install/lib/engines-3"',
             f'-DMODULESDIR="{directory}/native/install/lib/ossl-modules"',
         ]
-        explicit = '-DMODULESDIR="/chosen/trusted-modules"'
+        explicit = '-DMODULESDIR="/chosen/trusted modules"'
         mismatched = f'-DMODULESDIR="{directory}/native/install/lib/engines-3"'
         result = subprocess.run(
             [str(ROOT / '.cargo/musl-cc.sh'), *build_directories, explicit, mismatched],

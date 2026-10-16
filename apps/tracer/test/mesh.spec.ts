@@ -714,3 +714,30 @@ for (const theme of ["ink", "paper"]) {
     });
   }
 }
+
+test("Mesh recovery retains one watch across repeated refresh failures", async ({ page }, testInfo) => {
+  await open(page);
+  await intoMesh(page);
+  for (let cycle = 0; cycle < 4; cycle++) {
+    await server(page, s => { s.failNext("mesh.list", "network"); s.patchNode("build-01", {rttMs: 20}); });
+    await expect.poll(() => probe(page, p => p.mesh.status())).toBe("error");
+    await probe(page, p => p.mesh.source().retry());
+    await expect.poll(() => probe(page, p => p.mesh.status())).toBe("ready");
+    // The protocol keeps a server-side watch until it is replaced or withdrawn.
+    // The test double exposes the installed set, so leaked watches cannot hide.
+    expect(await server(page, s => (s as unknown as {open: ReadonlyMap<number, unknown>}).open.size)).toBe(1);
+  }
+  await capture(page, "refresh-recovered-ink-1440x900", testInfo);
+});
+
+test("a pushed Mesh recovery cancels pending retry work", async ({ page }) => {
+  await open(page);
+  await intoMesh(page);
+  await server(page, s => { s.failNext("mesh.list", "network"); s.patchNode("build-01", {rttMs: 20}); });
+  await expect.poll(() => probe(page, p => p.mesh.status())).toBe("error");
+  await server(page, s => s.resync());
+  await expect.poll(() => probe(page, p => p.mesh.status())).toBe("ready");
+  const before = await server(page, s => s.calls.filter(c => c.action === "mesh.list").length);
+  await page.waitForTimeout(2500);
+  expect(await server(page, s => s.calls.filter(c => c.action === "mesh.list").length)).toBe(before);
+});

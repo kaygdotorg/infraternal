@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Keep static build callers on the common Cargo compiler driver (D243, #201, #229).
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+# .cargo/rustc.sh owns remapping for direct Cargo and packaging alike. Passing
+# flags through untouched avoids a second mapping that changes artifact bytes.
+exec cargo "$@"

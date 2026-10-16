@@ -15,6 +15,8 @@ rustflags = ["-C", "target-feature=+crt-static"]
 [env]
 # Upstream native build timestamps must not depend on the build wall clock.
 SOURCE_DATE_EPOCH = "0"
+# Include delegated compiler rules in native cache identity.
+SCCACHE_EXTRAFILES = { value = ".cargo/musl-cc.sh", relative = true }
 CC_x86_64_unknown_linux_musl = { value = ".cargo/musl-cc-avx512.sh", relative = true }
 CC_aarch64_unknown_linux_musl = { value = ".cargo/musl-cc.sh", relative = true }
 AR_x86_64_unknown_linux_musl = { value = ".cargo/musl-ar.sh", relative = true }

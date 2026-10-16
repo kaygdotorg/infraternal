@@ -53,7 +53,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   let grants: Grant[] = [];
   const grantById = new Map<string, Grant>();
   let serial = 0;
-  let generation = 0;
+  let generation = 0, publication = 0;
   let disposed = false;
   let retryTimer = 0, notifyTimer = 0, retryStep = 0;
   let notifyQueued = false;
@@ -81,8 +81,12 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   };
 
   const apply = (s: Snapshot): void => {
+    // A pushed recovery supersedes pending failures; successful replies still
+    // follow the server revision, so a newer retry snapshot can advance it.
+    publication += 1;
+    if (retryTimer) { window.clearTimeout(retryTimer); retryTimer = 0; }
     rev = s.rev; access = s.access;
-    if (!access.view) { status = "unavailable"; notify(true); return; }
+    if (!access.view) { generation += 1; status = "unavailable"; notify(true); return; }
     nodes = new Map(s.nodes.map((n) => [n.name, n]));
     idOf = new Map(s.nodes.map((n) => [n.name, n.id]));
     tags = s.tags;
@@ -98,25 +102,34 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   const refresh = (): void => {
     if (disposed) return;
     if (inflight > 0) { dirty = true; return; }
-    const mine = ++generation;
+    const mine = ++generation, published = publication;
     window.clearTimeout(retryTimer); retryTimer = 0;
     if (status === "error") status = "loading";
     client.list().then((raw) => {
       if (disposed || mine !== generation) return;
       const snap = parseSnapshot(raw);
-      if (!snap) { toError(); return; }
-      if (snap.rev < rev) return; // an answer that raced a newer edit
+      if (!snap) { if (published === publication) toError(); return; }
+      // Expiry can change liveness without advancing the stored revision.
+      // On a revision tie, retain the state published after this request began.
+      if (snap.rev < rev || (snap.rev === rev && published !== publication)) return;
       apply(snap);
       watch();
     }, (error: unknown) => {
-      if (disposed || mine !== generation) return;
+      if (disposed || mine !== generation || published !== publication) return;
       // Refused (not allowed, or no such action here): the person has no Mesh. A server that could not answer is an error.
-      if (error instanceof ActionRefused && error.reason !== "mesh unavailable") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); return; }
+      if (error instanceof ActionRefused && error.reason !== "mesh unavailable") { withdraw(); return; }
       toError();
     });
   };
+  const withdraw = (): void => {
+    // Withdrawal has no snapshot revision, so invalidate pending requests too.
+    generation += 1;
+    window.clearTimeout(retryTimer); retryTimer = 0;
+    status = "unavailable"; access = { view: false, manageGrants: false }; notify(true);
+  };
   const toError = (): void => {
     status = "error"; notify(true);
+    window.clearTimeout(retryTimer);
     const wait = RETRY_MS[Math.min(retryStep++, RETRY_MS.length - 1)]!;
     retryTimer = window.setTimeout(refresh, wait);
   };
@@ -132,12 +145,21 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   let stopWatch: (() => void) | undefined;
   const watch = (): void => {
     if (stopWatch || disposed) return;
-    stopWatch = client.watch({}, (ev) => {
+    let ended = false;
+    const release = client.watch({}, (ev) => {
       if (disposed) return;
       if (ev.type === "error") {
+        // A local refresh failure leaves the server watch installed. Keep it:
+        // the frozen wire has replacement subscriptions, but no unsubscribe.
+        if (ev.subscriptionActive) { toError(); return; }
         // The server ended the subscription. A withdrawn view: the Mesh goes. Anything else: ask again, with a new watch.
+        // A server withdrawal ends this watch. Release the client handle and
+        // pending page work before retry installs its replacement (#229).
+        ended = true;
+        const stop = stopWatch;
         stopWatch = undefined;
-        if (ev.error === "forbidden") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); } else toError();
+        stop?.();
+        if (ev.error === "forbidden") withdraw(); else toError();
         return;
       }
       const snap = parseSnapshot(ev.snapshot);
@@ -146,6 +168,8 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       if (inflight > 0) { dirty = true; return; }
       if (snap.rev >= rev) apply(snap);
     });
+    // Refusal may arrive inside subscribe, before its release handle exists.
+    if (ended) release(); else stopWatch = release;
   };
   // The first connection and every reconnect (a terminal is attached): start from a list when nothing is live; a live
   // watch is subscribed again by the connection and answers with its own snapshot.
