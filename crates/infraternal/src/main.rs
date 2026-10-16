@@ -18,6 +18,8 @@ mod remote;
 #[cfg(feature = "plugin-server")]
 mod remote_server;
 #[cfg(feature = "remote")]
+mod remote_service;
+#[cfg(feature = "remote")]
 mod restart;
 #[cfg(feature = "remote")]
 mod restart_binary;
@@ -1463,7 +1465,7 @@ fn run_remote_agent(
                 "Keep this process running to maintain the connection.",
             );
         }
-        runtime.block_on(remote::run(&data, state))
+        remote_service::run(runtime, remote::run(&data, state))
     })();
     if result.is_ok() {
         if enroll_only {

@@ -68,22 +68,46 @@ async fn run_inner(
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    // Invalid enrollment must not create local state or start plugin work.
-    // Renewed credentials are authoritative when a renewal owner is present.
-    if let Some(renewal) = renewal {
-        crate::remote_renewal::require_current(&renewal.current()?)?;
-    } else {
-        crate::remote_renewal::require_current(&identity.identity)?;
-    }
-    let state = crate::sessions::state(state)?;
-    // The host control surface remains available while the authenticated server is offline.
-    let service = crate::plugin_control::Service::start(
-        &state,
-        crate::plugins::ExecutionMode::Remote,
-        installation,
-    )
-    .await?;
-    server_path::run(identity, state, renewal, service.registry.clone()).await
+    // A link cancellation cannot cancel synchronous plugin/kernel work. Keep
+    // its sole owner and local listener across watchdog resets; only a closed
+    // receiver proves the worker has ended and can safely be replaced.
+    let service = Mutex::new(None::<crate::plugin_control::Service>);
+    supervisor::run(|connected| {
+        let service = &service;
+        let state = state.clone();
+        async move {
+            // Invalid enrollment creates no local state or plugin work. A clock or
+            // credential failure still leaves the retry owner alive for recovery.
+            if let Some(renewal) = renewal {
+                crate::remote_renewal::require_current(&renewal.current()?)?;
+            } else {
+                crate::remote_renewal::require_current(&identity.identity)?;
+            }
+            let state = crate::sessions::state(state.clone())?;
+            let mut local = service.lock().await;
+            if local.as_ref().is_some_and(|local| local.registry.ended()) {
+                local.take();
+            }
+            if local.is_none() {
+                *local = Some(
+                    crate::plugin_control::Service::start(
+                        &state,
+                        crate::plugins::ExecutionMode::Remote,
+                        installation,
+                    )
+                    .await?,
+                );
+            }
+            let plugins = local
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .registry
+                .clone();
+            drop(local);
+            server_path::run(identity, state, renewal, plugins, connected).await
+        }
+    })
+    .await
 }
 
 // Keep the race in its own future. Its losing socket is dropped when this
@@ -358,6 +382,9 @@ mod dial_runtime;
 
 #[path = "remote_server_path.rs"]
 mod server_path;
+
+#[path = "remote_supervisor.rs"]
+mod supervisor;
 
 #[path = "remote_primed_native.rs"]
 mod primed_native;

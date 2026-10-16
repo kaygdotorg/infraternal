@@ -1,6 +1,9 @@
 //! Proves plugin-proposed server paths before replacement, retaining one live authenticated transport during probes [128,198,215].
 use super::{
-    Connected, RemoteIdentity, dial_preferred, dial_runtime::DialRuntime, quic_session_on,
+    Connected, RemoteIdentity, dial_preferred,
+    dial_runtime::DialRuntime,
+    quic_session_on,
+    supervisor::{MAX_BACKOFF, retry_delay},
 };
 use crate::{channel::Channel, daemon, remote_quic, remote_tls};
 use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
@@ -325,7 +328,7 @@ async fn warming(
         }
         current(identity, renewal, identity.endpoint)?;
         tokio::time::sleep(retry).await;
-        retry = (retry * 2).min(Duration::from_secs(30));
+        retry = (retry * 2).min(MAX_BACKOFF);
     }
 }
 
@@ -443,7 +446,7 @@ async fn replacement(
             () = tokio::time::sleep(retry) => {},
             changed = paths.changed() => { changed.map_err(|_| io::ErrorKind::BrokenPipe)?; },
         }
-        retry = (retry * 2).min(Duration::from_secs(30));
+        retry = (retry * 2).min(MAX_BACKOFF);
     }
 }
 
@@ -495,7 +498,10 @@ async fn transition(
             }
 
             result = &mut replacing => return result.ok(),
-            _ = &mut active => return None,
+            result = &mut active => {
+                eprintln!("Infraternal agent server session ended ({:?}); reconnecting", result.err().map(|error| error.kind()));
+                return None;
+            },
             result = async { preparing.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.await },
                 if preparing.is_some() && warm.is_none() => {
                 *warm = result.ok();
@@ -562,7 +568,10 @@ pub(super) async fn run(
     state: PathBuf,
     renewal: Option<&crate::remote_renewal::RenewalIdentity>,
     registry: crate::plugin_control::Registry,
+    connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
+    // No preference is valid; an error means the local worker is unavailable.
+    // The retry owner replaces only a terminated worker before reconnecting.
     registry
         .initialize_paths()
         .await
@@ -574,6 +583,7 @@ pub(super) async fn run(
     let mut backoff = Duration::from_millis(200);
     let mut cooling = false;
     loop {
+        let attempt_started = tokio::time::Instant::now();
         // Reconnection itself never waits for a failed mesh probe. Once the
         // fallback is healthy, probes run alongside it and cannot lose bytes.
         let link = if let Some(link) = live.take() {
@@ -593,35 +603,40 @@ pub(super) async fn run(
                         continue;
                     }
                     current(identity, renewal, identity.endpoint)?;
+                    if backoff == Duration::from_millis(200) {
+                        eprintln!(
+                            "Infraternal agent server unavailable ({:?}); retrying with bounded backoff",
+                            error.kind()
+                        );
+                    }
                     report(&registry, None, reason);
-                    let jitter =
-                        Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
-                    tokio::time::sleep(backoff + jitter).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    tokio::time::sleep(retry_delay(backoff, attempt_started.elapsed())).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                     continue;
                 }
             }
         };
         let started = tokio::time::Instant::now();
         report(&registry, Some(&link), reason);
+        connected.send_replace(true);
         // Both futures leave scope before retiring the old transport. Aborting
         // a partial write is safe only because Link closes that entire channel.
         let moved = transition(
             &link, identity, &state, renewal, &registry, cooling, &mut warm,
         )
         .await;
+        connected.send_replace(false);
         // A transport close can win the replacement race after component down.
         // The current applied preference owns the reason, rather than whichever
         // future happened to finish first.
         let interrupted_reason = interruption_reason(&registry);
         let moved = match moved {
             Some((next, why)) if next.kind == ServerLinkKind::Fallback && warm.is_some() => {
-                Some((warm.take().ok_or(io::ErrorKind::BrokenPipe)?, why))
+                Some((warm.take().unwrap_or(next), why))
             }
-            None if link.kind == ServerLinkKind::Mesh && warm.is_some() => Some((
-                warm.take().ok_or(io::ErrorKind::BrokenPipe)?,
-                interrupted_reason,
-            )),
+            None if link.kind == ServerLinkKind::Mesh => {
+                warm.take().map(|next| (next, interrupted_reason))
+            }
             other => other,
         };
         if let Some((next, why)) = moved {
@@ -638,13 +653,14 @@ pub(super) async fn run(
             force_fallback = cooling;
             report(&registry, None, reason);
             if link.kind == ServerLinkKind::Fallback {
-                if started.elapsed() > Duration::from_secs(10) {
+                let elapsed = if started.elapsed() > Duration::from_secs(10) {
                     backoff = Duration::from_millis(200);
-                }
-                let jitter =
-                    Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 100);
-                tokio::time::sleep(backoff + jitter).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                    Duration::ZERO
+                } else {
+                    attempt_started.elapsed()
+                };
+                tokio::time::sleep(retry_delay(backoff, elapsed)).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
         drop(link);

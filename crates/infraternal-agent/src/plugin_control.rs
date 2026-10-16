@@ -21,6 +21,11 @@ pub(crate) struct Registry {
     link: std::sync::Arc<std::sync::Mutex<infraternal_plugin_api::server_path::ServerLink>>,
 }
 type Factory = Box<dyn FnOnce() -> Result<PluginRegistry, PluginError> + Send>;
+#[cfg(test)]
+tokio::task_local! {
+    /// Scope fault injection to one reconnect task; unrelated tests use real plugins.
+    pub(crate) static TEST_FACTORY: std::sync::Arc<dyn Fn() -> Result<PluginRegistry, PluginError> + Send + Sync>;
+}
 struct PendingWorker {
     factory: Factory,
     incoming: mpsc::Receiver<Job>,
@@ -66,11 +71,20 @@ impl Registry {
     pub(crate) fn new(registry: PluginRegistry) -> Self {
         Self::from_factory(Box::new(move || Ok(registry)))
     }
+    /// Exercise startup failure through the real lazy worker/channel lifecycle.
+    #[cfg(all(test, feature = "remote"))]
+    pub(crate) fn unavailable() -> Self {
+        Self::from_factory(Box::new(|| Err(PluginError::Rejected)))
+    }
     fn for_mode(
         state: PathBuf,
         mode: crate::plugins::ExecutionMode,
         installation: Option<crate::plugins::Installation>,
     ) -> Self {
+        #[cfg(test)]
+        if let Ok(factory) = TEST_FACTORY.try_with(std::sync::Arc::clone) {
+            return Self::from_factory(Box::new(move || factory()));
+        }
         let registry = Self::from_factory(Box::new(move || {
             crate::plugins::registry_at(mode, Some(&state), installation.as_ref())
         }));
@@ -97,6 +111,11 @@ impl Registry {
             }))),
         }
     }
+    /// Receiver closure fences replacement: no old callback can still execute.
+    #[cfg(feature = "remote")]
+    pub(crate) fn ended(&self) -> bool {
+        self.sender.is_closed()
+    }
     fn start(&self) -> Result<(), PluginError> {
         // An inactive control surface needs no thread or its resident startup
         // code. Serialize the first call so concurrent local/server callers
@@ -116,6 +135,8 @@ impl Registry {
                     let Ok(mut registry) = factory() else {
                         return;
                     };
+                    // Drop the registry before the captured receiver. Never
+                    // close it early: ended() uses that as its replacement fence.
                     while let Some(job) = incoming.blocking_recv() {
                         if let Ok(link) = link.lock() {
                             registry.set_server_link(&link);

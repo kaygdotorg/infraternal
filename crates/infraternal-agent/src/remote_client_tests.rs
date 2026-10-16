@@ -482,7 +482,7 @@ async fn tcp_winner_cancels_silent_udp_drivers_without_waiting_for_drain() {
 }
 
 #[tokio::test]
-async fn expired_local_identity_stops_instead_of_retrying_forever() {
+async fn unavailable_local_credentials_retry_without_creating_state() {
     let ca = root();
     let key = openssl::pkey::PKey::generate_ed25519().unwrap();
     let mut certificate = X509::builder().unwrap();
@@ -520,8 +520,8 @@ async fn expired_local_identity_stops_instead_of_retrying_forever() {
     )
     .await;
     assert!(
-        matches!(result, Ok(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied),
-        "expired identity kept retrying"
+        result.is_err(),
+        "unavailable credentials stopped the server link"
     );
     assert_eq!(
         std::fs::read_dir(&directory.0).unwrap().count(),

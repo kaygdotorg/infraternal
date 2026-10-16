@@ -90,9 +90,15 @@ impl RenewalIdentity {
     }
     /// Snapshot the current acknowledged leaf without exposing the key to the peer.
     /// # Errors
-    /// Refuses poisoned identity state.
+    /// Refuses poisoned identity state; returns `WouldBlock` during publication.
     pub fn current(&self) -> io::Result<Identity> {
-        let identity = self.identity.read().map_err(|_| denied())?;
+        // A publisher may be waiting for storage while holding the writer.
+        // Reconnect runs on an async executor: never park that executor on this
+        // synchronous lock, or its timeout/watchdog cannot run either.
+        let identity = self.identity.try_read().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
+            std::sync::TryLockError::Poisoned(_) => denied(),
+        })?;
         Ok(Identity {
             certificate: identity.certificate.clone(),
             key: identity.key.clone(),
@@ -206,4 +212,37 @@ pub fn require_current(identity: &Identity) -> io::Result<()> {
 }
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Publisher;
+    impl CertificatePublisher for Publisher {
+        fn publish(&self, _: &X509) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Publication can hold the writer while storage is slow. Snapshotting from
+    /// an async reconnect task must yield an error, never park its runtime thread.
+    #[test]
+    fn credential_snapshot_does_not_block_async_reconnect() {
+        let ca = crate::remote_tls::tests::root();
+        let identity = crate::remote_tls::tests::leaf(&ca, false);
+        let renewal = RenewalIdentity::new(&identity, &[ca.certificate], Arc::new(Publisher));
+        let writer = renewal.identity.write().unwrap();
+        let reading = renewal.clone();
+        let (done, completion) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            done.send(reading.current().map(|_| ()).map_err(|error| error.kind()))
+                .unwrap();
+        });
+        let result = completion.recv_timeout(std::time::Duration::from_secs(5));
+        // Release the fixture writer even if the regression blocks the reader.
+        drop(writer);
+        thread.join().unwrap();
+        assert_eq!(result.unwrap(), Err(io::ErrorKind::WouldBlock));
+    }
 }

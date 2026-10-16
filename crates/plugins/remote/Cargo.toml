@@ -15,7 +15,7 @@ test-support = ["transport"]
 [dependencies]
 bytes = { workspace = true, optional = true }
 infraternal-shim = { workspace = true, optional = true }
-nix = { workspace = true, optional = true }
+nix = { workspace = true, optional = true, features = ["net"] }
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
 infraternal-protocol = { workspace = true, optional = true }
 openssl = { workspace = true, optional = true }

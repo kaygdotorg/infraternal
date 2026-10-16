@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     net::IpAddr,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -81,8 +81,41 @@ impl Store {
     }
     /// Atomically publish public intent and fsync the replacement and directory.
     /// # Errors
-    /// Reports incomplete persistence; no existing temporary file is overwritten.
+    /// Refuses stale/conflicting revisions or incomplete persistence; no existing
+    /// temporary file is overwritten. Identical replay and exact legacy-key
+    /// metadata upgrades retain their established semantics.
     pub fn save(&self, state: &State) -> io::Result<()> {
+        // The directory inode is stable across atomic snapshot replacement.
+        // Lock it, not the replaced file, so independent Store instances cannot
+        // race the revision check and rename. No idle descriptor is retained.
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(self.path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        // Disabled/unconfigured intent carries no access revision. It must
+        // remain publishable even if the retained public snapshot is unreadable.
+        if let Some(next) = &state.config
+            && let Some(previous) = read_public::<State>(&self.path)?
+            && let Some(old) = previous.config
+        {
+            if next.version < old.version {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if next.version == old.version && next != &old {
+                // An existing exact legacy-key upgrade changes metadata only;
+                // Node's authenticated binding check still authorizes that key.
+                let mut bound = old;
+                if bound.local_key.is_some() || next.local_key.is_none() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                bound.local_key = next.local_key;
+                if &bound != next {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+            }
+        }
         #[cfg(feature = "cutoff-measure")]
         let encode = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_encode")
@@ -105,7 +138,7 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(path)
     {
-        Ok(file) => {
+        Ok(mut file) => {
             let meta = file.metadata()?;
             if !meta.is_file()
                 || meta.uid() != nix::unistd::Uid::effective().as_raw()
@@ -113,7 +146,13 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
             {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
-            serde_json::from_reader(file)
+            // Reuse the slice decoder already used for peer/access frames,
+            // avoiding a second JSON specialization for public file input. Read
+            // the checked descriptor so replacement cannot bypass no-follow or
+            // ownership validation. These bytes contain no private key material.
+            let mut body = Vec::new();
+            file.read_to_end(&mut body)?;
+            serde_json::from_slice(&body)
                 .map(Some)
                 .map_err(io::Error::other)
         }
@@ -148,9 +187,9 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    struct Directory(PathBuf);
+    pub(super) struct Directory(pub(super) PathBuf);
     impl Directory {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let base = std::env::var_os("CARGO_TARGET_DIR")
                 .map_or_else(
                     || std::env::current_dir().map(|path| path.join("target")),
@@ -298,3 +337,7 @@ mod tests {
         assert!(Store::open(&directory.0).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "node_state_order_tests.rs"]
+mod order_tests;

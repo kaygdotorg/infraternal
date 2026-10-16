@@ -22,12 +22,22 @@ use tokio_tungstenite::{
 
 type Browser = WebSocketStream<tokio_openssl::SslStream<tokio::net::TcpStream>>;
 
+/// Copied process fixtures can run on the measurement host without a checkout.
+fn fixture_repository() -> PathBuf {
+    std::env::var_os("INFRATERNAL_REMOTE_FIXTURE_REPOSITORY").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        PathBuf::from,
+    )
+}
+
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        let path = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/ra6")
-            .join(format!("{:08x}", rand::random::<u32>()));
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+            || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ra6"),
+            PathBuf::from,
+        );
+        let path = root.join(format!("{:08x}", rand::random::<u32>()));
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -42,7 +52,7 @@ impl Drop for Directory {
         // Reuse the authenticated rendezvous cleanup; never match unrelated PIDs.
         let script = "import sys;sys.dont_write_bytecode=True;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))";
         let cleanup = Command::new("python3")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .current_dir(fixture_repository())
             .args(["-c", script])
             .arg(self.0.join("s"))
             .stdout(Stdio::null())
@@ -159,7 +169,18 @@ async fn next(browser: &mut Browser) -> bytes::Bytes {
             .unwrap()
             .unwrap()
         {
-            Message::Binary(bytes) => return bytes,
+            Message::Binary(bytes) => {
+                // The replacement server can prove browser liveness while host
+                // admission is pending. Answer it without issuing another open.
+                if let Ok(decoded) = decode_muxed_frame(&bytes)
+                    && decoded.stream_id == 0
+                    && let Frame::Ping { nonce, sent_us } = decoded.frame
+                {
+                    send(browser, 0, &Frame::Pong { nonce, sent_us }).await;
+                    continue;
+                }
+                return bytes;
+            }
             Message::Ping(bytes) => browser.send(Message::Pong(bytes)).await.unwrap(),
             Message::Close(_) => panic!("browser transport closed"),
             _ => {}
@@ -324,12 +345,19 @@ async fn browser(address: SocketAddr, root: &X509, origin: &str, cookie: &str) -
 }
 
 async fn open_remote(browser: &mut Browser, host: uuid::Uuid, started: Instant) -> uuid::Uuid {
+    open_remote_with_budget(browser, host, started, Duration::from_secs(10)).await
+}
+
+/// Release outage checks allow the complete bounded reconnect backoff.
+async fn open_remote_with_budget(
+    browser: &mut Browser,
+    host: uuid::Uuid,
+    started: Instant,
+    budget: Duration,
+) -> uuid::Uuid {
     // Retry only host admission, without creating any successful duplicate PTYs.
     loop {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "remote host did not register"
-        );
+        assert!(started.elapsed() < budget, "remote host did not register");
         let input = serde_json::json!({"host_id":host}).to_string();
         send(
             browser,
@@ -484,7 +512,7 @@ async fn browser_proof(fixture: &Fixture, host: uuid::Uuid, session: uuid::Uuid)
         return;
     }
     let mut child = tokio::process::Command::new("bun")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .current_dir(fixture_repository())
         .arg("scripts/verify-remote-browser.mjs")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -553,11 +581,23 @@ fn cli(binary: &Path, directory: &Directory, join: bool) -> Process {
         command
             .env(
                 "ZDOTDIR",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../infraternal/tests/profile"),
+                fixture_repository().join("crates/infraternal/tests/profile"),
             )
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(
+                if std::env::var_os("INFRATERNAL_RECONNECT_CONTROL").is_some() {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                },
+            )
+            .stderr(
+                if std::env::var_os("INFRATERNAL_RECONNECT_CONTROL").is_some() {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                },
+            )
             .spawn()
             .unwrap(),
     )
