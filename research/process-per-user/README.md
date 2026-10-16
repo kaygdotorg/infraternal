@@ -332,6 +332,15 @@ as an upper bound that can include interrupts or virtual CPU steal. PID setup,
 stage flushing and tracing affect scheduling; these are diagnostic captures,
 never admission results or a substitute for the uninstrumented control.
 
+`ppu_baseline_tail.py` observes the shipping control without requesting a
+native stage header or sending profiling signals to it. Independent launch
+records bind each shim to its own shell; the same marker matcher and batch
+ownership audit are reused. `ppu_baseline_tail_report.py` reports overlapping
+shim/shell/reader scheduler intervals and kernel off-CPU spans. It explicitly
+omits native VT/frame timestamps, which the shipping image cannot supply.
+Diagnostic observer costs differ between these captures and must stay visible
+when comparing their locations with the uninstrumented admission distributions.
+
 The native `ppu_wire_probe` example is a diagnostic observer. It opens additional
 viewer sockets with a distinct durable writer, finishes setup before timing,
 and checks output offsets and shell-generated markers. Those extra connections
