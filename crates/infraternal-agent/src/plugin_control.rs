@@ -318,47 +318,54 @@ impl Service {
         lifetime.clone_from(&service.registry.lifetime);
         Ok(service)
     }
-    async fn start_inner(
-        state: &Path,
+    fn start_inner<'a>(
+        state: &'a Path,
         mode: crate::plugins::ExecutionMode,
-        installation: Option<&crate::plugins::Installation>,
+        installation: Option<&'a crate::plugins::Installation>,
         #[cfg(feature = "remote")] lifetime: Option<std::sync::Arc<std::fs::File>>,
-    ) -> io::Result<Self> {
-        #[cfg(feature = "remote")]
-        let lifetime = if matches!(mode, crate::plugins::ExecutionMode::Remote) {
-            let guard = if let Some(guard) = lifetime {
-                infraternal_plugin_remote::runtime_lock::validate(&guard, state)?;
-                guard
-            } else {
-                std::sync::Arc::new(if let Some(context) = installation {
-                    infraternal_plugin_remote::runtime_lock::acquire_owned(state, &context.host)?
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self>> + Send + 'a>> {
+        // Startup has one temporary allocation rather than repeating its state
+        // machine in embedded and remote dispatch. It is released after startup [243].
+        Box::pin(async move {
+            #[cfg(feature = "remote")]
+            let lifetime = if matches!(mode, crate::plugins::ExecutionMode::Remote) {
+                let guard = if let Some(guard) = lifetime {
+                    infraternal_plugin_remote::runtime_lock::validate(&guard, state)?;
+                    guard
                 } else {
-                    infraternal_plugin_remote::runtime_lock::acquire(state)?
-                })
+                    std::sync::Arc::new(if let Some(context) = installation {
+                        infraternal_plugin_remote::runtime_lock::acquire_owned(
+                            state,
+                            &context.host,
+                        )?
+                    } else {
+                        infraternal_plugin_remote::runtime_lock::acquire(state)?
+                    })
+                };
+                crate::sessions::state(Some(state.to_owned()))?;
+                Some(guard)
+            } else {
+                None
             };
-            crate::sessions::state(Some(state.to_owned()))?;
-            Some(guard)
-        } else {
-            None
-        };
-        // Compiled metadata is validated by registry tests; construct its
-        // process-owned instances only when a caller needs an action.
-        #[cfg(feature = "remote")]
-        let installation = installation.cloned();
-        #[cfg(not(feature = "remote"))]
-        let installation = installation.copied();
-        let registry = Registry::for_mode(state.to_owned(), mode, installation);
-        // Listener tasks and synchronous workers retain the same ownership even
-        // when cancellation has been requested but their work has not stopped.
-        #[cfg(feature = "remote")]
-        let registry = Registry {
-            lifetime,
-            ..registry
-        };
-        let local = Local::bind(state, registry.clone()).await?;
-        Ok(Self {
-            registry,
-            _local: local,
+            // Compiled metadata is validated by registry tests; construct its
+            // process-owned instances only when a caller needs an action.
+            #[cfg(feature = "remote")]
+            let installation = installation.cloned();
+            #[cfg(not(feature = "remote"))]
+            let installation = installation.copied();
+            let registry = Registry::for_mode(state.to_owned(), mode, installation);
+            // Listener tasks and synchronous workers retain the same ownership even
+            // when cancellation has been requested but their work has not stopped.
+            #[cfg(feature = "remote")]
+            let registry = Registry {
+                lifetime,
+                ..registry
+            };
+            let local = Local::bind(state, registry.clone()).await?;
+            Ok(Self {
+                registry,
+                _local: local,
+            })
         })
     }
 }
