@@ -24,7 +24,8 @@ class Receipts(unittest.TestCase):
                     'cpu.stat': 'usage_usec 123\nuser_usec 100\n'}[path.name]
         replies = ['idle.scope loaded active running example\n',
                    'Id=idle.scope\nControlGroup=/system.slice/idle.scope\n']
-        with patch.object(compare.Path, 'stat', return_value=SimpleNamespace(st_dev=0, st_ino=3)), \
+        with patch.object(compare, 'control_scopes', return_value=['own.scope']), \
+             patch.object(compare.Path, 'stat', return_value=SimpleNamespace(st_dev=0, st_ino=3)), \
              patch.object(compare.Path, 'exists', return_value=True), \
              patch.object(compare.Path, 'read_text', read), \
              patch.object(compare.subprocess, 'check_output', side_effect=replies):
@@ -34,7 +35,8 @@ class Receipts(unittest.TestCase):
 
     def test_environment_discloses_first_shim_wakeup_scope(self):
         output = []
-        with patch.object(compare, 'INDEPENDENT', True), \
+        with patch.object(compare, 'lock_receipt', return_value={}), \
+             patch.object(compare, 'INDEPENDENT', True), \
              patch.object(compare, 'original_write', side_effect=lambda rec, kind, **row: output.append(row)):
             compare.write(SimpleNamespace(), 'environment')
         self.assertEqual(output[0]['wakeup_scope'], 'first-shim-only')
