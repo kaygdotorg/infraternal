@@ -34,6 +34,7 @@ class Cleanup(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import Mock
         host = baseline.Host.__new__(baseline.Host)
         host.peers = []
+        host.shells = []
         dead = Mock()
         dead.poll.return_value = 0
         live = Mock()
@@ -47,6 +48,47 @@ class Cleanup(unittest.IsolatedAsyncioTestCase):
         live.kill.assert_called_once()
         dead.wait.assert_called_once()
         live.wait.assert_called_once()
+
+    async def test_reused_shell_pid_is_never_signalled_during_cleanup(self):
+        from unittest.mock import Mock
+        host = baseline.Host.__new__(baseline.Host)
+        host.peers = []
+        host.shells = [(100, '123')]
+        live = Mock()
+        live.poll.return_value = None
+        live.pid = 555
+        host.children = [live]
+        host.child = baseline.Children(host.children)
+        host.log = Mock()
+        def read(path):
+            if path.name == 'children':
+                return '100'
+            fields = ['0'] * 20
+            fields[19] = '456'  # The numeric PID now names another birth.
+            return '100 (fixture) ' + ' '.join(fields)
+        with patch.object(baseline.Path, 'read_text', read), \
+             patch.object(baseline.os, 'getpgid', return_value=100), \
+             patch.object(baseline.os, 'killpg') as group_signal, \
+             patch.object(baseline.os, 'pidfd_open', return_value=99), \
+             patch.object(baseline.os, 'close'), \
+             patch.object(baseline.signal, 'pidfd_send_signal') as pinned_signal:
+            await host.close()
+        group_signal.assert_not_called()
+        pinned_signal.assert_not_called()
+
+    def test_real_captured_child_is_retired_through_its_pinned_identity(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        try:
+            birth = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+            baseline.retire_shell(child.pid, birth)
+            self.assertEqual(child.wait(timeout=5), -baseline.signal.SIGKILL)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
 
 
 if __name__ == '__main__':

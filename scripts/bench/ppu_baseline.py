@@ -33,6 +33,18 @@ def aggregate(pids):
             for key in rows[0]}
 
 
+def retire_shell(pid, birth):
+    """Pin a captured shell identity before checking birth and sending a signal."""
+    with contextlib.suppress(ProcessLookupError, FileNotFoundError):
+        handle = os.pidfd_open(pid)
+        try:
+            current = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+            if current == birth:
+                signal.pidfd_send_signal(handle, signal.SIGKILL)
+        finally:
+            os.close(handle)
+
+
 class Children:
     """Present the shared fixture's liveness interface for all owned shim children."""
     def __init__(self, children):
@@ -92,17 +104,8 @@ class Host(suite.Host):
         # A dead shim must not make the aggregate liveness check skip its live
         # siblings. Direct Popen handles keep cleanup scoped to this fixture.
         await asyncio.gather(*(peer.close() for peer in self.peers), return_exceptions=True)
-        for child in self.children:
-            if child.poll() is None:
-                with contextlib.suppress(FileNotFoundError):
-                    children = Path(f'/proc/{child.pid}/task/{child.pid}/children').read_text().split()
-                    for value in children:
-                        pid = int(value)
-                        with contextlib.suppress(ProcessLookupError):
-                            if os.getpgid(pid) == pid:
-                                os.killpg(pid, signal.SIGKILL)
-                            else:
-                                os.kill(pid, signal.SIGKILL)
+        for pid, birth in self.shells:
+            retire_shell(pid, birth)
         self.child.kill()
         await asyncio.to_thread(self.child.wait)
         self.log.close()
