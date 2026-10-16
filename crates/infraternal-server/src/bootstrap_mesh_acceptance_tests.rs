@@ -2,6 +2,7 @@
 /// Unrestricted Output callbacks are route diagnostics. A readiness PTY created
 /// after the ingress fence and a separate fresh post-join marker supply causal
 /// mesh-byte witnesses, separately labeled from unrestricted timings [263].
+/// Optional release cycles retain the same writer across repeated path moves.
 use super::*;
 use crate::remote_runtime::tests::mesh_namespace::{
     Echo, local_daemon, namespace_pool, proof_routes, root_fixture_home, wait_link,
@@ -766,6 +767,72 @@ async fn mesh_acceptance_real_addhost() {
         }
     );
     nft("delete table inet acceptance_cut");
+    // The release trial retains this one writer through every repeated path
+    // move. The existing enrolled-ingress fence proves fresh mesh Output.
+    let release_cycle_count =
+        std::env::var("ACCEPTANCE_RELEASE_CYCLES").map_or(0, |value| value.parse::<u32>().unwrap());
+    assert!(
+        release_cycle_count <= 10,
+        "release cycle count exceeds its lab bound"
+    );
+    assert!(release_cycle_count == 0 || (standing && !baseline_transport),
+        "release cycles require a preserved standing terminal");
+    let mut release_path_cycles = Vec::new();
+    if fallback_echo.is_ok() {
+        for cycle in 1..=release_cycle_count {
+            wait_link(&remote, ServerLinkKind::Mesh).await;
+            println!("RELEASE_CYCLE cycle={cycle} phase=mesh writer={terminal_writer}");
+            nft(&fence_rules(node, controller, "release_cycle_fence"));
+            capture.clear_terminal_milestones();
+            let mesh_started = Instant::now();
+            let marker = format!("release-cycle-{cycle}-mesh-{}|", Uuid::new_v4());
+            expected.extend_from_slice(marker.as_bytes());
+            echo.send(marker.as_bytes()).await;
+            echo.wait(&expected).await;
+            let mesh_echo_us = mesh_started.elapsed().as_micros();
+            assert!(
+                capture
+                    .first_terminal_after(terminal_writer, mesh_started)
+                    .is_some()
+            );
+            nft("delete table inet release_cycle_fence");
+            println!("RELEASE_CYCLE cycle={cycle} phase=fallback writer={terminal_writer}");
+            nft(&mesh_cut_rules(server_mesh.port, "release_cycle_cut"));
+            let fallback_started = Instant::now();
+            let marker = format!("release-cycle-{cycle}-fallback-{}|", Uuid::new_v4());
+            expected.extend_from_slice(marker.as_bytes());
+            echo.send(marker.as_bytes()).await;
+            echo.wait(&expected).await;
+            let fallback_echo_us = fallback_started.elapsed().as_micros();
+            wait_link(&remote, ServerLinkKind::Fallback).await;
+            assert_eq!(echo.writer_id(), terminal_writer);
+            assert_eq!(
+                capture.count(crate::remote_autoswitch_probe::Kind::TlsHandshake),
+                tls_count
+            );
+            assert_eq!(
+                capture.count(crate::remote_autoswitch_probe::Kind::LedgerAdmission),
+                admission_count
+            );
+            assert_eq!(
+                capture.count(crate::remote_autoswitch_probe::Kind::ControlReady),
+                control_count
+            );
+            // Echo::wait requires the entire received stream to equal expected.
+            release_path_cycles.push(serde_json::json!({
+                "cycle":cycle,"writer_id":terminal_writer,"expected_bytes":expected.len(),
+                "verified_bytes":expected.len(),"mesh_output_path_proven":true,
+                "mesh_echo_us":mesh_echo_us,"fallback_echo_us":fallback_echo_us,
+                "tls_admission_control_unchanged":true
+            }));
+            std::fs::write(
+                scratch.join("release-path-cycles.json"),
+                serde_json::to_vec_pretty(&release_path_cycles).unwrap(),
+            )
+            .unwrap();
+            nft("delete table inet release_cycle_cut");
+        }
+    }
     // Optional full lifecycle coverage reuses the real installed daemon and
     // its writer after the measured cut. Its work cannot alter earlier clocks.
     let mesh_disable_checked = std::env::var_os("ACCEPTANCE_DISABLE_LIFECYCLE").is_some();
@@ -861,6 +928,8 @@ async fn mesh_acceptance_real_addhost() {
         // terminal detach. All measured byte boundaries are already captured.
         report["final_transport_observations"] = observer_snapshot(&capture);
     }
+    report["release_path_cycles"] = serde_json::json!(release_path_cycles);
+    report["release_path_cycle_count"] = serde_json::json!(release_cycle_count);
     report["expected_terminal_bytes"] = serde_json::json!(expected.len());
     report["verified_terminal_bytes"] = serde_json::json!(byte_integrity.then_some(expected.len()));
     report["terminal_writer_id"] = serde_json::json!(terminal_writer);
