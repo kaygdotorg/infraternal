@@ -134,3 +134,23 @@ test("review reconnect budget survives sockets that open then close without even
     expect(FakeSocket.all).toHaveLength(3);
   } finally { stop(); }
 });
+
+// Automatic reconnects remain bounded; a person's eligible retry must still recover delivery.
+test("review explicit retry resumes after the setup feed stops", async () => {
+  const lost: string[] = [];
+  const source = feed();
+  const stop = source.subscribe(HOST, () => undefined, { lost: () => lost.push("lost") });
+  try {
+    FakeSocket.all[0]!.open();
+    FakeSocket.all[0]!.say(wire(1, "join", "failed", { failed_step: "join", retry_available: true }));
+    for (let i = 0; i < 3; i++) {
+      FakeSocket.all[i]!.drop();
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    expect(lost).toEqual(["lost"]);
+    source.retry?.(HOST);
+    expect(FakeSocket.all).toHaveLength(4);
+    FakeSocket.all[3]!.open();
+    expect(FakeSocket.all[3]!.sent.map((message) => message.action)).toEqual(["subscribe", "retry"]);
+  } finally { stop(); }
+});
