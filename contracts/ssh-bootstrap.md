@@ -482,15 +482,25 @@ Fresh rollback also retires the infraternal agent's fixed local control socket,
 `sessions/plugins.sock`, which may survive a service stop before the first server
 connection (#230). Its parent must be an owned real private directory and the
 socket an owned, non-linked inode. Socket mode comes from the service manager's
-umask; the private parent protects access for every inherited mode. A kernel
-socket row under that runtime, including a bound or accepted socket, refuses
-removal. Control-socket liveness also uses the host's `ss` extended Unix socket
-diagnostics and process mapping to bridge the filesystem inode to the kernel
-socket inode used by `/proc/net/unix` and open descriptors. A relative bind,
-later working-directory change or renamed live socket is retained by inode;
-missing/incomplete diagnostics refuse cleanup. This utility is consulted only
-when a control socket exists. Recheck the inode before unlinking; unknown files,
-links and live sockets keep the receipt intact.
+umask; the private parent protects access for every inherited mode. Control-socket
+liveness is decided by a direct nonblocking connection with a 250 ms bound,
+using the host's Python 3 standard library only when that socket exists. A
+successful connection retains the live socket and receipt (73). Only
+`ECONNREFUSED` proves staleness; permission errors, timeout, wrong socket type
+and all other uncertain results retain state (77). Missing Python 3 retains
+state with an actionable requirement (76). Cached kernel inode diagnostics and
+global basenames never authorize control-socket removal or block cleanup for
+an unrelated Unix user's listener.
+
+The probe opens the receipt-bound installation root and its private runtime
+directory without following links. It checks socket ownership, type and link
+count with `lstat` immediately before connecting, then repeats that check and
+requires the same device/inode immediately before unlinking relative to the
+opened directory. Relative binds, changed working directories, renamed live
+sockets and live replacements reusing a retired inode remain protected. The
+later session-socket removal loop excludes the control socket, so it cannot
+undo this check. Unknown files and links keep the receipt intact. Executable
+and descriptor inspection considers only processes owned by the installing user.
 
 A retry with retained cleanup coordinates first finishes that exact host and
 transaction's rollback, before issuing another invitation. Progress says “An
