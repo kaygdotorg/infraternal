@@ -2959,3 +2959,22 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        person's click; a built-in MCP server (`infraternal mux mcp`).
      - **Every command and subcommand of ours ships a well-written, concise
        skill** describing what it does, its commands and its safety rules.
+289. **The SSH engine is russh with ring, built into the binary (owner,
+     2026-10-16, #221; extends D235):**
+     - **Engine:** russh with the ring crypto backend (ring is already in the
+       binary). Measured at 500 sessions: 189 KiB per session (92 MiB in all)
+       against 2,240 KiB for a separate OpenSSH sshd (1.07 GiB); TCP to
+       prompt 100/104 ms p50/p99 against 132/197 ms on a 1 ms link.
+       Rejected: a separately managed OpenSSH (about 12× the memory per
+       session); libssh and Dropbear (their certificate login does not meet
+       the contract); russh with AWS-LC (+2.68 MB, adds a second crypto
+       library).
+     - **In the binary, not a downloaded add-on:** adding a host from the
+       canvas switches it to our SSH automatically, so every node needs it
+       and a separate download would only add a step and a delay to adding
+       a host. Rejected: an on-demand SSH add-on file.
+     - **Size exception to D243:** measured +1,872,736 B x86_64 /
+       +1,589,336 B aarch64 without SFTP, plus +157,088 / +133,216 B for
+       SFTP. The caps rise once by the measured delta when the SSH slice
+       lands, and only by that; jobs offset it with cuts elsewhere where
+       they can, and the ratchet continues downward from there.
