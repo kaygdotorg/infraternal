@@ -2004,17 +2004,9 @@ async fn restart_recovers_partial_stage_retirement() {
     }
 }
 
-/// Reusing a retired filesystem inode cannot authorize unlinking a replacement live socket.
-#[tokio::test]
-async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
+/// Bind and replace on one CPU so real inode reuse is independent of allocator locality.
+async fn inode_reuse_listener(base: &std::path::Path) -> tokio::process::Child {
     use tokio::io::AsyncReadExt;
-    let fixture = Fixture::new();
-    let transaction = fixture.transaction();
-    transaction.stage(&fixture.binary).await.unwrap();
-    let runtime = fixture.base().join("sessions");
-    std::fs::create_dir(&runtime).unwrap();
-    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let control = runtime.join("plugins.sock");
     // One pinned fixture process performs both allocations. This avoids
     // allocator locality changes between unrelated subprocesses; no inode
     // value or kernel diagnostic is mocked. EOF retires only this listener.
@@ -2022,7 +2014,7 @@ async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
         .args([
             "-u",
             "-c",
-            r#"
+            r"
 import os,socket,sys,time
 os.sched_setaffinity(0,{min(os.sched_getaffinity(0))})
 path='sessions/plugins.sock'
@@ -2041,9 +2033,9 @@ else:
 s.listen(); os.chdir('/')
 print('reused',flush=True)
 sys.stdin.read()
-"#,
+",
         ])
-        .current_dir(fixture.base())
+        .current_dir(base)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -2058,6 +2050,21 @@ sys.stdin.read()
         .await
         .unwrap();
     assert_eq!(&ready, b"ready\n");
+    listener
+}
+
+/// Reusing a retired filesystem inode cannot authorize unlinking a replacement live socket.
+#[tokio::test]
+async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
+    use tokio::io::AsyncReadExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let control = runtime.join("plugins.sock");
+    let mut listener = inode_reuse_listener(&fixture.base()).await;
     let snapshot = fixture.root.join("snapshot");
     let observed = fixture.root.join("observed");
     let replaced = fixture.root.join("replaced");
@@ -2125,6 +2132,7 @@ sys.stdin.read()
 #[tokio::test]
 #[ignore = "requires sudo -n to create an isolated listener as uid 65534"]
 async fn review_unrelated_user_relative_socket_does_not_block_stale_cleanup() {
+    use std::os::unix::fs::MetadataExt;
     use tokio::io::AsyncReadExt;
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
@@ -2160,7 +2168,6 @@ async fn review_unrelated_user_relative_socket_does_not_block_stale_cleanup() {
         .await
         .unwrap();
     assert_eq!(&ready, b"ready\n");
-    use std::os::unix::fs::MetadataExt;
     assert_eq!(
         std::fs::metadata(unrelated.join("plugins.sock"))
             .unwrap()
