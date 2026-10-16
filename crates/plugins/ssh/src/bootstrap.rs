@@ -60,6 +60,18 @@ pub trait Backend: Send + Sync {
         target: &'a Target,
         check: &'a Check,
     ) -> Operation<'a, JoinMaterial>;
+    /// Only a durable failed-host binding may replace the earlier-setup confirmation.
+    /// Unknown servers, hosts, accounts and destinations must return false.
+    fn owns_failed_setup<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _target: &'a Target,
+        _check: &'a Check,
+        _host: uuid::Uuid,
+        _lookup: Option<String>,
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
     /// Bind nonsecret cleanup coordinates to the connection that actually authenticated.
     fn invitation_with_trust<'a>(
         &'a self,
@@ -99,7 +111,7 @@ pub trait Backend: Send + Sync {
         authority: &'a Authority,
         host: uuid::Uuid,
     ) -> Operation<'a, ()>;
-    /// Record explicit earlier-attempt recovery using only public coordinates.
+    /// Record earlier-attempt recovery using only public coordinates.
     fn record_start_fresh(&self, _: &Target, _: uuid::Uuid, _: uuid::Uuid, _: &'static str) {}
 
     /// One public failure record per attempt, before cleanup changes its progress phase.
@@ -620,8 +632,26 @@ impl Bootstrap {
         check.authorize_mode(target.mode)?;
         restore_previous(batch, target, attempt, started, session.clone()).await?;
         if let Some(previous) = previous {
-            self.await_start_fresh(batch, target, attempt, started, session.as_ref(), &previous)
+            let automatic = self
+                .backend
+                .owns_failed_setup(
+                    &batch.authority,
+                    target,
+                    &check,
+                    previous.host,
+                    session.trust_lookup(),
+                )
                 .await?;
+            self.await_start_fresh(
+                batch,
+                target,
+                attempt,
+                started,
+                session.as_ref(),
+                &previous,
+                automatic,
+            )
+            .await?;
         }
         // A cold-locked CA or unsupported #78 runtime must fail here, before upload.
         // Durable publication can outlive a cancelled acknowledgement. Bind
@@ -831,32 +861,45 @@ impl Bootstrap {
         started: Instant,
         session: &dyn SshSession,
         previous: &PreviousAttempt,
+        automatic: bool,
     ) -> Result<(), Failure> {
-        let challenge = uuid::Uuid::new_v4();
-        let (resume, resumed) = oneshot::channel();
-        {
-            let mut states = lock(&batch.states);
-            let state = states
-                .get_mut(&target.id)
-                .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
-            state.start_fresh = Some(PendingFresh { challenge, resume });
+        if automatic {
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Install,
+                "An earlier setup on this host did not finish; finishing it now.",
+                started,
+                None,
+            );
+        } else {
+            let challenge = uuid::Uuid::new_v4();
+            let (resume, resumed) = oneshot::channel();
+            {
+                let mut states = lock(&batch.states);
+                let state = states
+                    .get_mut(&target.id)
+                    .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
+                state.start_fresh = Some(PendingFresh { challenge, resume });
+            }
+            emit_with_leftovers(
+                batch,
+                target,
+                attempt,
+                Step::Check,
+                "This host has leftovers from an earlier setup",
+                started,
+                Some(Failure::new(
+                    crate::model::FailureKind::StalePreviousAttempt,
+                    "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
+                )),
+                Some(Box::new(previous.findings(target.mode, challenge))),
+            );
+            resumed.await.map_err(|_| {
+                Failure::install("Host provisioning stopped while waiting to start fresh.")
+            })?;
         }
-        emit_with_leftovers(
-            batch,
-            target,
-            attempt,
-            Step::Check,
-            "This host has leftovers from an earlier setup",
-            started,
-            Some(Failure::new(
-                crate::model::FailureKind::StalePreviousAttempt,
-                "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
-            )),
-            Some(Box::new(previous.findings(target.mode, challenge))),
-        );
-        resumed.await.map_err(|_| {
-            Failure::install("Host provisioning stopped while waiting to start fresh.")
-        })?;
         self.backend
             .record_start_fresh(target, previous.host, previous.transaction, "started");
         let result = previous.start_fresh(session, target).await;

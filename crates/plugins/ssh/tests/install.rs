@@ -1331,12 +1331,17 @@ fn earlier_attempt_classification_preserves_status_boundary_and_authentication()
 
 #[tokio::test]
 async fn start_fresh_resumes_the_same_attempt_after_owner_confirmation() {
-    exercise_start_fresh(false).await;
+    exercise_start_fresh(false, false).await;
 }
 
 #[tokio::test]
 async fn turning_off_paused_host_provisioning_preserves_earlier_leftovers() {
-    exercise_start_fresh(true).await;
+    exercise_start_fresh(true, false).await;
+}
+
+#[tokio::test]
+async fn known_failed_setup_finishes_without_a_second_confirmation() {
+    exercise_start_fresh(false, true).await;
 }
 
 // Reuse one real-filesystem fixture for completion and component cancellation.
@@ -1344,7 +1349,7 @@ async fn turning_off_paused_host_provisioning_preserves_earlier_leftovers() {
     clippy::too_many_lines,
     reason = "Keep the real shell fixture and same-attempt admission assertions together."
 )]
-async fn exercise_start_fresh(turn_off: bool) {
+async fn exercise_start_fresh(turn_off: bool, automatic: bool) {
     use infraternal_plugin_api::{ComponentPlugin, PluginState};
     use infraternal_plugin_ssh::{
         bootstrap::{Authority, Backend, Bootstrap, Resolved},
@@ -1359,6 +1364,7 @@ async fn exercise_start_fresh(turn_off: bool) {
     };
     struct Ready {
         host: uuid::Uuid,
+        automatic: bool,
         invitations: AtomicUsize,
         recoveries: Mutex<Vec<&'static str>>,
     }
@@ -1376,6 +1382,16 @@ async fn exercise_start_fresh(turn_off: bool) {
                     mesh: MeshEvidence::default(),
                 })
             })
+        }
+        fn owns_failed_setup<'a>(
+            &'a self,
+            _: &'a Authority,
+            _: &'a Target,
+            _: &'a Check,
+            host: uuid::Uuid,
+            _: Option<String>,
+        ) -> Operation<'a, bool> {
+            Box::pin(async move { Ok(self.automatic && host == self.host) })
         }
         fn invitation<'a>(
             &'a self,
@@ -1438,6 +1454,7 @@ async fn exercise_start_fresh(turn_off: bool) {
     std::fs::remove_file(&foreign).unwrap();
     let backend = Arc::new(Ready {
         host: fixture.join.host,
+        automatic,
         invitations: AtomicUsize::new(0),
         recoveries: Mutex::new(Vec::new()),
     });
@@ -1455,63 +1472,71 @@ async fn exercise_start_fresh(turn_off: bool) {
         .start("owner".into(), vec![fixture.target.clone()], None)
         .unwrap();
     let mut changes = batch.subscribe();
-    let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        loop {
-            let (_, events) = batch.events(0);
-            if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
-                assert_eq!(event.attempt, 1);
-                assert!(event.host_id.is_none(), "pause must precede enrollment");
-                return event.leftovers.as_ref().unwrap().challenge;
+    if !automatic {
+        let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let (_, events) = batch.events(0);
+                if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
+                    assert_eq!(event.attempt, 1);
+                    assert!(event.host_id.is_none(), "pause must precede enrollment");
+                    return event.leftovers.as_ref().unwrap().challenge;
+                }
+                changes.changed().await.unwrap();
             }
-            changes.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
-    assert!(backend.recoveries.lock().unwrap().is_empty());
-    if turn_off {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            runner.set_enabled(false),
-        )
+        })
         .await
-        .unwrap()
         .unwrap();
-        assert_eq!(runner.status().state, PluginState::Off);
-        assert_eq!(runner.status().active_work, 0);
-        assert!(fixture.receipt().exists());
-        assert!(fixture.base().join(".bootstrap-owner").exists());
-        assert!(backend.recoveries.lock().unwrap().is_empty());
         assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+        assert!(backend.recoveries.lock().unwrap().is_empty());
+        if turn_off {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                runner.set_enabled(false),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(runner.status().state, PluginState::Off);
+            assert_eq!(runner.status().active_work, 0);
+            assert!(fixture.receipt().exists());
+            assert!(fixture.base().join(".bootstrap-owner").exists());
+            assert!(backend.recoveries.lock().unwrap().is_empty());
+            assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+            assert!(
+                runner
+                    .start_fresh(&batch, "owner", "one", challenge)
+                    .is_err()
+            );
+            return;
+        }
+        assert!(
+            runner
+                .start_fresh(&batch, "other-owner", "one", challenge)
+                .is_err()
+        );
+        assert!(
+            runner
+                .start_fresh(&batch, "owner", "one", uuid::Uuid::new_v4())
+                .is_err()
+        );
+        runner
+            .start_fresh(&batch, "owner", "one", challenge)
+            .unwrap();
         assert!(
             runner
                 .start_fresh(&batch, "owner", "one", challenge)
                 .is_err()
         );
-        return;
     }
-    assert!(
-        runner
-            .start_fresh(&batch, "other-owner", "one", challenge)
-            .is_err()
-    );
-    assert!(
-        runner
-            .start_fresh(&batch, "owner", "one", uuid::Uuid::new_v4())
-            .is_err()
-    );
-    runner
-        .start_fresh(&batch, "owner", "one", challenge)
-        .unwrap();
-    assert!(
-        runner
-            .start_fresh(&batch, "owner", "one", challenge)
-            .is_err()
-    );
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let (_, events) = batch.events(0);
+            if automatic {
+                assert!(
+                    events.iter().all(|event| event.leftovers.is_none()),
+                    "a known failed setup unexpectedly required another confirmation"
+                );
+            }
             if let Some(event) = events
                 .iter()
                 .find(|event| matches!(event.step, Step::Done | Step::Failed))
