@@ -19,6 +19,25 @@ if CommandLine.arguments.contains("--check-permissions") {
     exit(0)
 }
 
+// A local diagnostic uses the same granted identity as streaming. A separate
+// shell-launched capture tool would be attributed to that shell instead.
+if let index = CommandLine.arguments.firstIndex(of: "--capture-still") {
+    let arguments = CommandLine.arguments
+    guard arguments.count > index + 3, let id = UInt32(arguments[index + 1]), id > 0,
+          let pid = Int32(arguments[index + 2]), pid > 0, CGPreflightScreenCaptureAccess(),
+          windowSnapshot().contains(where: { $0["window_id"] as? UInt32 == id && $0["owner_pid"] as? Int32 == pid }),
+          arguments[index + 3].hasPrefix("/"), arguments[index + 3].hasSuffix(".png") else { exit(2) }
+    let capture = Process()
+    capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    capture.arguments = ["-x", "-l", String(id), "-t", "png", arguments[index + 3]]
+    do {
+        try capture.run()
+        fputs("DESKTOP_STILL child_pid=\(capture.processIdentifier)\n",stderr)
+        capture.waitUntilExit(); exit(capture.terminationStatus)
+    }
+    catch { exit(1) }
+}
+
 let surfaceMode = CommandLine.arguments.contains("--surface-capture")
 private let encoderMode = CommandLine.arguments.contains("--encoder")
 
