@@ -1,32 +1,8 @@
-/** Supplies shared, on-demand styling and concise labels for point-anchored link tooltips. */
+/** Formats terminal link destinations for the shared point-anchored tooltip. */
 
 const LINK_TOOLTIP_MAX = 56;
 const LINK_ORIGIN = /^(?:https?:\/\/[^/?#]+|mailto:[^?#]*|file:\/\/)/iu;
-let stylesInstalled = false;
 let textMeasure: CanvasRenderingContext2D | null | undefined;
-
-/** Extends the one warm tooltip surface for destination previews after the link feature loads. */
-export function installLinkTooltipStyles(): void {
-  if (stylesInstalled) return;
-  stylesInstalled = true;
-  const style = document.createElement("style");
-  style.dataset.uiLinkTooltip = "";
-  style.textContent = `
-.tip-pos, .tip-measure { --tip-content-max: min(258px, calc(100vw - 38px)); }
-.tip-pos .tip { max-width: calc(var(--tip-content-max) + 22px); }
-html body .tip-label { white-space: normal; overflow-wrap: anywhere; }
-html body .tip-label.is-leaving { right: 10px; }
-html body .tip-measure { box-sizing: border-box; max-width: var(--tip-content-max); letter-spacing: 0; white-space: normal; overflow-wrap: anywhere; }
-`;
-  document.head.append(style);
-}
-
-/** Keeps the shared arrow at the edge of a link label after its two-line height is known. */
-export function alignLinkTooltipArrow(): void {
-  const position = document.querySelector<HTMLElement>(".tip-pos[data-side='top']");
-  const arrow = position?.querySelector<HTMLElement>(".tip-arrow");
-  if (position && arrow) arrow.style.top = `${position.offsetHeight - 4}px`;
-}
 
 /** Keeps the complete scheme and host, shortening the path only at grapheme boundaries. */
 export function formatLinkTooltipText(target: string, contentWidth = 258, font = "500 12px ui-monospace"): string {

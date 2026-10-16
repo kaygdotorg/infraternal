@@ -1,6 +1,6 @@
 /** Finds and opens links in the visible terminal buffer; callers feed changed rows only after paint. */
 import { hideTipAt as hideSharedTipAt, hoverTipAt, peekTipAt } from "../../../packages/ui/src/tooltip";
-import { alignLinkTooltipArrow, formatLinkTooltipText, installLinkTooltipStyles, linkTooltipLineCount } from "../../../packages/ui/src/tooltip-link-text";
+import { formatLinkTooltipText, linkTooltipLineCount } from "../../../packages/ui/src/tooltip-link-text";
 
 export interface TerminalLinkRange {
   start: { x: number; y: number };
@@ -214,9 +214,6 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
   let touchOpenedKey: string | undefined;
   let touchOpenTimer = 0;
   let disposed = false;
-  let sideRestoreTimer = 0;
-  let savedTipSide: string | null = null;
-  let temporaryTipSide = false;
 
   const linkKey = (link: TerminalLink): string => `${link.kind}:${link.range.start.y}:${link.range.start.x}:${link.range.end.y}:${link.range.end.x}:${link.target}`;
 
@@ -239,7 +236,6 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
 
   /** Multiline links span the terminal width so the shared tooltip can clear every wrapped row. */
   const tooltipPoint = (link: TerminalLink, label: string): { x: number; y: number; side: "top" | "bottom" } => {
-    installLinkTooltipStyles();
     const canvas = options.canvas.getBoundingClientRect();
     const metrics = options.getCellMetrics();
     const visible = options.getVisibleRange();
@@ -253,40 +249,19 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     const { fontSize, contentWidth, font } = tooltipTextStyle();
     const lineCount = linkTooltipLineCount(label, contentWidth, font);
     const tooltipHeight = Math.ceil(lineCount * fontSize * 1.2) + 14;
-    const reserve = Math.max(0, tooltipHeight - 27);
     const topFits = linkTop - 8 - tooltipHeight >= 8;
     const bottomFits = innerHeight - linkBottom - 8 - tooltipHeight >= 8;
     const side = topFits || (!bottomFits && linkTop - tooltipHeight >= innerHeight - linkBottom - tooltipHeight) ? "top" : "bottom";
-    return { x: (left + right) / 2, y: side === "top" ? linkTop - reserve : linkBottom, side };
+    return { x: (left + right) / 2, y: side === "top" ? linkTop : linkBottom, side };
   };
 
-  /** Temporarily uses the shared tooltip's existing side preference for the complete wrapped link. */
+  /** Sends link-only wrapping and placement to the shared tooltip for this call. */
   const showLinkTip = (label: string, point: { x: number; y: number; side: "top" | "bottom" }, hover: boolean): void => {
-    window.clearTimeout(sideRestoreTimer);
-    if (!temporaryTipSide) savedTipSide = options.host.getAttribute("data-tip-side");
-    temporaryTipSide = true;
-    options.host.dataset.tipSide = point.side;
-    if (hover) hoverTipAt(options.host, label, point.x, point.y);
-    else peekTipAt(options.host, label, point.x, point.y, 2600);
-    alignLinkTooltipArrow();
-    if (hover) {
-      // Cold hover waits 400 ms before placement; align after that callback has run.
-      sideRestoreTimer = window.setTimeout(alignLinkTooltipArrow, 400);
-    } else sideRestoreTimer = window.setTimeout(restoreTipSide, 2600);
-  };
-
-  const restoreTipSide = (): void => {
-    window.clearTimeout(sideRestoreTimer);
-    sideRestoreTimer = 0;
-    if (!temporaryTipSide) return;
-    if (savedTipSide === null) delete options.host.dataset.tipSide;
-    else options.host.setAttribute("data-tip-side", savedTipSide);
-    savedTipSide = null;
-    temporaryTipSide = false;
+    if (hover) hoverTipAt(options.host, label, point.x, point.y, { lines: 2, side: point.side });
+    else peekTipAt(options.host, label, point.x, point.y, 2600, { lines: 2, side: point.side });
   };
 
   const hideLinkTip = (): void => {
-    restoreTipSide();
     hideSharedTipAt(options.host);
   };
 
@@ -528,7 +503,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
           }
         }
         if (focusedLink && touchesDirtyGroup(focusedLink)) {
-      hideLinkTip();
+          hideLinkTip();
           refreshHover = true;
         }
       }
@@ -564,7 +539,6 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     dispose() {
       if (disposed) return;
       disposed = true;
-      restoreTipSide();
       if (idleHandle) {
         const w = window as unknown as { cancelIdleCallback?: (id: number) => void };
         if (w.cancelIdleCallback) w.cancelIdleCallback(idleHandle);
