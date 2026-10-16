@@ -7,18 +7,82 @@ const baseURL = `http://localhost:${port}`;
 const target = `https://links.example.test/oauth/authorize?client_id=web&state=${"s".repeat(420)}&redirect_uri=https%3A%2F%2Flinks.example.test%2Fcallback&response_type=code`;
 const osc8Target = "https://links.example.test/actual-destination";
 
-async function openTerminal(page: import("playwright/test").Page): Promise<void> {
-  await page.setViewportSize({ width: 390, height: 844 });
+async function openTerminal(
+  page: import("playwright/test").Page,
+  theme = "ink",
+  viewport = { width: 390, height: 844 },
+): Promise<void> {
+  await page.setViewportSize(viewport);
   const reset = await page.context().request.post("/__mock/reset");
   const opened = await page.context().request.post("/__mock/open-terminal");
   expect([reset.status(), opened.status()]).toEqual([200, 200]);
-  await page.goto("/?mock=1&proto=product&bg=none&fixture=none");
+  await page.goto(`/?mock=1&proto=product&bg=none&fixture=none&theme=${theme}`);
   await expect.poll(() => page.evaluate(() => window.__tracerProductTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
 }
 
 function evidencePath(testInfo: import("playwright/test").TestInfo, name: string): string {
   const directory = process.env.LINK_TOOLTIP_EVIDENCE_DIR;
   return directory ? `${directory}/${name}` : testInfo.outputPath(name);
+}
+
+async function linkAccentPixels(page: import("playwright/test").Page, needle: string): Promise<number> {
+  return page.evaluate((text) => {
+    const screen = window.__tracerProductTestDouble?.screenText() ?? "";
+    const lines = screen.split("\n");
+    const row = lines.findIndex((line) => line.includes(text));
+    const col = row < 0 ? -1 : lines[row]!.indexOf(text);
+    const metrics = window.__tracerProductTestDouble?.rendererMetrics();
+    const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
+    const context = canvas?.getContext("2d");
+    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+    const color = /^#([\da-f]{6})$/i.exec(accent)?.[1];
+    const background = metrics?.terminalColors?.background;
+    if (row < 0 || col < 0 || !metrics || !canvas || !context || !color || !background) throw new Error("link underline pixels are unavailable");
+    if (metrics.rendererAccentColor.toLowerCase() !== accent.toLowerCase()) throw new Error("renderer accent does not match the theme token");
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const left = Math.max(0, Math.floor(col * metrics.cellWidth * scaleX));
+    const right = Math.min(canvas.width, Math.ceil((col + text.length) * metrics.cellWidth * scaleX));
+    const top = Math.max(0, Math.floor(row * metrics.cellHeight * scaleY));
+    const bottom = Math.min(canvas.height, Math.ceil((row + 1) * metrics.cellHeight * scaleY));
+    // A one-pixel canvas stroke may cover adjacent backing pixels partially; check its accent-to-background blend.
+    const underlineTop = Math.max(top, bottom - Math.ceil(4 * scaleY));
+    const image = context.getImageData(left, underlineTop, right - left, bottom - underlineTop).data;
+    const red = Number.parseInt(color.slice(0, 2), 16);
+    const green = Number.parseInt(color.slice(2, 4), 16);
+    const blue = Number.parseInt(color.slice(4, 6), 16);
+    const accentVector = [red - background.r, green - background.g, blue - background.b];
+    const vectorLength = accentVector.reduce((sum, channel) => sum + channel * channel, 0);
+    let count = 0;
+    for (let offset = 0; offset < image.length; offset += 4) {
+      if (image[offset + 3]! === 0) continue;
+      const pixelVector = [image[offset]! - background.r, image[offset + 1]! - background.g, image[offset + 2]! - background.b];
+      const coverage = pixelVector.reduce((sum, channel, index) => sum + channel * accentVector[index]!, 0) / vectorLength;
+      const residual = Math.sqrt(pixelVector.reduce((sum, channel, index) => sum + (channel - coverage * accentVector[index]!) ** 2, 0));
+      if (coverage >= 0.25 && coverage <= 1.05 && residual <= 4) count += 1;
+    }
+    return count;
+  }, needle);
+}
+
+async function linkTextPixels(page: import("playwright/test").Page, needle: string): Promise<number[]> {
+  return page.evaluate((text) => {
+    const lines = (window.__tracerProductTestDouble?.screenText() ?? "").split("\n");
+    const row = lines.findIndex((line) => line.includes(text));
+    const col = row < 0 ? -1 : lines[row]!.indexOf(text);
+    const metrics = window.__tracerProductTestDouble?.rendererMetrics();
+    const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
+    const context = canvas?.getContext("2d");
+    if (row < 0 || col < 0 || !metrics || !canvas || !context) throw new Error("link text pixels are unavailable");
+    const scaleX = canvas.width / canvas.getBoundingClientRect().width;
+    const scaleY = canvas.height / canvas.getBoundingClientRect().height;
+    const left = Math.floor(col * metrics.cellWidth * scaleX);
+    const right = Math.ceil((col + text.length) * metrics.cellWidth * scaleX);
+    const top = Math.floor(row * metrics.cellHeight * scaleY);
+    const bottom = Math.max(top, Math.ceil((row + 1) * metrics.cellHeight * scaleY) - Math.ceil(3 * scaleY));
+    return Array.from(context.getImageData(left, top, right - left, bottom - top).data);
+  }, needle);
 }
 
 async function terminalLinkPoint(page: import("playwright/test").Page, prefix: string): Promise<{ x: number; y: number; cols: number }> {
@@ -303,6 +367,75 @@ test("wrapped and OSC 8 links open from the terminal and palette", async ({ brow
     await osc8Popup.close();
   } finally {
     await context.close();
+  }
+});
+
+test("link underlines use the theme accent on hover and while the open modifier is held", async ({ browser }, testInfo) => {
+  for (const theme of ["ink", "paper"] as const) {
+    const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
+    if (theme === "paper") {
+      await context.addInitScript(() => Object.defineProperty(navigator, "platform", { configurable: true, get: () => "MacIntel" }));
+    }
+    try {
+      const page = await context.newPage();
+      await openTerminal(page, theme, { width: 393, height: 852 });
+      const first = "https://links.example.test/first";
+      const second = "https://links.example.test/second";
+      const response = await context.request.post("/__mock/live-query-output", {
+        data: { text: `\u001b[2J\u001b[H${first}\r\n${second}\r\n\u001b[?25l` },
+      });
+      expect(response.ok()).toBe(true);
+      await expect.poll(() => page.evaluate(() => window.__tracerProductTestDouble?.screenText().includes("/second") ?? false)).toBe(true);
+      await expect.poll(() => page.evaluate(() => window.__tracerProductTestDouble?.terminalLinks().length ?? 0)).toBe(2);
+      const textBeforeHover = await linkTextPixels(page, first);
+      expect(await linkAccentPixels(page, first)).toBe(0);
+      expect(await linkAccentPixels(page, second)).toBe(0);
+
+      const point = await terminalLinkPoint(page, first);
+      await page.mouse.move(point.x, point.y);
+      await expect.poll(() => linkAccentPixels(page, first)).toBeGreaterThan(0);
+      expect(await linkAccentPixels(page, second)).toBe(0);
+      expect(await linkTextPixels(page, first)).toEqual(textBeforeHover);
+      await page.screenshot({ path: evidencePath(testInfo, `terminal-link-underline-${theme}.png`) });
+
+      const blank = await page.evaluate(() => {
+        const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
+        const metrics = window.__tracerProductTestDouble?.rendererMetrics();
+        if (!canvas || !metrics) throw new Error("terminal blank cell is unavailable");
+        const rect = canvas.getBoundingClientRect();
+        return { x: rect.left + metrics.cellWidth * 2, y: rect.top + metrics.cellHeight * 8 };
+      });
+      await page.mouse.move(blank.x, blank.y);
+      await expect.poll(async () => (await linkAccentPixels(page, first)) + (await linkAccentPixels(page, second))).toBe(0);
+
+      const modifier = theme === "ink" ? "Control" : "Meta";
+      await page.keyboard.down(modifier);
+      await expect.poll(() => linkAccentPixels(page, first)).toBeGreaterThan(0);
+      await expect.poll(() => linkAccentPixels(page, second)).toBeGreaterThan(0);
+      await page.keyboard.up(modifier);
+      await expect.poll(async () => (await linkAccentPixels(page, first)) + (await linkAccentPixels(page, second))).toBe(0);
+
+      for (const viewport of [{ width: 375, height: 667 }, { width: 1440, height: 900 }]) {
+        await page.setViewportSize(viewport);
+        const blankAtViewport = await page.evaluate(() => {
+          const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
+          const metrics = window.__tracerProductTestDouble?.rendererMetrics();
+          if (!canvas || !metrics) throw new Error("terminal blank cell is unavailable");
+          const rect = canvas.getBoundingClientRect();
+          return { x: rect.left + metrics.cellWidth * 2, y: rect.top + metrics.cellHeight * 8 };
+        });
+        await page.mouse.move(blankAtViewport.x, blankAtViewport.y);
+        await expect.poll(() => linkAccentPixels(page, first)).toBe(0);
+        const textAtViewport = await linkTextPixels(page, first);
+        const viewportPoint = await terminalLinkPoint(page, first);
+        await page.mouse.move(viewportPoint.x, viewportPoint.y);
+        await expect.poll(() => linkAccentPixels(page, first)).toBeGreaterThan(0);
+        expect(await linkTextPixels(page, first)).toEqual(textAtViewport);
+        await page.screenshot({ path: evidencePath(testInfo, `terminal-link-underline-${theme}-${viewport.width}.png`) });
+      }
+    } finally {
+      await context.close();
+    }
   }
 });
 
