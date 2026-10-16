@@ -98,9 +98,24 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private retired: { status?: number } | undefined;
     private dropGhost: (() => void) | undefined;
     private ghostTimer = 0;
+    private connectionStabilityTimer = 0;
     private connectedNow = false;
     get connected(): boolean { return this.connectedNow; }
-    private setConnected(connected: boolean): void {
+    private setConnected(connected: boolean, settleMs = 0): void {
+      if (!connected) {
+        window.clearTimeout(this.connectionStabilityTimer);
+        this.connectionStabilityTimer = 0;
+      } else if (!this.connectedNow && settleMs > 0) {
+        // A resumed stream must survive a short settle window before its pill turns live; failed retries
+        // therefore leave one steady connecting state instead of a one-frame green flash.
+        if (this.connectionStabilityTimer === 0) {
+          this.connectionStabilityTimer = window.setTimeout(() => {
+            this.connectionStabilityTimer = 0;
+            if (!this.disposed) this.setConnected(true);
+          }, settleMs);
+        }
+        return;
+      }
       if (connected === this.connectedNow) return;
       this.connectedNow = connected;
       this.connectionChanged?.();
@@ -173,7 +188,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       // A silent attached session needs inventory too; a one-shot grace lets an initial prompt paint first.
       const hooks: TerminalHooks = {
         ...(first ? options.firstHooks : {}),
-        onAttached: (resumed, terminal) => { this.setConnected(true); this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
+        onAttached: (resumed, terminal) => { this.setConnected(true, resumed ? 300 : 0); this.mark("attached"); if (!firstSettled) window.setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(settle)), 1000); if (first) options.firstHooks?.onAttached?.(resumed, terminal); },
         onPaintedOutput: (bytes, at, sequence) => { if (!firstSettled && this.client?.readScreenText().trim()) settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onDisconnected: (forced) => { this.setConnected(false); if (first) options.firstHooks?.onDisconnected?.(forced); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
@@ -284,6 +299,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     dispose(): void {
       this.keepScreen();
       this.endGhost();
+      window.clearTimeout(this.connectionStabilityTimer);
+      this.connectionStabilityTimer = 0;
       this.disposed = true;
       bindings.delete(this);
       if (active === this) { active = undefined; core.setActiveTerminal(undefined); }

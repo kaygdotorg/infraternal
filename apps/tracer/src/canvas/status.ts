@@ -12,19 +12,54 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
   const element = document.createElement("p");
   element.hidden = true;
   let relaying = false;
+  let lastMessage: string | undefined;
+  let lastShownAt = 0;
+  let toastOwned = false;
+  let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
   const observer = new MutationObserver(() => {
     const message = element.textContent?.trim() ?? "";
     if (message && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
+      clearTimeout(clearTimer);
+      clearTimer = 0;
       relaying = true;
-      // Whatever passes the filter above is bad news (a lost connection, a refused or ended terminal), never a
-      // confirmation, so it never wears the success tick. The old guess by wording missed "The connection to the
-      // server ended."
-      toast.show({ message, tone: "error", duration: 5000 });
-    } else if (relaying) {
-      relaying = false;
-      toast.dismiss();
+      const connectionFailure = message === "The connection to the server ended." || message === "The server closed the connection." || message === "The connection did not respond in time.";
+      // A retry changes the hidden status several times. Keep its reason visible across those routine states, and
+      // do not recreate the same toast on every immediate close. The toast's own timeout bounds each display.
+      if (message !== lastMessage || !toastOwned || (!connectionFailure && Date.now() - lastShownAt >= 5000)) {
+        lastMessage = message;
+        lastShownAt = Date.now();
+        // Whatever passes the filter is bad news (a lost connection, a refusal or an ended terminal), never a
+        // confirmation. The old guess by wording missed "The connection to the server ended."
+        // Keep a connection reason visible until the status clears after a stable attach.
+        toast.show({ message, tone: "error", duration: connectionFailure ? 0 : 5000, onClose: () => { toastOwned = false; } });
+        toastOwned = true;
+      }
+    } else if (!message && relaying) {
+      clearTimeout(clearTimer);
+      clearTimer = setTimeout(() => {
+        clearTimer = 0;
+        if (element.textContent?.trim() !== "") return;
+        relaying = false;
+        lastMessage = undefined;
+        lastShownAt = 0;
+        if (toastOwned) toast.dismiss();
+        toastOwned = false;
+      }, 300);
+    } else {
+      // A retry that starts before the settle window completes keeps the existing reason in place.
+      clearTimeout(clearTimer);
+      clearTimer = 0;
     }
   });
   observer.observe(element, { childList: true, characterData: true, subtree: true });
-  return { element, dispose: () => observer.disconnect() };
+  return {
+    element,
+    dispose: () => {
+      observer.disconnect();
+      clearTimeout(clearTimer);
+      clearTimer = 0;
+      if (toastOwned) toast.dismiss();
+      toastOwned = false;
+    },
+  };
 }
