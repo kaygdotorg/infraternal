@@ -1,5 +1,5 @@
 //! Exercise real hardware encoder callbacks and access-unit conversion across frames and session reconfiguration (#146).
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", feature = "desktop"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[test]
