@@ -110,7 +110,7 @@ async def echo(peer, marker, command=b''):
 
 
 async def soak(host, args, record, rng):
-    assert args.mode == 'soak' and args.seconds <= 300
+    assert args.mode == 'soak' and args.seconds <= 900
     scheduler = trace.Trace(host.pid)
     async def flush():
         while True:

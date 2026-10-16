@@ -20,6 +20,24 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
                 stages.read_header(io.StringIO(text))
         self.assertEqual(stages.read_header(io.StringIO('{"kind":"stage-format","version":1}'))['version'], 1)
 
+    async def test_aged_capture_is_bounded_to_one_short_lock_hold(self):
+        scheduler = Mock()
+        async def workload(*_):
+            return None
+        async def fence(*_):
+            raise ConnectionError('synthetic host closed')
+        host = SimpleNamespace(pid=123, peers=[SimpleNamespace(echo=fence)])
+        with patch.object(stages.trace, 'Trace', return_value=scheduler) as create, \
+             patch.object(stages, 'ORIGINAL_SOAK', workload), \
+             patch.object(stages.os, 'kill'):
+            with self.assertRaises(ConnectionError):
+                await stages.soak(host, SimpleNamespace(mode='soak', seconds=900), None, None)
+            scheduler.close.assert_called_once()
+            create.reset_mock()
+            with self.assertRaises(AssertionError):
+                await stages.soak(host, SimpleNamespace(mode='soak', seconds=901), None, None)
+            create.assert_not_called()
+
     async def test_failed_final_fence_still_closes_private_scheduler(self):
         scheduler = Mock()
         async def workload(*_):
