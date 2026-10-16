@@ -506,8 +506,12 @@ Legacy runtimes have no lifetime lock. Only for these runtimes, the same binary
 uses a nonblocking connection to the owned control socket: connection retains it
 (73); errors other than refusal retain it as uncertain (77). Refusal also requires
 conservative same-user bound-endpoint inspection, so a bound endpoint before
-`listen` or with a retained earlier name is not removed. Another Unix user's
-listener does not block retirement of this installation's owned files. The binary
+`listen` or with a retained earlier name is not removed. The native helper asks
+the kernel for each candidate's UID through an exact socket diagnostic query;
+private process descriptors are neither required nor proof that it is stale.
+Only a fixed known reply from the kernel is accepted; denied or unexpected replies
+remain uncertain (77). Another Unix user's listener does not block retirement of
+this installation's owned files. The binary
 opens the receipt-bound root and private runtime directory without following links,
 checks socket ownership/type/link count before probing, and repeats these checks
 and the same device/inode immediately before unlinking relative to the open directory.
