@@ -73,7 +73,9 @@ def write(record, kind, **fields):
     if kind == 'environment':
         fields.update(architecture='independent-session-processes',
                       resource_scope='all-shim-processes-excludes-shells',
-                      wakeup_scope='first-shim-only', native_host_stages=False)
+                      wakeup_scope='first-shim-only', native_host_stages=False,
+                      diagnostic_only=True, budget_admission=False, marker_receipt=stages.MARKER_RECEIPT)
+        return stages.ORIGINAL_WRITE(record, kind, **fields)
     return tail.write(record, kind, **fields)
 
 

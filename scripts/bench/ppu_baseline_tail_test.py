@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Verify baseline diagnostics preserve the original native marker bounds [D270]."""
 import unittest
-from ppu_baseline_tail import receipts
+from ppu_baseline_tail import receipts, write
+import ppu_baseline_tail as profile
+from unittest.mock import patch
 
 
 class Endpoints(unittest.TestCase):
@@ -13,6 +15,15 @@ class Endpoints(unittest.TestCase):
             receipts([probe], {})
         with self.assertRaises(ValueError):
             receipts([probe], {(971, 2): dict(receive_active_s=11.)})
+
+    def test_shipping_header_cannot_claim_native_stage_buffers_or_flushes(self):
+        captured = []
+        with patch.object(profile.stages, 'ORIGINAL_WRITE',
+                          side_effect=lambda rec, kind, **row: captured.append(row)):
+            write(object(), 'environment')
+        self.assertFalse(captured[0]['native_host_stages'])
+        self.assertNotIn('stage_capacity', captured[0])
+        self.assertNotIn('stage_flush_interval_s', captured[0])
 
 
 if __name__ == '__main__':
