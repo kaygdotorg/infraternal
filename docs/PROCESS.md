@@ -151,7 +151,7 @@ Reviews and fixes run at the same time as the next lane's build.
   The recipe retains the approved native AES-GCM fallback and size optimization
   for release and host-facts plugins; terminal, mesh and cryptographic
   dependencies retain speed optimization (D243, D264, D272). Combined-source
-  size and runtime receipts remain required for acceptance.
+  size and runtime receipts are required before the final downward ratchet.
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later
