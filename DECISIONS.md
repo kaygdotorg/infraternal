@@ -3053,3 +3053,28 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        window says which.
      - **Curtain (Q16):** later, shown only where the machine proves it
        works.
+294. **VNC round 3 (owner, 2026-10-16, #223; extends D293):**
+     - **Settings → Remote Desktop (Q11):** General (Quality Auto / Sharp /
+       Smooth, Resolution Match window / 1080p / 1440p / 4K / Custom, Frame
+       rate Auto / 30 / 60 / 120), then a section per kind (App windows,
+       VNC, RDP later). Each window has a per-machine override in its menu,
+       remembered for that machine, and shows a small label when it is not
+       on Auto.
+     - **Aspect ratio (Q12):** never stretched. When the remote can resize,
+       it follows the window's shape; when it cannot, the leftover space
+       shows the canvas background, and double-clicking the window edge
+       snaps the window to the screen's shape.
+     - **Multiple displays (Q17):** one window with a Display 1 / 2 / All
+       switch, plus "open this display as its own window"; all on one
+       connection.
+     - **Phone and tablet input (Q18):** trackpad mode by default, a
+       one-tap switch to touch mode remembered per machine; a pencil always
+       points directly.
+     - **Files (Q19):** dropping a file on a Remote Desktop window sends it
+       with **infraternal Drop**, our file-sending feature between machines
+       (the "file drop" of D196), through the infraternal agent. Plain VNC
+       without an agent says it cannot receive files. Drop gets its own
+       design round.
+     - **Several viewers (Q20):** one person in control; others watch and
+       can ask for control; the controller sees Give / Keep; an idle
+       controller loses control after 5 minutes when someone asks.
