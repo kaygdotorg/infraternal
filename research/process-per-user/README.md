@@ -337,6 +337,11 @@ probe windows, retains unknown scheduler coverage and treats scheduled-running
 as an upper bound that can include interrupts or virtual CPU steal. PID setup,
 stage flushing and tracing affect scheduling; these are diagnostic captures,
 never admission results or a substitute for the uninstrumented control.
+Read events retain numeric descriptor, requested count and signed result, but
+discard buffer addresses and contents. Pair those syscall bounds with the
+session's next PTY-read stage before deciding whether a kernel wait occurred
+on a productive read or a speculative retry. Nonblocking PTY reads can still
+wait for kernel terminal work; a byte budget cannot preempt such a syscall.
 
 `ppu_baseline_tail.py` observes the shipping control without requesting a
 native stage header or sending profiling signals to it. Independent launch
