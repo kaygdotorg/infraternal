@@ -199,26 +199,26 @@ pub fn classify(mut error: Failure) -> Failure {
     if error.kind != FailureKind::Install {
         return error;
     }
-    let classified = match error.exit_status {
-        Some(73) => Failure::new(
-            FailureKind::SetupRunning,
-            "Setup is already running on this host. Wait for it to finish, then try again.",
-        ),
-        Some(75) => refused(),
-        Some(71 | 72) => Failure::install(
-            "Host provisioning cannot safely remove these leftovers because their ownership is not proven.",
-        ),
-        Some(76) => Failure::install(crate::model::SOCKET_PROBE_UNAVAILABLE),
-        Some(77) => Failure::install(crate::model::SOCKET_PROBE_UNCERTAIN),
+    // Reuse the original failure rather than constructing a temporary failure
+    // (and its diagnostic vector) solely to copy two static fields [243].
+    error.message = match error.exit_status {
+        Some(73) => {
+            error.kind = FailureKind::SetupRunning;
+            "Setup is already running on this host. Wait for it to finish, then try again."
+        }
+        Some(75) => REFUSED_MESSAGE,
+        Some(71 | 72) => {
+            "Host provisioning cannot safely remove these leftovers because their ownership is not proven."
+        }
+        Some(76) => crate::model::SOCKET_PROBE_UNAVAILABLE,
+        Some(77) => crate::model::SOCKET_PROBE_UNCERTAIN,
         _ => return error,
     };
-    error.kind = classified.kind;
-    error.message = classified.message;
     error.log_tail.clear();
     error
 }
+const REFUSED_MESSAGE: &str = "The earlier setup journal has an unsupported or changed format. Host provisioning left it untouched.";
+
 fn refused() -> Failure {
-    Failure::install(
-        "The earlier setup journal has an unsupported or changed format. Host provisioning left it untouched.",
-    )
+    Failure::install(REFUSED_MESSAGE)
 }
