@@ -72,6 +72,80 @@ async fn repeated_storage_failure_has_bounded_diagnostics() {
 }
 
 #[tokio::test]
+async fn malformed_unrelated_host_preserves_scoped_inventory() {
+    let fixture = Fixture::new().await;
+    let service = &fixture.service;
+    let visible = enroll(service, "visible-host", 51).await;
+    let unrelated = enroll(service, "unrelated-host", 52).await;
+    for (action, input) in [
+        ("mesh.tag.create", json!({"name":"visible"})),
+        (
+            "mesh.tag.member.add",
+            json!({"tag":"visible","node_id":visible}),
+        ),
+        (
+            "mesh.role.define",
+            json!({"name":"visible-role","actions":["mesh.manage_nodes"],"scopes":["visible"]}),
+        ),
+        (
+            "mesh.role.assign",
+            json!({"user_id":MEMBER,"role":"visible-role"}),
+        ),
+    ] {
+        call(service, OWNER, action, input, NOW).await.unwrap();
+    }
+    let before = service
+        .list(MEMBER, MeshFilter::default(), NOW)
+        .await
+        .unwrap();
+    assert_eq!(before.nodes.len(), 1);
+    assert_eq!(before.nodes[0].node.id.0, visible);
+    sqlx::query("UPDATE mesh_nodes SET name='' WHERE id=?")
+        .bind(i64::try_from(unrelated).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let after = service.list(MEMBER, MeshFilter::default(), NOW).await;
+    fixture.cleanup().await;
+    assert_eq!(
+        after,
+        Ok(before),
+        "invalid out-of-scope host must not hide valid inventory"
+    );
+}
+
+#[tokio::test]
+async fn malformed_host_keeps_healthy_inventory_readable() {
+    let fixture = Fixture::new().await;
+    let healthy = enroll(&fixture.service, "readable-host", 53).await;
+    let invalid = enroll(&fixture.service, "legacy-host", 54).await;
+    sqlx::query("UPDATE mesh_nodes SET name='' WHERE id=?")
+        .bind(i64::try_from(invalid).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let answer = fixture
+        .service
+        .list(OWNER, MeshFilter::default(), NOW)
+        .await;
+    fixture.cleanup().await;
+    let snapshot = answer.expect("one invalid host must not hide healthy inventory");
+    assert!(snapshot.nodes.iter().any(|node| node.node.id.0 == healthy));
+    // A successful response must also be readable by the existing strict
+    // clients. Returning the malformed name alongside healthy rows is no recovery.
+    for node in snapshot.nodes {
+        assert!(
+            parse_action(
+                "mesh.node.rename",
+                &serde_json::to_vec(&json!({"node_id":node.node.id.0,"name":node.node.host}))
+                    .unwrap(),
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Keep ordered failure/repair assertions under one real pool and capture.
 async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
     let fixture = Fixture::new().await;
