@@ -17,8 +17,8 @@ def index_records(records):
     return groups
 
 
-def correlate(probe, records, origin):
-    """Require causal input/output ranges, not a nearest unrelated socket write."""
+def validate_receipt(probe):
+    """The captured marker span must fit the original native echo result."""
     if 'send_before_s' not in probe or 'receive_active_s' not in probe:
         raise ValueError('marker receipt clock bounds missing')
     start, end, elapsed = probe['send_before_s'], probe['receive_active_s'], probe['rtt_ms']
@@ -28,6 +28,11 @@ def correlate(probe, records, origin):
     # Both use the same active clock; no tolerance or timing subtraction is needed.
     if (end - start) * 1000 > elapsed:
         raise ValueError('marker receipt span exceeds timed echo')
+
+
+def correlate(probe, records, origin):
+    """Require causal input/output ranges, not a nearest unrelated socket write."""
+    validate_receipt(probe)
     session = origin + probe['session']
     groups = records if isinstance(records, dict) else index_records(records)
     def find(stage, predicate, after=0, fd=None):
