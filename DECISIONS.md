@@ -2989,3 +2989,15 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      resize. Without a manager, resizing from the canvas still resizes the
      real window. Trigger: the owner saw TextEdit flicker on the MacBook as
      infraternal shrank it and OmniWM tiled it back, over and over.
+291. **A new host joins through the add-host SSH connection; no agent port
+     is required (owner, 2026-10-16; amends D64 and D215):** the server is
+     already signed in to the host over SSH during add-host. It opens a
+     reverse tunnel inside that connection, and the freshly installed
+     infraternal agent makes its first connection to the server through it.
+     If infraternal could sign in, the host can join; nobody opens a
+     firewall port for it. After the join, the agent's link to the server
+     takes the mesh path (D215): direct UDP on a port each node picks itself
+     (D228 M4), then a relay, then TCP/TLS on 443 (D196). The server's agent
+     port (7443) is no longer required for anything. Owner: "this is very
+     non-intrusive and I love it." Trigger: adding calternal-dev failed
+     because its network did not allow TCP 7443 to the server (#230).
