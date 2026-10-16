@@ -143,15 +143,15 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,516,992 bytes |
+  | `x86_64-unknown-linux-musl` | 21,320,560 bytes |
+  | `aarch64-unknown-linux-musl` | 19,513,808 bytes |
 
-  These ceilings retain the lower recorded per-target measurements from #198
-  and #201 while combined-source release artifacts are checked on #201. The
-  recipe retains the approved native AES-GCM fallback and size optimization
+  These ceilings pin the normalized combined-source artifacts measured on #201.
+  A fresh checkout and empty target reproduce the x86 artifact byte for byte.
+  The recipe retains the approved native AES-GCM fallback and size optimization
   for release and host-facts plugins; terminal, mesh and cryptographic
   dependencies retain speed optimization (D243, D264, D272). Combined-source
-  size and runtime receipts are required before the final downward ratchet.
+  size and runtime receipts remain required for acceptance.
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later
