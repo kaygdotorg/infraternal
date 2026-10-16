@@ -83,6 +83,32 @@ test("server Close unregisters its app-window handler before disposal", async ()
   } finally { f.stream.dispose(); }
 });
 
+test("retry after server Close stops the retained native capture before replacement", async () => {
+  const f = await fixture();
+  try {
+    f.handlers.get(1)!.onFrame({ type: "Close", code: 4403, reason: "stream unavailable" }, new Uint8Array(), 0);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions.filter(action => action === "desktop.session.stop")).toHaveLength(0);
+    f.stream.retry({ width: 800, height: 600, density: 1 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions.filter(action => action === "desktop.session.stop")).toHaveLength(1);
+    expect(f.actions.filter(action => action === "desktop.session.start")).toHaveLength(2);
+    expect(f.actions.indexOf("desktop.session.stop")).toBeLessThan(f.actions.lastIndexOf("desktop.session.start"));
+  } finally { f.stream.dispose(); }
+});
+
+test("disposal after server Close releases the retired viewer's native capture", async () => {
+  const f = await fixture();
+  try {
+    f.handlers.get(1)!.onFrame({ type: "Close", code: 4403, reason: "stream unavailable" }, new Uint8Array(), 0);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    f.stream.dispose();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions.filter(action => action === "desktop.session.stop")).toHaveLength(1);
+    expect(f.actions.filter(action => action === "desktop.session.start")).toHaveLength(1);
+  } finally { f.stream.dispose(); }
+});
+
 test("viewing never sends controller-only resize before acquisition", async () => {
   const f = await fixture();
   try {

@@ -117,7 +117,7 @@ export class AppStream {
   private lastInputAt = -Infinity;
   private pausedTimer = 0;
   private statsWaiters: Array<(stats: WorkerStats) => void> = [];
-  /** Native sessions whose Stop was queued while the shared socket could not carry it. */
+  /** Native sessions to release on Retry/disposal, including retired viewers and disconnected Stops. */
   private pendingStops: Set<string> | undefined;
   private stopTask: Promise<boolean> | undefined;
   private stopWelcomeOff: (() => void) | undefined;
@@ -267,9 +267,12 @@ export class AppStream {
 
   private frame(frame: WireFrame): void {
     if (frame.type === "Close") {
-      // The server ended this viewer: the session is over (the app quit, or the machine stopped it), or this socket
-      // lost it. Retire the local registration too; MuxConnection keeps handlers until closeStream is called.
+      // Close retires this viewer; the server may still retain native capture.
+      // Keep its identity for Retry/disposal without stopping sibling viewers
+      // merely because this attachment ended. The local handler retires now.
+      const retired = this.session?.id;
       this.detach();
+      if (retired) (this.pendingStops ??= new Set()).add(retired);
       this.session = undefined;
       this.setControl({ kind: "none" });
       void this.diagnose(this.generation, new Error("closed"));
@@ -463,8 +466,8 @@ export class AppStream {
   }
 
   private stopSession(id: string | undefined): void {
-    if (!id) return;
-    (this.pendingStops ??= new Set()).add(id);
+    if (id) (this.pendingStops ??= new Set()).add(id);
+    if (!this.pendingStops?.size) return;
     if (!this.stopWelcomeOff) this.stopWelcomeOff = this.o.connection.onWelcome(() => { void this.flushStops(); });
     void this.flushStops();
   }
