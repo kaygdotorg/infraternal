@@ -458,17 +458,21 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     /// Restore the previous installation, or remove only this host-bound fresh installation.
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
-    pub async fn rollback(&self) -> Result<(), Failure> {
-        self.session
-            .run(
-                &self.script(&format!(
-                    "{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\n{ROLLBACK_TRANSACTION}"
-                )),
-                Input::Empty,
-            )
-            .await
-            .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
-        Ok(())
+    pub fn rollback(&self) -> crate::transport::Operation<'_, ()> {
+        // Failure and earlier-attempt recovery share one teardown poller [243].
+        // The temporary allocation is confined to cleanup, outside the happy path.
+        Box::pin(async move {
+            self.session
+                .run(
+                    &self.script(&format!(
+                        "{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\n{ROLLBACK_TRANSACTION}"
+                    )),
+                    Input::Empty,
+                )
+                .await
+                .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+            Ok(())
+        })
     }
 }
 
