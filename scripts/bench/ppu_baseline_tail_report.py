@@ -17,14 +17,14 @@ from ppu_stages import MARKER_RECEIPT
 from ppu_tail_report import Timeline, waits
 
 
-def report(root, warmup, unit):
+def report(root, warmup, unit, observer_scopes=()):
     meta = json.loads((root / 'baseline-probes.json').read_text())
     assert meta['complete'] and not meta['overruns'], 'incomplete baseline trace'
     assert meta['marker_receipt'] == MARKER_RECEIPT and meta['native_host_stages'] is False
     # Revalidate the same native clock bounds when reading saved receipts.
     probes = receipts(meta['probes'], {(row['session'], row['number']): row for row in meta['probes']})
     records = [json.loads(line) for line in (root / 'samples.jsonl').read_text().splitlines()]
-    discarded = audit_batches(records, warmup, unit)
+    discarded = audit_batches(records, warmup, unit, observer_scopes)
     excluded = {row['number'] for row in discarded}
     roles = json.loads((root / 'tail-roles.json').read_text())
     events = defaultdict(list)
@@ -46,7 +46,7 @@ def report(root, warmup, unit):
             if wait['end_ns'] > begin and wait['begin_ns'] < end]
             for name, pid in identities.items()}
     result = dict(diagnostic_only=True, complete=True, native_host_stages=False,
-        probes=len(rows), discarded_batches=discarded, unit=unit,
+        probes=len(rows), discarded_batches=discarded, unit=unit, declared_observer_scopes=sorted(observer_scopes),
         caveat='Overall shim/shell/reader intervals overlap. Kernel sleep-to-schedule spans include runnable time; no native VT/frame timestamps exist.',
         slowest=sorted(rows, key=lambda row: row['rtt_ms'], reverse=True)[:20])
     (root / 'baseline-tail-report.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -58,8 +58,10 @@ if __name__ == '__main__':
     parser.add_argument('root', type=Path)
     parser.add_argument('--warmup', type=float, default=600)
     parser.add_argument('--unit', required=True)
+    parser.add_argument('--observer-scope', action='append', default=[],
+                        help='own observer scope verified separately; retained as explicit overhead')
     args = parser.parse_args()
-    result = report(args.root, args.warmup, args.unit)
+    result = report(args.root, args.warmup, args.unit, args.observer_scope)
     print(json.dumps(dict(complete=result['complete'], probes=result['probes'],
         slowest_ms=result['slowest'][0]['rtt_ms'] if result['slowest'] else None)))
     raise SystemExit(0 if result['probes'] else 1)

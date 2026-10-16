@@ -100,7 +100,7 @@ def runqlat(events):
                 p99_ms=percentile(values, .99), max_ms=max(values, default=None))
 
 
-def report(root, warmup, unit=None):
+def report(root, warmup, unit=None, observer_scopes=()):
     meta = json.loads((root / 'stage-probes.json').read_text())
     assert meta['complete'] and meta['overruns'] == 0, 'incomplete scheduler capture'
     correlated = stage_report(root)
@@ -134,7 +134,7 @@ def report(root, warmup, unit=None):
     discarded = []
     if unit is not None:
         records = [json.loads(line) for line in (root / 'samples.jsonl').read_text().splitlines()]
-        discarded = audit_batches(records, warmup, unit)
+        discarded = audit_batches(records, warmup, unit, observer_scopes)
         excluded = {row['number'] for row in discarded}
         rows = [row for row in rows if row['number'] not in excluded]
     for row in rows:
@@ -192,7 +192,7 @@ def report(root, warmup, unit=None):
              for name, pid in roles.items()}
     result = dict(diagnostic_only=True, complete=True, warmup_s=warmup,
                   kernel_stacks_only=True, probes=len(rows), all_settled_probes=all_settled,
-                  discarded_batches=discarded, contention_unit=unit, run_queue=queue,
+                  discarded_batches=discarded, contention_unit=unit, declared_observer_scopes=sorted(observer_scopes), run_queue=queue,
                   caveat='Scheduled-running upper bounds overlap across roles; tracing changes timing. No admission subtraction.',
                   slowest=sorted(rows, key=lambda row: row['rtt_ms'], reverse=True)[:20])
     (root / 'tail-report.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -204,8 +204,10 @@ if __name__ == '__main__':
     parser.add_argument('root', type=Path)
     parser.add_argument('--warmup', type=float, default=120)
     parser.add_argument('--unit', help='require batch lock/scope audit for this owned unit')
+    parser.add_argument('--observer-scope', action='append', default=[],
+                        help='own observer scope verified separately; retained as explicit overhead')
     args = parser.parse_args()
-    result = report(args.root, args.warmup, args.unit)
+    result = report(args.root, args.warmup, args.unit, args.observer_scope)
     print(json.dumps(dict(complete=result['complete'], probes=result['probes'],
                          slowest_ms=result['slowest'][0]['rtt_ms'] if result['slowest'] else None)))
     raise SystemExit(0 if result['probes'] else 1)
