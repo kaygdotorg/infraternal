@@ -81,6 +81,8 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   };
 
   const apply = (s: Snapshot): void => {
+    // A published snapshot supersedes every older list, including its failure.
+    generation += 1;
     if (retryTimer) { window.clearTimeout(retryTimer); retryTimer = 0; }
     rev = s.rev; access = s.access;
     if (!access.view) { status = "unavailable"; notify(true); return; }
@@ -112,9 +114,15 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     }, (error: unknown) => {
       if (disposed || mine !== generation) return;
       // Refused (not allowed, or no such action here): the person has no Mesh. A server that could not answer is an error.
-      if (error instanceof ActionRefused && error.reason !== "mesh unavailable") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); return; }
+      if (error instanceof ActionRefused && error.reason !== "mesh unavailable") { withdraw(); return; }
       toError();
     });
+  };
+  const withdraw = (): void => {
+    // Withdrawal has no snapshot revision, so invalidate pending requests too.
+    generation += 1;
+    window.clearTimeout(retryTimer); retryTimer = 0;
+    status = "unavailable"; access = { view: false, manageGrants: false }; notify(true);
   };
   const toError = (): void => {
     status = "error"; notify(true);
@@ -148,7 +156,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
         const stop = stopWatch;
         stopWatch = undefined;
         stop?.();
-        if (ev.error === "forbidden") { status = "unavailable"; access = { view: false, manageGrants: false }; notify(true); } else toError();
+        if (ev.error === "forbidden") withdraw(); else toError();
         return;
       }
       const snap = parseSnapshot(ev.snapshot);
