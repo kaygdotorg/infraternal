@@ -615,18 +615,14 @@ async fn server_path_capability_is_advertised_on_native_and_fallback_transports(
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
     for native in [true, false] {
-        let (listener, socket) = reserve_transport_pair().await;
-        let address = listener.local_addr().unwrap();
-        let server = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            Some(
-                remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
-                    .unwrap(),
-            ),
-            socket.into_std().unwrap(),
-            std::sync::Arc::new(quinn::TokioRuntime),
+        let (server, listener) = bind_capability_test_transports(
+            remote_quic::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
+                .unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
         )
+        .await
         .unwrap();
+        let address = server.local_addr().unwrap();
         let tls =
             remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate))
                 .unwrap();
@@ -681,4 +677,56 @@ async fn server_path_capability_is_advertised_on_native_and_fallback_transports(
         );
         assert_eq!(caps & remote_quic::REMOTE_WRITER_BINDING != 0, native);
     }
+}
+
+/// Reserve both protocols before either supervisor path can start.
+async fn bind_capability_test_transports(
+    config: quinn::ServerConfig,
+    candidate: SocketAddr,
+) -> io::Result<(quinn::Endpoint, tokio::net::TcpListener)> {
+    let mut candidate = candidate;
+    // The kernel allocates UDP and TCP ports independently. Keep the original
+    // protocol assertions, but move to another candidate if either is occupied.
+    for _ in 0..16 {
+        let server = match quinn::Endpoint::server(config.clone(), candidate) {
+            Ok(server) => server,
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                candidate.set_port(0);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match tokio::net::TcpListener::bind(server.local_addr()?).await {
+            Ok(listener) => return Ok((server, listener)),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                server.close(0u32.into(), b"fixture candidate occupied");
+                candidate.set_port(0);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrInUse,
+        "no shared test TCP/UDP port available",
+    ))
+}
+
+#[tokio::test]
+async fn capability_fixture_retries_a_port_held_by_the_other_transport() {
+    let ca = root();
+    let identity = leaf(&ca, true);
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied = held.local_addr().unwrap();
+    let (endpoint, listener) = bind_capability_test_transports(
+        remote_quic::server_config(&identity, std::slice::from_ref(&ca.certificate)).unwrap(),
+        occupied,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        endpoint.local_addr().unwrap(),
+        listener.local_addr().unwrap()
+    );
+    assert_ne!(listener.local_addr().unwrap(), occupied);
+    assert_eq!(held.local_addr().unwrap(), occupied);
 }
