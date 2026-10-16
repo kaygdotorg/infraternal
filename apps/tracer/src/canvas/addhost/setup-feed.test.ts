@@ -118,3 +118,19 @@ describe("createSetupFeed", () => {
     expect(socket.readyState).toBe(3);
   });
 });
+
+// A transport open is not evidence that a retained subscription can deliver.
+test("review reconnect budget survives sockets that open then close without events", async () => {
+  const lost: string[] = [];
+  const stop = feed().subscribe(HOST, () => undefined, { lost: () => lost.push("lost") });
+  try {
+    for (let i = 0; i < 3; i++) {
+      const socket = FakeSocket.all[i]!;
+      socket.open();
+      socket.drop();
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    expect(lost).toEqual(["lost"]);
+    expect(FakeSocket.all).toHaveLength(3);
+  } finally { stop(); }
+});
