@@ -81,7 +81,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   };
 
   const apply = (s: Snapshot): void => {
-    window.clearTimeout(retryTimer); retryTimer = 0;
+    if (retryTimer) { window.clearTimeout(retryTimer); retryTimer = 0; }
     rev = s.rev; access = s.access;
     if (!access.view) { status = "unavailable"; notify(true); return; }
     nodes = new Map(s.nodes.map((n) => [n.name, n]));
@@ -142,8 +142,8 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
         // the frozen wire has replacement subscriptions, but no unsubscribe.
         if (ev.subscriptionActive) { toError(); return; }
         // The server ended the subscription. A withdrawn view: the Mesh goes. Anything else: ask again, with a new watch.
-        // A failed client-side refresh can leave the wire watch alive. Release
-        // it before retry installs another, including pending page work (#229).
+        // A server withdrawal ends this watch. Release the client handle and
+        // pending page work before retry installs its replacement (#229).
         ended = true;
         const stop = stopWatch;
         stopWatch = undefined;
