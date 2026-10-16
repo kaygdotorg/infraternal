@@ -116,6 +116,9 @@ test("an invalid stored host leaves healthy inventory visible", async () => {
     await page.locator(".cl-viewport").waitFor();
     await page.keyboard.press("Control+Shift+Digit2");
     await expect(page.locator('.cl[data-view="mesh"] .cl-meshstate[data-open="true"]')).toHaveCount(0);
+    for (const host of ["alpha", "bravo"]) {
+      await expect(page.locator(`.cl[data-view="mesh"] .ui-window[data-window-id="n-${host}"]`)).toBeVisible();
+    }
     await page.screenshot({path: tracerEvidencePath("mesh-unreachable", "invalid-row.png")});
     console.log("MESH_PROOF invalid_stored_name=skipped healthy_inventory=visible");
   } finally { sql("UPDATE mesh_nodes SET name='never-connected' WHERE name=''"); }
