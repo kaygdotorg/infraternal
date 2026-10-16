@@ -16,6 +16,11 @@ async function openTerminal(page: import("playwright/test").Page): Promise<void>
   await expect.poll(() => page.evaluate(() => window.__tracerProductTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
 }
 
+function evidencePath(testInfo: import("playwright/test").TestInfo, name: string): string {
+  const directory = process.env.LINK_TOOLTIP_EVIDENCE_DIR;
+  return directory ? `${directory}/${name}` : testInfo.outputPath(name);
+}
+
 async function terminalLinkPoint(page: import("playwright/test").Page, prefix: string): Promise<{ x: number; y: number; cols: number }> {
   return page.evaluate((needle) => {
     const text = window.__tracerProductTestDouble?.screenText() ?? "";
@@ -49,6 +54,7 @@ async function linkTooltipLayout(
   labelInsideTooltip: boolean;
   tooltipIntersectsLinkRows: boolean;
   tooltipIntersectsPointer: boolean;
+  tooltipArrowAligned: boolean;
 }> {
   return page.evaluate(({ expected, pointer }) => {
     const link = window.__tracerProductTestDouble?.terminalLinks().find((item) => item.target === expected) as TerminalLink | undefined;
@@ -56,7 +62,9 @@ async function linkTooltipLayout(
     const canvas = document.querySelector<HTMLCanvasElement>("#terminal-host canvas");
     const tooltip = document.querySelector<HTMLElement>(".tip");
     const label = document.querySelector<HTMLElement>(".tip-label:not(.is-leaving)");
-    if (!link || !metrics || !canvas || !tooltip || !label) throw new Error("link tooltip layout is unavailable");
+    const position = document.querySelector<HTMLElement>(".tip-pos");
+    const arrow = position?.querySelector<HTMLElement>(".tip-arrow");
+    if (!link || !metrics || !canvas || !tooltip || !label || !position || !arrow) throw new Error("link tooltip layout is unavailable");
 
     const text = window.__tracerProductTestDouble?.screenText() ?? "";
     const firstRow = text.split("\n").findIndex((line) => line.includes(link.visibleText.slice(0, 24)));
@@ -93,6 +101,7 @@ async function linkTooltipLayout(
         labelRect.top >= tooltipRect.top && labelRect.bottom <= tooltipRect.bottom,
       tooltipIntersectsLinkRows: intersects(tooltipRect, linkRows),
       tooltipIntersectsPointer: intersects(tooltipRect, pointerRect),
+      tooltipArrowAligned: Math.abs(Number.parseFloat(arrow.style.top) - (position.dataset.side === "top" ? tooltipRect.height - 4 : -4)) < 0.75,
     };
   }, { expected: target, pointer: point });
 }
@@ -137,7 +146,7 @@ test("a long link tooltip stays short, readable, and clear of its wrapped rows",
     await page.mouse.move(longPoint.x, longPoint.y);
     await expect(page.locator(".tip")).toBeVisible();
     await expect(page.locator(".tip-label.is-leaving")).toHaveCount(0);
-    await page.screenshot({ path: testInfo.outputPath(`${capture}-link-tooltip-long.png`) });
+    await page.screenshot({ path: evidencePath(testInfo, `${capture}-link-tooltip-phone.png`) });
     const longLayout = await linkTooltipLayout(page, longTarget, longPoint);
     // The product's coarse-pointer type scale raises secondary labels to 15 px.
     const mobileTypeScale = await page.addStyleTag({ content: ":root { --text-secondary: 15px; }" });
@@ -147,7 +156,17 @@ test("a long link tooltip stays short, readable, and clear of its wrapped rows",
     const mobileLongLayout = await linkTooltipLayout(page, longTarget, longPoint);
     await mobileTypeScale.evaluate((style) => style.parentElement?.removeChild(style));
 
-    await page.mouse.click(longPoint.x, longPoint.y);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(1440);
+    await page.mouse.move(0, 0);
+    const desktopPoint = await terminalLinkPoint(page, visibleUrl.slice(0, 36));
+    await page.mouse.move(desktopPoint.x, desktopPoint.y);
+    await expect(page.locator(".tip")).toBeVisible();
+    await expect(page.locator(".tip-label.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: evidencePath(testInfo, `${capture}-link-tooltip-desktop.png`) });
+    const desktopLongLayout = await linkTooltipLayout(page, longTarget, desktopPoint);
+
+    await page.mouse.click(desktopPoint.x, desktopPoint.y);
     expect(await page.evaluate(() => (window as unknown as { __openCalls: string[][] }).__openCalls.at(-1))).toEqual([longTarget, "_blank", "noopener,noreferrer"]);
     const popup = context.pages().find((candidate) => candidate !== page);
     if (popup) await popup.close();
@@ -164,10 +183,10 @@ test("a long link tooltip stays short, readable, and clear of its wrapped rows",
     await page.mouse.move(shortPoint.x, shortPoint.y);
     await expect(page.locator(".tip")).toBeVisible();
     await expect(page.locator(".tip-label.is-leaving")).toHaveCount(0);
-    await page.screenshot({ path: testInfo.outputPath(`${capture}-link-tooltip-short.png`) });
+    await page.screenshot({ path: evidencePath(testInfo, `${capture}-link-tooltip-short.png`) });
     const shortLayout = await linkTooltipLayout(page, shortTarget, shortPoint);
 
-    console.log(`LINK_TOOLTIP_LAYOUT ${JSON.stringify({ long: longLayout, short: shortLayout, mobileLong: mobileLongLayout, columns: cols })}`);
+    console.log(`LINK_TOOLTIP_LAYOUT ${JSON.stringify({ long: longLayout, short: shortLayout, mobileLong: mobileLongLayout, desktopLong: desktopLongLayout, columns: cols })}`);
     expect.soft(longLayout.rows).toBe(8);
     expect.soft(longLayout.text.startsWith("https://login.example.test")).toBe(true);
     expect.soft(longLayout.text).toContain("…");
@@ -178,12 +197,14 @@ test("a long link tooltip stays short, readable, and clear of its wrapped rows",
     expect.soft(longLayout.labelInsideTooltip).toBe(true);
     expect.soft(longLayout.tooltipIntersectsLinkRows).toBe(false);
     expect.soft(longLayout.tooltipIntersectsPointer).toBe(false);
+    expect.soft(longLayout.tooltipArrowAligned).toBe(true);
     expect.soft(shortLayout.text).toBe(shortTarget);
     expect.soft(shortLayout.labelScrollWidth).toBeLessThanOrEqual(shortLayout.labelClientWidth);
     expect.soft(shortLayout.labelScrollHeight).toBeLessThanOrEqual(2 * shortLayout.lineHeight + 1);
     expect.soft(shortLayout.labelInsideTooltip).toBe(true);
     expect.soft(shortLayout.tooltipIntersectsLinkRows).toBe(false);
     expect.soft(shortLayout.tooltipIntersectsPointer).toBe(false);
+    expect.soft(shortLayout.tooltipArrowAligned).toBe(true);
     expect.soft(mobileLongLayout.text.startsWith("https://login.example.test")).toBe(true);
     expect.soft(mobileLongLayout.text).toContain("…");
     expect.soft(mobileLongLayout.text.endsWith("&response_type=code")).toBe(true);
@@ -192,6 +213,16 @@ test("a long link tooltip stays short, readable, and clear of its wrapped rows",
     expect.soft(mobileLongLayout.labelInsideTooltip).toBe(true);
     expect.soft(mobileLongLayout.tooltipIntersectsLinkRows).toBe(false);
     expect.soft(mobileLongLayout.tooltipIntersectsPointer).toBe(false);
+    expect.soft(mobileLongLayout.tooltipArrowAligned).toBe(true);
+    expect.soft(desktopLongLayout.text.startsWith("https://login.example.test")).toBe(true);
+    expect.soft(desktopLongLayout.text).toContain("…");
+    expect.soft(desktopLongLayout.text.endsWith("&response_type=code")).toBe(true);
+    expect.soft(desktopLongLayout.labelScrollWidth).toBeLessThanOrEqual(desktopLongLayout.labelClientWidth);
+    expect.soft(desktopLongLayout.labelScrollHeight).toBeLessThanOrEqual(2 * desktopLongLayout.lineHeight + 1);
+    expect.soft(desktopLongLayout.labelInsideTooltip).toBe(true);
+    expect.soft(desktopLongLayout.tooltipIntersectsLinkRows).toBe(false);
+    expect.soft(desktopLongLayout.tooltipIntersectsPointer).toBe(false);
+    expect.soft(desktopLongLayout.tooltipArrowAligned).toBe(true);
   } finally {
     await context.close();
     if (video && videoDirectory) await video.saveAs(`${videoDirectory}/link-tooltip.webm`);
@@ -229,7 +260,7 @@ test("wrapped and OSC 8 links open from the terminal and palette", async ({ brow
     expect(context.pages()).toHaveLength(1);
     await page.mouse.move(point.x, point.y);
     await expect(page.locator("#terminal-host canvas")).toHaveCSS("cursor", "pointer");
-    await page.screenshot({ path: testInfo.outputPath("terminal-wrapped-link-hover.png") });
+    await page.screenshot({ path: evidencePath(testInfo, "terminal-wrapped-link-hover.png") });
     const pageCount = context.pages().length;
     await page.mouse.click(point.x, point.y);
     expect(await page.evaluate(() => (window as unknown as { __openCalls: string[][] }).__openCalls.at(-1))).toEqual([target, "_blank", "noopener,noreferrer"]);
@@ -262,7 +293,7 @@ test("wrapped and OSC 8 links open from the terminal and palette", async ({ brow
     const osc8Point = await terminalLinkPoint(page, "Sign in");
     await page.mouse.move(osc8Point.x, osc8Point.y);
     await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText(osc8Target, { timeout: 3_000 });
-    await page.screenshot({ path: testInfo.outputPath("terminal-osc8-target-hover.png") });
+    await page.screenshot({ path: evidencePath(testInfo, "terminal-osc8-target-hover.png") });
     const osc8PageCount = context.pages().length;
     await page.mouse.click(osc8Point.x, osc8Point.y);
     expect(await page.evaluate(() => (window as unknown as { __openCalls: string[][] }).__openCalls.at(-1))).toEqual([osc8Target, "_blank", "noopener,noreferrer"]);
@@ -303,6 +334,70 @@ test("touch tap opens a recognized terminal link", async ({ browser }) => {
     const popup = context.pages().find((candidate) => candidate !== page)!;
     await expect(popup).toHaveURL(target);
     await popup.close();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a plain tooltip keeps its one-line layout after a link tooltip", async ({ browser }) => {
+  test.setTimeout(90_000);
+  const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
+  try {
+    const page = await context.newPage();
+    await openTerminal(page);
+    await page.evaluate(() => {
+      const trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.id = "plain-tooltip-regression-trigger";
+      trigger.dataset.tip = `https://plain.example.test/${"x".repeat(420)}`;
+      trigger.style.cssText = "position:fixed;left:20px;top:32px;width:24px;height:24px;opacity:0;";
+      document.body.append(trigger);
+    });
+    const trigger = page.locator("#plain-tooltip-regression-trigger");
+    const measurePlainTooltip = () => page.evaluate(() => {
+      const tip = document.querySelector<HTMLElement>(".tip");
+      const label = document.querySelector<HTMLElement>(".tip-label:not(.is-leaving)");
+      if (!tip || !label) throw new Error("plain tooltip is unavailable");
+      const tipRect = tip.getBoundingClientRect();
+      const labelRect = label.getBoundingClientRect();
+      const style = getComputedStyle(label);
+      return {
+        width: tipRect.width,
+        height: tipRect.height,
+        labelWidth: labelRect.width,
+        labelHeight: labelRect.height,
+        lineHeight: Number.parseFloat(style.lineHeight),
+        whiteSpace: style.whiteSpace,
+        overflowWrap: style.overflowWrap,
+        textOverflow: style.textOverflow,
+        scrollWidth: label.scrollWidth,
+        clientWidth: label.clientWidth,
+      };
+    });
+
+    await trigger.hover();
+    await expect(page.locator(".tip")).toBeVisible();
+    const beforeLink = await measurePlainTooltip();
+    await page.mouse.move(0, 0);
+
+    const target = "https://login.example.test/sign-in";
+    const response = await context.request.post("/__mock/live-query-output", {
+      data: { text: `\u001b[2J\u001b[H\u001b]8;;${target}\u0007Sign in\u001b]8;;\u0007` },
+    });
+    expect(response.ok()).toBe(true);
+    await expect.poll(() => page.evaluate((expected) => window.__tracerProductTestDouble?.terminalLinks().some((link) => link.target === expected) ?? false, target)).toBe(true);
+    const point = await terminalLinkPoint(page, "Sign in");
+    await page.mouse.move(point.x, point.y);
+    await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText(target);
+    await trigger.hover();
+    await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText(`https://plain.example.test/${"x".repeat(420)}`);
+    const afterLink = await measurePlainTooltip();
+
+    expect(afterLink).toEqual(beforeLink);
+    expect(afterLink.whiteSpace).toBe("nowrap");
+    expect(afterLink.textOverflow).toBe("ellipsis");
+    expect(afterLink.labelHeight).toBeLessThanOrEqual(afterLink.lineHeight + 1);
+    expect(afterLink.scrollWidth).toBeGreaterThan(afterLink.clientWidth);
   } finally {
     await context.close();
   }
