@@ -403,11 +403,15 @@ the default server supplies the verified source through the same SSH plugin.
 ## Classified attempt failures (#169)
 
 Failure adds optional `exit_status` from the authenticated command process (a
-signal or unavailable status omits it). Fixed installer codes 71 and 72 retain
-`failed_step` and identify the approved root/rootless directory with ownership
-or ownership guidance. A competing transaction (72) directs the person back
-to the host check; a live setup (73) offers to wait. Other failures name the
-command boundary and next check. Arbitrary stdout/stderr remains withheld. One server log line per failed
+signal or unavailable status omits it). Fixed installer code 71 retains
+`failed_step` and identifies the approved root/rootless directory with ownership,
+permission and setup-file guidance. An unfinished transaction (72) directs the
+person back to cleanup; a live setup (73) offers to wait. A retry with retained
+coordinates actually finishes the original cleanup before continuing. A returned
+script status is a setup failure, including status 255 after authentication;
+only failures without a script status are classified as command-channel failures.
+Other failures name the command boundary and next check. Arbitrary stdout/stderr
+remains withheld. One server log line per failed
 attempt contains only host UUID (unassigned before issuance), target id, step,
 exit status and static mode; cleanup warnings do not replace the original phase.
 The existing dialog Details disclosure shows the trusted failed-step label.
@@ -473,6 +477,32 @@ execution mode, fresh ownership journal and started/completed/refused outcome.
 Authenticated command status and setup-step diagnostics remain available; no
 file contents, process arguments, environments or arbitrary remote output enter
 public findings or logs. No existing enrolled identity is adopted by recovery.
+
+Fresh rollback also retires the infraternal agent's fixed local control socket,
+`sessions/plugins.sock`, which may survive a service stop before the first server
+connection (#230). Its parent must be an owned real private directory and the
+socket an owned, non-linked inode. Socket mode comes from the service manager's
+umask; the private parent protects access for every inherited mode. A kernel
+socket row under that runtime, including a bound or accepted socket, refuses
+removal. Recheck the inode before
+unlinking; unknown files, links and live sockets keep the receipt intact.
+
+A retry with retained cleanup coordinates first finishes that exact host and
+transaction's rollback, before issuing another invitation. Progress says “An
+earlier setup on this host did not finish; finishing it now.” Cleanup coordinates
+never authorize another transaction's lease retirement. Unattributed earlier
+state still requires the existing start-fresh confirmation and full revalidation;
+a receipt alone never permits adoption by a different host or server.
+
+After a server restart, the existing retired bootstrap ledger can authorize that
+same cleanup without another confirmation. It must bind the receipt's exact host
+UUID to the current owner, privilege mode, observed execution uid and authenticated
+SSH lookup. A recorded lookup must match; only when both lookups are absent may
+an exact saved SSH address suffice. Active, unknown or mismatched records cannot
+authorize automatic recovery. The live owner session and root consent are checked
+again. This proof permits retirement of fresh leftovers, never adoption of an
+enrolled identity; the complete shell inventory, inode and liveness checks remain.
+The ledger is queried only when inspection finds earlier setup state.
 
 Exact screen copy for the later UI pass: title “This host has leftovers from an
 earlier setup”; body “infraternal didn't finish setting up here before. Start
