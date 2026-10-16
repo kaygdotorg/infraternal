@@ -173,6 +173,14 @@ impl Installation {
     fn script(&self, body: &str) -> String {
         // A local binding shares this literal across format programs instead
         // of embedding another copy of the setup-lock program in each one.
+        // setup_lock.sh proof notes [17][243]:
+        // Every new installer command takes this same directory lock. It leaves
+        // no lock file and serializes admission, recovery and journal mutation.
+        // A bounded lease holds the transaction directory across SSH command gaps. Its
+        // public PID/start-time receipt is not authority by itself: retirement also
+        // requires the process's inherited descriptor to refer to this exact directory.
+        // Also detect a holder whose creation was interrupted before PID journaling.
+        // Such an unrecorded lease expires at the same bounded setup deadline.
         let setup_lock = include_str!("setup_lock.sh");
         let guarded = format!("{setup_lock}\nsetup_guard\n{body}");
         Self::script_for(self.mode, self.host, self.transaction, &guarded)
@@ -401,6 +409,22 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
     }
 }
 
+// Shell proof notes live outside transmitted literals [243].
+// These checks precede every lookup below sessions; links never authorize cleanup.
+// The service manager supplies the umask, so socket mode is not an ownership
+// receipt. The real private parent protects it for every inherited mode.
+// Unix diagnostics bridge the filesystem inode to the kernel socket inode
+// used by /proc/net/unix and socket:[inode] descriptors. Path resolution
+// cannot do this after a relative bind, chdir or rename. Missing diagnostics
+// cannot prove staleness. Inode collisions on other devices refuse safely.
+// The kernel Unix diagnostic VFS inode is u32 even on wide-inode filesystems.
+// Reduce decimal digits individually: full u64 values exceed awk precision
+// and signed shell arithmetic. Truncation collisions only retain more state.
+// A bind without listen and an accepted connection are live too. A relative
+// basename collision refuses conservatively, even outside this installation.
+// An outside receipt is written only after service rollback, before retiring
+// stage. Its surviving markers may be any subset; validate known artifacts
+// without reading enrollment contents or following links before resuming removal.
 pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats
@@ -481,11 +505,30 @@ fi
 
 // The rollback journal is a fixed shell program. Keeping it outside the Rust
 // adapter makes its ownership and interruption invariants reviewable together.
+// Shell proof notes (kept out of the transmitted program [243]):
+// This receipt means service rollback is complete. Do not repeat service
+// changes after a stop inside stage retirement, even if its markers are gone.
+// Creation can succeed before the receipt's bytes fit on disk. Only
+// the exact acquisition journal owns this private, empty lock; never
+// treat a different nonempty transaction as an interrupted write.
+// Only the pre-mkdir journal authorizes an empty, uninitialized lock.
+// Refused stop retains both installation and policy receipts for cleanup retry.
+// Only the validated original transaction may retire its cross-command lease.
+// A losing installer must not stop another attempt's lease before refusing it.
+// Only a journaled final replacement belongs to this attempt. Temporary
+// files stay in stage; unrelated suffix files are never cleanup targets.
+// Retire replacement markers before restoring backups: a retry must never
+// delete an original already restored by an interrupted rollback. Backups
+// still present remain sufficient evidence to retry interrupted restoration.
+// Restoration can stop between moving the backup and recreating links.
+// The original-presence marker survives both operations and makes retry safe.
+// No replacement began, but a lost stop reply may have stopped the old service.
+// An acknowledged refusal is staging-only cleanup and must not restart it.
+// An incomplete upload is owned by this transaction. Reclaim it before
+// allocating the outside receipt, including when the home filesystem is full.
 pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
-    # This receipt means service rollback is complete. Do not repeat service
-    # changes after a stop inside stage retirement, even if its markers are gone.
     stage="$base/.bootstrap-lock"
     if [ -e "$stage" ] || [ -L "$stage" ]; then
         validate_retired_stage "$transaction" "$host"
@@ -526,28 +569,21 @@ fi
 if [ -e "$stage/transaction" ] || [ -L "$stage/transaction" ]; then
     [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] || exit 72
     if [ "$(cat "$stage/transaction")" != "$transaction" ]; then
-        # Creation can succeed before the receipt's bytes fit on disk. Only
-        # the exact acquisition journal owns this private, empty lock; never
-        # treat a different nonempty transaction as an interrupted write.
         [ "$acquired" = yes ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 72
         [ -O "$stage/transaction" ] && [ "$(stat -c '%a:%s:%h' "$stage/transaction")" = 600:0:1 ] || exit 72
         rm "$stage/transaction"
         rmdir "$stage" || exit 72
     fi
 else
-    # Only the pre-mkdir journal authorizes an empty, uninitialized lock.
     [ "$acquired" = yes ] || exit 72
     rmdir "$stage" || exit 72
 fi
-# Refused stop retains both installation and policy receipts for cleanup retry.
 if [ -f "$stage/kind" ] && [ ! -L "$stage/kind" ]; then kind=$(cat "$stage/kind"); else [ "$acquired" = yes ] || exit 72; fi
 case "$kind" in
     fresh) validate_parent;;
     upgrade) :;;
     *) exit 71;;
 esac
-# Only the validated original transaction may retire its cross-command lease.
-# A losing installer must not stop another attempt's lease before refusing it.
 retire_setup_lease
 if [ -f "$stage/activating" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
@@ -563,19 +599,12 @@ if [ -f "$stage/activating" ]; then
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
     if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
-    # Only a journaled final replacement belongs to this attempt. Temporary
-    # files stay in stage; unrelated suffix files are never cleanup targets.
     if [ -f "$stage/replacing-launcher" ] && [ ! -f "$stage/had-launcher" ]; then rm -f "$launcher"; fi
     [ ! -f "$stage/replacing-unit" ] || rm -f "$unit"
-    # Retire replacement markers before restoring backups: a retry must never
-    # delete an original already restored by an interrupted rollback. Backups
-    # still present remain sufficient evidence to retry interrupted restoration.
     rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit" "$stage/replacing-launcher"
     if [ -f "$stage/previous-binary" ]; then
         mv "$stage/previous-binary" "$base/bin/live"
     fi
-    # Restoration can stop between moving the backup and recreating links.
-    # The original-presence marker survives both operations and makes retry safe.
     if [ -f "$stage/had-binary" ]; then
         [ -L "$base/bin/current" ] || ln -s "$base/bin/live" "$base/bin/current"
         [ -L "$launcher" ] || ln -s "$base/bin/current" "$launcher"
@@ -586,14 +615,10 @@ if [ -f "$stage/activating" ]; then
     [ ! -f "$stage/was-enabled" ] || $manager enable infraternal-agent.service
     [ ! -f "$stage/was-active" ] || $manager start infraternal-agent.service
 fi
-# No replacement began, but a lost stop reply may have stopped the old service.
-# An acknowledged refusal is staging-only cleanup and must not restart it.
 if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ]; then
     $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then
-    # An incomplete upload is owned by this transaction. Reclaim it before
-    # allocating the outside receipt, including when the home filesystem is full.
     rm -f "$stage/payload"
     if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
         printf '%s %s fresh %s\n' "$host" "$transaction" "$(stat -c '%d:%i' "$base")" > "$receipt"
@@ -611,6 +636,16 @@ fi
 // owner marker and base. Noclobber creation, bounded reads, uid/mode and directory
 // identity checks preserve exact binding
 // prevent stale or foreign cleanup from being mistaken for this fresh attempt.
+// Shell proof notes (kept out of the transmitted program [243]):
+// The outside receipt can outlive an interrupted retirement of the acquisition
+// journal. Remove only its exact fresh binding, after validating the base owner.
+// Never recursively delete unjournaled contents. Unexpected data keeps
+// the receipt and makes cleanup fail rather than claiming success.
+// The service creates these rendezvous directories before its first PTY.
+// Remove only empty owned directories; never follow a parent link or
+// remove retained shim/session data merely because installation failed.
+// Preserve the owner marker alongside the receipt if unknown data keeps
+// the root nonempty. Another attempt cannot claim this unfinished root.
 pub(crate) const FRESH_CLEANUP: &str = r#"
 receipt="$base.bootstrap-rollback-$transaction"
 validate_parent() {
@@ -633,8 +668,6 @@ validate_receipt() {
         [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || exit 71
     fi
 }
-# The outside receipt can outlive an interrupted retirement of the acquisition
-# journal. Remove only its exact fresh binding, after validating the base owner.
 retire_fresh_acquisition() {
     acquiring="$base/.bootstrap-acquiring"
     if [ -e "$acquiring" ] || [ -L "$acquiring" ]; then
@@ -651,22 +684,15 @@ finish_fresh() {
             [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
         fi
         retire_fresh_acquisition
-        # Never recursively delete unjournaled contents. Unexpected data keeps
-        # the receipt and makes cleanup fail rather than claiming success.
         rm -f "$base/.bootstrap-ready"
         retire_control_socket
         rmdir "$base/bin" 2>/dev/null || :
-        # The service creates these rendezvous directories before its first PTY.
-        # Remove only empty owned directories; never follow a parent link or
-        # remove retained shim/session data merely because installation failed.
         if [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ]; then
             if [ ! -L "$base/sessions/sessions" ] && [ -O "$base/sessions/sessions" ]; then
                 rmdir "$base/sessions/sessions" 2>/dev/null || :
             fi
             rmdir "$base/sessions" 2>/dev/null || :
         fi
-        # Preserve the owner marker alongside the receipt if unknown data keeps
-        # the root nonempty. Another attempt cannot claim this unfinished root.
         for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
             [ "$entry" = "$base/.bootstrap-owner" ] || { [ ! -e "$entry" ] && [ ! -L "$entry" ]; } || exit 72
         done

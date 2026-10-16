@@ -1,23 +1,14 @@
 # Validate stopped control sockets and receipt-authorized staging before retiring failed setup (#230).
+# Proof notes are beside RUNTIME_CLEANUP in install.rs [17][243].
 validate_control_socket() {
     control="$base/sessions/plugins.sock"
     [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0
-    # These checks precede every lookup below sessions; links never authorize cleanup.
     [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ] || exit 71
     [ -e "$control" ] || [ -L "$control" ] || return 0
     [ "$(stat -c '%a' "$base/sessions")" = 700 ] || exit 71
-    # The service manager supplies the umask, so socket mode is not an ownership
-    # receipt. The real private parent protects it for every inherited mode.
     [ -S "$control" ] && [ ! -L "$control" ] && [ -O "$control" ] && [ "$(stat -c '%h' "$control")" = 1 ] || exit 71
     control_identity=$(stat -c '%d:%i' "$control")
-    # Unix diagnostics bridge the filesystem inode to the kernel socket inode
-    # used by /proc/net/unix and socket:[inode] descriptors. Path resolution
-    # cannot do this after a relative bind, chdir or rename. Missing diagnostics
-    # cannot prove staleness. Inode collisions on other devices refuse safely.
     rows=$(ss -x -a -n -e -p -H 2>&1) || exit 75
-    # The kernel Unix diagnostic VFS inode is u32 even on wide-inode filesystems.
-    # Reduce decimal digits individually: full u64 values exceed awk precision
-    # and signed shell arithmetic. Truncation collisions only retain more state.
     live=$(printf '%s\n' "$rows" | awk -v filesystem_inode="i${control_identity#*:}" '
         BEGIN {
             value = 0
@@ -39,8 +30,6 @@ validate_control_socket() {
     [ -z "$live" ] || exit 73
     control_real=$(CDPATH= cd -P "$base/sessions" && pwd -P)/plugins.sock
     [ -r /proc/net/unix ] || exit 71
-    # A bind without listen and an accepted connection are live too. A relative
-    # basename collision refuses conservatively, even outside this installation.
     while read -r num refs protocol flags type state inode path; do
         case "$path" in "$base"/*|"${control_real%/plugins.sock}"/*|plugins.sock|./plugins.sock) exit 73;; esac
     done < /proc/net/unix
@@ -53,9 +42,6 @@ retire_control_socket() {
     fi
 }
 
-# An outside receipt is written only after service rollback, before retiring
-# stage. Its surviving markers may be any subset; validate known artifacts
-# without reading enrollment contents or following links before resuming removal.
 validate_retired_stage() {
     stage="$base/.bootstrap-lock"
     [ -e "$stage" ] || [ -L "$stage" ] || return 0

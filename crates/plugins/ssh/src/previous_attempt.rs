@@ -7,6 +7,44 @@ use crate::{
     transport::{Input, SshSession},
 };
 
+// Shell proof notes live outside transmitted literals to keep setup and the binary small [243].
+// This program emits only fixed records and public ids, never process arguments or file contents.
+// no_redirect has already permitted only the home alias and symlinks above
+// it. Resolve that alias so /proc descriptor links under the real home are
+// still recognized as live setup state.
+// Match live socket entries by canonical path or the exact UUID basename. The latter
+// also covers a listener bound through a relative path or a directory alias.
+// A collision refuses conservatively; it never authorizes removal.
+// A bound socket before listen, or an accepted connection after the
+// listener closes, is still live. Closed stale files have no kernel row.
+// Control sockets have a fixed basename on every host. Match only
+// our canonical directory or a relative bind, never another root.
+// Inspect executable and open-descriptor links in one native traversal,
+// never argv or environments. Per-link shell subprocesses grow with every
+// other workload's open files. Bound the process table and refuse paths
+// that cannot be represented literally by find's link-pattern predicate.
+// Processes can exit or belong to another uid during traversal. Other
+// failures (missing utility, oversized argv) cannot prove absence.
+// Every directory from / to the setup root must be real, except the home
+// directory itself or a directory above it (e.g. /home -> /var/home): a
+// symlink below home could send recovery to leftovers somewhere else (#169).
+// Final retirement can stop after the owner or base is gone. The private
+// outside receipt still identifies the exact host/transaction for the
+// server's durable authorization; a replacement directory never matches.
+// Only an empty root is reachable after retiring the owner marker.
+// An interrupted fresh lock is recoverable through its original journal.
+// An upgrade owns previous enrolled data and is never a start-fresh target.
+// Receipt and any surviving lock must describe the same fresh attempt.
+// Fresh acquisition receipts own only these staging artifacts.
+// More advanced/unknown layouts need their original rollback; do not
+// recursively delete foreign files just because a lock is marked ours.
+// Only the acquisition journal proves an otherwise empty lock.
+// A receipt may coexist with interrupted acquisition retirement. Validate
+// that sibling binding before removing even otherwise-owned sockets.
+// Any unjournaled root entry refuses the entire recovery before mutation,
+// including sockets elsewhere that would otherwise be safe to retire.
+// Validate every socket before deleting any. Only these session rendezvous
+// names and empty directories belong to this legacy fresh-install receipt.
 pub(crate) const INSPECT: &str = include_str!("previous_attempt.sh");
 
 /// Nonsecret coordinates bind confirmation to exactly the directory observed.
