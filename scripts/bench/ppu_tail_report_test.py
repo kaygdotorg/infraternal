@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check scheduler intersections, wakeup races and kernel-stack identity [D270]."""
 import unittest
-from ppu_tail_report import Timeline, waits, runqlat
+from ppu_tail_report import Timeline, waits, runqlat, futex_waits
 
 
 def event(stamp, kind, state='', **fields):
@@ -24,6 +24,13 @@ class Timing(unittest.TestCase):
         result = runqlat(rows)
         self.assertEqual(result['count'], 2)
         self.assertEqual(result['max_ms'], 3)
+
+    def test_futex_timeout_is_paired_with_its_actual_syscall_bounds(self):
+        rows = [event(1, 'sys_enter_futex', futex_lock=2, futex_op=137),
+                event(6, 'sys_exit_futex', futex_result=-110),
+                event(7, 'sys_exit_futex', futex_result=0)]
+        self.assertEqual(futex_waits(rows), [dict(begin_ns=1_000_000,
+            end_ns=6_000_000, lock=2, operation=137, result=-110)])
 
     def test_stack_must_belong_to_the_same_sleep_transition(self):
         rows = [event(1, 'sched_switch', 'out-sleeping'),

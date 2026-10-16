@@ -62,6 +62,21 @@ def waits(events):
     return result
 
 
+def futex_waits(events):
+    """Pair actual syscall bounds; a timeout remains distinct from a wakeup."""
+    pending = None
+    result = []
+    for row in sorted(events, key=lambda item: item['ns']):
+        if row['kind'] == 'sys_enter_futex':
+            pending = row
+        elif row['kind'] == 'sys_exit_futex' and pending is not None:
+            result.append(dict(begin_ns=pending['ns'], end_ns=row['ns'],
+                operation=pending.get('futex_op'), lock=pending.get('futex_lock'),
+                result=row.get('futex_result')))
+            pending = None
+    return result
+
+
 def runqlat(events):
     """Include wakeups and runnable preemption; ignore an already running wakeup."""
     values = []
@@ -98,6 +113,9 @@ def report(root, warmup):
               for pid, data in events.items()}
     fault_starts = {pid: [row['ns'] for row in data] for pid, data in faults.items()}
     wait_ends = {pid: [row['end_ns'] for row in data] for pid, data in blocked.items()}
+    reader_waits = futex_waits(events[roles['reader']])
+    counter_ops = [row for row in events.get(roles.get('counter'), [])
+                   if row['kind'] == 'sys_enter_futex']
     start = meta['started_ns'] + int(warmup * 1e9)
     rows = [row for row in correlated['rows'] if row['send_before_ns'] >= start]
     for row in rows:
@@ -111,6 +129,15 @@ def report(root, warmup):
                                       for name, pid in role_ids.items()}
                                for stage, window in windows.items()}
         begin, end = row['send_before_ns'], row['receive_ns']
+        row['reader_futex'] = [wait | dict(
+            duration_ms=(wait['end_ns'] - wait['begin_ns']) / 1e6,
+            post_socket_overlap_ms=max(0, min(end, wait['end_ns']) -
+                max(row['socket_done_ns'], wait['begin_ns'])) / 1e6,
+            counter_same_lock=[dict(ns=op['ns'], operation=op.get('futex_op'))
+                for op in counter_ops if wait['lock'] is not None
+                and op.get('futex_lock') == wait['lock']
+                and wait['begin_ns'] <= op['ns'] <= wait['end_ns']])
+            for wait in reader_waits if wait['end_ns'] > begin and wait['begin_ns'] < end]
         row['fault_reclaim_events'] = {}
         row['kernel_waits'] = {}
         for name, pid in role_ids.items():
