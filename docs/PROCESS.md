@@ -143,19 +143,25 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 22,204,304 bytes |
-  | `aarch64-unknown-linux-musl` | 19,638,744 bytes |
+  | `x86_64-unknown-linux-musl` | 21,422,096 bytes |
+  | `aarch64-unknown-linux-musl` | 19,594,856 bytes |
 
   These are the #198 measurements of the full-feature release recipe after
-  unused native APIs and duplicated action metadata construction were cut.
+  unused native APIs, duplicated action metadata construction, OpenSSL's
+  unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
+  cut (D243, D264, #198). The x86_64 build retains AES-NI and generic AES-GCM
+  dispatch, checked against a NIST vector
+  using the shipping static crypto archive.
+  The release and host-facts plugins use size optimization; terminal and mesh
+  data paths retain speed optimization (D243).
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later
   regrowth. Update both targets and this table with evidence on the issue.
   An intentional increase needs a justified, target-specific measured owner
   exception under D243. The gate never updates a ceiling automatically.
-  Attribution, retained feature costs and runtime tradeoffs are recorded in
-  `docs/verification/size-ratchet/README.md`.
+  Attribution, retained feature costs and runtime tradeoffs for #198 are
+  recorded on that issue.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.

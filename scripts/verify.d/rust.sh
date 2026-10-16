@@ -64,8 +64,8 @@ rust_check_static_binary() {
     fi
 
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=22204304 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19638744 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21422096 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19594856 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
@@ -82,7 +82,7 @@ rust_check_static_binary() {
         return 1
     fi
     # A cut must update its ceiling, or later regrowth would spend hidden slack.
-    # D243 ratchets each shipping target to its measured bytes, with no allowance.
+    # D243 and D264 ratchet each shipping target to its measured bytes, with no allowance.
     if ((size_bytes < max_size_bytes)); then
         printf 'binary shrank to %s bytes; ratchet the %s ceiling down from %s bytes\n' \
             "$size_bytes" "$target" "$max_size_bytes" >&2
@@ -180,6 +180,9 @@ rust_static_build_check() {
 
     for target in "${targets[@]}"; do
         cargo build --locked --release --package infraternal --target "$target" || return $?
+        if [[ "$target" == x86_64-unknown-linux-musl ]]; then
+            CARGO_TARGET_DIR="$target_dir" python3 scripts/test-openssl-avx512-gcm.py || return $?
+        fi
         # Keep every size failure, but still exercise both shipping providers.
         rust_check_static_binary "$target" || failed=1
         rust_check_static_key_memory "$target" "${target_dir}/${target}/release/infraternal" || failed=1

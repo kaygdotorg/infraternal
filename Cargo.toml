@@ -27,7 +27,9 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 infraternal-plugin-api = { version = "0.1.0", path = "crates/infraternal-plugin-api" }
 argon2 = "0.5"
-axum = { version = "0.8", features = ["ws"] }
+# Retain the server's HTTP, JSON, WebSocket and tracing paths; the form, query,
+# matched-path and original-URI extractors are not used [#198].
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tower-log", "tracing", "ws"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-openssl"] }
 bytes = "1"
 base64 = "0.22"
@@ -101,4 +103,12 @@ panic = "unwind"
 
 # Bound async orchestration code; Mesh and cryptographic dependencies retain speed optimization [5,198].
 [profile.release.package.infraternal-server]
+opt-level = "s"
+
+# Keep management metadata and host-facts actions size-optimized; terminal and
+# mesh data paths retain the speed profile [243].
+[profile.release.package.infraternal-plugin-release]
+opt-level = "s"
+
+[profile.release.package.infraternal-plugin-host-facts]
 opt-level = "s"
