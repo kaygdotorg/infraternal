@@ -19,7 +19,12 @@ impl SshSession for Local {
         Box::pin(async move {
             // Map the remote user's home to isolated fixture storage without
             // changing the process's HOME or touching a real user's installation.
-            let script = script.replace("$HOME", self.root.to_str().unwrap());
+            // Retain the shell parent through the reply. An interrupted final
+            // command must never target the test runner through exec optimization.
+            let script = format!(
+                "{}\nbootstrap_test_status=$?\nexit \"$bootstrap_test_status\"",
+                script.replace("$HOME", self.root.to_str().unwrap())
+            );
             let mut child = Command::new("/bin/sh")
                 .args(["-c", &script])
                 .env(
@@ -1154,7 +1159,7 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
         .unwrap_err();
     assert_eq!(serde_json::to_value(&failure).unwrap()["exit_status"], 71);
     assert!(failure.message.contains("~/.local/share/infraternal"));
-    assert!(failure.message.contains("Move it aside"));
+    assert!(failure.message.contains("ownership"));
 }
 
 #[tokio::test]
@@ -1693,18 +1698,38 @@ async fn concurrent_attempts_cannot_replace_or_clean_each_others_transaction() {
     retry.rollback().await.unwrap();
 }
 
-/// A command disappearing after publishing its unit retains enough journal to restore it.
+/// A lost start reply after activation must retire the stopped service's control socket.
 #[tokio::test]
 async fn crash_mid_install_can_roll_back_and_retry() {
+    use infraternal_plugin_ssh::model::InstallStep;
     let fixture = Fixture::new();
     let transaction = fixture.transaction();
     transaction.stage(&fixture.binary).await.unwrap();
+    let manager = fixture.root.join("tools/systemctl");
+    let original_manager = std::fs::read_to_string(&manager).unwrap();
+    let runtime = fixture.base().join("sessions");
     executable(
-        &fixture.root.join("tools/mv"),
-        "#!/bin/sh\n/usr/bin/mv \"$@\" || exit $?\ncase \"$*\" in *infraternal-agent.service) kill -TERM \"$PPID\";; esac\n",
+        &manager,
+        &format!(
+            r#"#!/bin/sh
+case "$*" in
+*is-enabled*|*is-active*) exit 1;;
+*enable*--now*)
+    python3 -c 'import os,socket,sys; os.makedirs(sys.argv[1],mode=0o700,exist_ok=True); os.umask(0o022); s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]+"/plugins.sock")' {}
+    kill -TERM "$PPID";;
+*) exit 0;;
+esac
+"#,
+            infraternal_plugin_ssh::transport::shell_quote(runtime.to_str().unwrap())
+        ),
     );
-    assert!(transaction.enroll_and_start(&fixture.join).await.is_err());
-    std::fs::remove_file(fixture.root.join("tools/mv")).unwrap();
+    let failure = transaction
+        .enroll_and_start(&fixture.join)
+        .await
+        .unwrap_err();
+    assert!(matches!(failure.failed_step, Some(InstallStep::Start)));
+    assert!(runtime.join("plugins.sock").exists());
+    executable(&manager, &original_manager);
     transaction.rollback().await.unwrap();
     let retry = fixture.transaction();
     retry.stage(&fixture.binary).await.unwrap();

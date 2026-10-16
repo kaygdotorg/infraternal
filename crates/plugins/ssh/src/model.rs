@@ -284,7 +284,13 @@ impl Failure {
     pub fn at_ssh_boundary(mut self, channel: bool) -> Self {
         // Reuse bounded, static diagnostics rather than growing every retained
         // Failure/event with a field solely for server instrumentation.
-        let boundary = if channel {
+        let boundary = if channel && self.exit_status.is_some() {
+            // Authentication completed and the command returned a status. Its
+            // refusal is setup evidence, not a broken SSH command channel.
+            self.log_tail
+                .retain(|line| *line != "The SSH command channel failed.");
+            "The remote setup command returned a failure status."
+        } else if channel {
             "The SSH command channel failed."
         } else {
             "The SSH connection setup failed."
@@ -338,13 +344,13 @@ impl Failure {
         match (self.exit_status, mode) {
             (Some(71..=73), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
-                self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
+                self.message = "Setup could not verify ownership or permissions of its files on this host. Check ~/.local/share/infraternal, its parent folders and the infraternal service files, then try again.";
             }
             (Some(71), InstallMode::Root) => {
-                self.message = "An existing folder /var/lib/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside with administrator access, then try again.";
+                self.message = "Setup could not verify ownership or permissions of its files on this host. Check /var/lib/infraternal, its parent folders and the infraternal service files with administrator access, then try again.";
             }
             (Some(72), _) => {
-                self.message = "Host provisioning found another setup attempt. Retry the host check to continue.";
+                self.message = "An earlier setup on this host did not finish. Retry the host check to finish its cleanup before continuing.";
             }
             (Some(73), _) => {
                 self.kind = FailureKind::SetupRunning;

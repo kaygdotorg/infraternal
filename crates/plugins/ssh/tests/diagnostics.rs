@@ -194,7 +194,7 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
                     }
                     71 => {
                         assert!(failure.message.contains(path));
-                        assert!(failure.message.contains("Move it aside"));
+                        assert!(failure.message.contains("ownership"));
                     }
                     72 => {
                         assert!(failure.message.contains("Retry the host check"));
@@ -254,8 +254,13 @@ fn failure_diagnostics_distinguish_auth_trust_transport_and_channel_without_raw_
     );
     let mut command = Failure::install("static").at_ssh_boundary(true);
     command.exit_status = Some(1);
-    let command = command.at(InstallStep::Connect);
-    assert_eq!(command.diagnostic_kind(), "channel");
+    let command = command.at_ssh_boundary(true).at(InstallStep::Connect);
+    assert_eq!(command.diagnostic_kind(), "setup");
+    assert!(
+        !command
+            .log_tail
+            .contains(&"The SSH command channel failed.")
+    );
     assert!(
         !serde_json::to_string(&command)
             .unwrap()
@@ -277,5 +282,23 @@ fn engine_failures_keep_their_ssh_boundary_without_remote_bytes() {
                 .unwrap()
                 .contains("private-engine-sentinel")
         );
+    }
+}
+
+/// Every authenticated script status names the command, never a failed SSH channel.
+#[test]
+fn script_status_diagnostics_are_honest_for_all_nonzero_codes() {
+    use infraternal_plugin_ssh::model::{Failure, InstallStep};
+    for status in 1..=255 {
+        let mut failure = Failure::install("static").at_ssh_boundary(true);
+        failure.exit_status = Some(status);
+        let failure = failure.at_ssh_boundary(true).at(InstallStep::Install);
+        assert_eq!(failure.diagnostic_kind(), "setup");
+        assert!(
+            !failure
+                .log_tail
+                .contains(&"The SSH command channel failed.")
+        );
+        assert_eq!(failure.exit_status, Some(status));
     }
 }

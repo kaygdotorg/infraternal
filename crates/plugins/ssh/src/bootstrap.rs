@@ -441,7 +441,7 @@ impl Bootstrap {
                         &target,
                         attempt,
                         Step::Install,
-                        "Automatic cleanup could not finish. Retry when SSH is available.",
+                        "Automatic cleanup could not finish. Retry to finish the earlier setup before continuing.",
                         started,
                         None,
                     );
@@ -926,7 +926,7 @@ async fn restore_previous(
             target,
             attempt,
             Step::Install,
-            "Restoring the previous host attempt before retry.",
+            "An earlier setup on this host did not finish; finishing it now.",
             started,
             None,
         );
