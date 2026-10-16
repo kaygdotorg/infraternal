@@ -171,7 +171,10 @@ impl Installation {
     }
 
     fn script(&self, body: &str) -> String {
-        let guarded = format!("{}\nsetup_guard\n{body}", include_str!("setup_lock.sh"));
+        // A local binding shares this literal across format programs instead
+        // of embedding another copy of the setup-lock program in each one.
+        let setup_lock = include_str!("setup_lock.sh");
+        let guarded = format!("{setup_lock}\nsetup_guard\n{body}");
         Self::script_for(self.mode, self.host, self.transaction, &guarded)
     }
 

@@ -21,13 +21,13 @@ pub struct PreviousAttempt {
 /// Fold the ownership check into the existing SSH sniff, without another round trip.
 #[must_use]
 pub fn check_script(mode: InstallMode) -> String {
+    let setup_lock = include_str!("setup_lock.sh");
     let inspect = Installation::script_for(
         mode,
         uuid::Uuid::nil(),
         uuid::Uuid::nil(),
         &format!(
-            "{}\n{}\n{INSPECT}\ninspect_previous",
-            include_str!("setup_lock.sh"),
+            "{setup_lock}\n{}\n{INSPECT}\ninspect_previous",
             crate::install::RUNTIME_CLEANUP
         ),
     );
@@ -138,9 +138,9 @@ impl PreviousAttempt {
             self.identity,
             self.sockets
         );
+        let setup_lock = include_str!("setup_lock.sh");
         let body = format!(
-            "{}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
-            include_str!("setup_lock.sh"),
+            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
             crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&expected),
             crate::install::FRESH_CLEANUP,
