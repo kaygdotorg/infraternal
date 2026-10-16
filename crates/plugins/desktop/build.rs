@@ -39,6 +39,7 @@ fn main() {
             "native/ResponsibleLaunch.swift",
             "native/Permissions.swift",
             "native/CaptureState.swift",
+            "native/FrameDamage.swift",
             "native/Inventory.swift",
             "native/Geometry.swift",
             "native/Input.swift",
