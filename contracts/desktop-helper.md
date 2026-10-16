@@ -103,9 +103,12 @@ encoded image waits for output. A dropped encoded frame forces the next
 transmitted frame to be an IDR, so its references never depend on a dropped frame.
 A successful native encoder callback marked `frameDropped` completes its input
 without a sample. It must not retire capture. The surface path retains its latest
-surface and requests a repairing keyframe on the next source-rate opportunity,
-using its existing one-shot timer even when no further damage arrives. It never
-spins on a dropped surface. The owned-pixel reply makes at most one forced-keyframe
+surface without turning a raw motion drop into decoder reference repair. A
+requested IDR or sharp refresh that is dropped retries at the next source-rate
+opportunity, using the existing one-shot timer even without further damage.
+Sharp refresh retries retain their larger bitrate budget. Ordinary dropped
+motion inputs wait for fresh damage or the scheduled settled refresh; they never
+cause a forced-IDR loop. The owned-pixel reply makes at most one forced-keyframe
 retry of the same captured pixels and timestamp, then refuses repeated drops.
 Callback errors, missing unflagged samples, invalid access units and a genuine
 completion timeout remain terminal failures. No wire frame is sent for a drop.
