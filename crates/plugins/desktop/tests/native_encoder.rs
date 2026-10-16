@@ -90,6 +90,18 @@ fn raw_encoder_drops_preserve_delta_references_and_refresh_quality() {
 }
 
 #[test]
+fn empty_native_damage_rectangles_do_not_schedule_unchanged_pictures() {
+    run_swift_fixture(
+        "frame-damage",
+        &[
+            "native/FrameDamage.swift",
+            "tests/fixtures/frame-damage-test.swift",
+        ],
+        false,
+    );
+}
+
+#[test]
 #[ignore = "requires the signed helper, a running managing process and the shared Mac hardware lock"]
 fn managed_native_window_has_no_resize_requests_or_frame_size_flips() {
     let helper = std::env::var_os("INFRATERNAL_NATIVE_CONTROL_TEST_HELPER")

@@ -78,15 +78,16 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let ticks = info[.displayTime] as? UInt64 ?? mach_absolute_time()
         mailbox.lock()
         guard !stopped else { mailbox.unlock(); return }
-        // Missing damage metadata is conservatively treated as changed. Empty
-        // rectangles suppress duplicate surfaces after the first usable picture.
-        let damaged = (info[.dirtyRects] as? [Any])?.isEmpty != true || retained == nil
+        // Missing/unknown damage remains conservative. A nonempty list of empty
+        // rectangles must not replace the retained picture or reset its refresh.
+        let damaged = captureFrameHasDamage(info[.dirtyRects], initial: retained == nil)
         if damaged { latest = (pixel, ticks) }
         let schedule = damaged && !active
         if schedule { active = true }
         mailbox.unlock()
         if ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil {
-            fputs("METRIC source_frame capture_ns=\(nanos(ticks)) damaged=\(damaged)\n", stderr)
+            let entries = (info[.dirtyRects] as? [Any])?.count ?? -1
+            fputs("METRIC source_frame capture_ns=\(nanos(ticks)) damaged=\(damaged) damage_entries=\(entries)\n", stderr)
         }
         if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
