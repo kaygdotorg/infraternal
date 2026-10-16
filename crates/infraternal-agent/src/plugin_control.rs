@@ -876,6 +876,10 @@ mod tests {
     }
     #[cfg(feature = "remote")]
     #[tokio::test]
+    #[allow(
+        clippy::used_underscore_binding,
+        reason = "Await the endpoint owner's actual cancellation in this lifecycle test."
+    )]
     async fn retained_runtime_registry_keeps_lifetime_ownership_after_listener_abort() {
         let directory = Directory::new();
         let service = Service::start(&directory.0, crate::plugins::ExecutionMode::Remote, None)
