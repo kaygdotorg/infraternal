@@ -1831,3 +1831,63 @@ async fn earlier_control_socket_receipt_recovers_before_a_new_setup() {
     retry.enroll_and_start(&fixture.join).await.unwrap();
     retry.commit().await.unwrap();
 }
+
+/// After process restart, the outside receipt must survive every cleanup boundary as usable proof.
+async fn restart_after_cleanup_boundary(boundary: &str) {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let (tool, retired, argument) = if boundary == "owner" {
+        ("rm", fixture.base().join(".bootstrap-owner"), "${2-}")
+    } else {
+        ("rmdir", fixture.base(), "${1-}")
+    };
+    // Stop the remote command immediately after the real mutation, before
+    // it can retire its outside receipt. A restarted server has no Cleanup.
+    executable(
+        &fixture.root.join("tools").join(tool),
+        &format!(
+            "#!/bin/sh\n/usr/bin/{tool} \"$@\" || exit $?\n[ \"{argument}\" != '{}' ] || exit 1\n",
+            retired.display()
+        ),
+    );
+    assert!(transaction.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    assert!(!retired.exists());
+    std::fs::remove_file(fixture.root.join("tools").join(tool)).unwrap();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let inspected = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await;
+    assert!(
+        inspected.is_ok(),
+        "restart inspection refused after {boundary} retirement: {:?}",
+        inspected.as_ref().err()
+    );
+    let (_, previous) =
+        infraternal_plugin_ssh::previous_attempt::parse_check(&inspected.unwrap().stdout).unwrap();
+    previous
+        .unwrap()
+        .start_fresh(&session, &fixture.target)
+        .await
+        .unwrap();
+    assert!(!receipt.exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn review_restart_recovers_cleanup_after_owner_retirement() {
+    restart_after_cleanup_boundary("owner").await;
+}
+
+#[tokio::test]
+async fn review_restart_recovers_cleanup_after_base_retirement() {
+    restart_after_cleanup_boundary("base").await;
+}
