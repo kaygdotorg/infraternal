@@ -1580,9 +1580,18 @@ async fn installed_infraternal_agent_always_restarts_without_start_limit() {
 
 /// Bind a canonical fixture path so parallel listeners cannot share a relative basename.
 async fn control_listener(runtime: &std::path::Path) -> tokio::process::Child {
+    control_listener_at(runtime, &runtime.join("plugins.sock")).await
+}
+
+/// Preserve the kernel's bind spelling to check liveness through relative paths too.
+async fn control_listener_at(
+    runtime: &std::path::Path,
+    binding: &std::path::Path,
+) -> tokio::process::Child {
     use tokio::io::AsyncReadExt;
     let mut child = Command::new("python3")
-        .args(["-u", "-c", "import socket,os,sys; s=socket.socket(socket.AF_UNIX); s.bind(os.getcwd()+'/plugins.sock'); os.chmod('plugins.sock',0o600); s.listen(); print('ready',flush=True); sys.stdin.read()"])
+        .args(["-u", "-c", "import socket,os,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1],0o600); s.listen(); print('ready',flush=True); sys.stdin.read()"])
+        .arg(binding)
         .current_dir(runtime)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1890,4 +1899,50 @@ async fn review_restart_recovers_cleanup_after_owner_retirement() {
 #[tokio::test]
 async fn review_restart_recovers_cleanup_after_base_retirement() {
     restart_after_cleanup_boundary("base").await;
+}
+
+/// A live control socket must survive inspection and rollback for every legal bind spelling.
+#[tokio::test]
+async fn review_live_relative_control_socket_preserves_its_receipt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"preserve until observed").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    std::fs::remove_file(keep).unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut listener = control_listener_at(
+        &fixture.base(),
+        std::path::Path::new("sessions/plugins.sock"),
+    )
+    .await;
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let inspected = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await;
+    let cleanup = transaction.rollback().await;
+    let preserved = runtime.join("plugins.sock").exists() && receipt.exists();
+    // Retire only this fixture's child before checking either result, including
+    // the incorrect-success case where cleanup unlinks a still-live listener.
+    listener.kill().await.unwrap();
+    assert!(
+        inspected
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.exit_status == Some(73))
+            && cleanup.is_err()
+            && preserved,
+        "live relative socket was accepted or removed: inspection_status={:?}, cleanup_status={:?}, socket_and_receipt_preserved={preserved}",
+        inspected.as_ref().err().and_then(|error| error.exit_status),
+        cleanup.as_ref().err().and_then(|error| error.exit_status),
+    );
 }
