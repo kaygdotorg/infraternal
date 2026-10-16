@@ -148,6 +148,10 @@ export class MuxConnection {
   private fastRecovery = false;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
   private welcomedAt = 0;
+  /** Retry hints exist only while a reconnect timer is pending. */
+  private retryHintListeners = false;
+  private readonly onNetworkAvailable = (): void => this.retryNow();
+  private readonly onPageVisible = (): void => { if (document.visibilityState === "visible") this.retryNow(); };
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
@@ -364,7 +368,8 @@ export class MuxConnection {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
-    window.clearTimeout(this.retryTimer);
+    this.clearRetryTimer();
+    this.stopRetryHintListeners();
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear();
@@ -381,6 +386,8 @@ export class MuxConnection {
 
   private connect(): void {
     if (this.closed) return;
+    this.clearRetryTimer();
+    this.stopRetryHintListeners();
     const resuming = [...this.streams.values()].some((s) => s.hasSession());
     this.status(resuming ? "Connection lost. Reconnecting…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -438,8 +445,18 @@ export class MuxConnection {
   /** Retire the route synchronously; closing a half-open socket need not produce an event. */
   private disconnect(socket: WebSocket): void {
     if (this.socket !== socket || this.closed) return;
-    const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
-    this.fastRecovery = this.welcomed && this.attachedCount > 0;
+    const wasWelcomed = this.welcomed;
+    const lived = wasWelcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
+    const forced = this.forcedDrop;
+    if (wasWelcomed) {
+      this.fastRecovery = [...this.streams.values()].some((stream) => stream.hasSession());
+      if (lived || forced) this.retryAttempt = 0;
+    } else {
+      // An unwelcomed socket is a path failure, not an accepted-close loop. Do not
+      // carry the close-loop backoff across a network outage or a refused handshake.
+      if (this.greeted) this.fastRecovery = false;
+      this.retryAttempt = 0;
+    }
     // The server retains a live writer indefinitely; its grace starts on disconnect
     // (or startup recovery), not Welcome. Failed retries must never renew that grace.
     if (this.welcomed && this.credentials) this.credentials.deadline = Date.now() + this.credentials.windowMs;
@@ -451,9 +468,7 @@ export class MuxConnection {
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection lost"));
     this.calls.clear();
-    const forced = this.forcedDrop;
     this.forcedDrop = false;
-    if (lived || forced) this.retryAttempt = 0;
     for (const s of [...this.streams.values()]) s.onDisconnected(forced);
     this.status("Connection lost. Reconnecting…");
     // With no stream left there is nothing to restore; the next `openStream` connects again.
@@ -596,6 +611,8 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
+    // Only welcomed sockets that close before the stable window add to this loop.
+    // Unwelcomed route failures restart their recovery schedule in disconnect().
     // Positive jitter spreads retries across pages; first opens retain the ordinary backoff.
     // An ordinary restart must regain typing within RTT + 50 ms [D259]. Once
     // a terminal really worked, check promptly during that bounded recovery
@@ -604,6 +621,37 @@ export class MuxConnection {
     const delay = this.fastRecovery && this.retryAttempt === 0 ? 5 + Math.random() * 5 : reconnectDelay(this.retryAttempt);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
+    this.startRetryHintListeners();
+  }
+
+  /** Online and foreground events supersede a pending delay because the route may work again now. */
+  private retryNow(): void {
+    if (this.closed || this.retryTimer === 0) return;
+    this.clearRetryTimer();
+    this.stopRetryHintListeners();
+    this.retryAttempt = 0;
+    this.fastRecovery = this.streams.size > 0;
+    this.connect();
+  }
+
+  private startRetryHintListeners(): void {
+    if (this.retryHintListeners || typeof window.addEventListener !== "function") return;
+    window.addEventListener("online", this.onNetworkAvailable);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onPageVisible);
+    this.retryHintListeners = true;
+  }
+
+  private stopRetryHintListeners(): void {
+    if (!this.retryHintListeners) return;
+    window.removeEventListener("online", this.onNetworkAvailable);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onPageVisible);
+    this.retryHintListeners = false;
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer === 0) return;
+    window.clearTimeout(this.retryTimer);
+    this.retryTimer = 0;
   }
 
   private resetPings(): void {
