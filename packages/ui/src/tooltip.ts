@@ -14,8 +14,6 @@
  * - Keyboard focus shows the tooltip at once with no motion. Escape hides it.
  * - Touch: a 500 ms long press shows the label. The click that ends that press is
  *   swallowed, because the user asked "what is this?", not "do this".
- * - Point-anchored link previews keep the scheme and host readable, shorten a long
- *   destination with a middle ellipsis, and sit clear of the link's hit rows.
  * - Reduced motion: opacity only.
  * - Components can request a timed confirmation label with flashTip(); its temporary
  *   data-tip is restored when the label expires.
@@ -46,15 +44,14 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
-.tip-pos, .tip-measure { --tip-content-max: min(260px, calc(100vw - 36px)); }
-.tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; max-width: calc(var(--tip-content-max) + 22px); overflow: hidden;
+.tip { position: relative; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; max-width: 280px; overflow: hidden;
   font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
-.tip-label { display: block; white-space: normal; overflow-wrap: anywhere; }
-.tip-label.is-leaving { position: absolute; left: 10px; top: 6px; right: 10px; }
+.tip-label { display: block; }
+.tip-label.is-leaving { position: absolute; left: 10px; top: 6px; }
 .tip-arrow { position: absolute; left: 0; width: 8px; height: 8px; margin-left: -4px; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
-.tip-measure { position: fixed; box-sizing: border-box; visibility: hidden; width: max-content; max-width: var(--tip-content-max); pointer-events: none;
-  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+.tip-measure { position: fixed; visibility: hidden; width: max-content; max-width: 260px; pointer-events: none;
+  font: var(--fw-label, 500) var(--text-secondary, 12px)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(340px, calc(100vw - 24px)); gap: 12px; padding: 14px 14px 12px;
   border-radius: 14px; opacity: 0; transform: scale(0.96); pointer-events: none;
@@ -299,39 +296,20 @@ function triggerOf(target: EventTarget | null): HTMLElement | null {
 
 function sideOf(el: HTMLElement, r: DOMRect, h: number): Side {
   const want = el.dataset.tipSide as Side | undefined;
-  const topSpace = r.top - GAP - MARGIN;
-  const bottomSpace = innerHeight - r.bottom - GAP - MARGIN;
-  const topFits = topSpace >= h;
-  const bottomFits = bottomSpace >= h;
-  if (want === "top" && topFits) return "top";
-  if (want === "bottom" && bottomFits) return "bottom";
-  if (topFits) return "top";
-  if (bottomFits) return "bottom";
-  return topSpace >= bottomSpace ? "top" : "bottom";
+  if (want) return want;
+  return r.top - GAP - h < MARGIN ? "bottom" : "top";
 }
 
 /** Places the surface for `el`; returns the travel direction (−1 left, 1 right). */
 function place(el: HTMLElement, animateMove: boolean): number {
   const text = labelOf(el);
   measure.textContent = text;
-  measure.style.width = "max-content";
-  measure.style.whiteSpace = "nowrap";
-  measure.style.overflowWrap = "normal";
-  const contentWidth = Math.ceil(measure.getBoundingClientRect().width);
-  // The surface adds 20 px of padding and a 1 px border on each side; matching all 22 px keeps
-  // the visible label's content width identical to the measure element's width.
-  const w = contentWidth + 22;
-  // Reflow at the exact content width used by .tip, so its measured height and rendered wraps agree.
-  measure.style.width = `${contentWidth}px`;
-  measure.style.whiteSpace = "normal";
-  measure.style.overflowWrap = "anywhere";
-  const h = Math.ceil(measure.getBoundingClientRect().height) + 14;
+  const w = Math.ceil(measure.getBoundingClientRect().width) + 22, h = 27;
   const r = pointAnchor === el && pointRect ? pointRect : el.getBoundingClientRect();
   const side = sideOf(el, r, h);
   const cx = r.left + r.width / 2;
   const x = Math.min(Math.max(MARGIN, cx - w / 2), innerWidth - MARGIN - w);
-  const rawY = side === "top" ? r.top - GAP - h : r.bottom + GAP;
-  const y = Math.max(MARGIN, Math.min(innerHeight - MARGIN - h, rawY));
+  const y = side === "top" ? r.top - GAP - h : r.bottom + GAP;
   const prev = new DOMMatrix(getComputedStyle(pos).transform).m41;
   pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE}` : "none";
   pos.style.transform = `translate(${x}px, ${y}px)`;
@@ -452,11 +430,11 @@ export function peekTip(el: HTMLElement, duration = 2600): void {
   closeTimer = window.setTimeout(() => { if (shown && current === mine) hide(); }, duration);
 }
 
-/** Shows the shared warm link tooltip at the pointer, using the link's full row range when supplied. */
-export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number, bounds?: DOMRect): void {
+/** Shows the shared warm tooltip at a pointer position while it remains over `anchor`. */
+export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: number): void {
   pointAnchor = anchor;
   pointLabel = text;
-  pointRect = bounds ?? new DOMRect(x, y, 0, 0);
+  pointRect = new DOMRect(x, y, 0, 0);
   if (warm()) {
     byHover = true;
     show(anchor, "instant");
@@ -471,11 +449,11 @@ export function hoverTipAt(anchor: HTMLElement, text: string, x: number, y: numb
   }
 }
 
-/** Shows the shared link tooltip at a pointer position for a short touch or click confirmation. */
-export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600, bounds?: DOMRect): void {
+/** Shows a shared tooltip at a pointer position for a short touch or click confirmation. */
+export function peekTipAt(anchor: HTMLElement, text: string, x: number, y: number, duration = 2600): void {
   pointAnchor = anchor;
   pointLabel = text;
-  pointRect = bounds ?? new DOMRect(x, y, 0, 0);
+  pointRect = new DOMRect(x, y, 0, 0);
   byHover = false;
   show(anchor, shown ? "instant" : "pop");
   const mine = current;
