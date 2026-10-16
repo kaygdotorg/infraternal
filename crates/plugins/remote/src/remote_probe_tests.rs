@@ -20,7 +20,8 @@ use std::{
 struct HeldSocket {
     inner: Arc<dyn AsyncUdpSocket>,
     until: Arc<Mutex<tokio::time::Instant>>,
-    lost_proofs: Option<Arc<Mutex<Vec<tokio::time::Instant>>>>,
+    proof_attempts: Option<Arc<Mutex<Vec<tokio::time::Instant>>>>,
+    pass_proofs: bool,
 }
 #[derive(Debug)]
 struct HeldPoller {
@@ -47,11 +48,13 @@ impl AsyncUdpSocket for HeldSocket {
         })
     }
     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
-        if let Some(proofs) = &self.lost_proofs
+        if let Some(proofs) = &self.proof_attempts
             && crate::remote_path_proof::path_probe_header(transmit.contents).is_some()
         {
             proofs.lock().unwrap().push(tokio::time::Instant::now());
-            return Ok(());
+            if !self.pass_proofs {
+                return Ok(());
+            }
         }
         if tokio::time::Instant::now() < *self.until.lock().unwrap() {
             return Err(io::ErrorKind::WouldBlock.into());
@@ -90,7 +93,8 @@ async fn a_queued_probe_cannot_expire_before_the_socket_emits_it() {
     let logical = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), physical.port());
     let until = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let socket = Arc::new(HeldSocket {
-        lost_proofs: None,
+        proof_attempts: None,
+        pass_proofs: false,
         inner: quinn::TokioRuntime
             .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
             .unwrap(),
@@ -152,7 +156,8 @@ async fn lost_path_proof_spends_its_reserved_retry_margin() {
                 .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
                 .unwrap(),
             until: Arc::new(Mutex::new(tokio::time::Instant::now())),
-            lost_proofs: Some(proofs.clone()),
+            proof_attempts: Some(proofs.clone()),
+            pass_proofs: false,
         }),
         logical,
     );
@@ -202,6 +207,92 @@ async fn lost_path_proof_spends_its_reserved_retry_margin() {
     client.close(0u32.into(), b"");
     server.close(0u32.into(), b"");
     drop(accepted);
+}
+
+/// Real authenticated responses must not turn a healthy path's measured RTT
+/// into its polling period. Virtual time checks scheduling, not network latency.
+#[tokio::test]
+async fn healthy_path_proofs_keep_the_configured_polling_interval() {
+    let ca = root();
+    let primary = quinn::TokioRuntime
+        .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+        .unwrap();
+    let logical = primary.local_addr().unwrap();
+    let bindings = crate::remote_bindings::Bindings::new(primary);
+    let physical = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), logical.port());
+    let _binding = bindings
+        .lease(
+            quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind(physical).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    let server = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        Some(server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate)).unwrap()),
+        bindings.clone(),
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
+    let proofs = Arc::new(Mutex::new(Vec::new()));
+    let path = PathSocket::new(
+        Arc::new(HeldSocket {
+            inner: quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap(),
+            until: Arc::new(Mutex::new(tokio::time::Instant::now())),
+            proof_attempts: Some(proofs.clone()),
+            pass_proofs: true,
+        }),
+        logical,
+    );
+    let mut client = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        None,
+        path.clone(),
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
+    client.set_default_client_config(client_config(&leaf(&ca, false), &[ca.certificate]).unwrap());
+    let (dial, accepted) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+        server.accept().await.unwrap().await
+    });
+    let dial = dial.unwrap();
+    let accepted = accepted.unwrap();
+    let _proof = bindings.connection_proof(&accepted).unwrap();
+    path.use_mesh(physical);
+    tokio::time::pause();
+    let guard = tokio::spawn({
+        let dial = dial.clone();
+        let path = path.clone();
+        async move {
+            path_interrupted(
+                &dial,
+                &path,
+                Duration::from_millis(15),
+                Duration::from_millis(30),
+            )
+            .await
+        }
+    });
+    // Include the first conservative response window, then observe repeated
+    // healthy challenges after this tuple has supplied its own RTT samples.
+    for _ in 0..400 {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+    }
+    assert!(!guard.is_finished(), "healthy authenticated path exited");
+    guard.abort();
+    assert!(guard.await.unwrap_err().is_cancelled());
+    let count = proofs.lock().unwrap().len();
+    assert!(
+        count <= 28,
+        "healthy proofs bypassed the 15 ms polling interval: {count}"
+    );
+    client.close(0u32.into(), b"");
+    server.close(0u32.into(), b"");
 }
 
 #[tokio::test]

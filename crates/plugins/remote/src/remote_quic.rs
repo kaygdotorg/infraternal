@@ -447,10 +447,8 @@ async fn authenticated_path_interrupted(
     // Independent sessions must not repeatedly fill one server receive queue
     // together. Spread their first probes over 15 ms and subsequent probes
     // over at most 5 ms; the authenticated response deadline is unchanged.
-    // This seed controls scheduling only and carries no authentication material.
-    let mut seed = [0; 8];
-    openssl::rand::rand_bytes(&mut seed).map_err(io::Error::other)?;
-    let mut phase = u64::from_ne_bytes(seed);
+    // The existing public UDP port spreads scheduling only; it never authenticates a path.
+    let mut phase = u64::from(quinn::AsyncUdpSocket::local_addr(path)?.port());
     let mut skew = || {
         phase ^= phase << 13;
         phase ^= phase >> 7;
@@ -476,7 +474,10 @@ async fn authenticated_path_interrupted(
                 local_delay = (local_delay * 7 / 8)
                     .max(expected.elapsed().saturating_mul(4))
                     .min(std::time::Duration::from_millis(200));
-                let measured = path.proof_allowance(connection.rtt(), margin) + local_delay;
+                // A slower requested cadence must leave room for a response
+                // and a retry instead of silently becoming a faster poller.
+                let measured = path.proof_allowance(connection.rtt(), margin)
+                    .max(interval.saturating_mul(2)) + local_delay;
                 // This response supplies its own authenticated RTT sample.
                 // Ordinary QUIC keepalive remains owned by the connection;
                 // sending a second probe here would duplicate every idle poll.
@@ -530,7 +531,7 @@ async fn authenticated_path_interrupted(
                     // An adaptive ordinary interval must not jump over the
                     // response margin. Wake at its start, then retry within it;
                     // neither phase spreading nor retries may skip the deadline.
-                    let boundary = if retry { allowance } else { allowance.saturating_sub(margin) };
+                    let boundary = if retry { allowance } else { allowance.saturating_sub(margin).max(interval) };
                     next = next.min(boundary.saturating_sub(sent.elapsed()));
                 }
                 ticks.reset_after(next);
