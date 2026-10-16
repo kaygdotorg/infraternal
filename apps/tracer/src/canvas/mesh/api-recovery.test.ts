@@ -147,6 +147,32 @@ for (const [revision, accepted] of [[1, false], [3, true]] as const)
     } finally { source.dispose(); restore(); }
   });
 
+test("a pushed liveness expiry supersedes an equal-revision retry snapshot", async () => {
+  const restore = timers();
+  let deliver: ((event: Record<string, unknown>) => void) | undefined;
+  let resolveRetry: ((value: Record<string, unknown>) => void) | undefined;
+  let retrying = false;
+  const source = createMeshApi({prime, transport: {
+    call: () => retrying
+      ? new Promise(resolve => { resolveRetry = resolve; })
+      : Promise.reject(new Error("connection lost")),
+    onReady: () => () => {},
+    subscribe: (_topic, listener) => { deliver = listener; return () => {}; },
+  }});
+  try {
+    deliver!({type: "changed", revision: 1});
+    await settle();
+    retrying = true;
+    source.retry();
+    await settle();
+    const node = {node: {id: 1, host: "peer", tags: []}};
+    deliver!({type: "resync", snapshot: {...raw, revision: 2, nodes: [{...node, live: false}]}});
+    resolveRetry!({...raw, revision: 2, nodes: [{...node, live: true}]});
+    await settle();
+    expect(source.data().nodes.get("peer")?.state).toBe("offline");
+  } finally { source.dispose(); restore(); }
+});
+
 test("a forbidden withdrawal cancels retry work from the retained watch", async () => {
   const pending = new Set<number>();
   const restore = timers(pending);

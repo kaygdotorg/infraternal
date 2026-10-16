@@ -109,7 +109,9 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       if (disposed || mine !== generation) return;
       const snap = parseSnapshot(raw);
       if (!snap) { if (published === publication) toError(); return; }
-      if (snap.rev < rev) return; // an answer that raced a newer edit
+      // Expiry can change liveness without advancing the stored revision.
+      // On a revision tie, retain the state published after this request began.
+      if (snap.rev < rev || (snap.rev === rev && published !== publication)) return;
       apply(snap);
       watch();
     }, (error: unknown) => {
