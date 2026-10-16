@@ -185,12 +185,16 @@ final class Encoder {
             try set(kVTCompressionPropertyKey_AverageBitRate,NSNumber(value:bitrate)); lastBitrate = bitrate
         }
         let result = EncodeResult(parameters:parameters)
+        // The C callback owns only an unretained pointer. ARC may otherwise end
+        // this local's lifetime after the throwing wait, before catch invalidates
+        // a timed-out session. Keep it alive through every completion/error path.
+        defer { withExtendedLifetime(result) {} }
         let pointer = Unmanaged.passUnretained(result).toOpaque()
         // One reusable input buffer is in flight; it is not overwritten until completion.
         let options = force ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String:true] as CFDictionary : nil
         let time = CMTime(value:Int64(nanos(mach_absolute_time())),timescale:1_000_000_000)
         let status = VTCompressionSessionEncodeFrame(session,imageBuffer:pixel,presentationTimeStamp:time,duration:CMTime(value:1,timescale:Int32(frameRate)),frameProperties:options,sourceFrameRefcon:pointer,infoFlagsOut:nil)
-        guard status == noErr else { fputs("ENCODER submit_status=\(status)\n",stderr); throw HelperFailure.unavailable }
+        guard status == noErr else { fputs("ENCODER submit_status=\(status)\n",stderr); stop(); throw HelperFailure.unavailable }
         let payload: Data
         do {
             guard let completed = try result.completedPayload(timeout:.now()+2) else {
