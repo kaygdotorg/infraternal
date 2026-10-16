@@ -484,8 +484,13 @@ connection (#230). Its parent must be an owned real private directory and the
 socket an owned, non-linked inode. Socket mode comes from the service manager's
 umask; the private parent protects access for every inherited mode. A kernel
 socket row under that runtime, including a bound or accepted socket, refuses
-removal. Recheck the inode before
-unlinking; unknown files, links and live sockets keep the receipt intact.
+removal. Control-socket liveness also uses the host's `ss` extended Unix socket
+diagnostics and process mapping to bridge the filesystem inode to the kernel
+socket inode used by `/proc/net/unix` and open descriptors. A relative bind,
+later working-directory change or renamed live socket is retained by inode;
+missing/incomplete diagnostics refuse cleanup. This utility is consulted only
+when a control socket exists. Recheck the inode before unlinking; unknown files,
+links and live sockets keep the receipt intact.
 
 A retry with retained cleanup coordinates first finishes that exact host and
 transaction's rollback, before issuing another invitation. Progress says “An
@@ -502,7 +507,12 @@ an exact saved SSH address suffice. Active, unknown or mismatched records cannot
 authorize automatic recovery. The live owner session and root consent are checked
 again. This proof permits retirement of fresh leftovers, never adoption of an
 enrolled identity; the complete shell inventory, inode and liveness checks remain.
-The ledger is queried only when inspection finds earlier setup state.
+The ledger is queried only when inspection finds earlier setup state. The
+outside receipt remains inspectable after interrupted final retirement removes
+the owner marker or the installation root. An existing root must retain the
+receipt's exact directory inode; without an owner marker it must be empty.
+An absent root still passes the process-liveness checks before receipt removal.
+Neither boundary recreates an ownership marker or relaxes the ledger proof.
 
 Exact screen copy for the later UI pass: title “This host has leftovers from an
 earlier setup”; body “infraternal didn't finish setting up here before. Start
