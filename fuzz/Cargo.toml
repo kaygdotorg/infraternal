@@ -213,3 +213,10 @@ path = "fuzz_targets/host_inventory_json.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "runtime_diag"
+path = "fuzz_targets/runtime_diag.rs"
+test = false
+doc = false
+bench = false
