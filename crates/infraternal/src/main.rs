@@ -932,7 +932,7 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
             json_output,
         );
     };
-    match runtime.block_on(read_setup_token(&data_dir)) {
+    match block_on(&runtime, read_setup_token(&data_dir)) {
         Ok(token) => {
             let result = CommandResult::new(
                 "server setup-token",
@@ -963,6 +963,35 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
     }
 }
 
+/// Share cold command startup through the existing reactor regardless of result type [243].
+/// The result slot outlives its adapter future, which stores the result before
+/// completing. Panics propagate to the caller's existing recovery boundary.
+#[cfg(feature = "plugin-server")]
+fn block_on<T>(
+    runtime: &tokio::runtime::Runtime,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    #[cfg(feature = "plugin-agent")]
+    {
+        let mut outcome = None;
+        // One allocation per command keeps its typed result out of another
+        // reactor instantiation; terminal frames never cross this adapter.
+        let _completion = infraternal_agent::block_on_io(
+            runtime,
+            Box::pin(async {
+                outcome = Some(operation.await);
+                Ok(())
+            }),
+        );
+        match outcome {
+            Some(value) => value,
+            None => unreachable!("a completed startup operation stores its result"),
+        }
+    }
+    #[cfg(not(feature = "plugin-agent"))]
+    runtime.block_on(operation)
+}
+
 #[cfg(feature = "plugin-server")]
 fn run_server_foreground(
     mut args: ServerArgs,
@@ -988,7 +1017,7 @@ fn run_server_foreground(
         "public_origin": config.public_origin,
     });
     infraternal_server::configure_logging(json_output);
-    match runtime.block_on(remote_server::serve(config, options)) {
+    match block_on(&runtime, remote_server::serve(config, options)) {
         #[cfg(feature = "remote")]
         Ok(remote_server::Outcome::Restart(replacement)) => {
             // Same-PID exec consumes the runtime after cancelling server tasks.
