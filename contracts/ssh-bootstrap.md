@@ -480,27 +480,45 @@ public findings or logs. No existing enrolled identity is adopted by recovery.
 
 Fresh rollback also retires the infraternal agent's fixed local control socket,
 `sessions/plugins.sock`, which may survive a service stop before the first server
-connection (#230). Its parent must be an owned real private directory and the
-socket an owned, non-linked inode. Socket mode comes from the service manager's
-umask; the private parent protects access for every inherited mode. Control-socket
-liveness is decided by a direct nonblocking connection with a 250 ms bound,
-using the host's Python 3 standard library only when that socket exists. A
-successful connection retains the live socket and receipt (73). Only
-`ECONNREFUSED` proves staleness; permission errors, timeout, wrong socket type
-and all other uncertain results retain state (77). Missing Python 3 retains
-state with an actionable requirement (76). Cached kernel inode diagnostics and
-global basenames never authorize control-socket removal or block cleanup for
-an unrelated Unix user's listener.
+connection (#230). The owned private runtime directory contains a mode-0600,
+single-link `.lifetime-lock`. The infraternal agent takes its exclusive advisory
+lock before binding any local socket. The remote supervisor retains it across
+worker replacement and temporary credential errors; listener tasks and synchronous
+workers keep the same ownership until their work actually stops.
+The installer holds the same lock through its bounded staging lease and artifact
+replacement, then hands it to the runtime at activation. A stopped process releases
+its lock automatically; a surviving socket path is not itself lifetime authority.
 
-The probe opens the receipt-bound installation root and its private runtime
-directory without following links. It checks socket ownership, type and link
-count with `lstat` immediately before connecting, then repeats that check and
-requires the same device/inode immediately before unlinking relative to the
-opened directory. Relative binds, changed working directories, renamed live
-sockets and live replacements reusing a retired inode remain protected. The
-later session-socket removal loop excludes the control socket, so it cannot
-undo this check. Unknown files and links keep the receipt intact. Executable
-and descriptor inspection considers only processes owned by the installing user.
+Cleanup opens that lock on descriptor 6 and asks the verified staged infraternal
+binary to validate its descriptor/path identity and take the lock nonblocking on
+the inherited open description. A held lock preserves the transaction and files
+(73). A successful acquisition remains held by the cleanup shell after the helper
+exits, through all retirement and receipt removal. An exclusive setup guard on the
+installation's parent directory also fences startup during final lock-file unlink;
+runtime startup holds shared directory admission while taking its lifetime lock.
+Managed startup checks its loaded host identity against the owner marker and
+refuses outstanding rollback receipts under that admission guard. Publishing a
+new lock beside a live legacy endpoint is refused, so an unheld new file cannot
+misclassify that older runtime during later cleanup.
+Unknown files, ownership mismatches and links retain their existing refusal rules.
+
+Legacy runtimes have no lifetime lock. Only for these runtimes, the same binary
+uses a nonblocking connection to the owned control socket: connection retains it
+(73); errors other than refusal retain it as uncertain (77). Refusal also requires
+conservative same-user bound-endpoint inspection, so a bound endpoint before
+`listen` or with a retained earlier name is not removed. Another Unix user's
+listener does not block retirement of this installation's owned files. The binary
+opens the receipt-bound root and private runtime directory without following links,
+checks socket ownership/type/link count before probing, and repeats these checks
+and the same device/inode immediately before unlinking relative to the open directory.
+The session removal loop excludes the control socket.
+
+Recovery needs no host interpreter. If the existing executable cache predates the
+internal helper (76), the server uploads its matching verified binary into that
+cache, then repeats inspection. Only recovery takes this path; clean installations
+keep their existing command sequence. This publishes executable content only and
+never changes host or transaction ownership. Failed or interrupted transfers retain
+the original receipt and can be retried.
 
 A retry with retained cleanup coordinates first finishes that exact host and
 transaction's rollback, before issuing another invitation. Progress says “An
