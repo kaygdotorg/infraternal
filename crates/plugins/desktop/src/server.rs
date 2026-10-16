@@ -414,7 +414,7 @@ impl Plugin for DesktopServer {
             // One live login lease owns the socket's tasks. Viewer count must
             // not multiply the database watchdog; packet and input projections
             // still check current session, node, login and controller authority.
-            let _ = host.authorized(Box::pin(async {
+            let outcome = host.authorized(Box::pin(async {
                 loop {
                     tokio::select! {
                         result = calls.join_next(), if !calls.is_empty() => {
@@ -476,6 +476,14 @@ impl Plugin for DesktopServer {
                 }
                 Ok(())
             })).await;
+            // Fixed states only: diagnostics never contain login, target or input data.
+            if std::env::var_os("INFRATERNAL_NATIVE_DIAGNOSTICS").is_some() {
+                eprintln!(
+                    "desktop_socket_exit authorized={} socket_live={}",
+                    outcome.is_ok(),
+                    host.authority().permits()
+                );
+            }
             // Dropping channels releases every viewer and its held input before
             // this socket worker joins; feature retirement aborts the same set.
             viewers.clear();

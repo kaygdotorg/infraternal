@@ -605,6 +605,9 @@ impl SocketPlugins {
                             || socket.requests.is_closed())
                 })
             {
+                if std::env::var_os("INFRATERNAL_NATIVE_DIAGNOSTICS").is_some() {
+                    eprintln!("native_withdrawal stream={stream} reason=worker-or-feature-ended");
+                }
                 let mut wire = Vec::new();
                 if encode_muxed_frame_into(
                     stream,
@@ -725,6 +728,13 @@ impl SocketPlugins {
         encode_muxed_frame_into(0, &decoded.frame, encode).ok()?;
         Some(Bytes::copy_from_slice(encode))
     }
+    /// The transport watches the same lifetime projection as plugin workers.
+    /// An uncertain authorization scope must end the connection, allowing a
+    /// fresh handshake instead of leaving its native viewers permanently closed.
+    #[cfg(any(test, feature = "native-streams"))]
+    pub(crate) fn authority(&self) -> Arc<dyn infraternal_plugin_api::streams::Authority> {
+        self.host.authority()
+    }
     /// Transfer the admitted packet's authority to the actual transport write.
     /// A check at queue delivery alone cannot fence cancellation during a stalled sink.
     #[cfg(any(test, feature = "native-streams"))]
@@ -782,6 +792,21 @@ impl SocketPlugins {
     }
     #[cfg(any(test, feature = "native-streams"))]
     fn refuse_native(&mut self, stream: u32, encode: &mut Vec<u8>) -> Dispatch {
+        if std::env::var_os("INFRATERNAL_NATIVE_DIAGNOSTICS").is_some() {
+            let native = self.native.get(&stream);
+            let closed = native.is_some_and(|native| native.closed);
+            let worker = native.and_then(|native| {
+                self.entries
+                    .iter()
+                    .find(|entry| entry.entry.plugin.descriptor().id == native.plugin)
+            });
+            eprintln!(
+                "native_refusal stream={stream} reserved={} closed={closed} worker_closed={} ingress_capacity={}",
+                native.is_some(),
+                worker.is_some_and(|worker| worker.requests.is_closed()),
+                worker.map_or(0, |worker| worker.requests.capacity())
+            );
+        }
         let reply = native_refusal(stream, encode);
         if let Some(native) = self.native.get_mut(&stream) {
             native.closed = true;

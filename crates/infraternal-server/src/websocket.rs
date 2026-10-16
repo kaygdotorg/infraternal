@@ -463,180 +463,194 @@ async fn run_socket(
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
     let mut loop_result = Ok(());
-    loop {
-        transport.active(!attachments.is_empty());
-        tokio::select! {
-            Some(reply) = plugins.recv() => {
-                let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
-                #[cfg(any(test, feature = "native-streams"))]
-                {
-                let authority = plugins.take_delivery_authority();
-                let sending = async {
-                    let write = send_message(&mut sink, Message::Binary(wire));
-                    let send = while_authorized(&state, &user_id, &session_token, true, write);
-                    match authority { Some(authority) => authority.authorized(Box::pin(send)).await, None => send.await }
-                };
-                if sending.await.is_err() { break; }
+    #[cfg(any(test, feature = "native-streams"))]
+    let socket_authority = plugins.authority();
+    let application = async {
+        loop {
+            transport.active(!attachments.is_empty());
+            tokio::select! {
+                Some(reply) = plugins.recv() => {
+                    let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
+                    #[cfg(any(test, feature = "native-streams"))]
+                    {
+                    let authority = plugins.take_delivery_authority();
+                    let sending = async {
+                        let write = send_message(&mut sink, Message::Binary(wire));
+                        let send = while_authorized(&state, &user_id, &session_token, true, write);
+                        match authority { Some(authority) => authority.authorized(Box::pin(send)).await, None => send.await }
+                    };
+                    if sending.await.is_err() { break; }
+                    }
+                    #[cfg(not(any(test, feature = "native-streams")))]
+                    if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Binary(wire))).await.is_err() { break; }
                 }
-                #[cfg(not(any(test, feature = "native-streams")))]
-                if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Binary(wire))).await.is_err() { break; }
-            }
-            changed = recovery_events.changed(), if recovery_subscribed => {
-                if changed.is_err() { break; }
-                if while_authorized(&state, &user_id, &session_token, false,
-                    send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
-                ).await.is_err() { break; }
-            }
-            changed = session_changes.changed(), if terminal_sessions_subscribed.is_some() => {
-                if changed.is_err() { break; }
-                if let Some(sub_id) = terminal_sessions_subscribed
-                    && while_authorized(&state, &user_id, &session_token, false,
-                        send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
+                changed = recovery_events.changed(), if recovery_subscribed => {
+                    if changed.is_err() { break; }
+                    if while_authorized(&state, &user_id, &session_token, false,
+                        send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
                     ).await.is_err() { break; }
-            }
-            changed = revocations.changed() => {
-                if changed.is_err() { break; }
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
-                expiry = deadline;
-            }
-            () = tokio::time::sleep_until(expiry) => {
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
-                expiry = deadline;
-            }
-            input = transport.recv() => {
-                let input = match input {
-                    Ok(Some(input)) => input,
-                    Ok(None) => {
-                        #[cfg(all(test, feature = "desktop"))]
-                        eprintln!("desktop_diagnostic stage=browser_receive result=eof");
-                        break;
-                    }
-                    Err(()) => {
-                        #[cfg(all(test, feature = "desktop"))]
-                        eprintln!("desktop_diagnostic stage=browser_receive result=invalid");
-                        loop_result = Err(());
-                        break;
-                    }
-                };
-                match input {
-                    Inbound::TransportPing(payload) => {
-                        if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
-                    }
-                    Inbound::Frame(wire) => {
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
-                        && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
-                            == Some(json!({"topic":"auth.recovery"})) {
-                        // Subscribe before reading the snapshot. A concurrent commit
-                        // remains visible in the watch generation and cannot be lost.
-                        recovery_subscribed = true;
-                        recovery_snapshot = RecoverySnapshot::Unread;
-                        if while_authorized(&state, &user_id, &session_token, true,
-                            send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
-                        ).await.is_err() { break; }
-                        continue;
-                    }
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Subscribe { sub_id, filter_json } = decoded.frame
-                        && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
-                            == Some(json!({"topic":"terminal.sessions"})) {
-                        // Install the watch before reading the snapshot so an intervening update is sent too.
-                        terminal_sessions_subscribed = Some(sub_id);
-                        if while_authorized(&state, &user_id, &session_token, true,
+                }
+                changed = session_changes.changed(), if terminal_sessions_subscribed.is_some() => {
+                    if changed.is_err() { break; }
+                    if let Some(sub_id) = terminal_sessions_subscribed
+                        && while_authorized(&state, &user_id, &session_token, false,
                             send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
                         ).await.is_err() { break; }
-                        continue;
-                    }
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Close { code, .. } = decoded.frame {
-                        let _ = while_authorized(&state, &user_id, &session_token, true, async {
-                            send_frame(&mut sink, CONTROL_STREAM,
-                                &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
-                            send_message(&mut sink, Message::Close(None)).await
-                        }).await;
-                        break;
-                    }
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && attachments.contains_key(&decoded.stream_id)
-                        && !matches!(decoded.frame, Frame::Input { .. } | Frame::Resize { .. } | Frame::Credit { .. } | Frame::Close { .. }) {
-                        loop_result = Err(());
-                        break;
-                    }
-                    if let Ok(decoded) = decode_muxed_frame(&wire)
-                        && !attachments.contains_key(&decoded.stream_id)
-                        && !plugins.owns_stream(decoded.stream_id)
-                        && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
-                        && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
-                        if while_authorized(&state, &user_id, &session_token, true, send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)).await.is_err() { break; }
-                        continue;
-                    }
-                    match plugins.dispatch(&wire, &mut encode) {
-                        Dispatch::Queued => continue,
-                        Dispatch::Refused(wire) => {
-                            if while_authorized(&state, &user_id, &session_token, true,
-                                send_message(&mut sink,Message::Binary(wire))).await.is_err() {break;}
-                            continue;
+                }
+                changed = revocations.changed() => {
+                    if changed.is_err() { break; }
+                    let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                    expiry = deadline;
+                }
+                () = tokio::time::sleep_until(expiry) => {
+                    let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                    expiry = deadline;
+                }
+                input = transport.recv() => {
+                    let input = match input {
+                        Ok(Some(input)) => input,
+                        Ok(None) => {
+                            #[cfg(all(test, feature = "desktop"))]
+                            eprintln!("desktop_diagnostic stage=browser_receive result=eof");
+                            break;
                         }
-                        Dispatch::Unhandled => {}
-                    }
-                    if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
-                            wire,
-                            &state,
-                            &user_id,
-                            &session_token,
-                            owner,
-                            &mut pending_plugin_calls,
-                            &connection_id,
-                            &mut attachments,
-                            &mut ended,
-                            &output_tx,
-                            &mut sink,
-                            &mut encode,
-                        )).await.is_err() {
+                        Err(()) => {
+                            #[cfg(all(test, feature = "desktop"))]
+                            eprintln!("desktop_diagnostic stage=browser_receive result=invalid");
                             loop_result = Err(());
                             break;
                         }
+                    };
+                    match input {
+                        Inbound::TransportPing(payload) => {
+                            if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
+                        }
+                        Inbound::Frame(wire) => {
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && decoded.stream_id == CONTROL_STREAM
+                            && let Frame::Subscribe { sub_id: 45, filter_json } = decoded.frame
+                            && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
+                                == Some(json!({"topic":"auth.recovery"})) {
+                            // Subscribe before reading the snapshot. A concurrent commit
+                            // remains visible in the watch generation and cannot be lost.
+                            recovery_subscribed = true;
+                            recovery_snapshot = RecoverySnapshot::Unread;
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_recovery_snapshot(&state, &user_id, &mut sink, &mut encode, &mut recovery_snapshot)
+                            ).await.is_err() { break; }
+                            continue;
+                        }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && decoded.stream_id == CONTROL_STREAM
+                            && let Frame::Subscribe { sub_id, filter_json } = decoded.frame
+                            && serde_json::from_slice::<serde_json::Value>(filter_json).ok()
+                                == Some(json!({"topic":"terminal.sessions"})) {
+                            // Install the watch before reading the snapshot so an intervening update is sent too.
+                            terminal_sessions_subscribed = Some(sub_id);
+                            if while_authorized(&state, &user_id, &session_token, true,
+                                send_terminal_sessions_snapshot(&state, &user_id, sub_id, &mut sink, &mut encode)
+                            ).await.is_err() { break; }
+                            continue;
+                        }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && decoded.stream_id == CONTROL_STREAM
+                            && let Frame::Close { code, .. } = decoded.frame {
+                            let _ = while_authorized(&state, &user_id, &session_token, true, async {
+                                send_frame(&mut sink, CONTROL_STREAM,
+                                    &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
+                                send_message(&mut sink, Message::Close(None)).await
+                            }).await;
+                            break;
+                        }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && attachments.contains_key(&decoded.stream_id)
+                            && !matches!(decoded.frame, Frame::Input { .. } | Frame::Resize { .. } | Frame::Credit { .. } | Frame::Close { .. }) {
+                            loop_result = Err(());
+                            break;
+                        }
+                        if let Ok(decoded) = decode_muxed_frame(&wire)
+                            && !attachments.contains_key(&decoded.stream_id)
+                            && !plugins.owns_stream(decoded.stream_id)
+                            && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
+                            && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
+                            if while_authorized(&state, &user_id, &session_token, true, send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)).await.is_err() { break; }
+                            continue;
+                        }
+                        match plugins.dispatch(&wire, &mut encode) {
+                            Dispatch::Queued => continue,
+                            Dispatch::Refused(wire) => {
+                                if while_authorized(&state, &user_id, &session_token, true,
+                                    send_message(&mut sink,Message::Binary(wire))).await.is_err() {break;}
+                                continue;
+                            }
+                            Dispatch::Unhandled => {}
+                        }
+                        if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
+                                wire,
+                                &state,
+                                &user_id,
+                                &session_token,
+                                owner,
+                                &mut pending_plugin_calls,
+                                &connection_id,
+                                &mut attachments,
+                                &mut ended,
+                                &output_tx,
+                                &mut sink,
+                                &mut encode,
+                            )).await.is_err() {
+                                loop_result = Err(());
+                                break;
+                            }
+                        }
                     }
                 }
-            }
-            output = output_rx.recv(), if output_open => {
-                let Some((stream_id, output)) = output else {
-                    output_open = false;
-                    continue;
-                };
-                // Proof replies stay in the host actor. A failed route returns here
-                // for two authority gates: the browser notice, then backend rebind.
-                let reconnect = matches!(output, TerminalOutput::RouteExpired)
-                    .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
-                if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
-                    &state, &user_id, &session_token, &connection_id, stream_id, output,
-                    &mut attachments, &mut ended, &mut sink, &mut encode,
-                )).await.is_err() { break; }
-                if let Some(handle) = reconnect
-                    && while_authorized(&state, &user_id, &session_token, true,
-                        async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() { break; }
+                output = output_rx.recv(), if output_open => {
+                    let Some((stream_id, output)) = output else {
+                        output_open = false;
+                        continue;
+                    };
+                    // Proof replies stay in the host actor. A failed route returns here
+                    // for two authority gates: the browser notice, then backend rebind.
+                    let reconnect = matches!(output, TerminalOutput::RouteExpired)
+                        .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
+                    if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
+                        &state, &user_id, &session_token, &connection_id, stream_id, output,
+                        &mut attachments, &mut ended, &mut sink, &mut encode,
+                    )).await.is_err() { break; }
+                    if let Some(handle) = reconnect
+                        && while_authorized(&state, &user_id, &session_token, true,
+                            async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() { break; }
 
-            }
-            plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
-                let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
-                let (ok, json) = match result {
-                    Ok(json) => (true, json),
-                    Err(AgentError::OpenRefused(reason)) => {
-                        let Ok(json) = reason.json() else { break; };
-                        (false, json)
-                    }
-                    Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
-                };
-                if while_authorized(&state, &user_id, &session_token, true,
-                    send_frame(&mut sink, CONTROL_STREAM,
-                        &Frame::Result { call_id, ok, json: &json }, &mut encode)
-                ).await.is_err() { break; }
+                }
+                plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
+                    let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
+                    let (ok, json) = match result {
+                        Ok(json) => (true, json),
+                        Err(AgentError::OpenRefused(reason)) => {
+                            let Ok(json) = reason.json() else { break; };
+                            (false, json)
+                        }
+                        Err(_) => (false, br#"{"error":"action unavailable"}"#.to_vec()),
+                    };
+                    if while_authorized(&state, &user_id, &session_token, true,
+                        send_frame(&mut sink, CONTROL_STREAM,
+                            &Frame::Result { call_id, ok, json: &json }, &mut encode)
+                    ).await.is_err() { break; }
+                }
             }
         }
+    };
+    #[cfg(any(test, feature = "native-streams"))]
+    {
+        tokio::pin!(application);
+        tokio::select! { biased;
+            () = socket_authority.cancelled() => {},
+            () = &mut application => {},
+        }
     }
+    #[cfg(not(any(test, feature = "native-streams")))]
+    application.await;
     pending_plugin_calls.shutdown().await;
     drop(plugins);
     drop(attachments);
@@ -681,7 +695,16 @@ pub(super) async fn while_authorized<T: Send>(
     // Sharing the watchdog across operation future types bounds transport code
     // size as compiled plugins grow. One short-lived allocation replaces each
     // separate watchdog state machine; operation cancellation stays unchanged.
-    while_authorized_operation(state, user, token, renew, operation.boxed()).await
+    while_authorized_operation(
+        state,
+        user,
+        token,
+        renew,
+        operation.boxed(),
+        #[cfg(any(test, feature = "native-streams"))]
+        None,
+    )
+    .await
 }
 
 async fn while_authorized_operation<T: Send>(
@@ -690,6 +713,7 @@ async fn while_authorized_operation<T: Send>(
     token: &str,
     renew: bool,
     operation: infraternal_plugin_api::Operation<'_, Result<T, ()>>,
+    #[cfg(any(test, feature = "native-streams"))] completed: Option<&mut bool>,
 ) -> Result<T, ()> {
     let mut revocations = state.auth.revocation_events();
     let mut expiry = authority_deadline(state, user, token, renew).await?;
@@ -716,6 +740,10 @@ async fn while_authorized_operation<T: Send>(
                 if revocations.has_changed().map_err(|_| ())? || tokio::time::Instant::now() >= expiry {
                     socket_deadline(state, user, token).await?;
                 }
+                // Optional completion receipt distinguishes backend refusal from
+                // an uncertain auth scope without wrapping/allocating per input.
+                #[cfg(any(test, feature = "native-streams"))]
+                if let Some(completed) = completed { *completed = true; }
                 return result;
             }
         }
@@ -1700,9 +1728,16 @@ async fn authority_deadline(
             state.auth.live_expiry(token, user_id, now).await
         }
     })
-    .await
-    .map_err(|_| ())?
-    .map_err(|_| ())?;
+    .await;
+    #[cfg(any(test, feature = "native-streams"))]
+    if !matches!(&expiry, Ok(Ok(_))) && std::env::var_os("INFRATERNAL_NATIVE_DIAGNOSTICS").is_some()
+    {
+        eprintln!(
+            "native_authority_read failed=true timeout={} renew={renew}",
+            expiry.is_err()
+        );
+    }
+    let expiry = expiry.map_err(|_| ())?.map_err(|_| ())?;
     let remaining = u64::try_from(expiry - now).map_err(|_| ())?;
     Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
 }
@@ -2221,10 +2256,19 @@ impl SocketHost for PluginHost {
                 if !self.authority.permits() {
                     return Err(());
                 }
-                tokio::select! { biased;
+                // Distinguish a failed backend operation from an authorization
+                // scope that could not complete its required read. The latter
+                // invalidates this whole connection before a worker can disappear;
+                // ordinary per-operation failures stay isolated to their caller.
+                let mut completed = false;
+                let result = tokio::select! { biased;
                     () = self.authority.cancelled() => Err(()),
-                    result = while_authorized_operation(&self.state, &self.user, &self.token, true, operation) => result,
+                    result = while_authorized_operation(&self.state, &self.user, &self.token, true, operation, Some(&mut completed)) => result,
+                };
+                if result.is_err() && !completed {
+                    self.authority.withdraw();
                 }
+                result
             })
         }
         #[cfg(not(any(test, feature = "native-streams")))]
