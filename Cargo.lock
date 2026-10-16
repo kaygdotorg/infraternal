@@ -1495,6 +1495,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "infraternal-plugin-api",
+ "infraternal-plugin-remote",
  "infraternal-shim",
  "nix",
  "serde",
