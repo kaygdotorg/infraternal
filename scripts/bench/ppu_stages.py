@@ -63,10 +63,6 @@ def register_readers(host):
 
 async def frame(reader):
     result = await ORIGINAL_FRAME(reader)
-    # This thread's accounted CPU excludes the counter thread and waits.
-    # Take it before the wall receipt: the CPU interval stays inside the RTT.
-    cpu_stamp = time.thread_time_ns()
-    stamp = time.monotonic_ns()
     state = READERS.get(reader)
     if state is not None and result[0] == 0x11:
         offset = int.from_bytes(result[1:9], 'little')
@@ -85,6 +81,11 @@ async def frame(reader):
                 if session != state['session']:
                     raise ValueError('probe waiter belongs to another session')
                 end = offset - len(tail) + position + len(marker)
+                # Account only matched probes, never every bulk frame. This
+                # thread's CPU excludes the counter thread and waits; sampling
+                # it before the wall receipt keeps its interval inside the RTT.
+                cpu_stamp = time.thread_time_ns()
+                stamp = time.monotonic_ns()
                 RECEIVED.setdefault((session, number), dict(receive_ns=stamp, output_end=end,
                     receive_thread_cpu_ns=cpu_stamp,
                     receive_active_s=suite.clock_now()))

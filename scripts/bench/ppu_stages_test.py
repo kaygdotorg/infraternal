@@ -77,9 +77,10 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
         stages.READERS[reader] = dict(session=900, tail=b'', head=123,
             peer=SimpleNamespace(waiters={b'probe-900-12': asyncio.get_running_loop().create_future()}))
         with patch.object(stages, 'ORIGINAL_FRAME', receive), \
-             patch.object(stages.time, 'thread_time_ns', return_value=900):
+             patch.object(stages.time, 'thread_time_ns', return_value=900) as cpu_clock:
             await stages.frame(reader)
             await stages.frame(reader)
+        cpu_clock.assert_called_once()
         row = stages.RECEIVED[(900, 12)]
         self.assertEqual(row['output_end'], 123 + len(first) + len(b'12'))
         self.assertGreater(row['receive_ns'], 0)
