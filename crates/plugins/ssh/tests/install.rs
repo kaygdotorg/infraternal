@@ -2003,3 +2003,120 @@ async fn restart_recovers_partial_stage_retirement() {
         retry.rollback().await.unwrap();
     }
 }
+
+/// Reusing a retired filesystem inode cannot authorize unlinking a replacement live socket.
+#[tokio::test]
+async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
+    use tokio::io::AsyncReadExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let control = runtime.join("plugins.sock");
+    // One pinned fixture process performs both allocations. This avoids
+    // allocator locality changes between unrelated subprocesses; no inode
+    // value or kernel diagnostic is mocked. EOF retires only this listener.
+    let mut listener = Command::new("python3")
+        .args([
+            "-u",
+            "-c",
+            r#"
+import os,socket,sys,time
+os.sched_setaffinity(0,{min(os.sched_getaffinity(0))})
+path='sessions/plugins.sock'
+s=socket.socket(socket.AF_UNIX); s.bind(path); s.close()
+identity=os.stat(path).st_ino
+print('ready',flush=True)
+sys.stdin.readline()
+os.unlink(path)
+time.sleep(0.1)
+for attempt in range(256):
+    s=socket.socket(socket.AF_UNIX); s.bind(path)
+    if os.stat(path).st_ino == identity: break
+    s.close(); os.unlink(path); time.sleep(0.01)
+else:
+    print('absent',flush=True); sys.exit(1)
+s.listen(); os.chdir('/')
+print('reused',flush=True)
+sys.stdin.read()
+"#,
+        ])
+        .current_dir(fixture.base())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 6];
+    listener
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .await
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    let snapshot = fixture.root.join("snapshot");
+    let observed = fixture.root.join("observed");
+    let replaced = fixture.root.join("replaced");
+    // Keep the actual diagnostic bytes and synchronize only the interleaving.
+    executable(
+        &fixture.root.join("tools/ss"),
+        &format!(
+            "#!/bin/sh\n/usr/bin/ss \"$@\" > '{}' || exit $?\n: > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\ncat '{}'\n",
+            snapshot.display(),
+            observed.display(),
+            replaced.display(),
+            snapshot.display()
+        ),
+    );
+    let cleanup = tokio::spawn(async move { transaction.rollback().await });
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !observed.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    listener
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"replace\n")
+        .await
+        .unwrap();
+    let mut reused = [0; 7];
+    listener
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut reused)
+        .await
+        .unwrap();
+    std::fs::write(&replaced, b"ready").unwrap();
+    let result = cleanup.await.unwrap();
+    let socket_preserved = control.exists();
+    let receipt_retained = std::fs::read_dir(fixture.base().parent().unwrap())
+        .unwrap()
+        .any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("infraternal.bootstrap-rollback-")
+        });
+    drop(listener.stdin.take());
+    let exited = listener.wait().await.unwrap();
+    assert_eq!(
+        &reused, b"reused\n",
+        "fixture could not reproduce inode reuse in 256 allocations"
+    );
+    assert!(exited.success());
+    assert!(
+        result.is_err() && socket_preserved && receipt_retained,
+        "live replacement accepted after inode reuse: status={:?}, socket_preserved={socket_preserved}, receipt_retained={receipt_retained}",
+        result.as_ref().err().and_then(|error| error.exit_status)
+    );
+}
