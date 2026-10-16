@@ -142,17 +142,17 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
 }
 
 // Legacy runtimes did not hold the lifetime lock. A refused connect alone is
-// insufficient during bind-before-listen: retain a same-user bound endpoint too.
+// insufficient before listen. Ask the kernel for candidate ownership instead
+// of inspecting private process descriptors, which cannot establish absence.
 #[cold]
 #[inline(never)]
 fn legacy_bound(runtime: &Path) -> io::Result<bool> {
     let rows = fs::read_to_string("/proc/net/unix")?;
     for row in rows.lines().skip(1) {
-        let fields = row.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 8 {
-            continue;
-        }
-        let saved = Path::new(fields[7]);
+        let mut fields = row.split_whitespace();
+        let Some(inode) = fields.nth(6) else { continue };
+        let Some(name) = fields.next() else { continue };
+        let saved = Path::new(name);
         if !(saved.starts_with(runtime)
             || (!saved.is_absolute()
                 && saved
@@ -161,33 +161,75 @@ fn legacy_bound(runtime: &Path) -> io::Result<bool> {
         {
             continue;
         }
-        let expected = format!("socket:[{}]", fields[6]);
-        for process in fs::read_dir("/proc")? {
-            let process = process?;
-            if !process
-                .file_name()
-                .as_encoded_bytes()
-                .iter()
-                .all(u8::is_ascii_digit)
-                || !process
-                    .metadata()
-                    .is_ok_and(|metadata| metadata.uid() == nix::unistd::Uid::effective().as_raw())
-            {
-                continue;
-            }
-            let Ok(descriptors) = fs::read_dir(process.path().join("fd")) else {
-                continue;
-            };
-            for descriptor in descriptors.flatten() {
-                if fs::read_link(descriptor.path())
-                    .is_ok_and(|target| target.as_os_str() == expected.as_str())
-                {
-                    return Ok(true);
-                }
-            }
+        let inode = inode.parse::<u32>().map_err(|_| refused())?;
+        if socket_uid(inode)? == nix::unistd::Uid::effective().as_raw() {
+            return Ok(true);
         }
     }
     Ok(false)
+}
+
+// Linux unix_diag.h fixed exact-query ABI: only UID is requested. A response
+// outside this known layout is uncertain, never permission to remove a socket.
+fn diagnostic_uid(data: &[u8], inode: u32) -> io::Result<u32> {
+    if data.len() != 48
+        || data[0..4] != 48_u32.to_ne_bytes()
+        || data[4..6] != 20_u16.to_ne_bytes()
+        || data[6..8] != 0_u16.to_ne_bytes()
+        || data[8..12] != 1_u32.to_ne_bytes()
+        || data[16] != 1
+        || data[20..24] != inode.to_ne_bytes()
+        || data[32..34] != 5_u16.to_ne_bytes()
+        || data[34..36] != 6_u16.to_ne_bytes()
+        || data[40..42] != 8_u16.to_ne_bytes()
+        || data[42..44] != 7_u16.to_ne_bytes()
+    {
+        return Err(refused());
+    }
+    Ok(u32::from_ne_bytes([data[44], data[45], data[46], data[47]]))
+}
+#[cold]
+#[inline(never)]
+fn socket_uid(inode: u32) -> io::Result<u32> {
+    use nix::sys::socket::{
+        MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
+    };
+    let query = socket(
+        AddressFamily::Netlink,
+        SockType::Datagram,
+        SockFlag::SOCK_CLOEXEC,
+        SockProtocol::NetlinkSockDiag,
+    )?;
+    setsockopt(
+        &query,
+        sockopt::ReceiveTimeout,
+        &nix::sys::time::TimeVal::new(0, 100_000),
+    )?;
+    let mut request = [0_u8; 40];
+    request[0..4].copy_from_slice(&40_u32.to_ne_bytes());
+    request[4..6].copy_from_slice(&20_u16.to_ne_bytes()); // SOCK_DIAG_BY_FAMILY
+    request[6..8].copy_from_slice(&1_u16.to_ne_bytes()); // NLM_F_REQUEST
+    request[8..12].copy_from_slice(&1_u32.to_ne_bytes());
+    request[16] = 1; // AF_UNIX
+    request[20..24].copy_from_slice(&u32::MAX.to_ne_bytes());
+    request[24..28].copy_from_slice(&inode.to_ne_bytes());
+    request[28..32].copy_from_slice(&0x40_u32.to_ne_bytes()); // UDIAG_SHOW_UID
+    request[32..40].fill(0xff); // No prior socket cookie.
+    if sendto(
+        query.as_raw_fd(),
+        &request,
+        &NetlinkAddr::new(0, 0),
+        MsgFlags::MSG_DONTWAIT,
+    )? != request.len()
+    {
+        return Err(refused());
+    }
+    let mut response = [0_u8; 64];
+    let (count, source) = recvfrom::<NetlinkAddr>(query.as_raw_fd(), &mut response)?;
+    if !source.is_some_and(|source| source.pid() == 0 && source.groups() == 0) {
+        return Err(refused());
+    }
+    diagnostic_uid(&response[..count], inode)
 }
 #[cold]
 #[inline(never)]
