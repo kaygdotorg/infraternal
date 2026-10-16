@@ -64,8 +64,8 @@ rust_check_static_binary() {
     fi
 
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21429840 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19607712 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21395600 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19564768 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
@@ -167,7 +167,7 @@ rust_static_build_check() {
     local x86_binary="${target_dir}/x86_64-unknown-linux-musl/release/infraternal"
     local failed=0
 
-    for tool in cargo file readelf stat prlimit python3; do
+    for tool in cargo file readelf stat prlimit python3 bun; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             printf 'required static-build tool is missing: %s\n' "$tool" >&2
             return 1
@@ -179,7 +179,7 @@ rust_static_build_check() {
     python3 scripts/release/production_trust_test.py || return $?
 
     for target in "${targets[@]}"; do
-        cargo build --locked --release --package infraternal --target "$target" || return $?
+        scripts/static-cargo build --locked --release --package infraternal --target "$target" || return $?
         if [[ "$target" == x86_64-unknown-linux-musl ]]; then
             CARGO_TARGET_DIR="$target_dir" python3 scripts/test-openssl-avx512-gcm.py || return $?
         fi
@@ -189,6 +189,8 @@ rust_static_build_check() {
     done
 
     CARGO_TARGET_DIR="$target_dir" python3 scripts/test-static-size.py || failed=1
+    # Inspect both freshly built images; iterate never qualifies stale artifacts.
+    CARGO_TARGET_DIR="$target_dir" bun test scripts/release/static-metadata-review.test.ts || failed=1
     rust_check_cli_stub "$x86_binary" "server" || failed=1
     rust_check_cli_stub "$x86_binary" "agent" || failed=1
     return "$failed"

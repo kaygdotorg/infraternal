@@ -75,7 +75,7 @@ def main():
         env["INFRATERNAL_STAGING_PUBLIC_KEY"] = str(key.with_suffix(".pub"))
         command(["scripts/auth-toolchain"], cwd=REPOSITORY, env=env)
         env["PATH"] = str(target / "auth-tools/zig") + ":" + env["PATH"]
-        command(["cargo", "build", "--locked", "--release", "-p", "infraternal", "--features", "staging-trust",
+        command(["scripts/static-cargo", "build", "--locked", "--release", "-p", "infraternal", "--features", "staging-trust",
                  "--target", "x86_64-unknown-linux-musl"], cwd=REPOSITORY, env=env)
         # A concurrent ordinary gate may rebuild the same target without test
         # trust. Retain our exact stage bytes before releasing the Cargo lock.

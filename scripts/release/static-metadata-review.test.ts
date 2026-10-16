@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 const repository = resolve(import.meta.dir, "../..");
 const source = process.env.INFRATERNAL_STATIC_SOURCE_ROOT ?? repository;
 const targetRoot = process.env.CARGO_TARGET_DIR ?? resolve(repository, "target");
+const registryRoot = resolve(process.env.CARGO_HOME ?? resolve(process.env.HOME!, ".cargo"), "registry/src");
 
 for (const [target, compiler] of [
   ["x86_64-unknown-linux-musl", "musl-cc-avx512.sh"],
@@ -16,6 +17,11 @@ for (const [target, compiler] of [
   if (!existsSync(binary)) { test.skip(name, () => {}); continue; }
   test(name, () => {
     const compilerPath = Buffer.from(resolve(source, ".cargo", compiler));
-    expect(readFileSync(binary).includes(compilerPath)).toBe(false);
+    const bytes = readFileSync(binary);
+    expect(bytes.includes(compilerPath)).toBe(false);
+    expect(bytes.includes(Buffer.from(`/.cargo/${compiler}`))).toBe(false);
+    expect(bytes.includes(Buffer.from(`${source}/`))).toBe(false);
+    expect(bytes.includes(Buffer.from(`${resolve(targetRoot)}/`))).toBe(false);
+    expect(bytes.includes(Buffer.from(`${registryRoot}/`))).toBe(false);
   });
 }

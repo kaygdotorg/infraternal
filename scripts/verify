@@ -44,7 +44,7 @@ verify_latency() {
     report_environment setup
 
     python3 "${script_dir}/latency_proxy.py" self-test --samples 31 || failed=1
-    if cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl; then
+    if scripts/static-cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl; then
         report_environment native
         python3 "${script_dir}/verify-latency.py" \
             --binary "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal" || failed=1
@@ -72,7 +72,7 @@ verify_integration() {
     local target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
     export CARGO_TARGET_DIR="$target_dir"
     if [[ -z "${INFRATERNAL_BIN:-}" ]]; then
-        cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl || return 1
+        scripts/static-cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl || return 1
         export INFRATERNAL_BIN="$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal"
     fi
     (

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Apply checkout-independent source paths to the pinned static Cargo recipe (D243, #229).
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$target_root" = /* ]] || target_root="$root/$target_root"
+cargo_sources="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+cd "$root"
+# Keep the two target configurations' existing static CRT flag. Remapping only
+# changes recorded source locations, leaving optimization and code paths intact.
+flags=(-C target-feature=+crt-static)
+if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    IFS=$'\x1f' read -r -a inherited <<< "$CARGO_ENCODED_RUSTFLAGS"
+    flags+=("${inherited[@]}")
+elif [[ -n "${RUSTFLAGS:-}" ]]; then
+    read -r -a inherited <<< "$RUSTFLAGS"
+    flags+=("${inherited[@]}")
+fi
+flags+=("--remap-path-prefix=$root=/infraternal" "--remap-path-prefix=$target_root=/build")
+for registry in "$cargo_sources"/*; do
+    if [[ -d "$registry" ]]; then
+        flags+=("--remap-path-prefix=$registry=/cargo")
+    fi
+done
+printf -v CARGO_ENCODED_RUSTFLAGS '%s\x1f' "${flags[@]}"
+export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS%$'\x1f'}"
+exec cargo "$@"

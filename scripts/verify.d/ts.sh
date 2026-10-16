@@ -9,6 +9,9 @@ ts_verify_fast() {
         return 1
     fi
 
+    printf '\n==> Compiler metadata generator checks\n'
+    (cd -- "$repo_dir" && bun test scripts/release/build-metadata.test.ts) || return $?
+
     printf '\n==> Vendored Ghostty artifact checksums\n'
     (cd -- "$repo_dir/apps/tracer/vendor/ghostty-web" && sha256sum --check SHA256SUMS) || return $?
 

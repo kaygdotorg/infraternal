@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the pinned C wrappers' D244 and D264 policies for both musl targets."""
+"""Exercise the pinned C wrappers' D243, D244 and D264 build rules for both musl targets."""
 
 import os
 from pathlib import Path
@@ -19,19 +19,27 @@ with tempfile.TemporaryDirectory(prefix='wrapper-test-', dir=SCRATCH) as directo
         ('aarch64-unknown-linux-musl', 'aarch64-linux-musl'),
     ):
         environment = dict(os.environ, CARGO_TARGET_DIR=directory, TARGET=target)
+        directories = [
+            '-DENGINESDIR="/a temporary/build/install/lib/engines-3"',
+            '-DMODULESDIR="/another/build/install/lib/ossl-modules"',
+        ]
+        canonical = [
+            '-DENGINESDIR="/usr/local/lib/infraternal/engines-3"',
+            '-DMODULESDIR="/usr/local/lib/infraternal/ossl-modules"',
+        ]
         retained = ['-DOPENSSL_NO_SECURE_MEMORY=1', '-DOTHER=1', '-O3', 'input with spaces.c']
         result = subprocess.run(
             [str(ROOT / '.cargo/musl-cc.sh'), f'--target={target}',
-             '-DOPENSSL_NO_SECURE_MEMORY', *retained],
+             '-DOPENSSL_NO_SECURE_MEMORY', *directories, *retained],
             env=environment, check=True, capture_output=True, text=True,
         )
-        assert result.stdout.splitlines() == ['cc', '-target', zig_target, *retained], target
+        assert result.stdout.splitlines() == ['cc', '-target', zig_target, *canonical, *retained], target
         result = subprocess.run(
             [str(ROOT / '.cargo/musl-cc.sh'), '--target=unowned-target'],
             env=environment, capture_output=True, text=True,
         )
         assert result.returncode != 0 and not result.stdout, target
-        print(f'{target}: exact define removed; other arguments preserved; override refused')
+        print(f'{target}: static directories canonical; exact define removed; other arguments preserved; override refused')
 
     source = Path(directory) / 'openssl-source'
     assembly = source / 'crypto/modes/asm/aes-gcm-avx512.pl'
