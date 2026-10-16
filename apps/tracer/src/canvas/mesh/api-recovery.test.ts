@@ -1,7 +1,7 @@
 /** Guards Mesh watch ownership across refresh failures and synchronous refusals (#229). */
 import { expect, test } from "bun:test";
 import { createMeshApi } from "./api";
-import type { MeshTransport, Snapshot } from "./protocol";
+import { ActionRefused, type MeshTransport, type Snapshot } from "./protocol";
 
 const raw = { revision: 1, nodes: [], tags: [], grants: [] };
 const prime: Snapshot = { rev: 0, access: { view: true, manageGrants: false }, nodes: [], tags: {}, grants: [] };
@@ -90,3 +90,51 @@ test("a pushed recovery cancels the scheduled retry", async () => {
     expect(pending.size).toBe(0);
   } finally { source.dispose(); restore(); }
 });
+
+// Closed sockets, liveness deadlines and JSON decoding reject the same pending
+// call promise. The source must distinguish these failures from access refusal.
+for (const [label, answer, status] of [
+  ["closed transport", () => Promise.reject(new Error("connection lost")), "error"],
+  ["liveness deadline", () => Promise.reject(new Error("connection timed out")), "error"],
+  ["unreadable JSON", () => Promise.reject(new SyntaxError("invalid JSON")), "error"],
+  ["unavailable storage", () => Promise.reject(new ActionRefused("refused", "mesh unavailable")), "error"],
+  ["forbidden action", () => Promise.reject(new ActionRefused("refused", "forbidden")), "unavailable"],
+  ["invalid stored host", () => Promise.resolve({...raw, nodes: [{node: {id: 1, host: "", tags: []}}]}), "error"],
+] as const) test(`initial Mesh list handles ${label}`, async () => {
+  const pending = new Set<number>();
+  const restore = timers(pending);
+  let watches = 0;
+  const source = createMeshApi({transport: {
+    call: answer,
+    onReady: listener => { listener(); return () => {}; },
+    subscribe: () => { watches++; return () => { watches--; }; },
+  }});
+  try {
+    await settle();
+    expect(source.status()).toBe(status);
+    expect(watches).toBe(0);
+    expect(pending.size).toBe(status === "error" ? 1 : 0);
+  } finally { source.dispose(); restore(); }
+  expect(pending.size).toBe(0);
+});
+
+for (const reason of ["forbidden", "mesh unavailable", "plugin unavailable"] as const)
+  test(`Mesh watch withdrawal handles ${reason}`, () => {
+    const pending = new Set<number>();
+    const restore = timers(pending);
+    let watches = 0;
+    let deliver: ((event: Record<string, unknown>) => void) | undefined;
+    const source = createMeshApi({prime, transport: {
+      call: () => Promise.resolve(raw),
+      onReady: () => () => {},
+      subscribe: (_topic, listener) => { watches++; deliver = listener; return () => { watches--; }; },
+    }});
+    try {
+      // Wire fields cannot claim that a withdrawn subscription is still active.
+      deliver!({type: "error", error: reason, subscriptionActive: true});
+      expect(watches).toBe(0);
+      expect(source.status()).toBe(reason === "forbidden" ? "unavailable" : "error");
+      expect(pending.size).toBe(reason === "forbidden" ? 0 : 1);
+    } finally { source.dispose(); restore(); }
+    expect(pending.size).toBe(0);
+  });
