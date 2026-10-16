@@ -2120,3 +2120,72 @@ sys.stdin.read()
         result.as_ref().err().and_then(|error| error.exit_status)
     );
 }
+
+/// A different Unix user's fixed basename is not liveness proof for this installation.
+#[tokio::test]
+#[ignore = "requires sudo -n to create an isolated listener as uid 65534"]
+async fn review_unrelated_user_relative_socket_does_not_block_stale_cleanup() {
+    use tokio::io::AsyncReadExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"retain receipt for restart inspection").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    std::fs::remove_file(keep).unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stale = std::os::unix::net::UnixListener::bind(runtime.join("plugins.sock")).unwrap();
+    drop(stale);
+    let unrelated = fixture.root.join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o777)).unwrap();
+    // Inherit the isolated cwd before dropping uid, so no home-directory
+    // permissions change is needed. EOF retires only this fixture's listener.
+    let mut listener = Command::new("sudo")
+        .args(["-n", "python3", "-u", "-c", "import os,socket,sys; os.setgroups([]); os.setgid(65534); os.setuid(65534); s=socket.socket(socket.AF_UNIX); s.bind('plugins.sock'); s.listen(); os.chdir('/'); print('ready',flush=True); sys.stdin.read()"])
+        .current_dir(&unrelated)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn().unwrap();
+    let mut ready = [0; 6];
+    listener
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .await
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        std::fs::metadata(unrelated.join("plugins.sock"))
+            .unwrap()
+            .uid(),
+        65534
+    );
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let inspected = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await;
+    let cleanup = transaction.rollback().await;
+    let unrelated_preserved = unrelated.join("plugins.sock").exists();
+    drop(listener.stdin.take());
+    assert!(listener.wait().await.unwrap().success());
+    assert!(unrelated_preserved);
+    assert!(
+        inspected.is_ok() && cleanup.is_ok() && !receipt.exists(),
+        "unrelated user socket blocks stale cleanup: inspection={:?}, cleanup={:?}, receipt_retained={}",
+        inspected.as_ref().err().and_then(|error| error.exit_status),
+        cleanup.as_ref().err().and_then(|error| error.exit_status),
+        receipt.exists(),
+    );
+}
