@@ -444,9 +444,26 @@ async fn authenticated_path_interrupted(
     margin: std::time::Duration,
 ) -> io::Result<()> {
     let _epoch = path.proof_epoch(connection)?;
-    let mut ticks = tokio::time::interval(interval);
+    // Independent sessions must not repeatedly fill one server receive queue
+    // together. Spread their first probes over 15 ms and subsequent probes
+    // over at most 5 ms; the authenticated response deadline is unchanged.
+    // This seed controls scheduling only and carries no authentication material.
+    let mut seed = [0; 8];
+    openssl::rand::rand_bytes(&mut seed).map_err(io::Error::other)?;
+    let mut phase = u64::from_ne_bytes(seed);
+    let mut skew = || {
+        phase ^= phase << 13;
+        phase ^= phase >> 7;
+        phase ^= phase << 17;
+        std::time::Duration::from_micros(phase % 5001)
+    };
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + skew() * 3, interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut pending = None;
+    let mut pending: Option<(
+        std::time::Instant,
+        tokio::time::Instant,
+        std::time::Duration,
+    )> = None;
     let mut local_delay = std::time::Duration::ZERO;
     let mut closed = std::pin::pin!(connection.closed());
     loop {
@@ -459,16 +476,31 @@ async fn authenticated_path_interrupted(
                 local_delay = (local_delay * 7 / 8)
                     .max(expected.elapsed().saturating_mul(4))
                     .min(std::time::Duration::from_millis(200));
-                let allowance = path.proof_allowance(connection.rtt(), margin) + local_delay;
+                let measured = path.proof_allowance(connection.rtt(), margin) + local_delay;
                 // This response supplies its own authenticated RTT sample.
                 // Ordinary QUIC keepalive remains owned by the connection;
                 // sending a second probe here would duplicate every idle poll.
-                if pending.is_some_and(|(sent, _)| path.mesh_authenticated_since(sent)) {
+                if pending.is_some_and(|(sent, _, _)| path.mesh_authenticated_since(sent)) {
                     pending = None;
                 }
-                if pending.is_some_and(|(_, sent): (std::time::Instant, tokio::time::Instant)| sent.elapsed() >= allowance) {
+                // A response already waiting on observed load keeps that
+                // allowance. Decaying scheduler jitter must not move its deadline
+                // earlier; only an answered challenge starts a smaller window.
+                let allowance = pending.as_mut().map_or(measured, |(_, _, budget)| {
+                    *budget = (*budget).max(measured);
+                    *budget
+                });
+                if pending.is_some_and(|(_, sent, _)| sent.elapsed() >= allowance) {
+                    #[cfg(feature = "test-support")]
+                    eprintln!("path_proof_timeout pending_us={} allowance_us={} local_delay_us={} quic_rtt_us={}",
+                        pending.map_or(0, |(_, sent, _)| sent.elapsed().as_micros()),
+                        allowance.as_micros(), local_delay.as_micros(), connection.rtt().as_micros());
                     return Err(io::ErrorKind::TimedOut.into());
                 }
+                // After this tuple's measured RTT/variation has elapsed, spend
+                // the remaining margin retrying brief receive-queue loss. Keep
+                // the original sequence and first-send deadline on every retry.
+                let retry = pending.is_some_and(|(_, sent, _)| sent.elapsed() >= allowance.saturating_sub(margin));
                 // A repeated challenge retains its sequence and first physical
                 // clock, so retransmission cannot postpone a failed path forever.
                 match path.send_proof() {
@@ -477,7 +509,7 @@ async fn authenticated_path_interrupted(
                         // endpoint runtimes; the owned async deadline also follows
                         // virtual time in functional cancellation tests.
                         let now = tokio::time::Instant::now();
-                        pending = Some((sent, now.checked_sub(sent.elapsed()).unwrap_or(now)));
+                        pending = Some((sent, now.checked_sub(sent.elapsed()).unwrap_or(now), allowance));
                     },
                     Ok(_) => {},
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
@@ -485,8 +517,23 @@ async fn authenticated_path_interrupted(
                 }
                 // Busy paths amortize probes over their measured response budget;
                 // a quiet LAN keeps its original interval and byte-delivery gains.
-                let cadence = interval.max((allowance / 4).min(std::time::Duration::from_millis(100)));
-                ticks.reset_after(cadence);
+                // Space ordinary probes by half the response allowance to reduce
+                // shared receive pressure; short retries alone spend its tail.
+                let cadence = if retry {
+                    interval.min(std::time::Duration::from_millis(5))
+                } else {
+                    interval.max((allowance / 2).min(std::time::Duration::from_millis(100)))
+                };
+                let spread = skew();
+                let mut next = cadence + if retry { spread.min(std::time::Duration::from_millis(1)) } else { spread };
+                if let Some((_, sent, _)) = pending {
+                    // An adaptive ordinary interval must not jump over the
+                    // response margin. Wake at its start, then retry within it;
+                    // neither phase spreading nor retries may skip the deadline.
+                    let boundary = if retry { allowance } else { allowance.saturating_sub(margin) };
+                    next = next.min(boundary.saturating_sub(sent.elapsed()));
+                }
+                ticks.reset_after(next);
             }
         }
     }

@@ -20,6 +20,7 @@ use std::{
 struct HeldSocket {
     inner: Arc<dyn AsyncUdpSocket>,
     until: Arc<Mutex<tokio::time::Instant>>,
+    lost_proofs: Option<Arc<Mutex<Vec<tokio::time::Instant>>>>,
 }
 #[derive(Debug)]
 struct HeldPoller {
@@ -46,6 +47,12 @@ impl AsyncUdpSocket for HeldSocket {
         })
     }
     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+        if let Some(proofs) = &self.lost_proofs
+            && crate::remote_path_proof::path_probe_header(transmit.contents).is_some()
+        {
+            proofs.lock().unwrap().push(tokio::time::Instant::now());
+            return Ok(());
+        }
         if tokio::time::Instant::now() < *self.until.lock().unwrap() {
             return Err(io::ErrorKind::WouldBlock.into());
         }
@@ -83,6 +90,7 @@ async fn a_queued_probe_cannot_expire_before_the_socket_emits_it() {
     let logical = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), physical.port());
     let until = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let socket = Arc::new(HeldSocket {
+        lost_proofs: None,
         inner: quinn::TokioRuntime
             .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
             .unwrap(),
@@ -123,6 +131,77 @@ async fn a_queued_probe_cannot_expire_before_the_socket_emits_it() {
         result.is_err(),
         "a healthy path was declared dead while its probe was queued: {result:?}"
     );
+}
+
+/// Losing a request must leave repeated recovery attempts inside the reserved
+/// response margin, even when adaptive ordinary polling becomes much slower.
+/// Virtual time checks scheduling decisions; this is no latency measurement.
+#[tokio::test]
+async fn lost_path_proof_spends_its_reserved_retry_margin() {
+    let ca = root();
+    let server = quinn::Endpoint::server(
+        server_config(&leaf(&ca, true), std::slice::from_ref(&ca.certificate)).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let logical = server.local_addr().unwrap();
+    let proofs = Arc::new(Mutex::new(Vec::new()));
+    let path = PathSocket::new(
+        Arc::new(HeldSocket {
+            inner: quinn::TokioRuntime
+                .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .unwrap(),
+            until: Arc::new(Mutex::new(tokio::time::Instant::now())),
+            lost_proofs: Some(proofs.clone()),
+        }),
+        logical,
+    );
+    let mut client = quinn::Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        None,
+        path.clone(),
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
+    client.set_default_client_config(client_config(&leaf(&ca, false), &[ca.certificate]).unwrap());
+    let (dial, accepted) = tokio::join!(client.connect(logical, "localhost").unwrap(), async {
+        server.accept().await.unwrap().await
+    });
+    let dial = dial.unwrap();
+    let accepted = accepted.unwrap();
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+    path.use_mesh(blackhole.local_addr().unwrap());
+    let margin = Duration::from_millis(30);
+    let allowance = path.proof_allowance(dial.rtt(), margin);
+    tokio::time::pause();
+    let guard = path_interrupted(&dial, &path, Duration::from_millis(15), margin);
+    tokio::pin!(guard);
+    // Poll the real guard while only its logical timer advances. Every physical
+    // challenge is deliberately lost, so neither QUIC nor a backup can answer.
+    let result = loop {
+        tokio::select! {
+            result = &mut guard => break result,
+            () = tokio::time::sleep(Duration::from_millis(1)) => {},
+        }
+    };
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    let attempts = proofs.lock().unwrap();
+    let first = attempts[0];
+    let retries = attempts
+        .iter()
+        .filter(|at| {
+            let age = at.duration_since(first);
+            age >= allowance.saturating_sub(margin) && age < allowance
+        })
+        .count();
+    assert!(
+        retries >= 3,
+        "ordinary polling skipped the retry margin: {attempts:?}"
+    );
+    drop(attempts);
+    client.close(0u32.into(), b"");
+    server.close(0u32.into(), b"");
+    drop(accepted);
 }
 
 #[tokio::test]
