@@ -120,6 +120,26 @@ test("a pushed recovery supersedes an outstanding retry failure", async () => {
   } finally { source.dispose(); restore(); }
 });
 
+test("a forbidden withdrawal cancels retry work from the retained watch", async () => {
+  const pending = new Set<number>();
+  const restore = timers(pending);
+  let deliver: ((event: Record<string, unknown>) => void) | undefined;
+  const source = createMeshApi({prime, transport: {
+    call: () => Promise.reject(new Error("connection lost")),
+    onReady: () => () => {},
+    subscribe: (_topic, listener) => { deliver = listener; return () => {}; },
+  }});
+  try {
+    deliver!({type: "changed", revision: 1});
+    await settle();
+    expect(source.status()).toBe("error");
+    expect(pending.size).toBe(1);
+    deliver!({type: "error", error: "forbidden"});
+    expect(source.status()).toBe("unavailable");
+    expect(pending.size).toBe(0);
+  } finally { source.dispose(); restore(); }
+});
+
 // Closed sockets, liveness deadlines and JSON decoding reject the same pending
 // call promise. The source must distinguish these failures from access refusal.
 for (const [label, answer, status] of [
