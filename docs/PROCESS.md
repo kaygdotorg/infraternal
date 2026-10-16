@@ -143,7 +143,7 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,332,464 bytes |
+  | `x86_64-unknown-linux-musl` | 21,331,152 bytes |
   | `aarch64-unknown-linux-musl` | 19,524,584 bytes |
 
   These are the #230 measurements of the full-feature release recipe after
@@ -152,6 +152,7 @@ Reviews and fixes run at the same time as the next lane's build.
   than inside transmitted programs.
   The direct socket-probe repair reuses validated identity/status data; its
   final aarch64 ceiling is ratcheted down another 32 bytes (#230).
+  Outlined x86_64 failure classifiers reduce that target another 1,312 bytes.
   The earlier #198 reductions remain: unused native APIs, duplicated action
   metadata construction, OpenSSL's
   unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
