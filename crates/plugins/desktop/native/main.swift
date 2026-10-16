@@ -112,7 +112,8 @@ private final class Session {
                 } else { throw HelperFailure.invalid }
                 output = CGSize(width:w,height:h)
                 if encoderMode { try encoder.configure(width:w,height:h) }
-                // Timer exists only during a stream; refusal and local activity are retried when idle.
+                // Reconcile only while streaming. Local activity defers following;
+                // managed windows never retry a native resize, including at idle.
                 if !surfaceMode { timer = Timer.scheduledTimer(withTimeInterval:1,repeats:true) { [weak self] _ in self?.geometry?.follow() } }
                 return (66,state())
             } catch { _ = stop(); throw error }
