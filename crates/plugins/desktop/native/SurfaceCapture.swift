@@ -46,6 +46,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         let configuration = SCStreamConfiguration()
         configuration.width = Int(size.width); configuration.height = Int(size.height)
+        // Normalize display-dependent pixels once on capture. The encoder's
+        // transfer metadata must describe these same sRGB values end to end.
+        configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.queueDepth = 3
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fps))

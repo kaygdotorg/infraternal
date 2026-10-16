@@ -5,6 +5,35 @@ import VideoToolbox
 enum HelperFailure: Error { case invalid, permission, unavailable }
 
 @main struct EncoderSessionTests {
+    static func expectSRGB(_ packet: Data) {
+        let bytes = Array(packet.dropFirst(9))
+        let starts = (0..<max(0, bytes.count - 3)).filter {
+            bytes[$0...($0 + 3)].elementsEqual([0, 0, 0, 1])
+        }
+        let parameters = starts.enumerated().compactMap { index, start -> Data? in
+            let end = index + 1 < starts.count ? starts[index + 1] : bytes.count
+            guard start + 4 < end, [7, 8].contains(bytes[start + 4] & 31) else { return nil }
+            return Data(bytes[(start + 4)..<end])
+        }
+        guard parameters.count == 2 else { fatalError("missing H.264 parameter sets") }
+        parameters[0].withUnsafeBytes { sps in parameters[1].withUnsafeBytes { pps in
+            let pointers = [sps.baseAddress!.assumingMemoryBound(to: UInt8.self), pps.baseAddress!.assumingMemoryBound(to: UInt8.self)]
+            let sizes = parameters.map(\.count)
+            var format: CMFormatDescription?
+            let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: nil,
+                parameterSetCount: 2, parameterSetPointers: pointers, parameterSetSizes: sizes,
+                nalUnitHeaderLength: 4, formatDescriptionOut: &format)
+            guard status == noErr, let format else { fatalError("invalid H.264 color description") }
+            // The wire format must describe the capture's sRGB pixels. Labelling
+            // them with a video transfer curve adds a per-pixel browser conversion.
+            let transfer = CMFormatDescriptionGetExtension(format, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String
+            guard transfer == kCVImageBufferTransferFunction_sRGB as String else {
+                fputs("FAIL desktop H.264 transfer function is \(transfer ?? "absent"), expected sRGB\n", stderr)
+                exit(1)
+            }
+        } }
+    }
+
     static func main() throws {
         let dropped = EncodeResult(parameters: LowDelayParameterSets())
         encodedCallback(nil, Unmanaged.passUnretained(dropped).toOpaque(), noErr, .frameDropped, nil)
@@ -32,6 +61,7 @@ enum HelperFailure: Error { case invalid, permission, unavailable }
                     ], pixels: pixels)
                     guard packet.count > 13, packet.subdata(in: 9..<13) == Data([0,0,0,1]),
                           frame != 0 || packet[8] == 1 else { fatalError("missing Annex-B frame or startup keyframe") }
+                    if !hevc && frame == 0 { expectSRGB(packet) }
                     count += 1
                     // Functional cadence only: there is deliberately no timing assertion.
                     Thread.sleep(forTimeInterval: 0.03)

@@ -119,6 +119,11 @@ final class Encoder {
         do {
             try set(kVTCompressionPropertyKey_RealTime,kCFBooleanTrue)
             try set(kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse)
+            // Capture normalizes the display into sRGB. Preserve its transfer
+            // curve instead of asking browsers to reinterpret it as video gamma.
+            try set(kVTCompressionPropertyKey_ColorPrimaries,kCVImageBufferColorPrimaries_ITU_R_709_2)
+            try set(kVTCompressionPropertyKey_TransferFunction,kCVImageBufferTransferFunction_sRGB)
+            try set(kVTCompressionPropertyKey_YCbCrMatrix,kCVImageBufferYCbCrMatrix_ITU_R_709_2)
             // Only startup, repair, resize and the settled sharp refresh require IDRs.
             // Periodic keyframes waste bandwidth on a static desktop.
             try set(kVTCompressionPropertyKey_MaxKeyFrameInterval,NSNumber(value:Int32.max))
