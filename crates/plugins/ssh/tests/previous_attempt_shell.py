@@ -55,6 +55,24 @@ class EarlierSetup(unittest.TestCase):
         body += CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']
         return self.run_shell(body)
 
+    def test_retired_owner_with_nonempty_root_is_refused(self):
+        self.listener.close()
+        self.owner.unlink()
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 71)
+        self.assertTrue(self.socket.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_retired_base_receipt_never_owns_replacement_directory(self):
+        self.listener.close()
+        retained = self.base.with_name('retained')
+        self.base.rename(retained)
+        self.base.mkdir(mode=0o700)
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 75)
+        self.assertTrue(self.receipt.exists())
+        self.assertTrue(retained.exists())
+
     def test_stale_socket_is_removed(self):
         self.listener.close()
         result = self.run_shell('\ninspect_previous')

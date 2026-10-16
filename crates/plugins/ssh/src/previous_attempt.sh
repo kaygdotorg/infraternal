@@ -17,10 +17,10 @@ not_live() {
     # no_redirect has already permitted only the home alias and symlinks above
     # it. Resolve that alias so /proc descriptor links under the real home are
     # still recognized as live setup state.
-    if base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P); then
-        :
+    if [ -e "$base" ] || [ -L "$base" ]; then
+        base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P) || exit 75
     else
-        exit 75
+        base_real=$(CDPATH= cd -P "$(dirname "$base")" && pwd -P)/${base##*/}
     fi
     [ -r /proc/net/unix ] || exit 75
     # Match live socket entries by canonical path or the exact UUID basename. The latter
@@ -93,21 +93,41 @@ inspect_previous() {
         printf 'INFRATERNAL_SETUP_CLEAR\n'
         return
     fi
-    [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
-    not_live
-    private_file "$base/.bootstrap-owner"
-    [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
-    previous_host=$(cat "$base/.bootstrap-owner")
-    hex_id "$previous_host"
-    identity=$(stat -c '%d:%i' "$base")
     if [ -n "$receipt" ]; then
         private_file "$receipt"
         previous_transaction=${receipt#"$base.bootstrap-rollback-"}
         hex_id "$previous_transaction"
-        # Old receipts without an inode binding cannot prove which directory
-        # they own. Refuse explicitly rather than reinterpret an older format.
+        read -r previous_host recorded_transaction kind identity extra < "$receipt"
+        hex_id "$previous_host"
         [ "$(cat "$receipt")" = "$previous_host $previous_transaction fresh $identity" ] || exit 75
+        case "$identity" in ''|:*|*:|*:*:*|*[!0-9:]*) exit 75;; esac
+        case "$identity" in *:*) :;; *) exit 75;; esac
+        # Final retirement can stop after the owner or base is gone. The private
+        # outside receipt still identifies the exact host/transaction for the
+        # server's durable authorization; a replacement directory never matches.
+        if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+            not_live
+            printf 'INFRATERNAL_SETUP_STALE %s %s %s 0\n' "$previous_host" "$previous_transaction" "$identity"
+            return
+        fi
+        [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
+        [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || exit 75
+        if [ ! -e "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ]; then
+            # Only an empty root is reachable after retiring the owner marker.
+            for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+                [ ! -e "$entry" ] && [ ! -L "$entry" ] || exit 71
+            done
+        else
+            private_file "$base/.bootstrap-owner"
+            [ "$(cat "$base/.bootstrap-owner")" = "$previous_host" ] || exit 75
+        fi
     else
+        [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
+        private_file "$base/.bootstrap-owner"
+        [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || exit 75
+        previous_host=$(cat "$base/.bootstrap-owner")
+        hex_id "$previous_host"
+        identity=$(stat -c '%d:%i' "$base")
         # An interrupted fresh lock is recoverable through its original journal.
         # An upgrade owns previous enrolled data and is never a start-fresh target.
         if [ -e "$base/.bootstrap-acquiring" ] || [ -L "$base/.bootstrap-acquiring" ]; then
@@ -124,6 +144,7 @@ inspect_previous() {
         fi
         hex_id "$previous_transaction"
     fi
+    not_live
     if [ -e "$base/.bootstrap-lock" ] || [ -L "$base/.bootstrap-lock" ]; then
         stage="$base/.bootstrap-lock"
         [ -d "$stage" ] && [ ! -L "$stage" ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 71
