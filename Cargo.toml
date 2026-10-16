@@ -115,4 +115,4 @@ opt-level = "s"
 
 # SSH installation is management orchestration, outside terminal and mesh data paths [243].
 [profile.release.package.infraternal-plugin-ssh]
-opt-level = "s"
+opt-level = "z"
