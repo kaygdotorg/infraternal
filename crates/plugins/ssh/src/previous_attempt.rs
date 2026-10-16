@@ -173,11 +173,12 @@ impl PreviousAttempt {
         );
         let setup_lock = include_str!("setup_lock.sh");
         // Revalidate listeners after ownership reads, immediately before removal.
+        // The exact observed record already contains the root identity; reuse its
+        // penultimate field rather than allocating another formatted shell argument.
         let body = format!(
-            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\nidentity={}\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\nidentity=${{observed% *}}\nidentity=${{identity##* }}\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
             crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&expected),
-            crate::transport::shell_quote(&self.identity),
             crate::install::FRESH_CLEANUP,
             crate::install::ROLLBACK_TRANSACTION
         );
