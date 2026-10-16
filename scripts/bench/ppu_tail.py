@@ -86,6 +86,23 @@ def futex_fields(line, kind, pid, reader, counter, identities):
     return {}
 
 
+def read_fields(line, kind):
+    """Identify short-read retries without retaining buffer addresses or bytes."""
+    if kind == 'sys_enter_read':
+        return {name: value for name, field in (('read_fd', b'fd'), ('read_count', b'count'))
+                if (value := number(line, field)) is not None}
+    if kind == 'sys_exit_read':
+        value = number(line, b'ret')
+        if value is None:
+            match = re.search(rb'->\s*(-?(?:0x)?[0-9a-fA-F]+)\b', line)
+            if match:
+                value = int(match[1], 16)
+                if value >= 1 << 63:
+                    value -= 1 << 64
+        return {} if value is None else dict(read_result=value)
+    return {}
+
+
 def task_counters(pid):
     """Separate page faults, run-queue time and timer slack from stage durations."""
     path = Path('/proc') / str(pid)
@@ -172,6 +189,7 @@ class RoleTrace(BASE_TRACE):
                                 stack = dict(kind='stack', ns=round(stamp * 1e9), pid=pid, symbols=[])
                             else:
                                 emit(dict(kind=kind, ns=round(stamp * 1e9), pid=pid, state=state,
+                                    **read_fields(line, kind),
                                     **futex_fields(line, kind, pid, ROLES['reader'],
                                                    self.counter_tid.value, identities)))
                                 events += 1

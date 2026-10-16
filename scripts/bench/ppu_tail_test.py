@@ -43,5 +43,18 @@ class Futex(unittest.TestCase):
                              dict(futex_result=-110))
 
 
+class Reads(unittest.TestCase):
+    def test_retains_only_numeric_read_identity_and_size(self):
+        for line in (b'sys_enter_read: fd=7 buf=deadbeef count=4096',
+                     b'sys_read(fd: 7, buf: deadbeef, count: 1000)'):
+            self.assertEqual(tail.read_fields(line, 'sys_enter_read'),
+                             dict(read_fd=7, read_count=4096))
+        self.assertEqual(tail.read_fields(b'sys_exit_read: ret=33', 'sys_exit_read'),
+                         dict(read_result=33))
+        self.assertEqual(tail.read_fields(b'sys_read -> 0xfffffffffffffff5', 'sys_exit_read'),
+                         dict(read_result=-11))
+        self.assertEqual(tail.read_fields(b'sys_write(fd: 7, buf: deadbeef)', 'sys_enter_write'), {})
+
+
 if __name__ == '__main__':
     unittest.main()
