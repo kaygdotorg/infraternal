@@ -51,15 +51,17 @@ export function createSetupFeed(options: SetupFeedOptions): SetupSource {
       let seen = false;
       let timer: number | undefined;
 
-      const end = (): void => {
+      const pause = (): void => {
         stopped = true;
         window.clearTimeout(timer);
-        live.delete(hostId);
         const closing = socket;
         socket = undefined;
         if (closing && closing.readyState <= WebSocket.OPEN) closing.close(1000);
       };
-      const lose = (): void => { if (!stopped) { end(); signals.lost?.(); } };
+      const end = (): void => { pause(); live.delete(hostId); };
+      // Exhaustion releases transport resources but keeps the explicit recovery action
+      // until the window disposes the subscription or setup completes.
+      const lose = (): void => { if (!stopped) { pause(); signals.lost?.(); } };
       const connect = (): void => {
         const next = open(setupUrl());
         socket = next;
@@ -91,7 +93,20 @@ export function createSetupFeed(options: SetupFeedOptions): SetupSource {
           timer = window.setTimeout(connect, delays[attempts++]);
         };
       };
-      live.set(hostId, { retry() { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ action: "retry", host_id: hostId })); else wantRetry = true; } });
+      live.set(hostId, { retry() {
+        if (stopped) {
+          // Fetch the retained status again before the server handles the retry.
+          // Its subscription and current authority still decide whether retry is allowed.
+          stopped = false;
+          attempts = 0;
+          last = 0;
+          seen = false;
+          wantRetry = true;
+          connect();
+        } else if (socket?.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ action: "retry", host_id: hostId }));
+        } else wantRetry = true;
+      } });
       connect();
       return end;
     },

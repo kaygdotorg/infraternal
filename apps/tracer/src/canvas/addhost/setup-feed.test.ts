@@ -152,5 +152,10 @@ test("review explicit retry resumes after the setup feed stops", async () => {
     expect(FakeSocket.all).toHaveLength(4);
     FakeSocket.all[3]!.open();
     expect(FakeSocket.all[3]!.sent.map((message) => message.action)).toEqual(["subscribe", "retry"]);
+    expect(FakeSocket.all[3]!.sent[0]).toMatchObject({ after: 0 });
+    stop();
+    source.retry?.(HOST);
+    expect(FakeSocket.all).toHaveLength(4);
+    expect(FakeSocket.all[3]!.readyState).toBe(3);
   } finally { stop(); }
 });
