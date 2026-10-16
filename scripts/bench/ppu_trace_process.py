@@ -18,11 +18,16 @@ class Drain:
 
     def run(self):
         self.receiver.close()
-        # Socket copies must never retain synthetic viewers after the driver
-        # closes them. This child uses only its trace fd and numeric result pipe.
+        # Socket copies must not retain viewers. Deferred tracing also inherits
+        # an older wakeup counter's trace_pipe: retaining that copy prevents its
+        # owner removing the instance before this collector exits. Keep only
+        # this collector's trace descriptor among private trace pipes.
         for path in Path('/proc/self/fd').iterdir():
             try:
-                if os.readlink(path).startswith('socket:['):
+                link = os.readlink(path).removesuffix(' (deleted)')
+                other_trace = (link.startswith('/sys/kernel/tracing/instances/')
+                               and link.endswith('/trace_pipe') and int(path.name) != self.observer.fd)
+                if link.startswith('socket:[') or other_trace:
                     os.close(int(path.name))
             except OSError:
                 pass
