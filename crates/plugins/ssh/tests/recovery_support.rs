@@ -225,19 +225,51 @@ fn review_stale_receipt_recovers_without_host_python() {
 /// A process still owns its bound control socket during the bind-to-listen gap.
 #[test]
 fn review_bound_control_socket_before_listen_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(false);
+    bound_legacy_control_socket_retains_receipt(false, false, false);
 }
 
 /// Restricted descriptor inspection cannot prove a bound legacy endpoint stale.
 #[test]
 fn private_legacy_control_socket_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(true);
+    bound_legacy_control_socket_retains_receipt(true, false, false);
 }
 
-fn bound_legacy_control_socket_retains_receipt(private: bool) {
-    let host = MinimalHost::new();
+/// The kernel's socket name includes the full home path, including spaces.
+#[test]
+fn legacy_control_socket_in_spaced_home_preserves_receipt() {
+    bound_legacy_control_socket_retains_receipt(false, true, false);
+}
+
+/// Another directory's same-user endpoint is not runtime ownership of this file.
+#[test]
+fn unrelated_same_user_relative_socket_does_not_block_cleanup() {
+    bound_legacy_control_socket_retains_receipt(false, false, true);
+}
+
+fn bound_legacy_control_socket_retains_receipt(private: bool, spaced: bool, unrelated: bool) {
+    let mut host = MinimalHost::new();
+    if spaced {
+        let root = host.root.with_file_name(format!(
+            "{} space",
+            host.root.file_name().unwrap().to_str().unwrap()
+        ));
+        fs::rename(&host.root, &root).unwrap();
+        host.root = root;
+    }
     let control = host.base().join("sessions/plugins.sock");
-    fs::remove_file(&control).unwrap();
+    let bind_directory = if unrelated {
+        let directory = host.root.join("unrelated");
+        fs::create_dir(&directory).unwrap();
+        directory
+    } else {
+        fs::remove_file(&control).unwrap();
+        host.base()
+    };
+    let endpoint = if unrelated {
+        bind_directory.join("plugins.sock")
+    } else {
+        control.clone()
+    };
     // Relative bind plus chdir keeps cwd/descriptor paths from supplying an
     // unrelated liveness signal. EOF proves the same holder can still listen.
     let privacy = if private {
@@ -245,12 +277,20 @@ fn bound_legacy_control_socket_retains_receipt(private: bool) {
     } else {
         ""
     };
+    let address = if spaced {
+        "sys.argv[1]"
+    } else if unrelated {
+        "'plugins.sock'"
+    } else {
+        "'sessions/plugins.sock'"
+    };
     let program = format!(
-        "import os,socket,sys; s=socket.socket(socket.AF_UNIX); s.bind('sessions/plugins.sock'); os.chdir('/'); {privacy}print('ready',flush=True); sys.stdin.read(); s.listen(); print('listening',flush=True)"
+        "import os,socket,sys; s=socket.socket(socket.AF_UNIX); s.bind({address}); os.chdir('/'); {privacy}print('ready',flush=True); sys.stdin.read(); s.listen(); print('listening',flush=True)"
     );
     let mut holder = Command::new("python3")
         .args(["-u", "-c", &program])
-        .current_dir(host.base())
+        .arg(&endpoint)
+        .current_dir(&bind_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -274,6 +314,7 @@ fn bound_legacy_control_socket_retains_receipt(private: bool) {
     let cleanup = run(&rollback);
     let socket_preserved = control.exists();
     let receipt_retained = host.receipt().exists();
+    let endpoint_retained = endpoint.exists();
     drop(holder.stdin.take());
     let mut listening = [0; 10];
     holder
@@ -284,6 +325,19 @@ fn bound_legacy_control_socket_retains_receipt(private: bool) {
         .unwrap();
     assert_eq!(&listening, b"listening\n");
     assert!(holder.wait().unwrap().success());
+    if unrelated {
+        assert!(
+            inspection.status.success()
+                && cleanup.status.success()
+                && !socket_preserved
+                && !receipt_retained
+                && endpoint_retained,
+            "unrelated endpoint retained cleanup: inspection={:?}, cleanup={:?}, socket_preserved={socket_preserved}, receipt_retained={receipt_retained}",
+            inspection.status.code(),
+            cleanup.status.code()
+        );
+        return;
+    }
     assert!(
         !inspection.status.success()
             && !cleanup.status.success()
