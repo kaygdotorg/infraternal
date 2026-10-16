@@ -966,7 +966,7 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
 /// Share cold command startup through the existing reactor regardless of result type [243].
 /// The result slot outlives its adapter future, which stores the result before
 /// completing. Panics propagate to the caller's existing recovery boundary.
-#[cfg(feature = "plugin-server")]
+#[cfg(any(feature = "plugin-server", feature = "remote"))]
 fn block_on<T>(
     runtime: &tokio::runtime::Runtime,
     operation: impl std::future::Future<Output = T>,
