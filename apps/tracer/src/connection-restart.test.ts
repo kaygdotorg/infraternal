@@ -117,6 +117,56 @@ test("a second quick server close leaves the fast path and backs off", () => {
   }
 });
 
+test("a failed first recovery handshake exits the one quick retry", () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, random: Math.random };
+  let retry: (() => void) | undefined;
+  let retryDelay = 0;
+  const sockets: Socket[] = [];
+  class Socket {
+    static OPEN = 1;
+    readyState = 1;
+    binaryType = "";
+    onopen?: () => void;
+    onerror?: () => void;
+    onclose?: () => void;
+    onmessage?: (event: { data: ArrayBuffer }) => void;
+    constructor() { sockets.push(this); }
+    send() {}
+    close() { this.readyState = 3; this.onclose?.(); }
+  }
+  const welcome = (): ArrayBuffer => encodeMuxedFrame(0, {
+    type: "Welcome", connectionId: new Uint8Array(16).fill(1), resumeToken: new Uint8Array(32).fill(2), resumeWindowSeconds: 120,
+  }).slice().buffer as ArrayBuffer;
+  const handler: StreamHandler = {
+    onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => true, onStatus() {},
+  };
+  let connection: MuxConnection | undefined;
+  try {
+    Math.random = () => 0;
+    globals.window = { setTimeout: (callback: () => void, delay: number) => { retry = callback; retryDelay = delay; return 1; }, clearTimeout() {} };
+    globals.location = { protocol: "https:", host: "restart.example.test" };
+    globals.WebSocket = Socket;
+    connection = new MuxConnection();
+    connection.openStream(handler);
+    sockets[0]!.onopen?.();
+    sockets[0]!.onmessage?.({ data: welcome() });
+    connection.streamAttached(true, 1);
+    sockets[0]!.close();
+    expect(retryDelay).toBe(5);
+
+    retry?.();
+    sockets[1]!.onerror?.();
+    expect(retryDelay).toBeGreaterThanOrEqual(50);
+  } finally {
+    connection?.dispose();
+    Math.random = original.random;
+    for (const key of ["window", "location", "WebSocket"] as const) {
+      if (original[key] === undefined) delete globals[key]; else globals[key] = original[key];
+    }
+  }
+});
+
 test("a server close reason survives socket retirement and the next retry", () => {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket };
