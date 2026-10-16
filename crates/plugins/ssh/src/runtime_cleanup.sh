@@ -1,46 +1,40 @@
-# Validate stopped control sockets and receipt-authorized staging before retiring failed setup (#230).
+# Probe owned control sockets directly before retiring failed setup (#230).
 # Proof notes are beside RUNTIME_CLEANUP in install.rs [17][243].
-validate_control_socket() {
+control_socket() {
     control="$base/sessions/plugins.sock"
     [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0
     [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ] || exit 71
     [ -e "$control" ] || [ -L "$control" ] || return 0
-    [ "$(stat -c '%a' "$base/sessions")" = 700 ] || exit 71
-    [ -S "$control" ] && [ ! -L "$control" ] && [ -O "$control" ] && [ "$(stat -c '%h' "$control")" = 1 ] || exit 71
-    control_identity=$(stat -c '%d:%i' "$control")
-    rows=$(ss -x -a -n -e -p -H 2>&1) || exit 75
-    live=$(printf '%s\n' "$rows" | awk -v filesystem_inode="i${control_identity#*:}" '
-        BEGIN {
-            value = 0
-            for (position = 2; position <= length(filesystem_inode); position++)
-                value = (value * 10 + substr(filesystem_inode, position, 1)) % 4294967296
-            wanted = sprintf("ino:%.0f", value)
-        }
-        NF {
-            if ($1 !~ /^u_/) exit 2
-            mapped = 0
-            for (i = 1; i <= NF; i++) {
-                if ($i ~ /^ino:/) mapped = 1
-                if ($i == wanted) found = 1
-            }
-            if ($5 != "*" && substr($5, 1, 1) != "@" && !mapped) exit 2
-        }
-        END { if (found) print "live" }
-    ') || exit 75
-    [ -z "$live" ] || exit 73
-    control_real=$(CDPATH= cd -P "$base/sessions" && pwd -P)/plugins.sock
-    [ -r /proc/net/unix ] || exit 71
-    while read -r num refs protocol flags type state inode path; do
-        case "$path" in "$base"/*|"${control_real%/plugins.sock}"/*|plugins.sock|./plugins.sock) exit 73;; esac
-    done < /proc/net/unix
+    command -v python3 >/dev/null 2>&1 || exit 76
+    python3 -I -S -B - "$base" "$1" "$identity" <<'PYTHON' || exit $?
+import errno,os,socket,stat,sys
+try:
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW
+    root=os.open(sys.argv[1],flags)
+    base=os.fstat(root)
+    if base.st_uid!=os.geteuid() or stat.S_IMODE(base.st_mode)!=0o700 or '%d:%d'%(base.st_dev,base.st_ino)!=sys.argv[3]: sys.exit(71)
+    fd=os.open('sessions',flags,dir_fd=root)
+    parent=os.fstat(fd)
+    if parent.st_uid!=os.geteuid() or stat.S_IMODE(parent.st_mode)!=0o700: sys.exit(71)
+    def checked():
+        entry=os.stat('plugins.sock',dir_fd=fd,follow_symlinks=False)
+        if not stat.S_ISSOCK(entry.st_mode) or entry.st_uid!=os.geteuid() or entry.st_nlink!=1: sys.exit(71)
+        return entry.st_dev,entry.st_ino
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as peer:
+        peer.settimeout(0.25)
+        before=checked()
+        try:
+            peer.connect('/proc/self/fd/%d/plugins.sock'%fd)
+        except OSError as error:
+            if error.errno!=errno.ECONNREFUSED: sys.exit(77)
+        else: sys.exit(73)
+    if checked()!=before: sys.exit(77)
+    if sys.argv[2]=='retire': os.unlink('plugins.sock',dir_fd=fd)
+except OSError: sys.exit(77)
+PYTHON
 }
-retire_control_socket() {
-    validate_control_socket
-    if [ -e "$control" ] || [ -L "$control" ]; then
-        [ ! -L "$control" ] && [ "$(stat -c '%d:%i' "$control")" = "$control_identity" ] || exit 71
-        rm -- "$control"
-    fi
-}
+validate_control_socket() { control_socket inspect; }
+retire_control_socket() { control_socket retire; }
 
 validate_retired_stage() {
     stage="$base/.bootstrap-lock"

@@ -21,19 +21,20 @@ not_live() {
     fi
     [ -r /proc/net/unix ] || exit 75
     while read -r num refs protocol flags type state inode path; do
-        case "$path" in "$base"/*|"$base_real"/*) exit 73;; esac
         for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
-            [ -S "$entry" ] || continue
-            if [ "$entry" = "$base/sessions/plugins.sock" ]; then
-                case "$path" in plugins.sock|./plugins.sock) exit 73;; esac
-                continue
-            fi
-            case "$path" in "${entry##*/}"|*/"${entry##*/}") exit 73;; esac
+            [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || continue
+            [ "$entry" != "$base/sessions/plugins.sock" ] || continue
+            case "$path" in "$entry"|"$base_real/${entry#"$base/"}"|"${entry##*/}"|*/"${entry##*/}") exit 73;; esac
         done
     done < /proc/net/unix
     case "$base" in *[\*\?\[]*) exit 75;; esac
     case "$base_real" in *[\*\?\[]*) exit 75;; esac
-    set -- /proc/[0-9]*/exe /proc/[0-9]*/fd
+    set --
+    for process in /proc/[0-9]*; do
+        [ -O "$process" ] || continue
+        set -- "$@" "$process/exe" "$process/fd"
+        [ "$#" -le 8192 ] || exit 75
+    done
     [ "$#" -le 8192 ] || exit 75
     command -v find >/dev/null 2>&1 || exit 75
     if live=$(find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>/dev/null); then

@@ -413,15 +413,15 @@ mv -T "$base/.bootstrap-lock/ready" "$base/.bootstrap-ready"
 // These checks precede every lookup below sessions; links never authorize cleanup.
 // The service manager supplies the umask, so socket mode is not an ownership
 // receipt. The real private parent protects it for every inherited mode.
-// Unix diagnostics bridge the filesystem inode to the kernel socket inode
-// used by /proc/net/unix and socket:[inode] descriptors. Path resolution
-// cannot do this after a relative bind, chdir or rename. Missing diagnostics
-// cannot prove staleness. Inode collisions on other devices refuse safely.
-// The kernel Unix diagnostic VFS inode is u32 even on wide-inode filesystems.
-// Reduce decimal digits individually: full u64 values exceed awk precision
-// and signed shell arithmetic. Truncation collisions only retain more state.
-// A bind without listen and an accepted connection are live too. A relative
-// basename collision refuses conservatively, even outside this installation.
+// Probe through an opened, no-follow private directory rather than cached inode
+// diagnostics or global names: a replacement can reuse a retired inode. Only a
+// direct ECONNREFUSED proves staleness; connection, timeout and all other errors
+// retain state. Python's timed socket uses nonblocking connect with a 250 ms bound.
+// The probe lstat checks uid/type/link count before connecting and rechecks the
+// same device/inode immediately before unlinking relative to that directory.
+// Root identity remains tied to the receipt, including after server restart.
+// Python runs isolated without site imports, only for a retained control socket;
+// missing support refuses cleanup with a fixed actionable diagnostic.
 // An outside receipt is written only after service rollback, before retiring
 // stage. Its surviving markers may be any subset; validate known artifacts
 // without reading enrollment contents or following links before resuming removal.

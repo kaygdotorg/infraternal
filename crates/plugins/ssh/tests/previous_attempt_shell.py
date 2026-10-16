@@ -192,12 +192,33 @@ class EarlierSetup(unittest.TestCase):
         self.assertFalse(control.exists())
         self.assertFalse(self.receipt.exists())
 
-    def test_missing_socket_diagnostics_preserves_receipt(self):
+    def test_missing_socket_diagnostics_does_not_replace_direct_probe(self):
         self.listener.close()
         control = self.sessions.parent / 'plugins.sock'
         self.socket.rename(control)
         result = self.run_shell('ss() { return 1; }\n' + CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
-        self.assertEqual(result.returncode, 75)
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(control.exists())
+        self.assertFalse(self.receipt.exists())
+
+    def test_full_control_socket_backlog_preserves_receipt_as_uncertain(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        with socket.socket(socket.AF_UNIX) as listener, socket.socket(socket.AF_UNIX) as queued:
+            listener.bind(str(control))
+            listener.listen(0)
+            queued.connect(str(control))
+            result = self.run_shell(CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 77)
+        self.assertTrue(control.exists())
+        self.assertTrue(self.receipt.exists())
+
+    def test_unavailable_control_probe_preserves_receipt(self):
+        self.listener.close()
+        control = self.sessions.parent / 'plugins.sock'
+        self.socket.rename(control)
+        result = self.run_shell('python3() { return 76; }\n' + CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION'])
+        self.assertEqual(result.returncode, 76)
         self.assertTrue(control.exists())
         self.assertTrue(self.receipt.exists())
 

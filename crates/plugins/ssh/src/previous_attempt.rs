@@ -12,13 +12,8 @@ use crate::{
 // no_redirect has already permitted only the home alias and symlinks above
 // it. Resolve that alias so /proc descriptor links under the real home are
 // still recognized as live setup state.
-// Match live socket entries by canonical path or the exact UUID basename. The latter
-// also covers a listener bound through a relative path or a directory alias.
-// A collision refuses conservatively; it never authorizes removal.
-// A bound socket before listen, or an accepted connection after the
-// listener closes, is still live. Closed stale files have no kernel row.
-// Control sockets have a fixed basename on every host. Match only
-// our canonical directory or a relative bind, never another root.
+// UUID session sockets retain their existing liveness checks. The fixed control
+// socket is probed directly; a global basename never proves it belongs here.
 // Inspect executable and open-descriptor links in one native traversal,
 // never argv or environments. Per-link shell subprocesses grow with every
 // other workload's open files. Bound the process table and refuse paths
@@ -178,9 +173,10 @@ impl PreviousAttempt {
         );
         let setup_lock = include_str!("setup_lock.sh");
         let body = format!(
-            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\n# Revalidate listeners after ownership reads, immediately before removal.\nidentity={}\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
             crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&expected),
+            crate::transport::shell_quote(&self.identity),
             crate::install::FRESH_CLEANUP,
             crate::install::ROLLBACK_TRANSACTION
         );
@@ -210,6 +206,8 @@ pub fn classify(mut error: Failure) -> Failure {
         Some(71 | 72) => Failure::install(
             "Host provisioning cannot safely remove these leftovers because their ownership is not proven.",
         ),
+        Some(76) => Failure::install(crate::model::SOCKET_PROBE_UNAVAILABLE),
+        Some(77) => Failure::install(crate::model::SOCKET_PROBE_UNCERTAIN),
         _ => return error,
     };
     error.kind = classified.kind;

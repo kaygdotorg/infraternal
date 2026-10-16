@@ -2009,7 +2009,9 @@ async fn inode_reuse_listener(base: &std::path::Path) -> tokio::process::Child {
     use tokio::io::AsyncReadExt;
     // One pinned fixture process performs both allocations. This avoids
     // allocator locality changes between unrelated subprocesses; no inode
-    // value or kernel diagnostic is mocked. EOF retires only this listener.
+    // value or kernel diagnostic is mocked. Keep nonmatching allocations until
+    // reuse: otherwise a lower inode freed by staging retirement is repeatedly
+    // selected instead of the original socket. EOF retires only this listener.
     let mut listener = Command::new("python3")
         .args([
             "-u",
@@ -2024,12 +2026,19 @@ print('ready',flush=True)
 sys.stdin.readline()
 os.unlink(path)
 time.sleep(0.1)
+samples=[]
+retained=[]
 for attempt in range(256):
     s=socket.socket(socket.AF_UNIX); s.bind(path)
+    if attempt<8: samples.append(os.stat(path).st_ino)
     if os.stat(path).st_ino == identity: break
-    s.close(); os.unlink(path); time.sleep(0.01)
+    s.close()
+    saved='../retained-%d'%attempt
+    os.rename(path,saved); retained.append(saved); time.sleep(0.01)
 else:
+    print('original',identity,'samples',samples,file=sys.stderr)
     print('absent',flush=True); sys.exit(1)
+for saved in retained: os.unlink(saved)
 s.listen(); os.chdir('/')
 print('reused',flush=True)
 sys.stdin.read()
@@ -2068,15 +2077,15 @@ async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
     let snapshot = fixture.root.join("snapshot");
     let observed = fixture.root.join("observed");
     let replaced = fixture.root.join("replaced");
-    // Keep the actual diagnostic bytes and synchronize only the interleaving.
+    // Capture real diagnostics, then pause before the direct probe. The snapshot
+    // remains stale across a real inode reuse; it cannot authorize removal.
     executable(
-        &fixture.root.join("tools/ss"),
+        &fixture.root.join("tools/python3"),
         &format!(
-            "#!/bin/sh\n/usr/bin/ss \"$@\" > '{}' || exit $?\n: > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\ncat '{}'\n",
+            "#!/bin/sh\n/usr/bin/ss -x -a -n -e -p -H > '{}' || exit $?\n: > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexec /usr/bin/python3 \"$@\"\n",
             snapshot.display(),
             observed.display(),
             replaced.display(),
-            snapshot.display()
         ),
     );
     let cleanup = tokio::spawn(async move { transaction.rollback().await });

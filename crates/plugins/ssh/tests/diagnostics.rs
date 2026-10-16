@@ -302,3 +302,30 @@ fn script_status_diagnostics_are_honest_for_all_nonzero_codes() {
         assert_eq!(failure.exit_status, Some(status));
     }
 }
+
+/// Recovery distinguishes missing probe support and uncertain liveness from SSH failures.
+#[test]
+fn control_probe_statuses_preserve_actionable_setup_messages() {
+    use infraternal_plugin_ssh::model::{Failure, InstallMode, InstallStep};
+    for (status, fragment) in [(76, "Python 3"), (77, "could not determine")] {
+        for mode in [InstallMode::Rootless, InstallMode::Root] {
+            let mut failure = Failure::install("static").at(InstallStep::Install);
+            failure.exit_status = Some(status);
+            let inspected = infraternal_plugin_ssh::previous_attempt::classify(failure.clone());
+            let rollback = failure.clone().in_mode(mode);
+            for classified in [inspected, rollback] {
+                assert!(classified.message.contains(fragment));
+                assert!(classified.message.contains("files were kept"));
+                assert_eq!(classified.exit_status, Some(status));
+                assert_eq!(classified.diagnostic_kind(), "setup");
+            }
+            let joined = failure.at(InstallStep::Join);
+            let expected = joined.message;
+            assert_eq!(
+                joined.in_mode(mode).message,
+                expected,
+                "the uploaded command's status is not a probe receipt"
+            );
+        }
+    }
+}

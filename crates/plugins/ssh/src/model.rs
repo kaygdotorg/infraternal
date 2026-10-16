@@ -4,6 +4,9 @@ use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 
+pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs Python 3 on this host to check its local control socket. Its files were kept.";
+pub(crate) const SOCKET_PROBE_UNCERTAIN: &str = "Setup could not determine whether its local control socket is still in use. Its files were kept; check host permissions and retry.";
+
 /// A validated destination; fields are private to prevent bypassing shell/option safety.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Destination {
@@ -342,7 +345,7 @@ impl Failure {
             return self;
         }
         match (self.exit_status, mode) {
-            (Some(71..=73), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
+            (Some(71..=77), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
                 self.message = "Setup could not verify ownership or permissions of its files on this host. Check ~/.local/share/infraternal, its parent folders and the infraternal service files, then try again.";
             }
@@ -357,6 +360,8 @@ impl Failure {
                 self.message =
                     "Setup is already running on this host. Wait for it to finish, then try again.";
             }
+            (Some(76), _) => self.message = SOCKET_PROBE_UNAVAILABLE,
+            (Some(77), _) => self.message = SOCKET_PROBE_UNCERTAIN,
             _ => {}
         }
         if self.exit_status.is_some() {
