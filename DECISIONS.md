@@ -3025,3 +3025,31 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        input to pixel p95 ≤50 ms; join ≤300 ms.
      - **Synthetic protocol coverage (Q7)** until a cleaned-up recording from
        the real Mac exists.
+293. **VNC round 2 (owner, 2026-10-16, #223; extends D292):**
+     - **Automatic text recognition (Q8):** text on a remote screen becomes
+       selectable, copyable and findable in search on its own. It runs only
+       after the screen settles and only on the regions that changed. It is
+       lazy and must never stall search or the window.
+     - **Where it runs (Q9):** on the server, which holds the screen copy,
+       and through the system's own recognition on Macs with our infraternal
+       agent. The engine is chosen by the owner from measured candidates.
+     - **Type a text field into the remote (Q10):** one toolbar input types
+       its text at the remote cursor on Enter, with progress and cancel,
+       adapting its speed to the remote; works on login and boot screens;
+       ⌘⇧V pastes by typing.
+     - **Quality is automatic by default, and the person can choose (Q11):**
+       resolution, frame rate and quality can be set, because automatic
+       detection can be wrong (e.g. a LAN machine left lossy). App windows,
+       VNC and later RDP are presented to people as one thing, **Remote
+       Desktop**, with global settings in Settings → Remote Desktop and a
+       section per kind.
+     - **Fit by default, zoom toward 1:1 and pan (Q12).**
+     - **Keyboard (Q13):** keys behave as they do in terminal windows.
+     - **VNC password (Q14):** none where our infraternal agent can sign in
+       locally; elsewhere remembered only after it is typed, sealed with the
+       person's passkey.
+     - **Mac whole desktop (Q15):** our own capture when the helper has its
+       permissions, otherwise Screen Sharing, chosen automatically; the
+       window says which.
+     - **Curtain (Q16):** later, shown only where the machine proves it
+       works.
