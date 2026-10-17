@@ -991,6 +991,8 @@ impl RemoteLink {
         match &link.transport {
             LinkTransport::Quic(native) => Some(native.connection.clone()),
             LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
         }
     }
 }
