@@ -294,5 +294,5 @@ async fn a_window_full_at_doubt_start_is_told_on_a_later_tick() {
     report_doubt(&mut route, &mut doubted, &attachments);
     assert!(matches!(full_rx.try_recv(), Ok(TerminalOutput::Recovered)));
     assert!(matches!(free_rx.try_recv(), Ok(TerminalOutput::Recovered)));
-    assert!(doubted.is_empty());
+    assert_eq!(doubted, Vec::<u64>::new());
 }
