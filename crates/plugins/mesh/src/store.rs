@@ -54,25 +54,31 @@ impl Snapshot {
 }
 /// The name a machine is called by, from an address (`user@minipc01`, `minipc01.lan:22`) or a reported hostname.
 ///
-/// Takes the first DNS label, lowercased; an IP address or anything that is not a valid Mesh host name gives
-/// nothing, so a numeric address never becomes a name and the caller falls back to the next source.
+/// Takes the first DNS label, lowercased. Anything address-like gives nothing, so a numeric address never becomes
+/// a name and the caller falls back to the next source: IPv4 (also shortened, `10.69.69`), IPv6 in any spelling
+/// (bracketed, with a zone `%eth0` or `%25eth0`), and labels made only of digits. So does anything that is not a
+/// valid Mesh host name.
 #[must_use]
 pub fn machine_name(source: &str) -> Option<String> {
     let host = source
         .rsplit_once('@')
         .map_or(source, |(_, host)| host)
         .trim();
-    if host.parse::<std::net::IpAddr>().is_ok()
-        || host.parse::<SocketAddr>().is_ok()
-        || host.starts_with('[')
-    {
+    // Two colons, a bracket or a zone mark only occur in IPv6 spellings; one colon separates a port.
+    if host.matches(':').count() > 1 || host.contains(['[', '%']) {
         return None;
     }
     let host = host.split_once(':').map_or(host, |(host, _)| host);
-    if host.parse::<std::net::IpAddr>().is_ok() {
+    if host
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
         return None;
     }
     let label = host.split('.').next()?.to_ascii_lowercase();
+    if label.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     crate::api::validate_host(&label).ok()?;
     Some(label)
 }
