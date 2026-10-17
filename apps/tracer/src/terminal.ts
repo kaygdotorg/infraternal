@@ -871,7 +871,9 @@ export class TerminalClient {
             this.connectionIsResume = true;
             this.replayResponseFence = undefined;
             this.suppressReplayResponses = true;
-            this.setStatus("Catching up…");
+            this.setStatus(typeof notice.reason === "string"
+              ? plainCloseReason(notice.reason)
+              : "Catching up…");
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {

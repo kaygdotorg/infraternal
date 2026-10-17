@@ -1,29 +1,46 @@
 /**
- * What a person reads when the server or the host's agent closes a terminal stream or the connection.
- * The servers send short English reasons (crates/infraternal-server/src/{embedded,websocket}.rs and
- * crates/infraternal-agent/src/daemon.rs); they are for logs, not for people. Every known reason maps to a plain
- * sentence about what happened to the person's terminal. An unknown or empty reason gets the fallback and the raw
- * text goes to the console only.
+ * What a person reads when the server or the host's infraternal agent closes a terminal stream or the connection.
+ * The server sends short, content-free close reasons; every known reason maps to an explanation in the existing
+ * terminal status surface. Unknown text is discarded because close reasons are untrusted input.
  */
 const KNOWN: Record<string, string> = {
-  "detached": "This window was disconnected from its terminal. Open it again to reconnect.",
-  "attachment ended": "This window was disconnected from its terminal. Open it again to reconnect.",
-  "reader fell behind; reattach": "The screen could not keep up, so this window was reconnected.",
-  "connection unresponsive": "The connection did not respond in time.",
-  "connection closed": "The connection to the server ended.",
-  "connection ended": "The connection to the server ended.",
-  "terminal shim disconnected": "The terminal on the host stopped responding.",
-  "terminal command queue full; reattach and replay unacknowledged input": "Too much typing was waiting for the host. Open the terminal again to continue.",
-  "shim lacks restart-safe input capability": "The infraternal agent on that host is too old for this terminal. Update it on the host.",
-  "shim refused terminal request": "The host would not open this terminal.",
+  "detached": "This window was detached from its terminal.",
+  "attachment ended": "Connection closed: the terminal stream ended.",
+  "reader fell behind; reattach": "Connection closed: the terminal reader fell behind and is reconnecting.",
+  "connection unresponsive": "Connection closed: the server did not respond in time.",
+  "connection closed": "Connection closed: the server ended the connection.",
+  "connection ended": "Connection closed: the server ended the connection.",
+  "session ended": "The terminal session ended.",
+  "input queue full": "Connection closed: terminal input exceeded the host queue limit.",
+  "terminal input exceeded the flow-control limit": "Connection closed: terminal input exceeded its flow-control limit.",
+  "terminal route unresponsive": "Connection closed: the terminal on the host stopped responding.",
+  "remote stream unavailable": "Connection closed: the infraternal agent lost its connection to the server.",
+  "standby writer unavailable": "Connection closed: the host could not resume this terminal stream.",
+  "other": "Connection closed: the server or host ended the terminal stream.",
+  "terminal shim disconnected": "Connection closed: the terminal on the host stopped responding.",
+  "terminal command queue full; reattach and replay unacknowledged input": "Connection closed: terminal input exceeded the host queue limit.",
+  "shim lacks restart-safe input capability": "Connection closed: the host infraternal agent needs an update.",
+  "shim refused terminal request": "Connection closed: the host refused the terminal request.",
+  "browser closed the connection": "Connection closed: the browser closed the connection.",
+  "the infraternal agent ended the terminal stream": "Connection closed: the infraternal agent ended the terminal stream.",
+  "the infraternal agent lost its connection to the server": "Connection closed: the infraternal agent lost its connection to the server.",
+  "the host could not accept the terminal attachment": "Connection closed: the host could not accept the terminal attachment.",
+  "terminal output credit exceeded its limit": "Connection closed: terminal output exceeded its flow-control limit.",
+  "a terminal frame exceeded the size limit": "Connection closed: a terminal frame exceeded the size limit.",
+  "the terminal stream sent an invalid protocol frame": "Connection closed: the terminal stream sent an invalid protocol frame.",
+  "the server refused the terminal attachment": "Connection closed: the server refused the terminal attachment.",
+  "the server refused to resume the connection": "Connection closed: the server refused to resume the connection.",
+  "the server stopped receiving connection replies": "Connection closed: the server stopped receiving connection replies.",
+  "the server could not keep up with connection replies": "Connection closed: the server could not keep up with connection replies.",
+  "the server could not write to the connection": "Connection closed: the server could not write to the connection.",
+  "the server could not continue the terminal stream": "Connection closed: the server could not continue the terminal stream.",
+  "window closed": "This window was closed.",
+  "tracer connection rotation": "The connection is being refreshed.",
+  "tracer resume probe": "The connection check ended the socket.",
 };
 
-/** The plain sentence for a close reason. `fallback` says what happened when the reason is unknown. */
-export function plainCloseReason(reason: string | undefined, fallback = "The terminal session ended."): string {
+/** The safe sentence for a close reason. Unknown text is never copied into the UI or console. */
+export function plainCloseReason(reason: string | undefined, fallback = "Connection closed: the server did not provide a safe reason."): string {
   const key = (reason ?? "").trim();
-  if (!key) return fallback;
-  const known = KNOWN[key];
-  if (known) return known;
-  console.warn(`unmapped close reason: ${key}`);
-  return fallback;
+  return Object.prototype.hasOwnProperty.call(KNOWN, key) ? KNOWN[key]! : fallback;
 }

@@ -23,7 +23,7 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
       clearTimeout(clearTimer);
       clearTimer = 0;
       relaying = true;
-      const connectionFailure = message === "The connection to the server ended." || message === "The server closed the connection." || message === "The connection did not respond in time.";
+      const connectionFailure = message.startsWith("Connection closed:") || message === "The connection to the server ended." || message === "The server closed the connection." || message === "The connection did not respond in time.";
       // A retry changes the hidden status several times. Keep its reason visible across those routine states, and
       // do not recreate the same toast on every immediate close. The toast's own timeout bounds each display.
       const repeatedConnectionReason = connectionFailure && message === lastMessage;
