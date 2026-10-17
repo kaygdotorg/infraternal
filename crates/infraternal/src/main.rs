@@ -27,6 +27,8 @@ mod restart_binary;
 mod restart_image;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
+#[cfg(feature = "ssh")]
+mod ssh_internal;
 #[cfg(all(feature = "ssh", feature = "remote"))]
 mod ssh_session;
 
@@ -96,6 +98,10 @@ fn run_invocation() -> ExitCode {
     }
     #[cfg(feature = "plugin-agent")]
     if let Some(result) = embedded_cli::run_if_requested() {
+        return result;
+    }
+    #[cfg(feature = "ssh")]
+    if let Some(result) = ssh_internal::run_if_requested() {
         return result;
     }
     // Global JSON is a flag; plugin ownership selects lazy metadata, while
