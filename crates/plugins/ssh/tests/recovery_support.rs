@@ -225,32 +225,42 @@ fn review_stale_receipt_recovers_without_host_python() {
 /// A process still owns its bound control socket during the bind-to-listen gap.
 #[test]
 fn review_bound_control_socket_before_listen_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(false, false, false);
+    bound_legacy_control_socket_retains_receipt(false, None, false);
 }
 
 /// Restricted descriptor inspection cannot prove a bound legacy endpoint stale.
 #[test]
 fn private_legacy_control_socket_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(true, false, false);
+    bound_legacy_control_socket_retains_receipt(true, None, false);
 }
 
 /// The kernel's socket name includes the full home path, including spaces.
 #[test]
 fn legacy_control_socket_in_spaced_home_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(false, true, false);
+    bound_legacy_control_socket_retains_receipt(false, Some(" space"), false);
 }
 
 /// Another directory's same-user endpoint is not runtime ownership of this file.
 #[test]
 fn unrelated_same_user_relative_socket_does_not_block_cleanup() {
-    bound_legacy_control_socket_retains_receipt(false, false, true);
+    bound_legacy_control_socket_retains_receipt(false, None, true);
 }
 
-fn bound_legacy_control_socket_retains_receipt(private: bool, spaced: bool, unrelated: bool) {
+/// A kernel socket name can contain a newline without ending runtime ownership.
+#[test]
+fn legacy_control_socket_in_newline_home_preserves_receipt() {
+    bound_legacy_control_socket_retains_receipt(false, Some("\nname"), false);
+}
+
+fn bound_legacy_control_socket_retains_receipt(
+    private: bool,
+    home_suffix: Option<&str>,
+    unrelated: bool,
+) {
     let mut host = MinimalHost::new();
-    if spaced {
+    if let Some(suffix) = home_suffix {
         let root = host.root.with_file_name(format!(
-            "{} space",
+            "{}{suffix}",
             host.root.file_name().unwrap().to_str().unwrap()
         ));
         fs::rename(&host.root, &root).unwrap();
@@ -277,7 +287,7 @@ fn bound_legacy_control_socket_retains_receipt(private: bool, spaced: bool, unre
     } else {
         ""
     };
-    let address = if spaced {
+    let address = if home_suffix.is_some() {
         "sys.argv[1]"
     } else if unrelated {
         "'plugins.sock'"
