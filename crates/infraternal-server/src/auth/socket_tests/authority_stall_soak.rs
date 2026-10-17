@@ -1,12 +1,18 @@
 //! Measurement harness for #240, ignored by default: real router, real SQLite,
 //! real browser sockets and a host fixture that echoes terminal input.
 //!
-//! `soak` runs several terminal sockets typing every 10 ms while the only store
-//! connection is held for random stalls, and counts sockets that close. `rtt`
-//! measures one terminal's echo round trip with a fast store, to show what the
-//! authority read costs per frame. Settings come from the environment:
-//! `SOAK_SECS`, `SOAK_TERMINALS`, `SOAK_STALL_MIN_MS`, `SOAK_STALL_MAX_MS`,
-//! `SOAK_STALL_EVERY_MS`, `RTT_SAMPLES`.
+//! `soak` runs several terminal sockets typing every 10 ms through random store
+//! stalls, and counts sockets that close. A probe meanwhile reads through the
+//! same pool every 20 ms, as the rest of the server would, and reports how long
+//! it waited. `SOAK_HOLD` picks the stall: `conn` holds a pool connection (with
+//! the default one-connection memory store, the only one), `write` holds
+//! SQLite's write lock from a connection outside the pool after making the
+//! session due for renewal, `mixed` alternates. `SOAK_STORE=file` uses the
+//! production pool shape instead: a WAL file, eight connections, 5 s busy
+//! timeout (`write` and `mixed` need it). `rtt` measures one terminal's echo
+//! round trip with a fast store, to show what the authority read costs per
+//! frame. Other settings: `SOAK_SECS`, `SOAK_TERMINALS`, `SOAK_STALL_MIN_MS`,
+//! `SOAK_STALL_MAX_MS`, `SOAK_STALL_EVERY_MS`, `RTT_SAMPLES`.
 // Counts and percentiles are printed for people; none of these casts can
 // reach a value where precision or width matters.
 #![allow(
@@ -15,6 +21,8 @@
     clippy::cast_sign_loss
 )]
 use super::*;
+use sqlx::Connection;
+use sqlx::sqlite::{SqliteConnection, SqliteJournalMode, SqliteSynchronous};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -242,8 +250,50 @@ async fn typist(
     }
 }
 
+/// The production pool shape on a fresh WAL file, and its connect options for
+/// the outside writer.
+async fn file_store() -> (Fixture, SqliteConnectOptions, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("infraternal-soak240-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(dir.join("infraternal.sqlite"))
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(options.clone())
+        .await
+        .unwrap();
+    let (auth, token) = empty_with_pool(pool).await;
+    (fixture_with_bootstrap(auth, token).await, options, dir)
+}
+
+/// Read through the pool every 20 ms until `until`, as other server work
+/// would, and return each read's total wait in microseconds.
+async fn probe_pool(pool: SqlitePool, until: tokio::time::Instant) -> Vec<u64> {
+    let mut waits = Vec::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    while tokio::time::Instant::now() < until {
+        tick.tick().await;
+        let started = std::time::Instant::now();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions").fetch_one(&pool),
+        )
+        .await;
+        waits.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+    }
+    waits
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement for #240; run explicitly on the perf VM"]
+#[allow(clippy::too_many_lines)] // One run: setup, stall loop and the report line.
 async fn authority_stall_soak() {
     let _guard = SERIAL.lock().await;
     let secs = setting("SOAK_SECS", 300);
@@ -253,10 +303,23 @@ async fn authority_stall_soak() {
         setting("SOAK_STALL_MAX_MS", 300),
     );
     let every = setting("SOAK_STALL_EVERY_MS", 2000);
-    let f = Arc::new(fixture().await);
+    let stall_kind = std::env::var("SOAK_HOLD").unwrap_or_else(|_| "conn".into());
+    let store = std::env::var("SOAK_STORE").unwrap_or_else(|_| "memory".into());
+    let (f, file) = if store == "file" {
+        let (f, options, dir) = file_store().await;
+        (f, Some((options, dir)))
+    } else {
+        assert_eq!(
+            stall_kind, "conn",
+            "SOAK_HOLD={stall_kind} needs SOAK_STORE=file"
+        );
+        (fixture().await, None)
+    };
+    let f = Arc::new(f);
     let (address, server, host) = soak_server(&f).await;
     let until = tokio::time::Instant::now() + Duration::from_secs(secs);
     let tally = Arc::new(Tally::default());
+    let probe = tokio::spawn(probe_pool(f.auth.pool.clone(), until));
     let mut typists = Vec::new();
     for index in 0..terminals {
         typists.push(tokio::spawn(typist(
@@ -269,6 +332,7 @@ async fn authority_stall_soak() {
     }
     let mut stalls = 0_u64;
     let mut stalled_ms = 0_u64;
+    let mut write_holds = 0_u64;
     let mut seed = 0x2400_u64;
     if stall_max > 0 {
         while tokio::time::Instant::now() < until {
@@ -277,9 +341,27 @@ async fn authority_stall_soak() {
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
             let length = stall_min + (seed >> 33) % (stall_max - stall_min + 1);
-            let held = f.auth.pool.acquire().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(length)).await;
-            drop(held);
+            let write = stall_kind == "write" || (stall_kind == "mixed" && stalls % 2 == 1);
+            if let (true, Some((options, _))) = (write, &file) {
+                // Due for its once-a-minute renewal: the next frame wants to write.
+                sqlx::query("UPDATE sessions SET expires=unixepoch()+600 WHERE user_id=?")
+                    .bind(&f.user)
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+                let mut writer = SqliteConnection::connect_with(options).await.unwrap();
+                sqlx::query("BEGIN IMMEDIATE")
+                    .execute(&mut writer)
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(length)).await;
+                sqlx::query("ROLLBACK").execute(&mut writer).await.unwrap();
+                write_holds += 1;
+            } else {
+                let held = f.auth.pool.acquire().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(length)).await;
+                drop(held);
+            }
             stalls += 1;
             stalled_ms += length;
         }
@@ -287,15 +369,26 @@ async fn authority_stall_soak() {
     for typist in typists {
         typist.await.unwrap();
     }
+    let mut waits = probe.await.unwrap();
+    waits.sort_unstable();
+    let at = |q: f64| waits[((waits.len() as f64 * q) as usize).min(waits.len() - 1)];
     println!(
-        "SOAK secs={secs} terminals={terminals} stalls={stalls} stall_ms={stall_min}..{stall_max} stalled_total_ms={stalled_ms} closes={} gaps={} echoes={} worst_echo_ms={:.1}",
+        "SOAK secs={secs} terminals={terminals} store={store} hold={stall_kind} stalls={stalls} write_holds={write_holds} stall_ms={stall_min}..{stall_max} stalled_total_ms={stalled_ms} closes={} gaps={} echoes={} worst_echo_ms={:.1} db_wait_n={} db_wait_p50_ms={:.2} db_wait_p99_ms={:.2} db_wait_max_ms={:.1} db_waits_over_100ms={}",
         tally.closes.load(Ordering::Relaxed),
         tally.gaps.load(Ordering::Relaxed),
         tally.echoes.load(Ordering::Relaxed),
         tally.worst_echo_us.load(Ordering::Relaxed) as f64 / 1000.0,
+        waits.len(),
+        at(0.50) as f64 / 1000.0,
+        at(0.99) as f64 / 1000.0,
+        waits[waits.len() - 1] as f64 / 1000.0,
+        waits.iter().filter(|wait| **wait > 100_000).count(),
     );
     server.abort();
     host.abort();
+    if let Some((_, dir)) = file {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
