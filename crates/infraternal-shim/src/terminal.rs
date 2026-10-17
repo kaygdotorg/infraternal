@@ -263,7 +263,11 @@ impl Terminal {
             self.bounded,
             self.host.clone(),
         )?;
-        restored.host = self.host.take();
+        // Clone, not take: a later error below leaves `self` in place.
+        #[cfg(feature = "process-per-user")]
+        {
+            restored.host.clone_from(&self.host);
+        }
         #[cfg(not(feature = "process-per-user"))]
         let mut restored = Self::new(self.dimensions.0, self.dimensions.1)?;
         let complete = ring.filter(|ring| ring.start() == 0 && self.recovery == Recovery::Exact);
