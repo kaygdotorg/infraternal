@@ -190,7 +190,7 @@ fn diagnostic_owner_matches_a_real_bound_socket() {
 
 /// Whitespace separates kernel columns, never pieces of the socket name.
 #[test]
-fn legacy_rows_preserve_names_and_refuse_unclear_identity() {
+fn legacy_rows_preserve_names_and_identifiers() {
     for name in [
         "sessions/plugins.sock",
         "/home/test user/.local/share/infraternal/sessions/plugins.sock",
@@ -198,13 +198,16 @@ fn legacy_rows_preserve_names_and_refuse_unclear_identity() {
         "/home/tést user/.local/share/infraternal/sessions/plugins.sock",
     ] {
         let row = format!("00000000: 00000002 00000000 00010000 0001 01 1234 {name}");
-        assert_eq!(legacy_row(&row).unwrap(), Some((1234, name)));
+        assert_eq!(legacy_row(&row), Some(("1234", name)));
     }
-    assert!(legacy_row("00000000: 2 0 0 1 1 unknown sessions/plugins.sock").is_err());
-    assert_eq!(legacy_row("00000000: 2 0 0 1 1 1234").unwrap(), None);
+    assert_eq!(
+        legacy_row("00000000: 2 0 0 1 1 unknown sessions/plugins.sock"),
+        Some(("unknown", "sessions/plugins.sock"))
+    );
+    assert_eq!(legacy_row("00000000: 2 0 0 1 1 1234"), None);
     for length in 0..128 {
         let row = " ".repeat(length);
-        assert_eq!(legacy_row(&row).unwrap(), None);
+        assert_eq!(legacy_row(&row), None);
     }
 }
 

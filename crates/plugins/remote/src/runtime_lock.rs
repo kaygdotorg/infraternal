@@ -146,7 +146,7 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
 
 // Only the seven kernel columns are whitespace-separated. The remaining
 // socket name is opaque: a home-directory space cannot shorten its identity.
-fn legacy_row(row: &str) -> io::Result<Option<(u32, &str)>> {
+fn legacy_row(row: &str) -> Option<(&str, &str)> {
     let mut rest = row;
     let mut inode = "";
     for _ in 0..7 {
@@ -161,9 +161,9 @@ fn legacy_row(row: &str) -> io::Result<Option<(u32, &str)>> {
     }
     let name = rest.trim_ascii_start();
     if name.is_empty() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some((inode.parse().map_err(|_| refused())?, name)))
+    Some((inode, name))
 }
 
 // Legacy runtimes did not hold the lifetime lock. A refused connect alone is
@@ -174,7 +174,7 @@ fn legacy_row(row: &str) -> io::Result<Option<(u32, &str)>> {
 fn legacy_bound(runtime: &Path, expected: &fs::Metadata) -> io::Result<bool> {
     let rows = fs::read_to_string("/proc/net/unix")?;
     for row in rows.lines().skip(1) {
-        let Some((inode, name)) = legacy_row(row)? else {
+        let Some((inode, name)) = legacy_row(row) else {
             continue;
         };
         if name.starts_with('@') {
@@ -189,6 +189,8 @@ fn legacy_bound(runtime: &Path, expected: &fs::Metadata) -> io::Result<bool> {
         {
             continue;
         }
+        // Interpret only candidates; unrelated kernel identifiers need no conversion.
+        let inode = inode.parse::<u32>().map_err(|_| refused())?;
         if socket_matches(inode, expected)? {
             return Ok(true);
         }
