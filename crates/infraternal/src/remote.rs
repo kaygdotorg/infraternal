@@ -429,7 +429,7 @@ impl infraternal_agent::remote_renewal::CertificatePublisher for IdentityPublish
 #[path = "remote_tests.rs"]
 mod tests;
 
-/// The internal independent service receives a bounded public plan only on stdin.
+/// The internal independent service consumes the bounded public plan its infraternal agent left (#235).
 pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if arguments
@@ -439,17 +439,14 @@ pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
         return None;
     }
     let execute = || -> io::Result<()> {
-        use std::io::Read;
         if arguments.len() != 2 {
             return Err(refused());
         }
-        let mut bytes = Vec::new();
-        std::io::stdin().take(8193).read_to_end(&mut bytes)?;
-        if bytes.len() > 8192 {
-            return Err(refused());
-        }
-        let plan = serde_json::from_slice(&bytes).map_err(|_| refused())?;
         let home = std::env::var_os("HOME").map_or_else(|| "/".into(), PathBuf::from);
+        let plan = infraternal_plugin_remote::uninstall::take_plan(
+            &home,
+            nix::unistd::Uid::effective().as_raw(),
+        )?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

@@ -222,84 +222,104 @@ impl AgentPlugin for UninstallPlugin {
             });
         }
         let plan = serde_json::to_vec(&self.context).map_err(|_| PluginError::Rejected)?;
-        // This runs on the synchronous plugin worker thread, which has no async
-        // runtime (#235): start and feed the launcher with blocking process
-        // primitives only. Nothing here may depend on an ambient reactor.
+        let path = plan_path(&self.home, self.uid);
+        write_plan(&path, &plan).map_err(|_| PluginError::Rejected)?;
+        // The helper runs as a separate transient service so it survives this
+        // daemon's stop. It is started only after the reply is written, with no
+        // stdin pipe and without waiting: both of those need the manager's bus,
+        // which hosts without a per-user bus lack (#235). Starting a unit needs
+        // only the manager's private socket. The plan travels in a private file.
         let mut command = std::process::Command::new(self.launcher);
         infraternal_shim::prepare_child(&mut command);
         if self.uid != 0 {
             command.arg("--user");
         }
-        // Private stdin is inherited by a separate transient service; it survives
-        // the owned daemon's stop. A dropped writer closes it without any plan.
-        let mut child = command
-            .args([
-                "--quiet",
-                "--collect",
-                "--pipe",
-                "--wait",
-                "--property=RuntimeMaxSec=30",
-            ])
+        command
+            .args(["--quiet", "--collect", "--property=RuntimeMaxSec=30"])
             .arg(std::env::current_exe().map_err(|_| PluginError::Rejected)?)
             .arg("--bootstrap-uninstall")
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| PluginError::Rejected)?;
-        let Some(stdin) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(PluginError::Rejected);
-        };
+            .stderr(Stdio::null());
         let mut handoff = Handoff {
-            child: Some(child),
-            stdin: Some(stdin),
+            command: Some(command),
+            plan: path,
         };
         Ok(ActionReply {
             json: br#"{"state":"accepted","cleanup":"pending"}"#.to_vec(),
-            after_write: Some(Box::new(move || handoff.deliver(&plan))),
+            after_write: Some(Box::new(move || handoff.start())),
         })
     }
 }
-/// The started launcher and its private plan pipe, owned until the reply is written.
+/// The private plan file the helper consumes, inside the installation it removes.
+const PLAN: &str = ".uninstall-plan";
+fn plan_path(home: &Path, uid: u32) -> PathBuf {
+    if uid == 0 {
+        PathBuf::from("/var/lib/infraternal").join(PLAN)
+    } else {
+        home.join(".local/share/infraternal").join(PLAN)
+    }
+}
+fn write_plan(path: &Path, plan: &[u8]) -> io::Result<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    // A plan left by a crash between writing and starting is replaced, never followed.
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(plan)?;
+    file.sync_all()
+}
+/// Read and consume the plan the infraternal agent left for its uninstall helper.
+/// # Errors
+/// Refuses a missing, foreign, shared-writable, oversized or malformed plan.
+pub fn take_plan(home: &Path, uid: u32) -> io::Result<Context> {
+    let path = plan_path(home, uid);
+    let body = public_file(&path, uid, 8192);
+    // Consume it whatever it holds: one accepted request starts one cleanup.
+    let _ = std::fs::remove_file(&path);
+    serde_json::from_str(&body?).map_err(|_| denied())
+}
+/// The prepared launcher and its plan, owned until the reply is written.
 ///
-/// Dropping it undelivered (the reply write failed) kills and reaps the launcher;
-/// the helper then reads end-of-file instead of a plan and removes nothing.
+/// Dropping it unstarted (the reply write failed) removes the plan, so nothing
+/// can act on a request the server never saw accepted.
 struct Handoff {
-    child: Option<std::process::Child>,
-    stdin: Option<std::process::ChildStdin>,
+    command: Option<std::process::Command>,
+    plan: PathBuf,
 }
 impl Handoff {
-    fn deliver(&mut self, plan: &[u8]) {
-        use std::io::Write;
-        // The plan is at most 8 KiB, below the kernel's minimum pipe capacity,
-        // so this write completes without waiting for the helper to read.
-        let Some(mut stdin) = self.stdin.take() else {
+    fn start(&mut self) {
+        let Some(mut command) = self.command.take() else {
             return;
         };
-        if stdin.write_all(plan).is_err() {
-            return;
-        }
-        drop(stdin);
-        // The launcher waits for the transient unit (at most RuntimeMaxSec);
-        // reap it off the caller's thread. If no thread can start, the exited
-        // launcher stays unreaped only until the helper stops this process.
-        if let Some(mut child) = self.child.take() {
-            let _ = std::thread::Builder::new()
-                .name("uninstall-handoff".into())
-                .spawn(move || {
-                    let _ = child.wait();
-                });
+        match command.spawn() {
+            // The launcher returns once the unit is queued; reap it off the
+            // caller's thread. If no thread starts, the exited launcher stays
+            // unreaped only until the helper stops this process.
+            Ok(mut child) => {
+                let _ = std::thread::Builder::new()
+                    .name("uninstall-handoff".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&self.plan);
+            }
         }
     }
 }
 impl Drop for Handoff {
     fn drop(&mut self) {
-        drop(self.stdin.take());
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if self.command.is_some() {
+            let _ = std::fs::remove_file(&self.plan);
         }
     }
 }
@@ -505,17 +525,29 @@ mod tests {
         plugin.launcher = "true";
         let input =
             serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":false})).unwrap();
+        let plan = plan_path(&home, uid);
+        let observed = plan.clone();
         let worker = std::thread::spawn(move || {
-            let reply = plugin.call_with_reply(crate::UNINSTALL.id, &input).unwrap();
+            // An unwritten reply is dropped: its plan must not survive it.
+            let unwritten = plugin.call_with_reply(crate::UNINSTALL.id, &input).unwrap();
+            assert!(observed.exists());
+            drop(unwritten);
+            assert!(!observed.exists(), "a dropped reply left its plan");
             // The reply writer runs this after a successful write; it must not
-            // need a runtime either, and dropping an unwritten reply is inert.
+            // need a runtime either.
+            let reply = plugin.call_with_reply(crate::UNINSTALL.id, &input).unwrap();
             reply.after_write.unwrap()();
             reply.json
         })
         .join();
+        let taken = take_plan(&home, uid);
+        let consumed = !plan.exists();
         std::fs::remove_dir_all(home).unwrap();
         let json = worker.expect("the uninstall handoff panicked off the async runtime");
         assert_eq!(json, br#"{"state":"accepted","cleanup":"pending"}"#);
+        // The helper finds exactly the plan for this installation, once.
+        assert_eq!(taken.unwrap().host, context.host);
+        assert!(consumed);
     }
     #[tokio::test]
     async fn retirement_signals_the_shell_after_its_foreground_job_exits() {
