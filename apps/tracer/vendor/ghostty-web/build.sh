@@ -74,6 +74,12 @@ if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; 
     exit 1
 fi
 
+# Ghostty zeroes page memory only in safe builds and trusts the OS otherwise. The
+# browser build is freestanding and pools pages inside one shared WebAssembly
+# instance, so a new terminal would inherit an earlier terminal's screen. This
+# patch is inside the submodule, so it applies after the submodule update.
+git -C "$source_dir/ghostty" apply "$vendor_dir/zero-pages.patch"
+
 zig_path="$(command -v "$zig_bin")"
 export PATH="$(dirname -- "$zig_path"):$PATH"
 (

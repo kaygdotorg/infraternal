@@ -1,0 +1,25 @@
+# Role: zeroes every terminal page in the browser build so a new or reset terminal starts blank (#241).
+diff --git a/src/terminal/PageList.zig b/src/terminal/PageList.zig
+index 29f414e..de4c037 100644
+--- a/src/terminal/PageList.zig
++++ b/src/terminal/PageList.zig
+@@ -341,7 +341,9 @@ fn initPages(
+         // In runtime safety modes we have to memset because the Zig allocator
+         // interface will always memset to 0xAA for undefined. In non-safe modes
+         // we use a page allocator and the OS guarantees zeroed memory.
+-        if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
++        // The browser build has no OS to hand out zeroed pages: its pooled memory is
++        // recycled from earlier terminals in the same WebAssembly instance.
++        if (comptime std.debug.runtime_safety or @import("builtin").os.tag == .freestanding) @memset(page_buf, 0);
+ 
+         // Initialize the first set of pages to contain our viewport so that
+         // the top of the first page is always the active area.
+@@ -2675,7 +2677,7 @@ inline fn createPageExt(
+ 
+     // Required only with runtime safety because allocators initialize
+     // to undefined, 0xAA.
+-    if (comptime std.debug.runtime_safety) @memset(page_buf, 0);
++    if (comptime std.debug.runtime_safety or @import("builtin").os.tag == .freestanding) @memset(page_buf, 0);
+ 
+     page.* = .{
+         .data = .initBuf(.init(page_buf), layout),
