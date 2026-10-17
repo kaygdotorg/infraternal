@@ -125,7 +125,7 @@ fn shared_host_budget_bounds_the_sum_and_keeps_every_terminal_exact() {
     );
     let excess: usize = terminals
         .iter()
-        .map(|t| t.memory().0.saturating_sub(FLOOR))
+        .map(|t| t.memory().0.saturating_sub(t.engine.host_floor()))
         .sum();
     assert_eq!(
         host.used(),
@@ -133,7 +133,8 @@ fn shared_host_budget_bounds_the_sum_and_keeps_every_terminal_exact() {
         "host accounting differs from its terminals"
     );
     let total: usize = terminals.iter().map(|t| t.memory().0).sum();
-    assert!(total <= TERMINALS * FLOOR + limit);
+    let floors: usize = terminals.iter().map(|t| t.engine.host_floor()).sum();
+    assert!(total <= floors + limit);
     for (index, terminal) in terminals.iter().enumerate() {
         assert!(!terminal.memory().2, "terminal {index} reached refusal");
         assert!(
@@ -250,4 +251,53 @@ fn widening_a_full_history_stays_inside_its_share() {
         terminal.process(b"after widening\r\n");
         assert!(!terminal.memory().2);
     }
+}
+
+/// PPU-R3-2 (#205): the pool is sized for every history share, and each
+/// session's floor covers both of its screens at its own geometry, so a
+/// host full of laptop-sized sessions with full history can still open
+/// full-screen programs and resize. The old 256 KiB floor covered an idle
+/// 80x24 screen only, so these screens spilled into the pool and it ran out.
+#[test]
+fn laptop_screens_come_from_their_floors_not_the_pool() {
+    const SESSIONS: usize = 300;
+    const HISTORY: usize = 64 * 1024 * 1024;
+    let pool = HISTORY + HISTORY / 8 + 8 * 1024 * 1024;
+    let share = HISTORY / SESSIONS;
+    let host = HostBudget::new(pool, 256 * 1024);
+    let mut terminals: Vec<_> = (0..SESSIONS)
+        .map(|_| {
+            let mut terminal =
+                Terminal::with_host_budget(200, 50, share, Some(host.clone())).unwrap();
+            terminal.process(b"\x1bc");
+            terminal
+        })
+        .collect();
+    let line = format!("{}\r\n", "x".repeat(199));
+    for terminal in &mut terminals {
+        terminal.process(&line.repeat(3 * share / 200).into_bytes());
+    }
+    let after_history = host.used();
+    let mut screen = b"\x1b[?1049h\x1b[2J".to_vec();
+    for row in 1..=55 {
+        screen.extend_from_slice(format!("\x1b[{row};1H\x1b[7m{}", "A".repeat(210)).as_bytes());
+    }
+    for terminal in &mut terminals {
+        terminal.resize(210, 55).unwrap();
+        terminal.process(&screen);
+    }
+    let refused = terminals.iter().filter(|t| t.memory().2).count();
+    let floors: usize = terminals.iter().map(|t| t.engine.host_floor()).sum();
+    eprintln!(
+        "{SESSIONS} sessions at 210x55: pool {after_history} after history, {} after \
+         full-screen + resize (limit {pool}); floor {} each, {floors} total; refused {refused}",
+        host.used(),
+        terminals[0].engine.host_floor()
+    );
+    assert_eq!(
+        refused,
+        0,
+        "{refused} sessions refused (pool {}/{pool})",
+        host.used()
+    );
 }

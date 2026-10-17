@@ -198,3 +198,20 @@ pub fn PagePool(comptime Item: type, comptime alignment: std.mem.Alignment) type
         }
     };
 }
+
+/// Pages one `cols` x `rows` screen occupies at the shared-host page shape,
+/// laid out as PageList.init lays out its active area; `page_len` receives
+/// each page's payload bytes (a pool item, or one exact wider page). The
+/// host keeps that many bytes per screen out of its shared pool [#205].
+pub fn screenPages(cols: u16, rows: u16, page_len: *usize) callconv(.c) usize {
+    const page = @import("terminal/page.zig");
+    const pool_len = page.Page.layout(page.std_capacity).total_size;
+    const cap = page.std_capacity.adjust(.{ .cols = @max(cols, 1) }) catch wide: {
+        var cap = page.std_capacity;
+        cap.cols = @max(cols, 1);
+        break :wide cap;
+    };
+    const len = page.Page.layout(cap).total_size;
+    page_len.* = if (len <= pool_len) pool_len else len;
+    return std.math.divCeil(usize, @max(rows, 1), cap.rows) catch unreachable;
+}

@@ -37,6 +37,18 @@ unsafe extern "C" {
     ) -> usize;
     #[cfg(feature = "compact-history")]
     fn infraternal_vt_compact(terminal: *mut c_void, full: bool);
+    #[cfg(feature = "process-per-user")]
+    fn infraternal_vt_screen_pages(cols: u16, rows: u16, page_len: *mut usize) -> usize;
+}
+/// Sizes a shared-host terminal's floor for one `cols` x `rows` screen, at
+/// the page shape of the native build [#205].
+#[cfg(feature = "process-per-user")]
+fn reserve_screens(memory: &mut crate::terminal_memory::Memory, cols: u16, rows: u16) {
+    let mut page_len = 0;
+    // SAFETY: pure layout arithmetic over the pinned page shape; writes only
+    // the provided local.
+    let pages = unsafe { infraternal_vt_screen_pages(cols, rows, &raw mut page_len) };
+    memory.reserve_screens(pages, page_len);
 }
 // A failed resize can partially mutate Ghostty page ownership. None is a
 // permanent tombstone: even destruction would inspect invalid native state.
@@ -119,9 +131,12 @@ impl Engine {
         let _ = limit;
         let mut raw = std::ptr::null_mut();
         #[cfg(all(feature = "process-per-user", not(feature = "compact-history")))]
-        let memory = crate::terminal_memory::Memory::with_host(limit, 0, host);
+        let mut memory = crate::terminal_memory::Memory::with_host(limit, 0, host);
         #[cfg(feature = "compact-history")]
-        let memory = crate::terminal_memory::Memory::with_host(limit, bytes, host);
+        let mut memory = crate::terminal_memory::Memory::with_host(limit, bytes, host);
+        // The first screen comes from the floor, so it is sized first.
+        #[cfg(feature = "process-per-user")]
+        reserve_screens(&mut memory, cols, rows);
         #[cfg(not(feature = "process-per-user"))]
         let allocator = std::ptr::null();
         #[cfg(feature = "process-per-user")]
@@ -177,6 +192,11 @@ impl Engine {
     pub(super) fn mapped_blocks(&self) -> usize {
         self.1.as_ref().map_or(0, |m| m.mapped_blocks())
     }
+    /// This terminal's floor in its host budget, for accounting tests.
+    #[cfg(all(test, feature = "process-per-user"))]
+    pub(super) fn host_floor(&self) -> usize {
+        self.1.as_ref().map_or(0, |m| m.floor())
+    }
     #[cfg(feature = "process-per-user")]
     pub(super) fn encoded_bytes(&self) -> usize {
         self.1.as_ref().map_or(0, |m| m.encoded_bytes())
@@ -206,6 +226,12 @@ impl Engine {
         let handle = self
             .0
             .ok_or_else(|| io::Error::other("retired Ghostty engine"))?;
+        // Floor first: the new screen's pages are this terminal's own, not
+        // the pool's. A failed resize retires the engine and its memory.
+        #[cfg(feature = "process-per-user")]
+        if let Some(memory) = self.1.as_mut() {
+            reserve_screens(memory, cols, rows);
+        }
         let result = unsafe { ghostty_terminal_resize(handle.as_ptr(), cols, rows, 0, 0) };
         if result == 0 {
             Ok(())

@@ -31,18 +31,23 @@ const STRUCTURE: usize = usize::MAX - 3;
 /// Native bytes shared by every terminal of one host [D270, #205].
 ///
 /// Each terminal keeps its own reservation, and its first `floor` bytes are
-/// its own: admitted with the session, never taken by a neighbour, enough
-/// for an ordinary screen to keep recycling history. Bytes above the floor
-/// come from one shared pool of `limit` bytes, so all terminals together
-/// stay under `sessions * floor + limit`. When the pool is empty, history
-/// growth recycles the terminal's own oldest page (exact); other requests
-/// are refused like a full per-terminal reservation. The reactor is
+/// its own: never taken by a neighbour. A terminal's floor covers its
+/// current screens (primary and alternate at its geometry, plus pages to
+/// recycle history), never less than `floor` here and never more than
+/// [`MAX_FLOOR`]. Screens therefore never draw on the pool; history above
+/// the floor does, from one shared pool of `limit` bytes, so all terminals
+/// together stay under `sum(floors) + limit`. When the pool is empty,
+/// history growth recycles the terminal's own oldest page (exact); other
+/// requests are refused like a full per-terminal reservation. The reactor is
 /// single-threaded; the atomic only keeps terminals `Send` without a lock.
 pub(crate) struct HostBudget {
     used: AtomicUsize,
     limit: usize,
     floor: usize,
 }
+/// A floor never exceeds two 250x180 screens: past that, the pool pays for
+/// the rest, and the host bound stays `MAX_SESSIONS * MAX_FLOOR + limit`.
+pub(crate) const MAX_FLOOR: usize = 2 * 1024 * 1024;
 impl HostBudget {
     pub(crate) fn new(limit: usize, floor: usize) -> Arc<Self> {
         Arc::new(Self {
@@ -51,20 +56,22 @@ impl HostBudget {
             floor,
         })
     }
-    /// Pool bytes a terminal at `used` needs to grow by `bytes`.
-    fn excess(&self, used: usize, bytes: usize) -> usize {
-        used.saturating_add(bytes).saturating_sub(self.floor) - used.saturating_sub(self.floor)
+    /// Pool bytes a terminal at `used` with `floor` needs to grow by `bytes`.
+    fn excess(used: usize, bytes: usize, floor: usize) -> usize {
+        used.saturating_add(bytes).saturating_sub(floor) - used.saturating_sub(floor)
     }
-    /// Pool bytes charged now; never above the limit, which `charge` enforces.
+    /// Pool bytes charged now. `charge` keeps it under the limit; a floor
+    /// that shrinks may move a terminal's existing bytes above it.
     #[cfg(test)]
     pub(crate) fn used(&self) -> usize {
         self.used.load(Ordering::Relaxed)
     }
-    fn fits(&self, used: usize, bytes: usize) -> bool {
-        self.excess(used, bytes) <= self.limit.saturating_sub(self.used.load(Ordering::Relaxed))
+    fn fits(&self, used: usize, bytes: usize, floor: usize) -> bool {
+        Self::excess(used, bytes, floor)
+            <= self.limit.saturating_sub(self.used.load(Ordering::Relaxed))
     }
-    fn charge(&self, used: usize, bytes: usize) -> bool {
-        let bytes = self.excess(used, bytes);
+    fn charge(&self, used: usize, bytes: usize, floor: usize) -> bool {
+        let bytes = Self::excess(used, bytes, floor);
         bytes == 0
             || self
                 .used
@@ -74,9 +81,20 @@ impl HostBudget {
                 .is_ok()
     }
     /// `used` is the terminal's charge after `bytes` were released.
-    fn release(&self, used: usize, bytes: usize) {
+    fn release(&self, used: usize, bytes: usize, floor: usize) {
         self.used
-            .fetch_sub(self.excess(used, bytes), Ordering::Relaxed);
+            .fetch_sub(Self::excess(used, bytes, floor), Ordering::Relaxed);
+    }
+    /// Moves a terminal's already allocated bytes between its floor and the
+    /// pool when its floor changes. Never refused: nothing is allocated, and
+    /// refusing would leave the charge out of step with `used`.
+    fn refloor(&self, used: usize, from: usize, to: usize) {
+        let (before, after) = (used.saturating_sub(from), used.saturating_sub(to));
+        if after > before {
+            self.used.fetch_add(after - before, Ordering::Relaxed);
+        } else {
+            self.used.fetch_sub(before - after, Ordering::Relaxed);
+        }
     }
 }
 
@@ -121,6 +139,8 @@ struct State {
     encoded_limit: usize,
     page_size: usize,
     host: Option<Arc<HostBudget>>,
+    /// This terminal's share of `host` that no neighbour can take.
+    floor: usize,
 }
 impl Memory {
     // Native allocator pointers borrow the ABI and context, so constructing
@@ -157,6 +177,7 @@ impl Memory {
                 encoded_used: 0,
                 encoded_limit,
                 page_size: page_size(),
+                floor: host.as_ref().map_or(0, |host| host.floor),
                 host,
             }),
         });
@@ -255,6 +276,29 @@ impl Memory {
         let state = self.state.get_mut();
         state.limit = state.used.saturating_add(headroom);
     }
+    /// Sizes this terminal's floor for `pages` screen pages of `page_len`
+    /// payload bytes each (one screen at its geometry) [#205]. Both screens
+    /// and two pages to recycle history are covered, so a full-screen
+    /// program or a resize never waits on the pool; the host's base floor
+    /// still covers parser and style data of an idle terminal.
+    pub(super) fn reserve_screens(&mut self, pages: usize, page_len: usize) {
+        let state = self.state.get_mut();
+        let Some(host) = &state.host else { return };
+        let charge = mapping_charge(page_len, state.page_size);
+        let floor = pages
+            .saturating_mul(2)
+            .saturating_add(2)
+            .saturating_mul(charge)
+            .saturating_add(SCREEN_OVERHEAD)
+            .clamp(host.floor, MAX_FLOOR.max(host.floor));
+        host.refloor(state.used, state.floor, floor);
+        state.floor = floor;
+    }
+    #[cfg(test)]
+    pub(super) fn floor(&self) -> usize {
+        // SAFETY: copied scalar between synchronous native calls.
+        unsafe { (*self.state.get()).floor }
+    }
     pub(super) fn abi(&self) -> *const c_void {
         (&raw const self.abi).cast()
     }
@@ -286,6 +330,17 @@ impl State {
         }
         self.peak = self.peak.max(self.used);
     }
+}
+
+/// Parser, style and page-list data of an idle terminal beside its pages.
+const SCREEN_OVERHEAD: usize = 64 * 1024;
+
+/// Bytes a page-aligned mapping of `len` payload bytes is charged: the
+/// payload rounded to whole pages plus the header's prefix page.
+fn mapping_charge(len: usize, page: usize) -> usize {
+    len.max(1)
+        .saturating_add(std::mem::size_of::<Block>().next_multiple_of(page))
+        .next_multiple_of(page)
 }
 
 fn page_size() -> usize {
@@ -352,7 +407,7 @@ unsafe extern "C" fn allocate(
         || memory
             .host
             .as_ref()
-            .is_some_and(|host| !host.charge(memory.used, layout.size()))
+            .is_some_and(|host| !host.charge(memory.used, layout.size(), memory.floor))
     {
         // Encoded history is an optional copy of still-resident exact state.
         // Refusing that optimization leaves the source page unchanged and
@@ -390,7 +445,7 @@ unsafe extern "C" fn allocate(
     };
     let Some(base) = NonNull::new(base) else {
         if let Some(host) = &memory.host {
-            host.release(memory.used, layout.size());
+            host.release(memory.used, layout.size(), memory.floor);
         }
         if !encoded {
             memory.refused = true;
@@ -452,7 +507,7 @@ unsafe extern "C" fn resize(
         && memory
             .host
             .as_ref()
-            .is_none_or(|host| host.fits(memory.used, size))
+            .is_none_or(|host| host.fits(memory.used, size, memory.floor))
 }
 unsafe extern "C" fn remap(
     _: *mut c_void,
@@ -490,7 +545,7 @@ unsafe extern "C" fn release(ctx: *mut c_void, payload: *mut c_void, _: usize, _
     }
     memory.used -= block.layout.size();
     if let Some(host) = &memory.host {
-        host.release(memory.used, block.layout.size());
+        host.release(memory.used, block.layout.size(), memory.floor);
     }
     if block.encoded {
         memory.encoded_used -= block.layout.size();

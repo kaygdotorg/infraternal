@@ -67,6 +67,12 @@ ZIG
 # The default artifact retains the pinned upstream page allocator unchanged.
 if [[ -n "$shared_host" ]]; then
     cp "$root/crates/infraternal-shim/native/memory.zig" "$source_dir/src/infraternal_memory.zig"
+    cat >> "$source_dir/src/lib_vt.zig" <<'ZIG_EXPORT_SCREEN'
+
+comptime {
+    @export(&@import("infraternal_memory.zig").screenPages, .{ .name = "infraternal_vt_screen_pages" });
+}
+ZIG_EXPORT_SCREEN
     page_list=src/terminal/PageList.zig
     tar -xOf "$archive" "ghostty-$version/$page_list" > "$source_dir/$page_list"
     python3 - "$source_dir/$page_list" <<'PY_LIMIT'

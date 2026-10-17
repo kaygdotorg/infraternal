@@ -46,13 +46,19 @@ const INTERACTIVE_READ_BYTES: usize = 4096;
 const BULK_READ_BYTES: usize = 16 * 1024;
 // Aggregate history is bounded at scale rather than multiplying defaults by 1000.
 const HOST_HISTORY_BYTES: usize = 64 * 1024 * 1024;
-/// Native VT bytes shared above the per-session floors [D270, #205]: the
-/// history shares with their page headers, plus one full screen reservation
-/// so a single large geometry fits. All sessions together stay under
-/// `sessions * SESSION_SCREEN_BYTES + HOST_NATIVE_POOL_BYTES`.
-const HOST_NATIVE_POOL_BYTES: usize = HOST_HISTORY_BYTES + HOST_HISTORY_BYTES / 8 + 8 * 1024 * 1024;
-/// Native bytes each session owns outright: an idle 80x24 terminal and a few
-/// history pages to recycle, so output never fails when the pool is empty.
+/// Smallest host pool [D270, #205]: every history share with its page
+/// headers, plus one full screen reservation so a single large geometry
+/// fits. Floors cover each session's screens, so with this pool neither a
+/// history share nor an ordinary screen is ever refused.
+const HOST_NATIVE_POOL_MIN: usize = HOST_HISTORY_BYTES + HOST_HISTORY_BYTES / 8 + 8 * 1024 * 1024;
+/// Largest host pool: what screens beyond a floor (larger than two 250x180
+/// screens) may borrow on a large machine.
+const HOST_NATIVE_POOL_MAX: usize = 512 * 1024 * 1024;
+/// The host pool's share of the memory this host may use.
+const HOST_NATIVE_POOL_FRACTION: usize = 32;
+/// Least native bytes each session owns outright: an idle 80x24 terminal
+/// and a few history pages to recycle, so output never fails when the pool
+/// is empty. A session's floor grows to cover its screens at its geometry.
 const SESSION_SCREEN_BYTES: usize = 256 * 1024;
 const MAX_SESSIONS: usize = 1000;
 const PEER_BYTES: usize = 4 * 1024 * 1024;
@@ -889,7 +895,7 @@ pub fn run_host_accounted(
         config.ring_capacity = config.ring_capacity.min(ring_budget);
     }
     let native =
-        crate::terminal_memory::HostBudget::new(HOST_NATIVE_POOL_BYTES, SESSION_SCREEN_BYTES);
+        crate::terminal_memory::HostBudget::new(host_native_pool_bytes(), SESSION_SCREEN_BYTES);
     let sessions = configs
         .into_iter()
         .map(|config| {
@@ -899,6 +905,43 @@ pub fn run_host_accounted(
         })
         .collect::<io::Result<Vec<_>>>()?;
     reactor::run(sessions, &signals, accounting)
+}
+
+/// Host pool for this machine: 1/32 of the memory the host may use, never
+/// below [`HOST_NATIVE_POOL_MIN`] or above [`HOST_NATIVE_POOL_MAX`]. All
+/// sessions together stay under the sum of their floors plus this pool.
+fn host_native_pool_bytes() -> usize {
+    usable_memory().map_or(HOST_NATIVE_POOL_MIN, |bytes| {
+        (bytes / HOST_NATIVE_POOL_FRACTION).clamp(HOST_NATIVE_POOL_MIN, HOST_NATIVE_POOL_MAX)
+    })
+}
+
+/// Physical memory, or the host's cgroup limit when that is lower. Read once
+/// at host start; a missing or unreadable source falls back to the minimum.
+fn usable_memory() -> Option<usize> {
+    let total = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|info| meminfo_total(&info))?;
+    let limit = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|groups| {
+            let path = groups.lines().find_map(|line| line.strip_prefix("0::"))?;
+            std::fs::read_to_string(format!("/sys/fs/cgroup{}/memory.max", path.trim())).ok()
+        })
+        .and_then(|max| max.trim().parse::<usize>().ok());
+    Some(limit.map_or(total, |limit| limit.min(total)))
+}
+
+fn meminfo_total(info: &str) -> Option<usize> {
+    let kib = info
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse::<usize>()
+        .ok()?;
+    kib.checked_mul(1024)
 }
 
 #[path = "user_host_reactor.rs"]
@@ -916,6 +959,33 @@ mod lazy_bench;
 mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
+
+    /// PPU-R3-2 (#205): the host pool follows the machine within its bounds.
+    #[test]
+    fn host_pool_scales_with_machine_memory_within_bounds() {
+        assert_eq!(
+            meminfo_total("MemTotal:       16303428 kB\nMemFree: 1 kB\n"),
+            Some(16_303_428 * 1024)
+        );
+        assert_eq!(meminfo_total("MemFree: 1 kB\n"), None);
+        let pool = host_native_pool_bytes();
+        eprintln!(
+            "host pool {pool} B for usable memory {:?} B",
+            usable_memory()
+        );
+        assert!((HOST_NATIVE_POOL_MIN..=HOST_NATIVE_POOL_MAX).contains(&pool));
+        for (memory, expected) in [
+            (1_usize << 30, HOST_NATIVE_POOL_MIN),
+            (8 << 30, 256 << 20),
+            (64 << 30, HOST_NATIVE_POOL_MAX),
+        ] {
+            assert_eq!(
+                (memory / HOST_NATIVE_POOL_FRACTION)
+                    .clamp(HOST_NATIVE_POOL_MIN, HOST_NATIVE_POOL_MAX),
+                expected
+            );
+        }
+    }
 
     pub(super) fn ack_fixture(tag: u8) -> (Session, std::os::unix::net::UnixStream, PathBuf) {
         let state = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(

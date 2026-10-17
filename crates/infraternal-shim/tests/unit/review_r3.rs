@@ -46,7 +46,7 @@ fn numbered(terminal: &mut Terminal, tag: usize, from: usize, count: usize, widt
 fn excess(terminals: &[Terminal]) -> usize {
     terminals
         .iter()
-        .map(|t| t.memory().0.saturating_sub(FLOOR))
+        .map(|t| t.memory().0.saturating_sub(t.engine.host_floor()))
         .sum()
 }
 
