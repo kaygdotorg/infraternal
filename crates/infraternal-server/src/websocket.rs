@@ -69,8 +69,9 @@ const AUTHORITY_READ_TIMEOUT: Duration = Duration::from_millis(25);
 // A read that misses its deadline is a busy store, not a refusal (#240): it is
 // retried while the socket's work stays held, and fails closed after this wait.
 const AUTHORITY_WAIT: Duration = Duration::from_secs(1);
-const AUTHORITY_RETRY_PAUSE: Duration = Duration::from_millis(5);
-const AUTHORITY_RETRY_PAUSE_MAX: Duration = Duration::from_millis(100);
+// Pause between attempts. With the 25 ms attempt deadline a stalled socket
+// tries about 30 times a second, each a queued pool checkout, not a query.
+const AUTHORITY_RETRY_PAUSE: Duration = Duration::from_millis(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
@@ -1691,13 +1692,7 @@ pub(super) async fn probe_deadline(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
     let now = i64::try_from(wall.as_secs()).map_err(|_| ())?;
-    #[cfg(test)]
-    let read_timeout = state.authority_read_timeout;
-    #[cfg(not(test))]
-    let read_timeout = AUTHORITY_READ_TIMEOUT;
-    let expiry = read_authority(read_timeout, || state.auth.live_expiry(token, user, now))
-        .await
-        .map_err(|_| ())?;
+    let expiry = read_expiry(state, user, token, now, false).await?;
     let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
     started
         .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
@@ -1719,60 +1714,50 @@ async fn authority_deadline(
     renew: bool,
 ) -> Result<tokio::time::Instant, ()> {
     let now = unix_seconds()?;
-    #[cfg(test)]
-    let read_timeout = state.authority_read_timeout;
-    #[cfg(not(test))]
-    let read_timeout = AUTHORITY_READ_TIMEOUT;
-    let expiry = read_authority(read_timeout, || async {
-        if renew {
-            state.auth.socket_activity(token, user_id, now).await
-        } else {
-            state.auth.live_expiry(token, user_id, now).await
-        }
-    })
-    .await
-    .map_err(|_| ())?;
+    let expiry = read_expiry(state, user_id, token, now, renew).await?;
     // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
     // wall clock after the read, so a slow store can never extend a session.
     let remaining = u64::try_from(expiry - unix_seconds()?).map_err(|_| ())?;
     Ok(tokio::time::Instant::now() + Duration::from_secs(remaining))
 }
 
-/// Why an authority read did not produce a value.
-#[derive(Debug)]
-enum AuthorityRead {
-    /// The store answered: no live session, or a storage error. Never retried.
-    Refused,
-    /// Every attempt missed its deadline for the whole bounded wait.
-    Stalled,
-}
-
-/// Run one authority read with its fixed per-attempt deadline. An attempt that
-/// misses the deadline is dropped and tried again after a short doubling pause,
-/// until `AUTHORITY_WAIT` has passed. The caller does no work meanwhile: every
-/// call site awaits this before it polls the operation it guards, so input stays
-/// queued in order behind the read instead of being dropped with the socket.
-/// Both reads are idempotent (a lookup, or setting expiry from the same `now`).
-/// The fast path is one attempt, exactly as before: no pause, no extra clock read
-/// beyond the start instant.
-async fn read_authority<T, E, F, Fut>(
-    read_timeout: Duration,
-    mut read: F,
-) -> Result<T, AuthorityRead>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-{
-    let started = tokio::time::Instant::now();
-    let mut pause = AUTHORITY_RETRY_PAUSE;
+/// Read the session's expiry, renewing it when `renew` is set. Each attempt has
+/// the fixed per-read deadline. An attempt that misses it is a busy store, not a
+/// refusal (#240): it is dropped and tried again after a short pause
+/// until `AUTHORITY_WAIT` has passed, then the read fails closed. A store that
+/// answers (no live session, or a storage error) fails at once and is never
+/// retried. The caller does no work meanwhile: every call site awaits this
+/// before it polls the operation it guards, so input stays queued in order
+/// behind the read instead of being dropped with the socket. Both reads are
+/// idempotent (a lookup, or setting expiry from the same `now`). The fast path
+/// is one attempt, as before, plus one clock read. One non-generic function
+/// serves every call site so the retry loop is compiled once (D243).
+async fn read_expiry(
+    state: &WebSocketState,
+    user_id: &str,
+    token: &str,
+    now: i64,
+    renew: bool,
+) -> Result<i64, ()> {
+    #[cfg(test)]
+    let read_timeout = state.authority_read_timeout;
+    #[cfg(not(test))]
+    let read_timeout = AUTHORITY_READ_TIMEOUT;
+    let give_up = tokio::time::Instant::now() + AUTHORITY_WAIT;
     loop {
-        match tokio::time::timeout(read_timeout, read()).await {
-            Ok(result) => return result.map_err(|_| AuthorityRead::Refused),
-            Err(_) if started.elapsed() + pause < AUTHORITY_WAIT => {
-                tokio::time::sleep(pause).await;
-                pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
+        let read = async {
+            if renew {
+                state.auth.socket_activity(token, user_id, now).await
+            } else {
+                state.auth.live_expiry(token, user_id, now).await
             }
-            Err(_) => return Err(AuthorityRead::Stalled),
+        };
+        match tokio::time::timeout(read_timeout, read).await {
+            Ok(result) => return result.map_err(|_| ()),
+            Err(_) if tokio::time::Instant::now() + AUTHORITY_RETRY_PAUSE < give_up => {
+                tokio::time::sleep(AUTHORITY_RETRY_PAUSE).await;
+            }
+            Err(_) => return Err(()),
         }
     }
 }
@@ -1781,15 +1766,7 @@ async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> 
     let Ok(now) = unix_seconds() else {
         return false;
     };
-    #[cfg(test)]
-    let read_timeout = state.authority_read_timeout;
-    #[cfg(not(test))]
-    let read_timeout = AUTHORITY_READ_TIMEOUT;
-    read_authority(read_timeout, || {
-        state.auth.socket_activity(token, user_id, now)
-    })
-    .await
-    .is_ok()
+    read_expiry(state, user_id, token, now, true).await.is_ok()
 }
 
 struct ClientAttachment {
