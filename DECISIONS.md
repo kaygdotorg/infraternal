@@ -3216,3 +3216,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        allowed, 4 not found, 5 off or unreachable, 6 partly done, 130
        interrupted; `status` exits 5 when something that should run is down.
        The JSON envelope only ever gains fields; a removal bumps its version.
+304. **Session automation and canvas commands, as shown to the owner
+     (owner, 2026-10-17, #239; extends D303):** "i love it". `infraternal
+     sessions [machine]`, `sessions read <machine>:<session> --last N`,
+     `sessions send <machine>:<session> '<text>'`, `sessions watch`,
+     `sessions open <machine> --name …`, `sessions close`; `infraternal
+     canvas open|windows|focus|close`, with `--note` so an AI tool can say why
+     it put something in front of the person. A refused request says why and
+     what to do, and exits 3; a request waiting for approval says who must
+     approve. Every command, including these, has `--json` (D299).
