@@ -158,6 +158,10 @@ test("a failed first recovery handshake exits the one quick retry", () => {
     retry?.();
     sockets[1]!.onerror?.();
     expect(retryDelay).toBeGreaterThanOrEqual(50);
+
+    retry?.();
+    sockets[2]!.onerror?.();
+    expect(retryDelay).toBeGreaterThanOrEqual(100);
   } finally {
     connection?.dispose();
     Math.random = original.random;
@@ -260,7 +264,7 @@ test("a clean server socket close keeps its fallback reason through the next ret
 
 test("a prolonged outage inside the fast-recovery window does not leave recovery behind accumulated backoff", () => {
   const globals = globalThis as unknown as Record<string, unknown>;
-  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, performance: globals.performance, random: Math.random };
+  const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, navigator: globals.navigator, performance: globals.performance, random: Math.random };
   let now = 0;
   let nextTimerId = 1;
   const failedPathRetryDelays: number[] = [];
@@ -296,6 +300,7 @@ test("a prolonged outage inside the fast-recovery window does not leave recovery
     };
     globals.location = { protocol: "https:", host: "restart.example.test" };
     globals.WebSocket = Socket;
+    globals.navigator = { onLine: false };
     const handler: StreamHandler = {
       onSocketOpen() {}, onWelcome: (resumed) => { if (resumed) recoveredAt = now; }, onFrame() {}, onDisconnected() {},
       hasSession: () => true, onStatus() {},
@@ -341,7 +346,7 @@ test("a prolonged outage inside the fast-recovery window does not leave recovery
   } finally {
     connection?.dispose();
     Math.random = original.random;
-    for (const key of ["window", "location", "WebSocket"] as const) {
+    for (const key of ["window", "location", "WebSocket", "navigator"] as const) {
       if (original[key] === undefined) delete globals[key]; else globals[key] = original[key];
     }
     if (original.performance === undefined) delete globals.performance; else globals.performance = original.performance;

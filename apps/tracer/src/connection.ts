@@ -155,7 +155,6 @@ export class MuxConnection {
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
-  private greeted = false;
   private resumeSent = false;
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
@@ -396,7 +395,6 @@ export class MuxConnection {
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
     this.welcomed = false;
-    this.greeted = false;
 
     socket.onopen = () => {
       if (this.socket !== socket || this.closed) return;
@@ -451,10 +449,11 @@ export class MuxConnection {
       this.fastRecovery = [...this.streams.values()].some((stream) => stream.hasSession());
       if (lived || forced) this.retryAttempt = 0;
     } else {
-      // An unwelcomed socket is a path failure, not an accepted-close loop. Do not
-      // carry the close-loop backoff across a network outage or a refused handshake.
-      if (this.greeted) this.fastRecovery = false;
-      this.retryAttempt = 0;
+      // Keep the prompt path checks while the browser reports the network down.
+      // Once it reports online, a failed handshake consumes the quick recovery
+      // and retains its count so another refused route uses growing backoff.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) this.retryAttempt = 0;
+      else this.fastRecovery = false;
     }
     // The server retains a live writer indefinitely; its grace starts on disconnect
     // (or startup recovery), not Welcome. Failed retries must never renew that grace.
@@ -537,7 +536,6 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
-        this.greeted = true;
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
