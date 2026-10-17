@@ -98,10 +98,7 @@ fn production_server_is_a_running_server_with_two_mesh_peers() {
     let status = fixture.status(&[(Scope::System, "infraternal-server.service")]);
     assert_eq!(status.role, Role::Server);
     assert_eq!(status.overall(), Activity::Active);
-    assert_eq!(
-        state(&status, "server"),
-        ("Running", "infraternal-server.service (system)")
-    );
+    assert_eq!(state(&status, "server"), ("Running", "system service"));
     assert_eq!(
         state(&status, "agent"),
         ("Running", "embedded in the server")
@@ -110,7 +107,7 @@ fn production_server_is_a_running_server_with_two_mesh_peers() {
         state(&status, "host"),
         ("Running", "embedded in the server")
     );
-    assert_eq!(state(&status, "mesh"), ("Running", "2 peers"));
+    assert_eq!(state(&status, "mesh"), ("Running", "peers: 2"));
     assert_eq!(state(&status, "ssh").0, "Ready");
     assert_eq!(state(&status, "release").0, "Ready");
     assert_eq!(state(&status, "relay").0, "Not available yet");
@@ -143,10 +140,7 @@ fn rootful_agent_is_a_host_with_its_own_state_directory() {
         status.units[0].0.state.as_deref(),
         Some(Path::new("/var/lib/infraternal/sessions"))
     );
-    assert_eq!(
-        state(&status, "agent"),
-        ("Running", "infraternal-agent.service (system)")
-    );
+    assert_eq!(state(&status, "agent"), ("Running", "system service"));
     assert_eq!(state(&status, "host").0, "Running");
     assert_eq!(state(&status, "server").0, "Not installed");
     assert_eq!(state(&status, "ssh").0, "Server only");
@@ -167,7 +161,7 @@ fn rootful_agent_reads_mesh_peers_from_its_state_directory() {
     fixture.write("agent-state/mesh-public.json", MESH);
     fixture.write("net/infraternal0/.keep", "");
     let status = fixture.status(&[(Scope::System, "infraternal-agent.service")]);
-    assert_eq!(state(&status, "mesh"), ("Running", "2 peers"));
+    assert_eq!(state(&status, "mesh"), ("Running", "peers: 2"));
 }
 
 #[test]
@@ -179,10 +173,7 @@ fn rootless_agent_is_read_from_the_user_manager() {
     );
     let status = fixture.status(&[(Scope::User, "infraternal-agent.service")]);
     assert_eq!(status.role, Role::Host);
-    assert_eq!(
-        state(&status, "agent"),
-        ("Running", "infraternal-agent.service (user)")
-    );
+    assert_eq!(state(&status, "agent"), ("Running", "user service"));
     assert_eq!(state(&status, "mesh"), ("Not set up", ""));
 }
 
@@ -234,4 +225,16 @@ fn an_unanswering_manager_only_makes_its_own_unit_unknown() {
     assert_eq!(state(&status, "server").0, "Running");
     assert_eq!(state(&status, "agent").0, "Unknown");
     assert_eq!(status.overall(), Activity::Active);
+}
+
+#[test]
+fn snapshot_scan_counts_peers_through_nesting_strings_and_spacing() {
+    use super::peer_count;
+    assert_eq!(peer_count(br#"{"enabled":false,"config":null}"#), None);
+    assert_eq!(peer_count(br#"{"config":{"peers":{},"x":1}}"#), Some(0));
+    let one = br#"{"config": {"peers" : { "3": {"a": [1,2], "b": "x,}\"y"} }}}"#;
+    assert_eq!(peer_count(one), Some(1));
+    assert_eq!(peer_count(MESH.as_bytes()), Some(2));
+    // A truncated file is "unknown", never a guess.
+    assert_eq!(peer_count(br#"{"config":{"peers":{"3":{"#), None);
 }

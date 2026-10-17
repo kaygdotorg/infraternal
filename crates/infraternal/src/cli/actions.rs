@@ -138,7 +138,7 @@ fn status_action() -> ActionDefinition {
                 JsonSchema::string("Current component state."),
             ),
             (
-                "detail".to_owned(),
+                "state_detail".to_owned(),
                 JsonSchema::string("Extra fact for this component, such as the mesh peer count."),
             ),
         ],

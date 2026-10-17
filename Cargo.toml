@@ -10,6 +10,7 @@ members = [
     "crates/infraternal-server",
     "crates/infraternal-agent",
     "crates/infraternal-shim",
+    "crates/infraternal-status",
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/backup",
@@ -118,4 +119,8 @@ opt-level = "s"
 # Keep host orchestration compact; transport, protocol, VT and cryptographic
 # crates retain their speed optimization [5,243].
 [profile.release.package.infraternal-agent]
+opt-level = "s"
+
+# `infraternal status` reads unit files once per call: size-optimized [243].
+[profile.release.package.infraternal-status]
 opt-level = "s"

@@ -8,8 +8,8 @@
 //!    classify each by its effective `ExecStart` (drop-ins included, an empty
 //!    `ExecStart=` resets earlier ones). The classification uses the
 //!    subcommand (`server` or `agent`), so any unit name and any description
-//!    works. `--data` and `--state` come from the same line, so a node with
-//!    non-default paths is read where it really keeps its state.
+//!    works. `--state` comes from the same line, so a node with a
+//!    non-default runtime directory is read where it really keeps its state.
 //! 2. Ask the owning manager for the `ActiveState` of only those units (at most
 //!    a few `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
@@ -19,14 +19,17 @@
 //!
 //! No network is touched and no file is written. Every path is injected through
 //! [`Roots`] so tests build whole nodes in a temporary directory.
+//!
+//! This is its own crate so that it is built size-optimized like the other
+//! management code (D243); it runs once per `status` call, never on a data path.
+
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-
-use serde_json::{Value, json};
 
 /// Mesh interface created by the mesh component.
 const MESH_INTERFACE: &str = "infraternal0";
@@ -80,8 +83,6 @@ pub struct Unit {
     pub name: String,
     /// Server or agent.
     pub kind: Kind,
-    /// `--data` argument, when given.
-    pub data: Option<PathBuf>,
     /// `--state` argument, when given.
     pub state: Option<PathBuf>,
 }
@@ -104,33 +105,25 @@ pub struct Roots {
 impl Roots {
     /// The real locations of this process.
     #[must_use]
+    #[inline(never)]
     pub fn detect() -> Self {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let rooted = nix::unistd::Uid::effective().is_root();
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|home| home.join(".config")));
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
         let run_dir = if rooted {
             Some(PathBuf::from("/run/infraternal"))
         } else {
             std::env::var_os("XDG_RUNTIME_DIR").map(|dir| PathBuf::from(dir).join("infraternal"))
         };
-        let mut data_dirs = vec![PathBuf::from("/var/lib/infraternal")];
-        data_dirs.extend(data.map(|data| data.join("infraternal")));
         Self {
-            system_units: [
-                "/etc/systemd/system",
-                "/run/systemd/system",
-                "/usr/lib/systemd/system",
-            ]
-            .map(PathBuf::from)
-            .to_vec(),
+            // Installers write units to /etc; packaged units elsewhere are not ours.
+            system_units: vec![PathBuf::from("/etc/systemd/system")],
             user_units: config.map(|config| config.join("systemd/user")),
             run_dir,
-            data_dirs,
+            // A server's database lives here when no unit names it.
+            data_dirs: vec![PathBuf::from("/var/lib/infraternal")],
             net_class: PathBuf::from("/sys/class/net"),
         }
     }
@@ -150,6 +143,17 @@ pub enum Role {
 }
 
 impl Role {
+    /// What the role runs, for sentences.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Host => "agent",
+            Self::Both => "server and agent",
+            Self::None => "node",
+        }
+    }
+
     /// Stable identifier for `--json`.
     #[must_use]
     pub const fn id(self) -> &'static str {
@@ -184,17 +188,14 @@ pub struct NodeStatus {
     pub components: Vec<Component>,
 }
 
-/// Probe the node. `ids` are the registered component ids, in display order.
+/// Probe the node. Never inlined: the caller is speed-optimized and would copy this body. `ids` are the registered component ids, in display order.
+#[inline(never)]
 pub fn probe(
     roots: &Roots,
     ids: &[String],
     activity: &dyn Fn(Scope, &str) -> Activity,
 ) -> NodeStatus {
-    let mut units = discover(roots);
-    units.sort_by(|left, right| {
-        (left.scope as u8, &left.name).cmp(&(right.scope as u8, &right.name))
-    });
-    let units: Vec<_> = units
+    let units: Vec<_> = discover(roots)
         .into_iter()
         .map(|unit| {
             let state = activity(unit.scope, &unit.name);
@@ -224,27 +225,26 @@ pub fn probe(
     }
 }
 
+/// Units in discovery order: system directories first, then the user's. A
+/// name seen in an earlier directory of the same scope wins, as in the manager.
 fn discover(roots: &Roots) -> Vec<Unit> {
     let mut found: Vec<Unit> = Vec::new();
-    let dirs = roots
+    let user = roots.user_units.as_ref().map(|dir| (Scope::User, dir));
+    for (scope, dir) in roots
         .system_units
         .iter()
         .map(|dir| (Scope::System, dir))
-        .chain(roots.user_units.iter().map(|dir| (Scope::User, dir)));
-    for (scope, dir) in dirs {
-        let Ok(entries) = fs::read_dir(dir) else {
+        .chain(user)
+    {
+        let Ok(mut entries) = fs::read_dir(dir) else {
             continue;
         };
-        for entry in entries.flatten() {
+        while let Some(Ok(entry)) = entries.next() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if !name.starts_with("infraternal") || !name.ends_with(".service") {
                 continue;
             }
-            // The first directory that has the name wins, as in the manager.
-            if found
-                .iter()
-                .any(|unit| unit.scope == scope && unit.name == name)
-            {
+            if found.iter().any(|u| u.scope == scope && u.name == name) {
                 continue;
             }
             if let Some(unit) = read_unit(scope, dir, &name) {
@@ -266,27 +266,33 @@ fn read_unit(scope: Scope, dir: &Path, name: &str) -> Option<Unit> {
         }
     };
     apply(&fs::read_to_string(dir.join(name)).ok()?);
-    let mut dropins: Vec<_> = fs::read_dir(dir.join(format!("{name}.d")))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
-        .collect();
-    dropins.sort();
+    // Drop-ins apply in file-name order; the directory is small, so insert in place.
+    let mut dropins: Vec<PathBuf> = Vec::new();
+    if let Ok(mut entries) = fs::read_dir(dir.join(format!("{name}.d"))) {
+        while let Some(Ok(entry)) = entries.next() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "conf") {
+                let at = dropins
+                    .iter()
+                    .position(|p| *p > path)
+                    .unwrap_or(dropins.len());
+                dropins.insert(at, path);
+            }
+        }
+    }
     for path in dropins {
         if let Ok(text) = fs::read_to_string(path) {
             apply(&text);
         }
     }
-    let words = split_words(&exec?);
-    // `-`/`@`/`+` prefixes are execution modifiers of the program word.
-    let subcommand = words
-        .iter()
+    let exec = exec?;
+    // The first word is the program; the next non-option word is the subcommand.
+    let kind = match exec
+        .split_whitespace()
         .skip(1)
+        .map(|word| word.trim_matches('"'))
         .find(|word| !word.starts_with('-'))
-        .map(String::as_str);
-    let kind = match subcommand {
+    {
         Some("server") => Kind::Server,
         Some("agent") => Kind::Agent,
         _ => return None,
@@ -295,49 +301,23 @@ fn read_unit(scope: Scope, dir: &Path, name: &str) -> Option<Unit> {
         scope,
         name: name.to_owned(),
         kind,
-        data: option(&words, "--data"),
-        state: option(&words, "--state"),
+        state: option(&exec, "--state"),
     })
 }
 
-/// Split on whitespace, honouring the simple double and single quotes used by unit files.
-fn split_words(line: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut started = false;
-    for ch in line.chars() {
-        match (quote, ch) {
-            (Some(open), ch) if ch == open => quote = None,
-            (Some(_), ch) => current.push(ch),
-            (None, '"' | '\'') => {
-                quote = Some(ch);
-                started = true;
-            }
-            (None, ch) if ch.is_whitespace() => {
-                if started || !current.is_empty() {
-                    words.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            (None, ch) => current.push(ch),
-        }
-    }
-    if started || !current.is_empty() {
-        words.push(current);
-    }
-    words
-}
-
-fn option(words: &[String], flag: &str) -> Option<PathBuf> {
-    let prefix = format!("{flag}=");
-    words.iter().enumerate().find_map(|(index, word)| {
+/// Value of `--flag value` or `--flag=value`. Unit files may quote words; paths
+/// containing spaces are not supported by the installer, so quotes are trimmed.
+fn option(line: &str, flag: &str) -> Option<PathBuf> {
+    let mut words = line.split_whitespace();
+    while let Some(word) = words.next() {
         if word == flag {
-            words.get(index + 1).map(PathBuf::from)
-        } else {
-            word.strip_prefix(&prefix).map(PathBuf::from)
+            return words.next().map(|v| PathBuf::from(v.trim_matches('"')));
         }
-    })
+        if let Some(v) = word.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
+            return Some(PathBuf::from(v.trim_matches('"')));
+        }
+    }
+    None
 }
 
 fn word(activity: Activity) -> &'static str {
@@ -359,7 +339,7 @@ fn row(name: &str, state: &str, detail: impl Into<String>) -> Component {
 
 fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let of = |kind| units.iter().find(|(unit, _)| unit.kind == kind);
-    let unit_detail = |unit: &Unit| format!("{} ({})", unit.name, unit.scope.label());
+    let unit_detail = |unit: &Unit| format!("{} service", unit.scope.label());
     match id {
         "server" => match of(Kind::Server) {
             Some((unit, state)) => row(id, word(*state), unit_detail(unit)),
@@ -402,6 +382,42 @@ fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) ->
     }
 }
 
+/// Peer count from the mesh's public snapshot, read by a bounded scan instead of
+/// a JSON parse: parsing would pull a second deserializer into the static binary
+/// (D243) for one number. The file is written by our own serializer; a layout
+/// this scan cannot follow reads as "unknown", never as a wrong number.
+fn peer_count(bytes: &[u8]) -> Option<usize> {
+    let key = b"\"peers\"";
+    let at = bytes.windows(key.len()).position(|w| w == key)? + key.len();
+    let mut rest = bytes[at..]
+        .iter()
+        .skip_while(|b| b.is_ascii_whitespace() || **b == b':');
+    if rest.next() != Some(&b'{') {
+        return None;
+    }
+    let (mut depth, mut count, mut quoted, mut escaped, mut any) = (1_u32, 0, false, false, false);
+    for &byte in rest {
+        if quoted {
+            quoted = escaped || byte != b'"';
+            escaped = !escaped && byte == b'\\';
+            continue;
+        }
+        match byte {
+            b'"' => (quoted, any) = (true, true),
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(usize::from(any) + count);
+                }
+            }
+            b',' if depth == 1 => count += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Mesh state: the kernel interface says whether it is up, the snapshot says how many peers.
 fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let link = roots.net_class.join(MESH_INTERFACE).exists();
@@ -410,39 +426,26 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
         .filter_map(|(unit, _)| unit.state.clone())
         .collect();
     dirs.extend(roots.run_dir.clone());
-    dirs.extend(units.iter().filter_map(|(unit, _)| unit.data.clone()));
-    dirs.extend(roots.data_dirs.clone());
     let mut unreadable = false;
-    let mut snapshot: Option<Value> = None;
+    let mut found = false;
+    let mut peers = None;
     for dir in dirs {
         match fs::read(dir.join("mesh-public.json")) {
             Ok(bytes) => {
-                if let Ok(value) = serde_json::from_slice(&bytes) {
-                    snapshot = Some(value);
-                    break;
-                }
+                found = true;
+                peers = peer_count(&bytes);
+                break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => unreadable = true,
             Err(_) => {}
         }
     }
-    let peers = snapshot
-        .as_ref()
-        .and_then(|value| value.pointer("/config/peers"))
-        .and_then(Value::as_object)
-        .map(serde_json::Map::len);
-    let enabled = snapshot
-        .as_ref()
-        .and_then(|value| value.get("enabled"))
-        .and_then(Value::as_bool);
-    let plural = |count: usize| format!("{count} peer{}", if count == 1 { "" } else { "s" });
-    match (link, peers, enabled) {
-        (true, Some(count), _) => row("mesh", "Running", plural(count)),
-        (true, None, _) if unreadable => row("mesh", "Running", "peers need root to read"),
-        (true, None, _) => row("mesh", "Running", "peers unknown"),
-        (false, _, Some(true)) => row("mesh", "Stopped", "enabled, interface is down"),
-        (false, _, Some(false)) => row("mesh", "Stopped", "disabled"),
-        (false, ..) => row("mesh", "Not set up", ""),
+    match (link, peers) {
+        (true, Some(count)) => row("mesh", "Running", format!("peers: {count}")),
+        (true, None) if unreadable => row("mesh", "Running", "peers need root to read"),
+        (true, None) => row("mesh", "Running", "peers unknown"),
+        (false, _) if found => row("mesh", "Stopped", "interface is down"),
+        (false, _) => row("mesh", "Not set up", ""),
     }
 }
 
@@ -482,13 +485,35 @@ pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
 }
 
 impl NodeStatus {
-    /// Components as the stable `--json` rows.
+    /// Overall activity, one sentence and the next step. A node with nothing
+    /// installed reports `Inactive` with the install hint.
     #[must_use]
-    pub fn component_rows(&self) -> Vec<Value> {
-        self.components
-            .iter()
-            .map(|c| json!({"name": c.name, "state": c.state, "detail": c.detail}))
-            .collect()
+    #[inline(never)]
+    pub fn headline(&self) -> (Activity, String, &'static str) {
+        let overall = self.overall();
+        let word = match overall {
+            Activity::Active => "running",
+            Activity::Failed => "failed",
+            Activity::Unknown => "not answering",
+            Activity::Inactive => "not running",
+        };
+        if self.role == Role::None {
+            return (
+                Activity::Inactive,
+                "No infraternal server or agent is installed on this node.".to_owned(),
+                "Run `infraternal server init` to create a server on this node.",
+            );
+        }
+        let next = if overall == Activity::Active {
+            "No action is needed while the service is running."
+        } else {
+            "Run `systemctl status` (add `--user` for a user unit) on the unit in the table."
+        };
+        (
+            overall,
+            format!("Infraternal {}: {word} on this node.", self.role.label()),
+            next,
+        )
     }
 
     /// Overall activity: any running unit means the node is up.

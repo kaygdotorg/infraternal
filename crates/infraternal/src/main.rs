@@ -8,7 +8,6 @@ mod component_cli;
 mod embedded_cli;
 #[cfg(feature = "remote")]
 mod host_remove;
-mod node_status;
 #[cfg(feature = "release")]
 mod release_cli;
 
@@ -313,57 +312,26 @@ fn run_key_memory_check(json_output: bool) -> ExitCode {
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
-    use node_status::{Activity, Role};
+    use infraternal_status::Activity;
     let ids: Vec<String> = registry
         .plugins()
         .filter(|plugin| plugin.id != "cli")
         .map(|plugin| plugin.id.clone())
         .collect();
-    let node = node_status::probe(
-        &node_status::Roots::detect(),
+    let node = infraternal_status::probe(
+        &infraternal_status::Roots::detect(),
         &ids,
-        &node_status::manager_activity,
+        &infraternal_status::manager_activity,
     );
-    let (state, message, next_step) = match (node.role, node.overall()) {
-        (Role::None, _) => (
-            CommandState::Stopped,
-            "No infraternal server or agent is installed on this node.",
-            "Run `infraternal server init` to create a server on this node.",
-        ),
-        (_, Activity::Active) => (
-            CommandState::Running,
-            match node.role {
-                Role::Both => {
-                    "An infraternal server and an infraternal agent are installed on this node, and at least one is running."
-                }
-                Role::Host => "The infraternal agent is running on this node.",
-                _ => "The infraternal server is running on this node.",
-            },
-            "No action is needed while the service is running.",
-        ),
-        (_, Activity::Failed) => (
-            CommandState::Failed,
-            "An infraternal service on this node has failed.",
-            "Run `journalctl -u <unit>` (add `--user` for a user unit) to see why it stopped.",
-        ),
-        (_, Activity::Unknown) => (
-            CommandState::Unknown,
-            "The service manager did not answer for the infraternal units on this node.",
-            "Check that the user or system service manager is running for this account.",
-        ),
-        (_, Activity::Inactive) => (
-            CommandState::Stopped,
-            "The infraternal services on this node are installed and not running.",
-            "Start the unit shown in the components table with `systemctl start`.",
-        ),
+    let (activity, message, next_step) = node.headline();
+    let state = match activity {
+        Activity::Active => CommandState::Running,
+        Activity::Inactive => CommandState::Stopped,
+        Activity::Failed => CommandState::Failed,
+        Activity::Unknown => CommandState::Unknown,
     };
-    let result = CommandResult::new(
-        "status",
-        state,
-        message,
-        json!({"role": node.role.id(), "components": node.component_rows()}),
-    )
-    .with_next_step(next_step);
+    let result =
+        CommandResult::new("status", state, message, json!({"role": node.role.id(), "components": node.components.iter().map(|c| json!({"name": c.name, "state": c.state, "state_detail": c.detail})).collect::<Vec<_>>()})).with_next_step(next_step);
     print_result(&result, json_output, false);
     ExitCode::SUCCESS
 }
