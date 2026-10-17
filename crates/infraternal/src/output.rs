@@ -1,37 +1,64 @@
-//! Formats operator results as organized human text or JSON lines without invocation-specific login material [202], #78.
+//! Progress and refusal records of the operator commands, in the one envelope every command uses (#239, D202, D299).
+//!
+//! Operator commands such as `agent join` print a record per step. Each record is a
+//! complete result of the shared kind, so scripts read them line by line and people
+//! read the same plain sentences. Internal action ids map to the command a person typed.
 
 use std::process::ExitCode;
 
-/// Every record is a complete line; callers report only confirmed states.
-pub(crate) fn report(json: bool, action: &str, state: &str, message: &str, next: &str) {
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"action": action, "state": state, "message": message, "next": next})
-        );
-    } else {
-        let title = if action.starts_with("remote.host.") {
-            "Remote infraternal agent"
-        } else if action.starts_with("remote.server.") {
-            "Remote server capability"
-        } else if action.starts_with("server.") {
-            "Server"
-        } else if action == "agent.embedded" {
-            "Infraternal agent"
-        } else {
-            "Command"
-        };
-        let text = format!("{title}\n  State   {state}\n  Detail  {message}\n  Next    {next}\n");
-        if state == "refused" {
-            eprint!("{text}");
-        } else {
-            print!("{text}");
-        }
+use crate::cli::output::{CommandResult, CommandState, Exit, emit, print};
+use serde_json::json;
+
+/// The command path a person typed for an operator action id.
+fn command_for(action: &str) -> &str {
+    match action {
+        "remote.host.join" => "agent join",
+        "remote.host.run" => "agent run",
+        "remote.host.remove" => "remove-host",
+        "remote.server.restart" => "server restart",
+        "internal.key-memory-check" => "__key-memory-check",
+        "agent.embedded" => "agent",
+        other => other,
     }
+}
+
+fn state_of(word: &str) -> CommandState {
+    match word {
+        "starting" => CommandState::Running,
+        "stopped" => CommandState::Stopped,
+        "confirmation required" => CommandState::Pending,
+        "refused" => CommandState::Refused,
+        _ => CommandState::Ready,
+    }
+}
+
+/// Every record is a complete line in JSON mode; callers report only confirmed states.
+pub(crate) fn report(json: bool, action: &str, state: &str, message: &str, next: &str) {
+    let mut result = CommandResult::new(command_for(action), state_of(state), message, json!({}));
+    if !next.is_empty() {
+        result = result.with_next_step(next);
+    }
+    print(&result, json, false);
 }
 
 /// Static refusals do not reflect a path, invitation, proof or private identity.
 pub(crate) fn refuse(json: bool, action: &str, message: &str, next: &str, exit: u8) -> ExitCode {
-    report(json, action, "refused", message, next);
-    ExitCode::from(exit)
+    let mut result = CommandResult::new(
+        command_for(action),
+        CommandState::Refused,
+        message,
+        json!({}),
+    );
+    if !next.is_empty() {
+        result = result.with_next_step(next);
+    }
+    emit(
+        result,
+        json,
+        if exit == Exit::Usage.code() {
+            Exit::Usage
+        } else {
+            Exit::Failed
+        },
+    )
 }

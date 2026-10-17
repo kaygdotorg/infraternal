@@ -25,6 +25,7 @@ pub fn build(registry: &ActionRegistry) -> Command {
             infraternal_plugin_api::release_version::channel(infraternal_plugin_api::VERSION)
                 .unwrap_or("unknown")
         ))
+        .bin_name("infraternal")
         .about("Manage infraternal servers and node components.")
         .disable_help_subcommand(true)
         .arg(
@@ -249,6 +250,28 @@ mod tests {
 
     use super::{build, selected};
     use crate::cli::actions::registry;
+
+    #[test]
+    fn every_command_in_the_tree_takes_json() {
+        // D299: no command is exempt, hidden internal ones included.
+        fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            if !command
+                .get_arguments()
+                .any(|argument| argument.get_id() == "json")
+            {
+                missing.push(path.to_owned());
+            }
+            for child in command.get_subcommands() {
+                walk(child, &format!("{path} {}", child.get_name()), missing);
+            }
+        }
+        let registry = registry().expect("action registry");
+        let mut root = build(&registry);
+        root.build();
+        let mut missing = Vec::new();
+        walk(&root, "infraternal", &mut missing);
+        assert!(missing.is_empty(), "commands without --json: {missing:?}");
+    }
 
     #[test]
     fn root_help_uses_registered_descriptions_and_long_action_guidance() {

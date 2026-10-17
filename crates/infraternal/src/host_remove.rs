@@ -6,6 +6,8 @@ use std::{
     process::ExitCode,
 };
 use uuid::Uuid;
+
+use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -42,35 +44,38 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             })
     };
     match operation() {
-        Ok(value) if machine => {
-            println!("{value}");
-            ExitCode::SUCCESS
-        }
-        Ok(value) if finish => {
-            super::output::report(
-                false,
-                infraternal_plugin_remote::REMOVE.id,
-                "removed",
-                value["message"].as_str().unwrap_or("Host removed."),
-                "Review the host cleanup result.",
-            );
-            ExitCode::SUCCESS
-        }
+        // The challenge or the result of the hosted action travels in `data`; the
+        // sentence says which step the person is on.
         Ok(value) => {
-            super::output::report(
-                false,
-                infraternal_plugin_remote::REMOVE.id,
-                "confirmation required",
-                value["action"]["host"].as_str().unwrap_or("Selected host"),
-                "Use --json for the passkey challenge. Confirm it with your owner passkey, then pass session, ceremony and proof on stdin with --finish.",
-            );
-            ExitCode::SUCCESS
+            let (state, message, next) = if finish {
+                (
+                    CommandState::Ready,
+                    value["message"]
+                        .as_str()
+                        .unwrap_or("The host was removed.")
+                        .to_owned(),
+                    "",
+                )
+            } else {
+                (
+                    CommandState::Pending,
+                    "Removing this host needs your owner passkey.".to_owned(),
+                    "Confirm with your owner passkey, then pass the session, ceremony and proof on standard input with --finish.",
+                )
+            };
+            // The challenge is for scripts; a person at a terminal needs the sentence, not the material.
+            let data = if machine { value } else { json!({}) };
+            let mut result = CommandResult::new("remove-host", state, message, data);
+            if !next.is_empty() {
+                result = result.with_next_step(next);
+            }
+            emit(result, machine, Exit::Ok)
         }
         Err(_) => super::output::refuse(
             machine,
             infraternal_plugin_remote::REMOVE.id,
-            "Host removal was refused",
-            "Use a live owner session and a fresh removal passkey proof on private stdin.",
+            "Host removal was refused.",
+            "Use a live owner session and a fresh removal passkey proof on standard input.",
             1,
         ),
     }

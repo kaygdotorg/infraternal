@@ -19,15 +19,16 @@ fn remote_refusal_matches_its_declared_cli_output() {
         .output()
         .expect("run the real CLI");
     assert!(!output.status.success());
-    // JSON-mode logging is a separate line; select the operator record by its action.
+    // JSON-mode logging is a separate line; select the operator record by its command.
     let value = serde_json::Deserializer::from_slice(&output.stdout)
         .into_iter::<serde_json::Value>()
         .map(|record| record.expect("JSON response line"))
-        .filter(|record| record["action"] == "remote.host.run")
+        .filter(|record| record["command"] == "agent run")
         .last()
         .expect("operator response");
-    assert_eq!(value["action"], "remote.host.run");
+    assert_eq!(value["command"], "agent run");
     assert_eq!(value["state"], "refused");
+    assert_eq!(value["ok"], false);
 
     let action = infraternal_plugin_remote::cli::agent_actions()
         .into_iter()

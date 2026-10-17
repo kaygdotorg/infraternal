@@ -267,15 +267,15 @@ fn operator_presentation_cannot_follow_a_private_control_action() {
             Err(PluginError::UnknownAction)
         );
         assert_eq!(
-            registry.format_human("example.read", b"{}"),
-            Ok("{}".to_owned())
+            registry.present("example.read", b"{}", 80).map(|p| p.data),
+            Ok(serde_json::json!({}))
         );
         assert_eq!(
-            registry.format_human("example.configure", b"{}"),
+            registry.present("example.configure", b"{}", 80),
             Err(PluginError::UnknownAction)
         );
         assert_eq!(
-            registry.format_human("example.read", &vec![b' '; crate::MAX_ACTION_BYTES + 1]),
+            registry.present("example.read", &vec![b' '; crate::MAX_ACTION_BYTES + 1], 80),
             Err(PluginError::MessageTooLarge)
         );
     }

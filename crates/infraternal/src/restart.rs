@@ -373,7 +373,7 @@ pub(crate) fn run(
                 } else {
                     "Server replacement requested cold (CA locked)"
                 },
-                "Check health and administrator CA status after startup.",
+                "infraternal status",
             );
             std::process::ExitCode::SUCCESS
         }
@@ -381,7 +381,7 @@ pub(crate) fn run(
             json,
             infraternal_plugin_remote::RESTART.id,
             "Server replacement refused",
-            "Use the running service account, its data directory and an executable binary.",
+            "Run this as the account that runs the server, with its --data directory and an executable --binary.",
             1,
         ),
     }

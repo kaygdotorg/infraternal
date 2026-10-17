@@ -58,38 +58,15 @@ fn action(
     action
 }
 
-/// Operator records keep the deployed format, while removal can print a hosted challenge/result.
+/// Operator records use the shared envelope; `data` carries the hosted response when there is one
+/// (for example the passkey challenge of a host removal) and is empty for progress records.
 fn operator_output(definition: infraternal_plugin_api::ActionDef) -> JsonSchema {
-    let required = if definition.id == super::REMOVE.id {
-        Vec::new()
-    } else {
-        vec!["state".to_owned(), "message".to_owned()]
-    };
-    let mut schema = JsonSchema::object(
-        [
-            (
-                "state".to_owned(),
-                JsonSchema::string("Confirmed operator state."),
-            ),
-            (
-                "message".to_owned(),
-                JsonSchema::string("Operator result summary."),
-            ),
-            (
-                "next".to_owned(),
-                JsonSchema::string("Recommended follow-up."),
-            ),
-        ],
-        required,
-    )
-    .with_description(format!(
-        "Operator records for {}. Hosted response schema: {}.",
+    let mut data = JsonSchema::empty_object().with_description(format!(
+        "Hosted response for {}, shaped by schema {}; empty for progress records.",
         definition.id, definition.output.0
     ));
-    // Hosted schemas remain authoritative for challenge/result fields. Local CLI
-    // errors may also use the versioned envelope; neither requires rewriting deployed output.
-    schema.additional_properties = Some(true);
-    schema
+    data.additional_properties = Some(true);
+    JsonSchema::command_result_with(data)
 }
 
 /// Enrollment and reconnect remain actions owned by the infraternal agent component.

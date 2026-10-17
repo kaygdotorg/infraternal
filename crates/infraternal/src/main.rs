@@ -41,7 +41,7 @@ use std::{
 use std::net::SocketAddr;
 
 use clap::ArgMatches;
-use cli::output::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
+use cli::output::{CommandResult, CommandState, Exit, emit, render_json, write_output};
 use infraternal_plugin_api::{
     ActionAvailability, ActionDefinition, ActionRegistry, CliHandler, JsonSchema, JsonSchemaType,
 };
@@ -106,21 +106,20 @@ fn run_invocation() -> ExitCode {
     let registry = match cli::actions::registry_for(requested_root) {
         Ok(registry) => registry,
         Err(error) => {
-            print_result(
-                &CommandResult::new(
-                    "cli",
+            return emit(
+                CommandResult::new(
+                    "infraternal",
                     CommandState::Failed,
-                    "The command registry could not be loaded.",
+                    "The command list could not be loaded.",
                     json!({}),
                 )
                 .with_details(error.to_string()),
-                false,
-                true,
+                requested_json_early(),
+                Exit::Failed,
             );
-            return ExitCode::FAILURE;
         }
     };
-    let requested_json = std::env::args_os().any(|argument| argument == "--json");
+    let requested_json = requested_json_early();
     let matches = match cli::command_tree::build(&registry).try_get_matches() {
         Ok(matches) => matches,
         Err(error)
@@ -130,30 +129,7 @@ fn run_invocation() -> ExitCode {
                     clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
                 ) =>
         {
-            // Invalid private transport coordinates must not leak through Clap diagnostics.
-            #[cfg(feature = "remote")]
-            return output::refuse(
-                true,
-                "cli",
-                "Invalid command arguments",
-                "Read the command help and retry.",
-                2,
-            );
-            #[cfg(not(feature = "remote"))]
-            {
-                print_result(
-                    &CommandResult::new(
-                        "cli",
-                        CommandState::Failed,
-                        "Invalid command arguments.",
-                        json!({}),
-                    )
-                    .with_next_step("Read the command help and retry."),
-                    true,
-                    false,
-                );
-                return ExitCode::from(2);
-            }
+            return usage_error(&registry, &error);
         }
         Err(error) => error.exit(),
     };
@@ -273,18 +249,29 @@ fn dispatch_action(
 }
 
 fn missing_action(json_output: bool) -> ExitCode {
-    print_result(
-        &CommandResult::new(
-            "cli",
-            CommandState::Failed,
-            "The requested command is not registered in this build.",
+    emit(
+        CommandResult::new(
+            "infraternal",
+            CommandState::Refused,
+            "That is not a command this build has.",
             json!({}),
         )
-        .with_next_step("Run `infraternal --help` to see the enabled commands."),
+        .with_next_step("infraternal --help"),
         json_output,
-        true,
-    );
-    ExitCode::from(2)
+        Exit::Usage,
+    )
+}
+
+/// Whether `--json` was typed anywhere, known before any parsing so failures can honour it.
+fn requested_json_early() -> bool {
+    std::env::args_os().any(|argument| argument == "--json")
+}
+
+/// A command line that does not parse, reported in the envelope; see `cli::usage`.
+fn usage_error(registry: &ActionRegistry, error: &clap::Error) -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tree = cli::command_tree::build(registry);
+    emit(cli::usage::result(&tree, &args, error), true, Exit::Usage)
 }
 
 /// The shipping diagnostic refuses partial protection independently of server development policy.
@@ -297,7 +284,7 @@ fn run_key_memory_check(json_output: bool) -> ExitCode {
             "internal.key-memory-check",
             "ready",
             "Key memory initialization=1; locked pages and dump exclusion enabled",
-            "Run this check under an 8 MiB memlock limit.",
+            "",
         );
         ExitCode::SUCCESS
     } else {
@@ -305,7 +292,7 @@ fn run_key_memory_check(json_output: bool) -> ExitCode {
             json_output,
             "internal.key-memory-check",
             "Key memory refused",
-            "Check the compiled provider and memlock limit.",
+            "Raise the memlock limit to at least 8 MiB and run the check again.",
             1,
         )
     }
@@ -332,8 +319,7 @@ fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
     };
     let result =
         CommandResult::new("status", state, message, json!({"role": node.role.id(), "components": node.components.iter().map(|c| json!({"name": c.name, "state": c.state, "state_detail": c.detail})).collect::<Vec<_>>()})).with_next_step(next_step);
-    print_result(&result, json_output, false);
-    ExitCode::SUCCESS
+    emit(result, json_output, Exit::Ok)
 }
 
 fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {
@@ -488,35 +474,29 @@ fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {
     let next_step = if action.hosted.is_some() {
         "Use the server UI with an authenticated session to run this plugin action."
     } else {
-        "Run `infraternal status` to review this node's current components."
+        "infraternal status"
     };
-    print_result(
-        &CommandResult::new(command, state, message, data).with_next_step(next_step),
+    emit(
+        CommandResult::new(command, state, message, data).with_next_step(next_step),
         json_output,
-        state == CommandState::Failed,
-    );
-    if state == CommandState::Unavailable {
-        ExitCode::from(2)
-    } else {
-        ExitCode::FAILURE
-    }
+        Exit::Failed,
+    )
 }
 
 #[cfg(feature = "plugin-server")]
 fn run_server(matches: &ArgMatches, json_output: bool) -> ExitCode {
     if !server_configuration_was_supplied(matches) {
-        print_result(
-            &CommandResult::new(
+        return emit(
+            CommandResult::new(
                 "server",
                 CommandState::Unavailable,
                 "The server is not configured yet.",
                 json!({"listen": "127.0.0.1:7443", "public_origin": "https://localhost:7443"}),
             )
-            .with_next_step("Run `infraternal server init` to configure a server."),
+            .with_next_step("infraternal server init"),
             json_output,
-            false,
+            Exit::Usage,
         );
-        return ExitCode::from(2);
     }
     let args = match server_args(matches) {
         Ok(args) => args,
@@ -709,11 +689,8 @@ fn run_server_install_compat(_matches: &ArgMatches, json_output: bool) -> ExitCo
         "The legacy server install path is disabled and did not create a service.",
         json!({"service": "", "enabled": false, "dry_run": false}),
     )
-    .with_next_step(
-        "Run `infraternal server init --dry-run` to review setup, then use `infraternal server init --yes` to create the service.",
-    );
-    print_result(&result, json_output, false);
-    ExitCode::from(2)
+    .with_next_step("infraternal server init --dry-run");
+    emit(result, json_output, Exit::Usage)
 }
 
 #[cfg(feature = "plugin-server")]
@@ -792,7 +769,7 @@ fn run_setup_token(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
             if json_output {
                 // Both private-pipe readers remain valid; the capability never enters logs or argv.
-                write_command_output(
+                write_output(
                     render_json(&SetupTokenOutput {
                         result: &result,
                         token: &token,
@@ -886,18 +863,17 @@ fn run_embedded_agent(matches: &ArgMatches, json_output: bool) -> ExitCode {
         .get_one::<i64>("fd")
         .and_then(|fd| i32::try_from(*fd).ok())
     else {
-        print_result(
-            &CommandResult::new(
+        return emit(
+            CommandResult::new(
                 "agent",
                 CommandState::Unavailable,
                 "The infraternal agent needs a server connection to start.",
                 json!({}),
             )
-            .with_next_step("Use `infraternal agent up` when component setup is available."),
+            .with_next_step("infraternal agent join --help"),
             json_output,
-            false,
+            Exit::Usage,
         );
-        return ExitCode::from(2);
     };
     let state = matches.get_one::<String>("state").map(PathBuf::from);
     match infraternal_agent::run_embedded(fd, state) {
@@ -968,8 +944,8 @@ where
 }
 
 fn report_failure(command: &str, message: &str, details: String, json_output: bool) -> ExitCode {
-    print_result(
-        &CommandResult::new(
+    emit(
+        CommandResult::new(
             command,
             CommandState::Failed,
             message,
@@ -977,9 +953,8 @@ fn report_failure(command: &str, message: &str, details: String, json_output: bo
         )
         .with_details(details),
         json_output,
-        true,
-    );
-    ExitCode::FAILURE
+        Exit::Failed,
+    )
 }
 
 /// Keep failed JSON results typed by the action's declared `data` schema.
@@ -1061,37 +1036,7 @@ mod failure_data_tests {
 }
 
 fn print_result<T: Serialize>(result: &CommandResult<T>, json_output: bool, to_stderr: bool) {
-    let to_stderr = to_stderr && !json_output;
-    let terminal = if to_stderr {
-        io::stderr().is_terminal()
-    } else {
-        io::stdout().is_terminal()
-    };
-    let output = if json_output {
-        render_json(result)
-    } else {
-        render_pretty(result, RenderOptions::detect(terminal))
-    };
-    write_command_output(output, to_stderr);
-}
-
-/// Shares formatting-error and destination handling for standard and compatibility output.
-fn write_command_output(output: Result<String, serde_json::Error>, to_stderr: bool) {
-    let rendered = match output {
-        Ok(output) => output,
-        Err(error) => {
-            eprintln!("Could not format command output.\nTechnical detail: {error}");
-            return;
-        }
-    };
-    let write_result = if to_stderr {
-        io::stderr().write_all(rendered.as_bytes())
-    } else {
-        io::stdout().write_all(rendered.as_bytes())
-    };
-    if let Err(error) = write_result {
-        eprintln!("Could not write command output.\nTechnical detail: {error}");
-    }
+    cli::output::print(result, json_output, to_stderr && !json_output);
 }
 
 #[cfg(all(unix, feature = "plugin-server"))]
@@ -1319,8 +1264,8 @@ fn run_remote_agent(
         return output::refuse(
             json,
             operation,
-            "Incompatible infraternal agent modes",
-            "Choose one infraternal agent mode.",
+            "These infraternal agent options cannot be used together.",
+            "infraternal agent --help",
             2,
         );
     }
@@ -1328,8 +1273,8 @@ fn run_remote_agent(
         return output::refuse(
             json,
             operation,
-            "Infraternal agent data directory unavailable",
-            "Set a private identity directory with --data.",
+            "The infraternal agent has no private directory for its identity.",
+            "Pass --data with a directory only this account can read.",
             1,
         );
     };
@@ -1337,8 +1282,8 @@ fn run_remote_agent(
         json,
         operation,
         "starting",
-        "Preparing the enrolled host connection",
-        "Keep invitation material on private stdin; retain private identity locally.",
+        "Preparing the connection to the server.",
+        "",
     );
     let result = (|| -> std::io::Result<()> {
         use std::io::Read;
@@ -1358,8 +1303,8 @@ fn run_remote_agent(
                 json,
                 operation,
                 "enrolled",
-                "Private host identity retained",
-                "Keep this process running to maintain the connection.",
+                "This machine is enrolled. Connecting now; keep this running.",
+                "",
             );
         }
         remote_service::run(runtime, remote::run(&data, state))
@@ -1370,16 +1315,16 @@ fn run_remote_agent(
                 json,
                 operation,
                 "enrolled",
-                "Private host identity retained",
-                "Start the service with infraternal agent run using this identity directory.",
+                "This machine is enrolled. Its identity is saved here.",
+                "infraternal agent run",
             );
         } else {
             output::report(
                 json,
                 operation,
                 "stopped",
-                "Remote infraternal agent stopped",
-                "Reconnect with the retained enrolled identity when needed.",
+                "The infraternal agent stopped.",
+                "infraternal agent run",
             );
         }
         ExitCode::SUCCESS
@@ -1388,10 +1333,10 @@ fn run_remote_agent(
             json,
             operation,
             result.as_ref().err().map_or(
-                "Remote infraternal agent operation failed",
+                "The infraternal agent could not finish.",
                 remote::public_error,
             ),
-            "Check the enrolled identity and existing server trust.",
+            "Check the server address and that this machine is still enrolled, then run the command again.",
             1,
         )
     }

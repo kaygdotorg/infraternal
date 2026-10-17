@@ -1,28 +1,70 @@
-//! Renders stable command results as readable terminal text or versioned JSON.
+//! One output style and one JSON envelope for every command (#239, D202, D299, D303).
+//!
+//! A result is rendered one of two ways from the same [`CommandResult`]:
+//!
+//! - Text for people: the answer first, in plain words; then short aligned
+//!   blocks; then `Why` (only for failures) and `Next` (only when a follow-up is
+//!   true for this state). Colour and the state mark appear only on a terminal.
+//!   Failures go to standard error so a script's standard output stays empty.
+//! - JSON for scripts and AI tools: one single-line envelope per result, with the
+//!   same fields for every command, including usage errors. Fields are only ever
+//!   added within `schema_version` 1; removing or renaming one bumps the version.
 
-use std::fmt::Write as _;
+use std::{
+    io::{self, IsTerminal, Write},
+    process::ExitCode,
+};
 
+use infraternal_plugin_api::present;
 use serde::Serialize;
 
-/// Versioned envelope shared by every public command's JSON output.
+/// Widest line a table or paragraph uses, however wide the terminal is: long lines are hard to scan.
+const MAX_WIDTH: usize = 100;
+/// Narrowest layout the renderer still tries to keep readable.
+const MIN_WIDTH: usize = 40;
+
+/// What went wrong, for scripts: a stable code, the argument at fault (never its value), and a sentence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ErrorInfo {
+    /// Stable machine-readable code such as `usage`, `not_found` or `unreachable`.
+    pub code: String,
+    /// Name of the argument at fault, e.g. `--server`; never the value that was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument: Option<String>,
+    /// The failure in plain words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Versioned envelope shared by every command's JSON output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CommandResult<T> {
     /// Version of the stable CLI result contract.
     pub schema_version: u32,
     /// Executed command path without the executable name.
     pub command: String,
+    /// True when the command did what was asked; always agrees with exit code 0.
+    pub ok: bool,
     /// Plain machine-readable state.
     pub state: CommandState,
     /// Short sentence describing the result.
     pub message: String,
-    /// Recommended follow-up action, when one is useful.
+    /// Follow-ups that are true for this state; at most three, empty when nothing is needed.
+    pub next: Vec<String>,
+    /// First entry of `next`; kept so readers of the first envelope keep working.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
     /// Technical detail for a failure, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    /// Present exactly when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorInfo>,
     /// Action-specific typed output data.
     pub data: T,
+    /// Aligned text that replaces the generic rendering of `data` for people; never serialized.
+    #[serde(skip)]
+    pub body: Option<String>,
 }
 
 impl<T> CommandResult<T> {
@@ -37,18 +79,26 @@ impl<T> CommandResult<T> {
         Self {
             schema_version: 1,
             command: command.into(),
+            ok: state.is_ok(),
             state,
             message: message.into(),
+            next: Vec::new(),
             next_step: None,
             details: None,
+            error: None,
             data,
+            body: None,
         }
     }
 
-    /// Attach a recommended follow-up action.
+    /// Add a follow-up command or action. Callers add only follow-ups that are true now.
     #[must_use]
     pub fn with_next_step(mut self, next_step: impl Into<String>) -> Self {
-        self.next_step = Some(next_step.into());
+        let next_step = next_step.into();
+        if self.next.is_empty() {
+            self.next_step = Some(next_step.clone());
+        }
+        self.next.push(next_step);
         self
     }
 
@@ -58,9 +108,28 @@ impl<T> CommandResult<T> {
         self.details = Some(details.into());
         self
     }
+
+    /// Name the argument at fault in a usage error; the value is never recorded.
+    #[must_use]
+    pub fn with_argument(mut self, code: &str, argument: Option<String>) -> Self {
+        self.error = Some(ErrorInfo {
+            code: code.to_owned(),
+            argument,
+            detail: Some(self.details.clone().unwrap_or_else(|| self.message.clone())),
+        });
+        self
+    }
+
+    /// Give people this text instead of the generic rendering of `data`.
+    #[must_use]
+    pub fn with_body(mut self, body: impl Into<String>) -> Self {
+        let body = body.into();
+        self.body = (!body.trim().is_empty()).then_some(body);
+        self
+    }
 }
 
-/// Stable state values used by pretty output and JSON consumers.
+/// Stable state values used by text output and JSON consumers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandState {
@@ -70,8 +139,12 @@ pub enum CommandState {
     Running,
     /// The requested service or component is stopped.
     Stopped,
-    /// This build does not yet provide the command handler.
+    /// The command waits for a step that only a person can take (a passkey, a confirmation).
+    Pending,
+    /// This build does not provide the command handler.
     Unavailable,
+    /// The command was understood and refused: not allowed, or its inputs were not accepted.
+    Refused,
     /// The command failed.
     Failed,
     /// A truthful state cannot be established from available runtime data.
@@ -79,14 +152,18 @@ pub enum CommandState {
 }
 
 impl CommandState {
-    const fn label(self) -> &'static str {
+    /// States that describe a command which did not do what was asked.
+    const fn is_ok(self) -> bool {
+        !matches!(self, Self::Unavailable | Self::Refused | Self::Failed)
+    }
+
+    /// One mark per state, shown only on a terminal and always beside a word.
+    const fn mark(self) -> &'static str {
         match self {
-            Self::Ready => "Ready",
-            Self::Running => "Running",
-            Self::Stopped => "Stopped",
-            Self::Unavailable => "Unavailable",
-            Self::Failed => "Failed",
-            Self::Unknown => "Unknown",
+            Self::Ready | Self::Running => "●",
+            Self::Stopped => "○",
+            Self::Pending | Self::Unavailable | Self::Unknown => "!",
+            Self::Refused | Self::Failed => "✕",
         }
     }
 
@@ -94,8 +171,42 @@ impl CommandState {
         match self {
             Self::Ready | Self::Running => "\u{1b}[32m",
             Self::Stopped | Self::Unknown => "\u{1b}[36m",
-            Self::Unavailable => "\u{1b}[33m",
-            Self::Failed => "\u{1b}[31m",
+            Self::Pending | Self::Unavailable => "\u{1b}[33m",
+            Self::Refused | Self::Failed => "\u{1b}[31m",
+        }
+    }
+}
+
+/// How a command ended. The code is what a shell sees; `error_code` is what the envelope says.
+/// The full table of exit codes is decided in D303.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Exit {
+    /// Done, or the state that was asked about was found.
+    Ok,
+    /// The operation failed.
+    Failed,
+    /// The command line is wrong.
+    Usage,
+}
+
+impl Exit {
+    /// Process exit status.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Failed => 1,
+            Self::Usage => 2,
+        }
+    }
+
+    /// Stable error code for the envelope's `error.code`.
+    #[must_use]
+    pub const fn error_code(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Usage => "usage",
         }
     }
 }
@@ -103,7 +214,7 @@ impl CommandState {
 /// Formatting controls supplied by the output destination and test snapshots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderOptions {
-    /// Whether stdout is connected to a terminal.
+    /// Whether the destination is a terminal.
     pub terminal: bool,
     /// Whether ANSI color is allowed.
     pub color: bool,
@@ -112,13 +223,17 @@ pub struct RenderOptions {
 }
 
 impl RenderOptions {
-    /// Detect terminal width and disable color outside a TTY or with `NO_COLOR`.
+    /// Width comes from the terminal, then `$COLUMNS`, then 80. Colour is off outside a
+    /// terminal and with `NO_COLOR`; the state mark stays on a terminal.
     #[must_use]
     pub fn detect(terminal: bool) -> Self {
-        let width = std::env::var("COLUMNS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|width| (40..=240).contains(width))
+        let width = infraternal_shim::stdout_columns()
+            .map(usize::from)
+            .or_else(|| {
+                std::env::var("COLUMNS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
             .unwrap_or(80);
         Self {
             terminal,
@@ -127,141 +242,171 @@ impl RenderOptions {
         }
     }
 
-    fn usable_width(self) -> usize {
-        self.width.max(40)
+    /// Layout width after the readability bounds.
+    #[must_use]
+    pub fn usable_width(self) -> usize {
+        self.width.clamp(MIN_WIDTH, MAX_WIDTH)
     }
 }
 
-/// Serialize CLI output, including action-specific compatibility fields, with a trailing newline.
+/// Serialize a result as one line, with a trailing newline. Single lines let a stream of
+/// results (progress, pages) be read line by line.
+///
+/// # Errors
+///
+/// Returns an error when the value cannot be serialized.
 pub fn render_json<T: Serialize>(result: &T) -> Result<String, serde_json::Error> {
-    let mut output = serde_json::to_string_pretty(result)?;
+    let mut output = serde_json::to_string(result)?;
     output.push('\n');
     Ok(output)
 }
 
-/// Render a command result as organized, width-aware terminal text.
+/// Render a result as text for people.
+///
+/// # Errors
+///
+/// Returns an error when `data` cannot be converted for the generic renderer.
 pub fn render_pretty<T: Serialize>(
     result: &CommandResult<T>,
     options: RenderOptions,
 ) -> Result<String, serde_json::Error> {
-    let data = serde_json::to_value(&result.data)?;
     let width = options.usable_width();
-    let mut output = String::new();
-    let title = format!("Infraternal {}", result.command);
-    let _ = writeln!(output, "{title}");
-    output.push('\n');
-    output.push_str("Overview\n");
-    let state = result.state.label();
-    let rendered_state = if options.terminal && options.color {
-        format!("{}{}\u{1b}[0m", result.state.color(), state)
+    let mut sections: Vec<String> = Vec::new();
+
+    let headline = if options.terminal {
+        let mark = if options.color {
+            format!("{}{}\u{1b}[0m", result.state.color(), result.state.mark())
+        } else {
+            result.state.mark().to_owned()
+        };
+        // The mark takes two columns of the first line.
+        let mut lines = present::wrap(&result.message, width.saturating_sub(2));
+        lines[0] = format!("{mark} {}", lines[0]);
+        for line in lines.iter_mut().skip(1) {
+            line.insert_str(0, "  ");
+        }
+        lines.join("\n") + "\n"
     } else {
-        state.to_owned()
+        present::wrap(&result.message, width).join("\n") + "\n"
     };
-    render_key_value(&mut output, "State", &rendered_state, 2, 9, width);
-    render_key_value(&mut output, "Summary", &result.message, 2, 9, width);
+    sections.push(headline);
 
-    render_data(&mut output, &data, options);
+    if let Some(body) = &result.body {
+        sections.push(body.clone());
+    } else {
+        let data = serde_json::to_value(&result.data)?;
+        sections.extend(render_data(&data, options));
+    }
 
+    let mut closing: Vec<(&str, String)> = Vec::new();
     if let Some(details) = &result.details {
-        output.push('\n');
-        output.push_str("Technical details\n");
-        render_wrapped(&mut output, details, 2, width);
+        closing.push(("Why", details.clone()));
     }
-    if let Some(next_step) = &result.next_step {
-        output.push('\n');
-        output.push_str("Next step\n");
-        render_wrapped(&mut output, next_step, 2, width);
+    for (index, next) in result.next.iter().enumerate() {
+        closing.push((if index == 0 { "Next" } else { "" }, next.clone()));
     }
-    Ok(output)
+    let closing = present::pairs(&closing, 0, width);
+    if !closing.is_empty() {
+        sections.push(closing);
+    }
+    Ok(sections
+        .iter()
+        .map(|section| section.trim_end_matches('\n'))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n")
 }
 
-fn render_data(output: &mut String, data: &serde_json::Value, options: RenderOptions) {
+/// Text for results that have no hand-made body: values in `data`, shown as short aligned blocks.
+fn render_data(data: &serde_json::Value, options: RenderOptions) -> Vec<String> {
+    let width = options.usable_width();
     let Some(fields) = data.as_object() else {
-        output.push('\n');
-        output.push_str("Data\n");
-        render_wrapped(output, &scalar_text(data), 2, options.usable_width());
-        return;
+        return if is_empty_value(data) {
+            Vec::new()
+        } else {
+            vec![present::wrap(&scalar_text(data), width).join("\n") + "\n"]
+        };
     };
-
-    let scalars = fields
+    let mut sections = Vec::new();
+    let scalars: Vec<(String, String)> = fields
         .iter()
-        .filter(|(_, value)| {
-            !value.is_object() && !value.is_array() && !is_empty_pretty_value(value)
-        })
-        .collect::<Vec<_>>();
+        .filter(|(_, value)| !value.is_object() && !value.is_array() && !is_empty_value(value))
+        .map(|(key, value)| (humanize(key), scalar_text(value)))
+        .collect();
     if !scalars.is_empty() {
-        output.push('\n');
-        output.push_str("Details\n");
-        let label_width = scalars
+        let rows: Vec<(&str, String)> = scalars
             .iter()
-            .map(|(key, _)| humanize(key).chars().count())
-            .max()
-            .unwrap_or(8)
-            .min(22);
-        for (key, value) in scalars {
-            render_key_value(
-                output,
-                &humanize(key),
-                &scalar_text(value),
-                2,
-                label_width,
-                options.usable_width(),
-            );
-        }
+            .map(|(label, value)| (label.as_str(), value.clone()))
+            .collect();
+        sections.push(present::pairs(&rows, 0, width));
     }
-
-    for (key, value) in fields.iter().filter(|(_, value)| {
-        (value.is_object() || value.is_array()) && !is_empty_pretty_value(value)
-    }) {
-        output.push('\n');
-        output.push_str(&humanize(key));
-        output.push('\n');
+    let structured: Vec<_> = fields
+        .iter()
+        .filter(|(_, value)| (value.is_object() || value.is_array()) && !is_empty_value(value))
+        .collect();
+    // A heading only helps when it tells blocks apart.
+    let headings = structured.len() + usize::from(!scalars.is_empty()) > 1;
+    for (key, value) in structured {
+        let mut block = if headings {
+            format!("{}\n", humanize(key))
+        } else {
+            String::new()
+        };
+        let indent = if headings { 2 } else { 0 };
         if let Some(items) = value.as_array() {
-            if let Some(rows) = object_rows(items) {
-                render_table(output, &rows, 2, options.usable_width());
+            if let Some((header, rows)) = object_rows(items) {
+                let tint = |column: usize, text: &str| {
+                    (options.color && header[column] == "state")
+                        .then(|| state_tint(text))
+                        .flatten()
+                };
+                let labels: Vec<String> = header.iter().map(|key| humanize(key)).collect();
+                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                block.push_str(&present::table(&labels, &rows, indent, width, Some(&tint)));
             } else {
-                for item in items {
-                    if !is_empty_pretty_value(item) {
-                        render_wrapped(output, &scalar_text(item), 2, options.usable_width());
+                for item in items.iter().filter(|item| !is_empty_value(item)) {
+                    for line in present::wrap(&scalar_text(item), width.saturating_sub(indent)) {
+                        block.push_str(&" ".repeat(indent));
+                        block.push_str(&line);
+                        block.push('\n');
                     }
                 }
             }
         } else if let Some(nested) = value.as_object() {
-            let label_width = nested
+            let rows: Vec<(String, String)> = nested
                 .iter()
-                .filter(|(_, value)| !is_empty_pretty_value(value))
-                .map(|(key, _)| key)
-                .map(|key| humanize(key).chars().count())
-                .max()
-                .unwrap_or(8)
-                .min(22);
-            for (nested_key, nested_value) in nested
+                .filter(|(_, value)| !is_empty_value(value))
+                .map(|(key, value)| (humanize(key), scalar_text(value)))
+                .collect();
+            let rows: Vec<(&str, String)> = rows
                 .iter()
-                .filter(|(_, value)| !is_empty_pretty_value(value))
-            {
-                render_key_value(
-                    output,
-                    &humanize(nested_key),
-                    &scalar_text(nested_value),
-                    2,
-                    label_width,
-                    options.usable_width(),
-                );
-            }
+                .map(|(label, value)| (label.as_str(), value.clone()))
+                .collect();
+            block.push_str(&present::pairs(&rows, indent, width));
         }
+        sections.push(block);
+    }
+    sections
+}
+
+/// Terminal tint for a state word in a table column.
+fn state_tint(text: &str) -> Option<&'static str> {
+    match text.to_ascii_lowercase().as_str() {
+        "running" | "ready" | "on" | "active" => Some("\u{1b}[32m"),
+        "failed" | "refused" => Some("\u{1b}[31m"),
+        "stopped" | "unknown" | "off" => Some("\u{1b}[36m"),
+        _ => None,
     }
 }
 
 /// Empty containers and blank strings have no useful human representation.
 /// Keep them in JSON, but omit their labels in the human renderer.
-fn is_empty_pretty_value(value: &serde_json::Value) -> bool {
+fn is_empty_value(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(value) => value.trim().is_empty(),
-        serde_json::Value::Array(items) => {
-            items.is_empty() || items.iter().all(is_empty_pretty_value)
-        }
+        serde_json::Value::Array(items) => items.is_empty() || items.iter().all(is_empty_value),
         serde_json::Value::Object(fields) => {
-            fields.is_empty() || fields.values().all(is_empty_pretty_value)
+            fields.is_empty() || fields.values().all(is_empty_value)
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
             false
@@ -269,176 +414,55 @@ fn is_empty_pretty_value(value: &serde_json::Value) -> bool {
     }
 }
 
-fn object_rows(items: &[serde_json::Value]) -> Option<Vec<Vec<String>>> {
+/// Columns (keys, `name` first) and rows for an array of flat objects.
+fn object_rows(items: &[serde_json::Value]) -> Option<(Vec<String>, Vec<Vec<String>>)> {
     if items.is_empty() || items.iter().any(|item| !item.is_object()) {
         return None;
     }
-    let visible_rows = items
+    let visible: Vec<_> = items
         .iter()
         .filter_map(serde_json::Value::as_object)
-        .filter(|fields| {
-            !fields.is_empty() && fields.values().any(|value| !is_empty_pretty_value(value))
-        })
-        .collect::<Vec<_>>();
-    if visible_rows.is_empty() {
-        return None;
-    }
-    let mut columns = std::collections::BTreeSet::new();
-    for fields in &visible_rows {
-        columns.extend(
-            fields
-                .iter()
-                .filter(|(_, value)| !is_empty_pretty_value(value))
-                .map(|(key, _)| key.clone()),
-        );
+        .filter(|fields| fields.values().any(|value| !is_empty_value(value)))
+        .collect();
+    let mut columns: Vec<String> = Vec::new();
+    for fields in &visible {
+        for (key, value) in *fields {
+            if !is_empty_value(value) && !columns.contains(key) {
+                columns.push(key.clone());
+            }
+        }
     }
     if columns.is_empty() {
         return None;
     }
-    let mut rows = Vec::with_capacity(visible_rows.len() + 1);
-    rows.push(columns.iter().map(|key| humanize(key)).collect());
-    for fields in visible_rows {
-        rows.push(
+    if let Some(at) = columns
+        .iter()
+        .position(|key| key == "name" || key == "command")
+    {
+        let first = columns.remove(at);
+        columns.insert(0, first);
+    }
+    let rows = visible
+        .iter()
+        .map(|fields| {
             columns
                 .iter()
                 .map(|key| fields.get(key).map_or_else(String::new, scalar_text))
-                .collect(),
-        );
-    }
-    Some(rows)
-}
-
-fn render_table(output: &mut String, rows: &[Vec<String>], indent: usize, width: usize) {
-    let column_count = rows.first().map_or(0, Vec::len);
-    if column_count == 0 {
-        return;
-    }
-    let gap = 2;
-    let available = width
-        .saturating_sub(indent + gap * (column_count - 1))
-        .max(column_count);
-    let column_width = (available / column_count).max(1);
-    let widths = (0..column_count)
-        .map(|column| {
-            rows.iter()
-                .filter_map(|row| row.get(column))
-                .map(|cell| cell.chars().count())
-                .max()
-                .unwrap_or(1)
-                .min(column_width)
-                .max(1)
+                .collect()
         })
-        .collect::<Vec<_>>();
-    for row in rows {
-        let wrapped = row
-            .iter()
-            .enumerate()
-            .map(|(index, value)| wrap_words(value, widths[index]))
-            .collect::<Vec<_>>();
-        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
-        for line in 0..height {
-            write_indent(output, indent);
-            for (column, column_width) in widths.iter().enumerate() {
-                let value = wrapped
-                    .get(column)
-                    .and_then(|lines| lines.get(line))
-                    .map_or("", String::as_str);
-                output.push_str(value);
-                if column + 1 != column_count {
-                    let padding = column_width.saturating_sub(value.chars().count()) + gap;
-                    output.push_str(&" ".repeat(padding));
-                }
-            }
-            output.push('\n');
-        }
-    }
+        .collect();
+    Some((columns, rows))
 }
 
-fn render_key_value(
-    output: &mut String,
-    label: &str,
-    value: &str,
-    indent: usize,
-    label_width: usize,
-    width: usize,
-) {
-    let value_indent = indent + label_width + 2;
-    let label_length = label.chars().count();
-    if label_length > label_width || value_indent >= width {
-        write_indent(output, indent);
-        output.push_str(label);
-        output.push('\n');
-        render_wrapped(output, value, indent + 2, width);
-        return;
-    }
-    write_indent(output, indent);
-    output.push_str(label);
-    output.push_str(&" ".repeat(label_width - label_length + 2));
-    let wrapped = wrap_words(value, width.saturating_sub(value_indent).max(1));
-    if let Some(first) = wrapped.first() {
-        output.push_str(first);
-    }
-    output.push('\n');
-    for line in wrapped.iter().skip(1) {
-        write_indent(output, value_indent);
-        output.push_str(line);
-        output.push('\n');
-    }
-}
-
-fn render_wrapped(output: &mut String, value: &str, indent: usize, width: usize) {
-    let available = width.saturating_sub(indent).max(1);
-    let wrapped = wrap_words(value, available);
-    for line in wrapped {
-        write_indent(output, indent);
-        output.push_str(&line);
-        output.push('\n');
-    }
-}
-
-fn wrap_words(value: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in value.split_whitespace() {
-        let word_length = word.chars().count();
-        if !line.is_empty() && line.chars().count() + 1 + word_length > width {
-            lines.push(std::mem::take(&mut line));
-        }
-        if word_length > width {
-            let mut chars = word.chars();
-            while chars.clone().count() > width {
-                line.extend(chars.by_ref().take(width));
-                lines.push(std::mem::take(&mut line));
-            }
-            line.extend(chars);
-        } else {
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-    }
-    if !line.is_empty() || lines.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-fn write_indent(output: &mut String, indent: usize) {
-    output.push_str(&" ".repeat(indent));
-}
-
+/// A label for a JSON key: `state_detail` reads as `Detail`, `peer_count` as `Peer count`.
 fn humanize(value: &str) -> String {
+    let value = value.strip_prefix("state_").unwrap_or(value);
     let mut output = String::with_capacity(value.len());
-    let mut uppercase_next = true;
-    for character in value.chars() {
+    for (index, character) in value.chars().enumerate() {
         if character == '_' || character == '-' {
             output.push(' ');
-            uppercase_next = true;
-        } else if uppercase_next {
+        } else if index == 0 {
             output.extend(character.to_uppercase());
-            uppercase_next = false;
         } else {
             output.push(character);
         }
@@ -448,8 +472,9 @@ fn humanize(value: &str) -> String {
 
 fn scalar_text(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::Null => "None".to_owned(),
-        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => "none".to_owned(),
+        serde_json::Value::Bool(true) => "yes".to_owned(),
+        serde_json::Value::Bool(false) => "no".to_owned(),
         serde_json::Value::Number(value) => value.to_string(),
         serde_json::Value::String(value) => value.clone(),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
@@ -458,14 +483,90 @@ fn scalar_text(value: &serde_json::Value) -> String {
     }
 }
 
+/// Finish a command: stamp `ok` and `error` from how it ended, print it, and return the exit code.
+///
+/// Failures go to standard error in text mode, so a script that reads standard output
+/// sees nothing; in JSON mode every result, failure or not, is one line on standard output.
+pub fn emit<T: Serialize>(result: CommandResult<T>, json: bool, exit: Exit) -> ExitCode {
+    emit_to(result, json, exit, exit != Exit::Ok)
+}
+
+/// Like [`emit`], with the destination for text output chosen by the caller.
+/// A report that is information even when the exit code is not zero (a stopped node) uses standard output.
+pub fn emit_to<T: Serialize>(
+    mut result: CommandResult<T>,
+    json: bool,
+    exit: Exit,
+    to_stderr: bool,
+) -> ExitCode {
+    result.ok = exit == Exit::Ok;
+    if exit != Exit::Ok && result.error.is_none() {
+        result.error = Some(ErrorInfo {
+            code: exit.error_code().to_owned(),
+            argument: None,
+            detail: result
+                .details
+                .clone()
+                .or_else(|| Some(result.message.clone())),
+        });
+    }
+    print(&result, json, to_stderr && !json);
+    ExitCode::from(exit.code())
+}
+
+/// Print a result without deciding the exit code (streams of progress records, tests).
+pub fn print<T: Serialize>(result: &CommandResult<T>, json: bool, to_stderr: bool) {
+    let terminal = if to_stderr {
+        io::stderr().is_terminal()
+    } else {
+        io::stdout().is_terminal()
+    };
+    let rendered = if json {
+        render_json(result)
+    } else {
+        render_pretty(result, RenderOptions::detect(terminal))
+    };
+    write_output(rendered, to_stderr);
+}
+
+/// Shares formatting-error and destination handling for every rendered result.
+pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) {
+    let rendered = match output {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("The result could not be formatted.\nWhy  {error}");
+            return;
+        }
+    };
+    let write_result = if to_stderr {
+        io::stderr().write_all(rendered.as_bytes())
+    } else {
+        io::stdout().write_all(rendered.as_bytes())
+    };
+    // A closed pipe (for example `| head`) is the reader's choice, not an error to report.
+    if let Err(error) = write_result
+        && error.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("The result could not be written.\nWhy  {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    //! Snapshots pretty output, terminal color, wrapping, and the stable JSON envelope.
+    //! Snapshots text output, terminal colour, wrapping, and the stable JSON envelope.
 
     use infraternal_plugin_api::{JsonSchema, JsonSchemaType};
     use serde_json::json;
 
-    use super::{CommandResult, CommandState, RenderOptions, render_json, render_pretty};
+    use super::{
+        CommandResult, CommandState, Exit, RenderOptions, emit_to, render_json, render_pretty,
+    };
+
+    const PLAIN: RenderOptions = RenderOptions {
+        terminal: false,
+        color: false,
+        width: 80,
+    };
 
     fn status() -> CommandResult<serde_json::Value> {
         CommandResult::new(
@@ -480,41 +581,28 @@ mod tests {
                 ]
             }),
         )
-        .with_next_step("Run infraternal mesh up when this node needs mesh connectivity.")
+        .with_next_step("infraternal mesh up")
     }
 
     #[test]
-    fn non_terminal_pretty_snapshot_has_aligned_details_and_table() {
-        let output = render_pretty(
-            &status(),
-            RenderOptions {
-                terminal: false,
-                color: false,
-                width: 80,
-            },
-        )
-        .expect("render status");
+    fn plain_text_answers_first_then_aligned_blocks_then_next() {
+        let output = render_pretty(&status(), PLAIN).expect("render status");
         assert_eq!(
             output,
             concat!(
-                "Infraternal status\n\n",
-                "Overview\n",
-                "  State      Ready\n",
-                "  Summary    The server is running and this node is connected.\n\n",
-                "Details\n",
-                "  Role  managed node\n\n",
+                "The server is running and this node is connected.\n\n",
+                "Role  managed node\n\n",
                 "Components\n",
-                "  Name    State\n",
+                "  NAME    STATE\n",
                 "  server  running\n",
                 "  mesh    stopped\n\n",
-                "Next step\n",
-                "  Run infraternal mesh up when this node needs mesh connectivity.\n"
+                "Next  infraternal mesh up\n"
             )
         );
     }
 
     #[test]
-    fn terminal_snapshot_uses_color_but_still_wraps_to_the_requested_width() {
+    fn terminal_output_has_a_mark_and_colour_and_wraps_to_the_width() {
         let mut result = status();
         result.message =
             "This sentence is deliberately long enough to wrap across a narrow terminal."
@@ -528,112 +616,104 @@ mod tests {
             },
         )
         .expect("render status");
-        assert_eq!(
-            output,
-            concat!(
-                "Infraternal status\n\n",
-                "Overview\n",
-                "  State      \u{1b}[32mReady\u{1b}[0m\n",
-                "  Summary    This sentence is deliberately long\n",
-                "             enough to wrap across a narrow\n",
-                "             terminal.\n\n",
-                "Details\n",
-                "  Role  managed node\n\n",
-                "Components\n",
-                "  Name    State\n",
-                "  server  running\n",
-                "  mesh    stopped\n\n",
-                "Next step\n",
-                "  Run infraternal mesh up when this node needs mesh\n",
-                "  connectivity.\n"
-            )
+        assert!(
+            output.starts_with(
+                "\u{1b}[32m●\u{1b}[0m This sentence is deliberately long enough to wrap\n  across"
+            ),
+            "{output:?}"
         );
-    }
-
-    #[test]
-    fn pretty_snapshot_omits_empty_skill_write_sections() {
-        let result = CommandResult::new(
-            "skill",
-            CommandState::Ready,
-            "Wrote 1 command skill files.",
-            json!({
-                "commands": [],
-                "skill": "",
-                "files": ["infraternal-status.md"]
-            }),
-        )
-        .with_next_step("Open a generated Markdown file to review its command contract.");
-        let output = render_pretty(
+        assert!(output.contains("\u{1b}[32mrunning\u{1b}[0m"), "{output:?}");
+        // The mark stays with NO_COLOR; plain output has neither mark nor colour.
+        let marked = render_pretty(
             &result,
             RenderOptions {
-                terminal: false,
-                color: false,
-                width: 80,
-            },
-        )
-        .expect("render skill write result");
-
-        assert_eq!(
-            output,
-            concat!(
-                "Infraternal skill\n\n",
-                "Overview\n",
-                "  State      Ready\n",
-                "  Summary    Wrote 1 command skill files.\n\n",
-                "Files\n",
-                "  infraternal-status.md\n\n",
-                "Next step\n",
-                "  Open a generated Markdown file to review its command contract.\n"
-            )
-        );
-        let json_output = render_json(&result).expect("render JSON skill write result");
-        assert!(json_output.contains("\"commands\": []"));
-        assert!(json_output.contains("\"skill\": \"\""));
-    }
-
-    #[test]
-    fn pretty_tables_omit_empty_columns_and_rows() {
-        let result = CommandResult::new(
-            "status",
-            CommandState::Ready,
-            "Components were inspected.",
-            json!({
-                "components": [
-                    {"name": "mesh", "state": "running", "details": ""},
-                    {}
-                ]
-            }),
-        );
-        let output = render_pretty(
-            &result,
-            RenderOptions {
-                terminal: false,
+                terminal: true,
                 color: false,
                 width: 80,
             },
         )
         .expect("render status");
-
-        assert!(!output.contains("Details"), "empty column: {output}");
-        assert!(!output.contains("  \n"), "empty row: {output}");
+        assert!(marked.starts_with("● This sentence"), "{marked:?}");
+        assert!(!marked.contains('\u{1b}'), "{marked:?}");
+        assert!(!render_pretty(&result, PLAIN).expect("plain").contains('●'));
     }
 
     #[test]
-    fn json_snapshot_has_stable_versioned_fields_and_omits_absent_details() {
-        let mut result = CommandResult::new(
+    fn a_failure_says_why_and_what_to_do() {
+        let result = CommandResult::new(
+            "mesh peers",
+            CommandState::Failed,
+            "The infraternal agent on this machine is not answering.",
+            json!({}),
+        )
+        .with_details("No socket in the runtime directory.")
+        .with_next_step("infraternal agent run");
+        assert_eq!(
+            render_pretty(&result, PLAIN).expect("render failure"),
+            concat!(
+                "The infraternal agent on this machine is not answering.\n\n",
+                "Why   No socket in the runtime directory.\n",
+                "Next  infraternal agent run\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_body_replaces_the_generic_rendering_of_data() {
+        let result = status().with_body("custom block\n");
+        let output = render_pretty(&result, PLAIN).expect("render body");
+        assert!(output.contains("custom block"));
+        assert!(!output.contains("Components"));
+    }
+
+    #[test]
+    fn tables_omit_empty_columns_and_rows_and_single_rows_have_no_header() {
+        let result = CommandResult::new(
+            "status",
+            CommandState::Ready,
+            "Components were inspected.",
+            json!({"components": [{"name": "mesh", "state": "running", "details": ""}, {}]}),
+        );
+        let output = render_pretty(&result, PLAIN).expect("render status");
+        assert_eq!(output, "Components were inspected.\n\nmesh  running\n");
+    }
+
+    #[test]
+    fn json_is_one_line_with_stable_fields_and_omits_absent_ones() {
+        let result = CommandResult::new(
             "mesh up",
             CommandState::Unavailable,
             "Mesh connectivity is not available yet.",
             json!({"ssh": false}),
         )
-        .with_next_step("Check infraternal skill mesh up for current instructions.");
+        .with_next_step("infraternal skill mesh up");
         assert_eq!(
             render_json(&result).expect("serialize result"),
-            "{\n  \"schema_version\": 1,\n  \"command\": \"mesh up\",\n  \"state\": \"unavailable\",\n  \"message\": \"Mesh connectivity is not available yet.\",\n  \"next_step\": \"Check infraternal skill mesh up for current instructions.\",\n  \"data\": {\n    \"ssh\": false\n  }\n}\n"
+            concat!(
+                "{\"schema_version\":1,\"command\":\"mesh up\",\"ok\":false,",
+                "\"state\":\"unavailable\",\"message\":\"Mesh connectivity is not available yet.\",",
+                "\"next\":[\"infraternal skill mesh up\"],",
+                "\"next_step\":\"infraternal skill mesh up\",\"data\":{\"ssh\":false}}\n"
+            )
         );
-        result.details = Some("No component manager is registered.".to_owned());
-        let json = render_json(&result).expect("serialize result with details");
-        assert!(json.contains("\"details\": \"No component manager is registered.\""));
+    }
+
+    #[test]
+    fn finishing_a_command_stamps_ok_and_the_error_from_the_exit() {
+        let failed = CommandResult::new("x", CommandState::Failed, "It broke.", json!({}))
+            .with_details("because");
+        let exit = emit_to(failed, true, Exit::Failed, false);
+        assert_eq!(
+            format!("{exit:?}"),
+            format!("{:?}", std::process::ExitCode::from(1))
+        );
+        let mut done = CommandResult::new("x", CommandState::Ready, "Done.", json!({}));
+        done.ok = false;
+        let exit = emit_to(done, true, Exit::Ok, false);
+        assert_eq!(
+            format!("{exit:?}"),
+            format!("{:?}", std::process::ExitCode::SUCCESS)
+        );
     }
 
     #[test]

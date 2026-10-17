@@ -120,25 +120,60 @@ impl JsonSchema {
                 ),
                 ("command".to_owned(), Self::string("Executed command path.")),
                 (
+                    "ok".to_owned(),
+                    Self::boolean("True when the command did what was asked; matches exit code 0."),
+                ),
+                (
                     "state".to_owned(),
                     Self::string("Plain machine-readable command state."),
                 ),
                 ("message".to_owned(), Self::string("Short result summary.")),
                 (
+                    "next".to_owned(),
+                    Self::array(
+                        Self::string("A command or action that fits this state."),
+                        "Recommended follow-ups, at most three; empty when nothing is needed.",
+                    ),
+                ),
+                (
                     "next_step".to_owned(),
-                    Self::string("Optional recommended follow-up action."),
+                    Self::string("First entry of `next`, kept for readers of the first envelope."),
                 ),
                 (
                     "details".to_owned(),
                     Self::string("Technical detail associated with a failed command."),
+                ),
+                (
+                    "error".to_owned(),
+                    Self::object(
+                        [
+                            (
+                                "code".to_owned(),
+                                Self::string(
+                                    "Stable error code such as usage, not_found or unreachable.",
+                                ),
+                            ),
+                            (
+                                "argument".to_owned(),
+                                Self::string("Name of the argument at fault, never its value."),
+                            ),
+                            (
+                                "detail".to_owned(),
+                                Self::string("What went wrong, in plain words."),
+                            ),
+                        ],
+                        ["code".to_owned()],
+                    ),
                 ),
                 ("data".to_owned(), data),
             ],
             [
                 "schema_version".to_owned(),
                 "command".to_owned(),
+                "ok".to_owned(),
                 "state".to_owned(),
                 "message".to_owned(),
+                "next".to_owned(),
                 "data".to_owned(),
             ],
         )
@@ -873,9 +908,18 @@ mod tests {
         assert_eq!(schema.schema_type, super::JsonSchemaType::Object);
         assert_eq!(
             schema.required,
-            ["schema_version", "command", "state", "message", "data"]
+            [
+                "schema_version",
+                "command",
+                "ok",
+                "state",
+                "message",
+                "next",
+                "data"
+            ]
         );
         assert!(schema.properties.contains_key("next_step"));
+        assert!(schema.properties.contains_key("error"));
         assert!(schema.properties.contains_key("details"));
         assert_eq!(
             schema.properties["data"].schema_type,

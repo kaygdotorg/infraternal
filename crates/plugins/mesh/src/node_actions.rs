@@ -294,8 +294,13 @@ impl AgentPlugin for MeshNodePlugin {
     fn human_status_action(&self, action: &str) -> Option<&'static str> {
         matches!(action, "mesh.up" | "mesh.down").then_some("mesh.status")
     }
-    fn format_human(&self, action: &str, output: &[u8]) -> Result<String, PluginError> {
-        crate::node_presentation::format(action, output)
+    fn present(
+        &self,
+        action: &str,
+        output: &[u8],
+        width: usize,
+    ) -> Result<infraternal_plugin_api::present::Presented, PluginError> {
+        crate::node_presentation::present(action, output, width)
     }
     fn control_actions(&self) -> &'static [ActionDef] {
         CONTROL_ACTIONS

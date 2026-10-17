@@ -9,31 +9,34 @@ safety notes.
 
 ## Human and JSON output
 
-Commands print organised human output by default. Results use titled sections,
-aligned fields or tables, plain-language states, technical details beneath
-failure summaries, and a short next step when one is useful. Terminal colour is
-enabled only when output is a TTY and `NO_COLOR` is absent.
+Every command prints the same shape for people: the answer in one plain
+sentence first, then short aligned blocks, then `Why` (failures only) and
+`Next` (only a follow-up that is true for this state, at most three). Tables
+show a header only from two rows, size each column to its widest value, and
+wrap only the last column. Width comes from the terminal, then `$COLUMNS`,
+then 80, and never exceeds 100. Colour and the state mark (`●` `○` `!` `✕`)
+appear only on a terminal; colour is off with `NO_COLOR`. Failures go to
+standard error.
 
-Every public command accepts `--json`. JSON uses a stable versioned envelope:
+Every command, including hidden internal ones, accepts `--json`. JSON is one
+compact line per result on standard output, also for failures and usage
+errors, so a stream of results can be read line by line:
 
 ```json
-{
-  "schema_version": 1,
-  "command": "status",
-  "state": "stopped",
-  "message": "No infraternal server service is running on this node.",
-  "next_step": "Run `infraternal server init` to create a server on this node.",
-  "data": {
-    "role": "node",
-    "components": [{"name": "server", "state": "Stopped"}]
-  }
-}
+{"schema_version":1,"command":"remove-host","ok":false,"state":"refused",
+ "message":"infraternal remove-host needs --server and <HOST>.",
+ "next":["infraternal remove-host --help"],"next_step":"infraternal remove-host --help",
+ "error":{"code":"usage","argument":"--server","detail":"..."},"data":{}}
 ```
 
-`next_step` and `details` are omitted when they do not apply. `data` is shaped
-by the selected action's output schema. State values are `ready`, `running`,
-`stopped`, `unavailable`, `failed`, and `unknown`. A command's short `message`
-is intended for people; `details` carries technical failure context.
+Fields are only ever added within `schema_version` 1; removing or renaming one
+bumps the version. `ok` is true exactly when the exit code is 0. `error` is
+present exactly when `ok` is false: `code` is stable, `argument` names the
+argument at fault and never its value. `next_step` repeats the first entry of
+`next`. `data` is shaped by the action's output schema. States are `ready`,
+`running`, `stopped`, `pending`, `unavailable`, `refused`, `failed` and
+`unknown`. A test walks the whole command tree and fails when a command lacks
+`--json` or prints anything that is not this envelope.
 
 ## Command shape
 

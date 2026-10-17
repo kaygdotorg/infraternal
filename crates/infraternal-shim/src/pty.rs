@@ -203,6 +203,19 @@ fn allowed_signal(number: u8) -> io::Result<Signal> {
     }
     Ok(signal)
 }
+/// Columns of the terminal behind standard output; `None` for a pipe, a file or a zero-width reply.
+pub fn stdout_columns() -> Option<u16> {
+    let mut size = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes exactly one Winsize through the pointer, which
+    // outlives the call; descriptor 1 is only inspected and never closed.
+    let status = unsafe { nix::libc::ioctl(1, nix::libc::TIOCGWINSZ, &raw mut size) };
+    (status == 0 && size.ws_col > 0).then_some(size.ws_col)
+}
 /// Detach only before threads or PTYs exist. The original process returns;
 /// the grandchild owns the session and redirects inherited standard handles.
 pub fn detach() -> io::Result<bool> {
