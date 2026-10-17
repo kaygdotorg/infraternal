@@ -353,8 +353,7 @@ impl Installation {
             crate::payload_encoding::encoded(binary, crate::payload_encoding::Codec::Zstd).await?;
         let gzip =
             crate::payload_encoding::encoded(binary, crate::payload_encoding::Codec::Gzip).await?;
-        let raw_size = tokio::fs::metadata(binary)
-            .await
+        let raw_size = std::fs::metadata(binary)
             .map_err(|_| {
                 Failure::install("The matching static infraternal binary is unavailable.")
             })?

@@ -41,10 +41,10 @@ struct Entry {
 /// Four bounded entries cover two architectures and two optional codecs.
 /// Missing tools and oversized/non-improving results preserve raw streaming.
 pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]>>, Failure> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| unavailable())?;
-    let metadata = file.metadata().await.map_err(|_| unavailable())?;
+    // Opening and inspecting a local file are short syscalls; the compressor
+    // reads the file itself, so no async file machinery is needed here.
+    let file = std::fs::File::open(path).map_err(|_| unavailable())?;
+    let metadata = file.metadata().map_err(|_| unavailable())?;
     // Small executables do not repay codec/process overhead. Oversized trusted
     // files retain bounded raw streaming instead of occupying the server cache.
     if metadata.len() < 64 * 1024 || metadata.len() > LIMIT as u64 {
@@ -80,13 +80,13 @@ pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]
 
 async fn compress(
     path: &Path,
-    file: tokio::fs::File,
+    file: std::fs::File,
     identity: Identity,
     codec: Codec,
 ) -> Result<Option<Arc<[u8]>>, Failure> {
     let mut command = codec.command();
     command
-        .stdin(Stdio::from(file.into_std().await))
+        .stdin(Stdio::from(file))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
@@ -107,7 +107,7 @@ async fn compress(
     if !child.wait().await.map_err(|_| unavailable())?.success() {
         return Ok(None);
     }
-    let current = tokio::fs::metadata(path).await.map_err(|_| unavailable())?;
+    let current = std::fs::metadata(path).map_err(|_| unavailable())?;
     if Identity::of(&current) != identity {
         return Err(Failure::install(
             "The static infraternal binary changed while being read. Retry host provisioning.",

@@ -3,7 +3,7 @@
 use crate::model::Failure;
 use sha2::{Digest, Sha256};
 use std::{os::unix::fs::MetadataExt, path::Path, sync::Arc};
-use tokio::{io::AsyncReadExt, sync::Mutex};
+use tokio::sync::Mutex;
 
 // A server has two payloads. Keep this bound even when settings point at new
 // files; no host, attempt or version can grow the process cache indefinitely.
@@ -46,33 +46,22 @@ pub(crate) async fn digest(path: &Path) -> Result<Arc<str>, Failure> {
 
 impl PayloadCache {
     async fn digest(&self, path: &Path) -> Result<Arc<str>, Failure> {
-        let mut file = tokio::fs::File::open(path).await.map_err(|_| {
+        // Local metadata is a short syscall; only the full read leaves the
+        // executor. One blocking task per miss replaces a blocking hop per
+        // 64 KiB read and keeps async file machinery out of the binary.
+        let identity = Identity::of(&std::fs::metadata(path).map_err(|_| {
             Failure::install("The matching static infraternal binary is unavailable.")
-        })?;
-        let identity = Identity::of(&file.metadata().await.map_err(|_| unreadable())?);
+        })?);
         // Serialize only cache misses, including their read. Concurrent adds
         // cannot hash the same immutable binary eight times at server startup.
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.iter().find(|entry| entry.identity == identity) {
             return Ok(entry.digest.clone());
         }
-        let mut hash = Sha256::new();
-        let mut bytes = vec![0; 64 * 1024];
-        loop {
-            let count = file.read(&mut bytes).await.map_err(|_| unreadable())?;
-            if count == 0 {
-                break;
-            }
-            hash.update(&bytes[..count]);
-        }
-        // Never publish a digest assembled across an in-place replacement.
-        // The target still verifies the uploaded/reused bytes before execution.
-        if Identity::of(&file.metadata().await.map_err(|_| unreadable())?) != identity {
-            return Err(Failure::install(
-                "The static infraternal binary changed while being read. Retry host provisioning.",
-            ));
-        }
-        let digest: Arc<str> = format!("{:x}", hash.finalize()).into();
+        let path = path.to_path_buf();
+        let digest = tokio::task::spawn_blocking(move || hash(&path, identity))
+            .await
+            .map_err(|_| unreadable())??;
         if entries.len() == 2 {
             entries.remove(0);
         }
@@ -82,6 +71,37 @@ impl PayloadCache {
         });
         Ok(digest)
     }
+}
+
+/// Hash one exact file identity; a replacement during the read is refused.
+fn hash(path: &Path, identity: Identity) -> Result<Arc<str>, Failure> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| Failure::install("The matching static infraternal binary is unavailable."))?;
+    if Identity::of(&file.metadata().map_err(|_| unreadable())?) != identity {
+        return Err(changed());
+    }
+    let mut hash = Sha256::new();
+    let mut bytes = vec![0; 64 * 1024];
+    loop {
+        let count = file.read(&mut bytes).map_err(|_| unreadable())?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&bytes[..count]);
+    }
+    // Never publish a digest assembled across an in-place replacement.
+    // The target still verifies the uploaded/reused bytes before execution.
+    if Identity::of(&file.metadata().map_err(|_| unreadable())?) != identity {
+        return Err(changed());
+    }
+    Ok(format!("{:x}", hash.finalize()).into())
+}
+
+fn changed() -> Failure {
+    Failure::install(
+        "The static infraternal binary changed while being read. Retry host provisioning.",
+    )
 }
 
 fn unreadable() -> Failure {
