@@ -903,3 +903,5 @@ mod native_plugin;
 mod restart_open_liveness_review;
 #[path = "socket_tests/review_input_credit.rs"]
 mod review_input_credit;
+#[path = "socket_tests/transient_authority_stall.rs"]
+mod transient_authority_stall;
