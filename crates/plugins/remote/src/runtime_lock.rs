@@ -144,108 +144,119 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
     checked_lock(file, &at(&directory, LOCK))
 }
 
-// Only the seven kernel columns are whitespace-separated. The remaining
-// socket name is opaque: a home-directory space cannot shorten its identity.
-fn legacy_row(row: &str) -> Option<(&str, &str)> {
-    let mut rest = row;
-    let mut inode = "";
-    for _ in 0..7 {
-        let field = rest.trim_ascii_start();
-        let end = field
-            .as_bytes()
-            .iter()
-            .position(u8::is_ascii_whitespace)
-            .unwrap_or(field.len());
-        inode = &field[..end];
-        rest = &field[end..];
-    }
-    let name = rest.trim_ascii_start();
-    if name.is_empty() {
-        return None;
-    }
-    Some((inode, name))
-}
-
-// Legacy runtimes did not hold the lifetime lock. A refused connect alone is
-// insufficient before listen. Ask the kernel for candidate ownership instead
-// of inspecting private process descriptors, which cannot establish absence.
-// Inspection carries only matched/unmatched/unknown: any unknown retains state.
-#[cold]
-#[inline(never)]
-fn legacy_bound(runtime: &Path, expected: &fs::Metadata) -> Option<bool> {
-    let rows = fs::read_to_string("/proc/net/unix").ok()?;
-    for row in rows.lines().skip(1) {
-        let Some((inode, name)) = legacy_row(row) else {
-            continue;
-        };
-        if name.starts_with('@') {
-            continue;
-        }
-        let saved = Path::new(name);
-        if !(saved.starts_with(runtime)
-            || (!saved.is_absolute()
-                && saved
-                    .extension()
-                    .is_some_and(|extension| extension == "sock")))
-        {
-            continue;
-        }
-        // Interpret only candidates; unrelated kernel identifiers need no conversion.
-        let inode = inode.parse::<u32>().ok()?;
-        if socket_matches(inode, expected)? {
-            return Some(true);
-        }
-    }
-    Some(false)
-}
-
-// Linux unix_diag.h exact-query ABI: UID and VFS identity are requested.
-// A bound kernel entry retains state only when it belongs to this owned file.
+// Linux unix_diag.h dump ABI with UID and VFS identity requested. Records are
+// identified only by numbers the kernel reports; socket names are never read,
+// so spaces, newlines or an aliased home cannot hide or impersonate an endpoint.
 #[derive(Debug, PartialEq, Eq)]
 struct SocketOwner {
     uid: u32,
     inode: u32,
     device: u32,
 }
-fn diagnostic_owner(data: &[u8], inode: u32) -> Option<SocketOwner> {
-    if data.len() != 60
-        || data[0..4] != 60_u32.to_ne_bytes()
-        || data[4..6] != 20_u16.to_ne_bytes()
-        || data[6..8] != 0_u16.to_ne_bytes()
+#[derive(Debug, PartialEq, Eq)]
+enum DumpRecord {
+    /// A socket without a filesystem binding (unnamed or abstract).
+    Unbound,
+    Bound(SocketOwner),
+    /// The kernel finished the dump without error.
+    Done,
+}
+fn dump_request() -> [u8; 40] {
+    let mut request = [0_u8; 40];
+    request[0..4].copy_from_slice(&40_u32.to_ne_bytes());
+    request[4..6].copy_from_slice(&20_u16.to_ne_bytes()); // SOCK_DIAG_BY_FAMILY
+    request[6..8].copy_from_slice(&0x301_u16.to_ne_bytes()); // NLM_F_REQUEST | NLM_F_DUMP
+    request[8..12].copy_from_slice(&1_u32.to_ne_bytes());
+    request[16] = 1; // AF_UNIX
+    request[20..24].copy_from_slice(&u32::MAX.to_ne_bytes()); // Every socket state.
+    request[28..32].copy_from_slice(&0x42_u32.to_ne_bytes()); // UDIAG_SHOW_UID | UDIAG_SHOW_VFS
+    request
+}
+// Accept exactly the three record shapes this request can produce. Anything
+// else, including a kernel error, proves nothing and makes inspection unsure.
+fn dump_record(data: &[u8]) -> Option<DumpRecord> {
+    let (kind, vfs) = match data.len() {
+        20 => (3_u16, 0), // NLMSG_DONE
+        48 => (20, 0),
+        60 => (20, 12),
+        _ => return None,
+    };
+    if data[0..4] != u32::try_from(data.len()).ok()?.to_ne_bytes()
+        || data[4..6] != kind.to_ne_bytes()
+        || data[6..8] != 2_u16.to_ne_bytes() // NLM_F_MULTI
         || data[8..12] != 1_u32.to_ne_bytes()
-        || data[16] != 1
-        || data[20..24] != inode.to_ne_bytes()
-        || data[32..34] != 12_u16.to_ne_bytes()
-        || data[34..36] != 1_u16.to_ne_bytes()
-        || data[44..46] != 5_u16.to_ne_bytes()
-        || data[46..48] != 6_u16.to_ne_bytes()
-        || data[52..54] != 8_u16.to_ne_bytes()
-        || data[54..56] != 7_u16.to_ne_bytes()
     {
         return None;
     }
-    Some(SocketOwner {
+    if kind == 3 {
+        return (data[16..20] == [0; 4]).then_some(DumpRecord::Done);
+    }
+    let tail = 32 + vfs;
+    if data[16] != 1
+        || data[tail..tail + 2] != 5_u16.to_ne_bytes()
+        || data[tail + 2..tail + 4] != 6_u16.to_ne_bytes()
+        || data[tail + 8..tail + 10] != 8_u16.to_ne_bytes()
+        || data[tail + 10..tail + 12] != 7_u16.to_ne_bytes()
+    {
+        return None;
+    }
+    if vfs == 0 {
+        return Some(DumpRecord::Unbound);
+    }
+    if data[32..34] != 12_u16.to_ne_bytes() || data[34..36] != 1_u16.to_ne_bytes() {
+        return None;
+    }
+    Some(DumpRecord::Bound(SocketOwner {
         uid: u32::from_ne_bytes([data[56], data[57], data[58], data[59]]),
         inode: u32::from_ne_bytes([data[36], data[37], data[38], data[39]]),
         device: u32::from_ne_bytes([data[40], data[41], data[42], data[43]]),
-    })
+    }))
+}
+// Split one kernel datagram into records. Every record this request yields is
+// a multiple of four bytes, so netlink alignment never adds padding.
+fn dump_datagram(mut data: &[u8], mut visit: impl FnMut(DumpRecord)) -> Option<()> {
+    while !data.is_empty() {
+        let length = usize::try_from(u32::from_ne_bytes(data.get(0..4)?.try_into().ok()?)).ok()?;
+        if length < 16 || length % 4 != 0 || length > data.len() {
+            return None;
+        }
+        visit(dump_record(&data[..length])?);
+        data = &data[length..];
+    }
+    Some(())
 }
 /// Internal property-test entry; never inspects the host.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 #[must_use]
-pub fn check_diagnostic_record(data: &[u8], inode: u32) -> Option<u32> {
-    if let Ok(row) = std::str::from_utf8(data) {
-        let _ = std::hint::black_box(legacy_row(row));
-    }
-    diagnostic_owner(data, inode).map(|owner| owner.uid)
+pub fn check_diagnostic_datagram(data: &[u8]) -> Option<Vec<Option<u32>>> {
+    let mut owners = Vec::new();
+    dump_datagram(data, |record| {
+        owners.push(match record {
+            DumpRecord::Bound(owner) => Some(owner.uid),
+            DumpRecord::Unbound | DumpRecord::Done => None,
+        });
+    })?;
+    Some(owners)
 }
+
+// Legacy runtimes did not hold the lifetime lock. A refused connect alone is
+// insufficient before listen. Ask the kernel whether any socket is bound to
+// this exact file (UID, device, inode), instead of inspecting private process
+// descriptors, which cannot establish absence. Unknown inspection retains state.
 #[cold]
 #[inline(never)]
-fn socket_matches(inode: u32, expected: &fs::Metadata) -> Option<bool> {
+fn legacy_bound(expected: &fs::Metadata) -> Option<bool> {
     use nix::sys::socket::{
         MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
     };
+    // The kernel VFS record projects inode/device to 32 bits. This scopes a
+    // bound entry to the probed file; a match only preserves state.
+    // New runtimes use the lifetime lock instead of this legacy fallback.
+    let device =
+        (nix::sys::stat::major(expected.dev()) << 20) | nix::sys::stat::minor(expected.dev());
+    let device = u32::try_from(device).ok()?;
+    let inode = expected.ino() & u64::from(u32::MAX);
     let query = socket(
         AddressFamily::Netlink,
         SockType::Datagram,
@@ -259,16 +270,7 @@ fn socket_matches(inode: u32, expected: &fs::Metadata) -> Option<bool> {
         &nix::sys::time::TimeVal::new(0, 100_000),
     )
     .ok()?;
-    let mut request = [0_u8; 40];
-    request[0..4].copy_from_slice(&40_u32.to_ne_bytes());
-    request[4..6].copy_from_slice(&20_u16.to_ne_bytes()); // SOCK_DIAG_BY_FAMILY
-    request[6..8].copy_from_slice(&1_u16.to_ne_bytes()); // NLM_F_REQUEST
-    request[8..12].copy_from_slice(&1_u32.to_ne_bytes());
-    request[16] = 1; // AF_UNIX
-    request[20..24].copy_from_slice(&u32::MAX.to_ne_bytes());
-    request[24..28].copy_from_slice(&inode.to_ne_bytes());
-    request[28..32].copy_from_slice(&0x42_u32.to_ne_bytes()); // UDIAG_SHOW_UID | UDIAG_SHOW_VFS
-    request[32..40].fill(0xff); // No prior socket cookie.
+    let request = dump_request();
     if sendto(
         query.as_raw_fd(),
         &request,
@@ -280,25 +282,32 @@ fn socket_matches(inode: u32, expected: &fs::Metadata) -> Option<bool> {
     {
         return None;
     }
-    let mut response = [0_u8; 64];
-    let (count, source) = recvfrom::<NetlinkAddr>(query.as_raw_fd(), &mut response).ok()?;
-    if !source.is_some_and(|source| source.pid() == 0 && source.groups() == 0) {
-        return None;
+    // Kernel dump datagrams stay below 32 KiB; a full buffer may be truncated.
+    let mut response = vec![0_u8; 64 * 1024];
+    loop {
+        let (count, source) = recvfrom::<NetlinkAddr>(query.as_raw_fd(), &mut response).ok()?;
+        if count == response.len()
+            || !source.is_some_and(|source| source.pid() == 0 && source.groups() == 0)
+        {
+            return None;
+        }
+        let (mut bound, mut done) = (false, false);
+        dump_datagram(&response[..count], |record| match record {
+            DumpRecord::Bound(owner) => {
+                bound |= owner.uid == expected.uid()
+                    && owner.device == device
+                    && u64::from(owner.inode) == inode;
+            }
+            DumpRecord::Unbound => {}
+            DumpRecord::Done => done = true,
+        })?;
+        if bound {
+            return Some(true);
+        }
+        if done {
+            return Some(false);
+        }
     }
-    let owner = diagnostic_owner(&response[..count], inode)?;
-    // The kernel VFS record projects inode/device to 32 bits. This scopes an
-    // already-bound entry to the probed file; a match only preserves state.
-    // New runtimes use the lifetime lock instead of this legacy fallback.
-    let device =
-        (nix::sys::stat::major(expected.dev()) << 20) | nix::sys::stat::minor(expected.dev());
-    if device > u64::from(u32::MAX) {
-        return None;
-    }
-    Some(
-        owner.uid == expected.uid()
-            && u64::from(owner.device) == device
-            && u64::from(owner.inode) == expected.ino() & u64::from(u32::MAX),
-    )
 }
 #[cold]
 #[inline(never)]
@@ -329,8 +338,7 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
             Err(nix::errno::Errno::ECONNREFUSED) => {}
             Err(_) => return Err(77),
         }
-        let resolved = fs::read_link(at(runtime, "")).map_err(|_| 77)?;
-        if legacy_bound(&resolved, &before).ok_or(77)? {
+        if legacy_bound(&before).ok_or(77)? {
             return Err(73);
         }
     }

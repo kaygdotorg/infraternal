@@ -1,14 +1,10 @@
-//! Checks fixed kernel ownership records against unexpected input (#230).
+//! Checks kernel socket-diagnostic dump datagrams against unexpected input (#230).
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
-    let inode = data
-        .get(20..24)
-        .and_then(|value| value.try_into().ok())
-        .map_or(0, u32::from_ne_bytes);
-    if let Some(uid) = infraternal_plugin_remote::runtime_lock::check_diagnostic_record(data, inode)
-    {
-        assert_eq!(data.len(), 60);
-        assert_eq!(uid, u32::from_ne_bytes(data[56..60].try_into().unwrap()));
+    if let Some(owners) = infraternal_plugin_remote::runtime_lock::check_diagnostic_datagram(data) {
+        // Accepted records are 20, 48 or 60 bytes, so a datagram holds at most len/20.
+        assert!(owners.len() <= data.len() / 20);
+        assert_eq!(data.is_empty(), owners.is_empty());
     }
 });

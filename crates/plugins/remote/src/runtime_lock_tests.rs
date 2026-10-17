@@ -116,101 +116,131 @@ fn unavailable_lock_support_does_not_claim_a_live_holder() {
     );
 }
 
-/// Exact kernel replies validate lengths and identity before reading the owner.
-#[test]
-fn diagnostic_owner_rejects_unexpected_fixed_records() {
-    let inode = 1234_u32;
-    let mut record = [0_u8; 60];
-    for (offset, value) in [
-        (0, 60),
-        (8, 1),
-        (20, inode),
-        (36, 4321),
-        (40, 123),
-        (56, 1001),
-    ] {
-        record[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
-    }
-    for (offset, value) in [
-        (4, 20_u16),
-        (32, 12),
-        (34, 1),
-        (44, 5),
-        (46, 6),
-        (52, 8),
-        (54, 7),
-    ] {
-        record[offset..offset + 2].copy_from_slice(&value.to_ne_bytes());
+fn record(length: usize) -> Vec<u8> {
+    let mut record = vec![0_u8; length];
+    let length = u32::try_from(length).unwrap();
+    record[0..4].copy_from_slice(&length.to_ne_bytes());
+    record[4..6].copy_from_slice(&(if length == 20 { 3_u16 } else { 20 }).to_ne_bytes());
+    record[6..8].copy_from_slice(&2_u16.to_ne_bytes());
+    record[8..12].copy_from_slice(&1_u32.to_ne_bytes());
+    if length == 20 {
+        return record;
     }
     record[16] = 1;
-    assert_eq!(
-        diagnostic_owner(&record, inode),
-        Some(SocketOwner {
-            uid: 1001,
-            inode: 4321,
-            device: 123
-        })
-    );
-    for length in 0..record.len() {
-        assert!(diagnostic_owner(&record[..length], inode).is_none());
+    record[20..24].copy_from_slice(&1234_u32.to_ne_bytes());
+    let tail = if length == 60 {
+        for (offset, value) in [(32, 12_u16), (34, 1)] {
+            record[offset..offset + 2].copy_from_slice(&value.to_ne_bytes());
+        }
+        record[36..40].copy_from_slice(&4321_u32.to_ne_bytes());
+        record[40..44].copy_from_slice(&123_u32.to_ne_bytes());
+        44
+    } else {
+        32
+    };
+    for (offset, value) in [(0, 5_u16), (2, 6), (8, 8), (10, 7)] {
+        record[tail + offset..tail + offset + 2].copy_from_slice(&value.to_ne_bytes());
     }
-    let mut extended = record.to_vec();
-    for _ in 0..64 {
-        extended.push(0);
-        assert!(diagnostic_owner(&extended, inode).is_none());
-    }
-    for offset in [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 20, 21, 22, 23, 32, 33, 34, 35, 44, 45, 46, 47,
-        52, 53, 54, 55,
+    record[tail + 12..tail + 16].copy_from_slice(&1001_u32.to_ne_bytes());
+    record
+}
+
+/// Only the three known kernel record shapes are accepted; anything else is unsure.
+#[test]
+fn dump_records_accept_only_known_shapes() {
+    let owner = SocketOwner {
+        uid: 1001,
+        inode: 4321,
+        device: 123,
+    };
+    for (length, expected, checked) in [
+        (
+            60,
+            DumpRecord::Bound(owner),
+            &[0, 4, 6, 8, 16, 32, 34, 44, 46, 52, 54][..],
+        ),
+        (
+            48,
+            DumpRecord::Unbound,
+            &[0, 4, 6, 8, 16, 32, 34, 40, 42][..],
+        ),
+        (20, DumpRecord::Done, &[0, 4, 6, 8, 16][..]),
     ] {
-        let mut changed = record;
-        changed[offset] ^= 0x80;
-        assert!(diagnostic_owner(&changed, inode).is_none());
+        let record = record(length);
+        assert_eq!(dump_record(&record), Some(expected));
+        for length in 0..record.len() {
+            assert!(dump_record(&record[..length]).is_none());
+        }
+        let mut extended = record.clone();
+        extended.extend([0; 4]);
+        assert!(dump_record(&extended).is_none());
+        for &offset in checked {
+            let mut changed = record.clone();
+            changed[offset] ^= 0x80;
+            assert!(dump_record(&changed).is_none(), "{length}:{offset}");
+        }
     }
     for byte in 0..=255 {
-        assert!(diagnostic_owner(&[byte; 60], inode).is_none());
+        assert!(dump_record(&[byte; 60]).is_none());
     }
+}
+
+/// A datagram is split by declared lengths; a malformed length fails the whole read.
+#[test]
+fn dump_datagrams_split_exactly() {
+    let mut datagram = [record(60), record(48), record(20)].concat();
+    let mut seen = 0;
+    assert!(dump_datagram(&datagram, |_| seen += 1).is_some());
+    assert_eq!(seen, 3);
+    for length in 1..datagram.len() {
+        let complete = [0, 60, 108].contains(&length);
+        assert_eq!(
+            dump_datagram(&datagram[..length], |_| {}).is_some(),
+            complete
+        );
+    }
+    datagram[60..64].copy_from_slice(&50_u32.to_ne_bytes());
+    assert!(dump_datagram(&datagram, |_| {}).is_none());
+    datagram[60..64].copy_from_slice(&4096_u32.to_ne_bytes());
+    assert!(dump_datagram(&datagram, |_| {}).is_none());
 }
 
 /// Kernel ownership remains observable when a runtime makes descriptors private.
 #[test]
-fn diagnostic_owner_matches_a_real_bound_socket() {
+fn legacy_inspection_finds_a_real_bound_socket() {
     let fixture = Fixture::new();
     let path = fixture.state().join("plugins.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-    let rows = fs::read_to_string("/proc/net/unix").unwrap();
-    let row = rows
-        .lines()
-        .find(|row| row.ends_with(path.to_str().unwrap()))
-        .unwrap();
-    let inode = row.split_whitespace().nth(6).unwrap().parse().unwrap();
-    assert!(socket_matches(inode, &fs::metadata(&path).unwrap()).unwrap());
+    let _pair = std::os::unix::net::UnixStream::pair().unwrap();
+    let expected = fs::metadata(&path).unwrap();
+    assert_eq!(legacy_bound(&expected), Some(true));
     let other = fixture.state().join("other.sock");
     drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
-    assert!(!socket_matches(inode, &fs::metadata(other).unwrap()).unwrap());
+    assert_eq!(legacy_bound(&fs::metadata(other).unwrap()), Some(false));
     drop(listener);
+    assert_eq!(legacy_bound(&expected), Some(false));
 }
 
-/// Whitespace separates kernel columns, never pieces of the socket name.
+/// Names are never read: newline homes and absolute aliases keep the same identity.
 #[test]
-fn legacy_rows_preserve_names_and_identifiers() {
-    for name in [
-        "sessions/plugins.sock",
-        "/home/test user/.local/share/infraternal/sessions/plugins.sock",
-        "/home/test /user/.local/share/infraternal/sessions/plugins.sock",
-        "/home/tést user/.local/share/infraternal/sessions/plugins.sock",
+fn legacy_inspection_is_independent_of_the_bound_name() {
+    let fixture = Fixture::new();
+    let odd = fixture.0.join("a\nb c");
+    fs::create_dir(&odd).unwrap();
+    let alias = fixture.0.join("alias");
+    symlink(fixture.state(), &alias).unwrap();
+    for (bound, probed) in [
+        (odd.join("plugins.sock"), odd.join("plugins.sock")),
+        (
+            alias.join("plugins.sock"),
+            fixture.state().join("plugins.sock"),
+        ),
     ] {
-        let row = format!("00000000: 00000002 00000000 00010000 0001 01 1234 {name}");
-        assert_eq!(legacy_row(&row), Some(("1234", name)));
-    }
-    assert_eq!(
-        legacy_row("00000000: 2 0 0 1 1 unknown sessions/plugins.sock"),
-        Some(("unknown", "sessions/plugins.sock"))
-    );
-    assert_eq!(legacy_row("00000000: 2 0 0 1 1 1234"), None);
-    for length in 0..128 {
-        let row = " ".repeat(length);
-        assert_eq!(legacy_row(&row), None);
+        let listener = std::os::unix::net::UnixListener::bind(&bound).unwrap();
+        assert_eq!(legacy_bound(&fs::metadata(&probed).unwrap()), Some(true));
+        drop(listener);
+        assert_eq!(legacy_bound(&fs::metadata(&probed).unwrap()), Some(false));
+        fs::remove_file(probed).unwrap();
     }
 }
 

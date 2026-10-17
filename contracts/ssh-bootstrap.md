@@ -507,11 +507,14 @@ uses a nonblocking connection to the owned control socket: connection retains it
 (73); errors other than refusal retain it as uncertain (77). Refusal also requires
 conservative same-user bound-endpoint inspection, so a bound endpoint before
 `listen` or with a retained earlier name is not removed. The native helper asks
-the kernel for each candidate's UID and VFS identity through an exact diagnostic
-query; private process descriptors are neither required nor proof that it is stale.
-The complete kernel socket name is preserved, including spaces in the home path.
-Only a fixed known reply from the kernel is accepted; denied or unexpected replies
-remain uncertain (77). Only a bound entry for this installation's owned control
+the kernel for one socket-diagnostic dump of every Unix socket with its UID and
+VFS identity (device and inode) and compares those numbers with the control file;
+private process descriptors are neither required nor proof that it is stale.
+Socket names are never read, so a home path with spaces or newlines, or one reached
+through an alias, cannot hide a bound endpoint. A socket without a VFS binding
+cannot own a filesystem endpoint.
+Only fixed known records from the kernel are accepted; denied, truncated or
+unexpected replies remain uncertain (77). Only a bound entry for this installation's owned control
 file can retain cleanup; a different directory's or Unix user's socket cannot.
 The binary
 opens the receipt-bound root and private runtime directory without following links,
