@@ -539,11 +539,13 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
   });
 }
 
-test("empty failure Details do not fall back to the visible summary", async ({ page }) => {
+test("a failure with nothing beyond the summary shows no Details at all", async ({ page }) => {
   await open(page);
   await openWizard(page);
   await addTyped(page, "nodetail.lab");
   await expect(page.getByRole("heading", { name: "Setting up nodetail.lab didn't finish" })).toBeVisible();
-  await wizard(page).locator(".ah-details summary").click();
-  await expect(wizard(page).locator(".ah-details pre")).toHaveText("No additional diagnostic details were reported.");
+  // The page already says everything the host reported, so an empty disclosure (or one that repeats the summary) would be noise (TASTE: no empty sections).
+  const failure = wizard(page).locator(".ah-page[data-page='failure']");
+  await expect(failure.locator(".ah-lede")).toHaveText("Setup stopped before this host was ready.");
+  await expect(failure.locator(".ah-details")).toHaveCount(0);
 });
