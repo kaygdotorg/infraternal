@@ -1303,6 +1303,9 @@ async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
 #[path = "embedded_path_tests.rs"]
 mod path_tests;
 
+#[path = "liveness_doubt_breakit_tests.rs"]
+mod liveness_doubt_breakit_tests;
+
 #[path = "embedded_credit_tests.rs"]
 mod credit_tests;
 #[tokio::test]
