@@ -3111,7 +3111,7 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        sessions, subject to the approval setting. Off: nothing from another
        machine can control it; the person still uses it normally in the
        browser. Turning it off ends any control in progress at once. No
-       separate rule syntax for this; access rules (D2xx) still decide who
+       separate rule syntax for this; access rules (D154, D164) still decide who
        may reach the machine at all.
      - **Approval setting (D288 Q3):** global, with "Ask each time"
        (default), "Allow when a rule permits", or "Off"; a mark in the
