@@ -1,7 +1,7 @@
 //! Presents public Mesh node records for people and for the JSON envelope; the generic CLI never knows Mesh fields [16,198,202], #239.
 use infraternal_plugin_api::{
     PluginError,
-    present::{Presented, Tone, pairs, table},
+    present::{Presented, Tone, age, bytes, pairs, table},
 };
 use serde_json::Value;
 
@@ -105,9 +105,41 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     })
 }
 
+/// Standard base64 of a 32-byte public key; the JSON form of a key is text, never a byte array.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |n, (i, byte)| n | (u32::from(*byte) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 fn peers(value: Value, width: usize) -> Result<Presented, PluginError> {
+    peers_at(value, width, now_secs())
+}
+
+/// The peers page as people and scripts read it. `now` is the wall clock in seconds, so tests can fix it.
+fn peers_at(value: Value, width: usize, now: u64) -> Result<Presented, PluginError> {
     let mut rows = Vec::new();
-    let mut unproven = 0_u64;
+    let mut records = Vec::new();
+    let mut waiting: Vec<(String, String)> = Vec::new();
     for row in value["peers"].as_array().ok_or(PluginError::Rejected)? {
         let node = row["node"].as_u64().ok_or(PluginError::Rejected)?;
         let address: std::net::Ipv4Addr = row["peer"]["addresses"]["ipv4"]
@@ -117,59 +149,108 @@ fn peers(value: Value, width: usize) -> Result<Presented, PluginError> {
             .map_err(|_| PluginError::Rejected)?;
         let endpoint = row["peer"]["endpoint"]
             .as_str()
-            .map(|endpoint| {
-                endpoint
-                    .parse::<std::net::SocketAddr>()
-                    .map(|endpoint| endpoint.to_string())
-            })
+            .map(|endpoint| endpoint.parse::<std::net::SocketAddr>())
             .transpose()
-            .map_err(|_| PluginError::Rejected)?
-            .unwrap_or_else(|| "Unlearned".into());
+            .map_err(|_| PluginError::Rejected)?;
         let path = row["path"].as_str().ok_or(PluginError::Rejected)?;
-        if !matches!(path, "Direct" | "Unproven") {
-            return Err(PluginError::Rejected);
-        }
-        unproven += u64::from(path == "Unproven");
+        let direct = match path {
+            "Direct" => true,
+            "Unproven" => false,
+            _ => return Err(PluginError::Rejected),
+        };
         let received = row["counters"]["received_bytes"]
             .as_u64()
             .ok_or(PluginError::Rejected)?;
         let sent = row["counters"]["sent_bytes"]
             .as_u64()
             .ok_or(PluginError::Rejected)?;
+        // The kernel reports the time of the last handshake; people want its age.
+        let handshake = row["counters"]["handshake_secs"]
+            .as_u64()
+            .filter(|secs| *secs > 0);
+        let ago = handshake.map(|secs| now.saturating_sub(secs));
+        let key: Vec<u8> = row["peer"]["key"]
+            .as_array()
+            .ok_or(PluginError::Rejected)?
+            .iter()
+            .map(|byte| byte.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+            .collect::<Option<_>>()
+            .ok_or(PluginError::Rejected)?;
+        // The server will send machine names once the mesh configuration carries them; until
+        // then a peer is known by its mesh address.
+        let name = row["peer"]["name"].as_str().map(str::to_owned);
+        let label = name.clone().unwrap_or_else(|| address.to_string());
+        if !direct {
+            waiting.push((label.clone(), address.to_string()));
+        }
         rows.push(vec![
-            node.to_string(),
-            address.to_string(),
-            endpoint,
-            path.to_owned(),
-            received.to_string(),
-            sent.to_string(),
+            label,
+            if direct { "direct" } else { "none yet" }.to_owned(),
+            bytes(received),
+            bytes(sent),
+            ago.map_or_else(|| "never".to_owned(), age),
+            endpoint.map_or_else(String::new, |endpoint| endpoint.to_string()),
         ]);
+        let mut record = serde_json::json!({
+            "node": node,
+            "address": address.to_string(),
+            "path": if direct { "direct" } else { "unproven" },
+            "key": base64(&key),
+            "received_bytes": received,
+            "sent_bytes": sent,
+        });
+        if let Some(name) = name {
+            record["name"] = name.into();
+        }
+        if let Some(endpoint) = endpoint {
+            record["endpoint"] = endpoint.to_string().into();
+        }
+        if let Some(ago) = ago {
+            record["last_handshake_secs_ago"] = ago.into();
+        }
+        records.push(record);
     }
     let more = !value["next_cursor"].is_null();
-    let message = if rows.is_empty() {
+    let count = records.len() as u64;
+    let message = if count == 0 {
         "No other machines are on the mesh.".to_owned()
+    } else if waiting.is_empty() {
+        format!(
+            "{}, all direct.",
+            plural(count, "peer on the mesh", "peers on the mesh")
+        )
     } else {
-        plural(rows.len() as u64, "peer", "peers") + " on the mesh."
+        format!(
+            "{}, {} without a direct path yet.",
+            plural(count, "peer on the mesh", "peers on the mesh"),
+            waiting.len()
+        )
     };
-    let next = if unproven > 0 && !more {
-        vec!["Send traffic to a peer marked Unproven to establish its direct path.".to_owned()]
-    } else {
-        Vec::new()
+    // Only offer to set up a path when one is missing, and name the machine.
+    let next = match waiting.first() {
+        Some((label, address)) if !more => vec![format!(
+            "Send traffic to {label} to set up its direct path, for example: ping {address}"
+        )],
+        _ => Vec::new(),
     };
+    let mut data = serde_json::json!({"peers": records});
+    for key in ["version", "next_cursor"] {
+        if !value[key].is_null() {
+            data[key] = value[key].clone();
+        }
+    }
     Ok(Presented {
         tone: Tone::Good,
         message,
         body: table(
-            &[
-                "Node", "Address", "Endpoint", "Path", "RX bytes", "TX bytes",
-            ],
+            &["Peer", "Path", "Received", "Sent", "Handshake", "Endpoint"],
             &rows,
             0,
             width,
             None,
         ),
         next,
-        data: value,
+        data,
     })
 }
 
@@ -217,5 +298,63 @@ mod tests {
     fn legacy_status_remains_readable_and_invalid_link_is_refused() {
         assert!(status(serde_json::json!({"state":"On","peer_count":0}), 80).is_ok());
         assert!(status(serde_json::json!({"state":"On","peer_count":0,"server_link":{"kind":"Mesh","reason":"MeshProven","endpoint":"invalid input"}}), 80).is_err());
+    }
+
+    fn peer(node: u64, address: &str, handshake: u64) -> serde_json::Value {
+        serde_json::json!({
+            "node": node,
+            "peer": {"key": vec![1_u8; 32], "addresses": {"ipv4": address}, "endpoint": "10.69.69.217:47823"},
+            "inbound": {"state": "All"}, "outbound": {"state": "All"},
+            "counters": {"handshake_secs": handshake, "received_bytes": 18_056_740_u64, "sent_bytes": 19_041_052_u64},
+            "path": if handshake > 0 { "Direct" } else { "Unproven" },
+        })
+    }
+
+    #[test]
+    fn peers_show_units_ages_and_no_hint_when_every_path_is_direct() {
+        let page = serde_json::json!({"peers": [peer(3, "10.254.0.3", 988)], "version": 4, "next_cursor": null});
+        let shown = peers_at(page, 100, 1000).expect("present peers");
+        assert_eq!(shown.message, "1 peer on the mesh, all direct.");
+        assert_eq!(
+            shown.body,
+            "10.254.0.3  direct  18 MB  19 MB  12 s ago  10.69.69.217:47823\n"
+        );
+        assert!(shown.next.is_empty(), "{:?}", shown.next);
+        // JSON: text key, an age instead of an epoch time, raw byte counts.
+        let record = &shown.data["peers"][0];
+        assert_eq!(
+            record["key"],
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+        );
+        assert_eq!(record["last_handshake_secs_ago"], 12);
+        assert_eq!(record["received_bytes"], 18_056_740_u64);
+        assert!(record.get("counters").is_none());
+    }
+
+    #[test]
+    fn an_unproven_peer_gets_a_hint_that_names_it() {
+        let page = serde_json::json!({"peers": [peer(3, "10.254.0.3", 990), peer(4, "10.254.0.4", 0)], "next_cursor": null});
+        let shown = peers_at(page, 100, 1000).expect("present peers");
+        assert_eq!(
+            shown.message,
+            "2 peers on the mesh, 1 without a direct path yet."
+        );
+        assert!(shown.next[0].contains("10.254.0.4"), "{:?}", shown.next);
+        assert!(shown.body.starts_with("PEER"), "{}", shown.body);
+        assert!(shown.body.lines().all(|line| line.chars().count() <= 100));
+    }
+
+    #[test]
+    fn a_wide_table_stays_within_the_width() {
+        let mut row = peer(3, "10.254.0.3", 990);
+        row["peer"]["endpoint"] = "[2001:db8:1234:5678:9abc:def0:1234:5678]:47823".into();
+        let page =
+            serde_json::json!({"peers": [row, peer(4, "10.254.0.4", 990)], "next_cursor": null});
+        let shown = peers_at(page, 80, 1000).expect("present peers");
+        assert!(
+            shown.body.lines().all(|line| line.chars().count() <= 80),
+            "{}",
+            shown.body
+        );
     }
 }
