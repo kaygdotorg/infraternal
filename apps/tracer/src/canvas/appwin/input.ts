@@ -4,7 +4,8 @@
  * - Keyboard layout text and held shortcuts use the shared protocol DesktopKeyboard adapter.
  * - Pointer positions are millionths of the stream's frame (0–1,000,000), measured on the picture itself. The
  *   picture sits letterboxed inside the window when its shape differs (an app that refuses a size, D208 A2), and
- *   positions in the bands are still sent: the machine answers that a band takes no clicks.
+ *   CSS bands are rejected before input is sent; they do not name a remote edge. Clamped coordinates are retained
+ *   for callers, while `inside` distinguishes a new input from a release of a previously held button.
  * - Scroll is sent in pixels, positive towards the content's top, which is the opposite sign of a browser wheel.
  * - Modifier bits follow the helper contract: 1 shift, 2 control, 4 option, 8 command.
  *
@@ -26,9 +27,10 @@ const clampMillionths = (v: number): number => Math.min(1_000_000, Math.max(0, M
  * A pointer position inside `box` as the wire's coordinates on the picture. `offsetX/offsetY` are relative to the box's
  * layout size (the camera's zoom is divided out by the caller), `picture` is where the frame sits inside it.
  */
-export function framePoint(offsetX: number, offsetY: number, picture: { x: number; y: number; width: number; height: number }): { x: number; y: number } {
-  if (picture.width <= 0 || picture.height <= 0) return { x: 0, y: 0 };
-  return { x: clampMillionths((offsetX - picture.x) / picture.width), y: clampMillionths((offsetY - picture.y) / picture.height) };
+export function framePoint(offsetX: number, offsetY: number, picture: { x: number; y: number; width: number; height: number }): { x: number; y: number; inside: boolean } {
+  if (picture.width <= 0 || picture.height <= 0) return { x: 0, y: 0, inside: false };
+  const inside = offsetX >= picture.x && offsetY >= picture.y && offsetX < picture.x + picture.width && offsetY < picture.y + picture.height;
+  return { x: clampMillionths((offsetX - picture.x) / picture.width), y: clampMillionths((offsetY - picture.y) / picture.height), inside };
 }
 
 /** Wire mouse buttons: 0 left, 1 right, 2 middle. Other buttons (back, forward) have no wire code. */
