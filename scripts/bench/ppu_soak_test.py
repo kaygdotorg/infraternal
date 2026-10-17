@@ -145,17 +145,26 @@ class MemoryPhases(unittest.IsolatedAsyncioTestCase):
     """Sibling input must complete while the oversized string is still open."""
     async def test_open_string_is_held_until_every_sibling_echoes(self):
         release = asyncio.Event()
+        drained = asyncio.Event()
         held = []
         class Peer:
             bytes = 0
             def __init__(self, index):
                 self.index = index
+                self.waiters = {}
             async def echo(self, marker, command=b''):
                 if marker == b'memory-victim-finished':
-                    self.bytes = 33554436
+                    # Framing/shell output may advance the byte count before
+                    # the source reaches its explicit post-payload fence.
+                    self.bytes = 33554436 + 4096
+                    fence = self.waiters.get(b'memory-open-drained')
+                    if fence is not None:
+                        drained.set()
+                        fence.set_result(0)
                     await release.wait()
                 elif marker.startswith(b'memory-open-sibling-'):
                     self_assert_false(release.is_set())
+                    self_assert_true(drained.is_set())
                     held.append(self.index)
                 return 1.0
             async def send(self, kind, payload):
@@ -163,6 +172,7 @@ class MemoryPhases(unittest.IsolatedAsyncioTestCase):
                 release.set()
         self_assert_equal = self.assertEqual
         self_assert_false = self.assertFalse
+        self_assert_true = self.assertTrue
         host = SimpleNamespace(scope='ppu-soak-memory-fixture', pid=42,
             peers=[Peer(i) for i in range(20)], child=SimpleNamespace(poll=lambda: None))
         contents = {'memory.max': 'max', 'memory.current': '10000000',
@@ -179,6 +189,28 @@ class MemoryPhases(unittest.IsolatedAsyncioTestCase):
         outcome = next(fields for kind, fields in records if kind == 'outcome')
         self.assertEqual(outcome['open_string_responsive_siblings'], 19)
         self.assertEqual(outcome['responsive_sessions'], 20)
+
+    async def test_periodic_sampler_never_releases_the_held_source(self):
+        called = []
+        class Peer:
+            bytes = 0
+            exit = SimpleNamespace(done=lambda: False)
+            def __init__(self, index):
+                self.index = index
+            async def echo(self, marker):
+                called.append(self.index)
+                return 1
+        sampler = ppu.FaultSampler.__new__(ppu.FaultSampler)
+        sampler.host = SimpleNamespace(pid=42, peers=[Peer(i) for i in range(3)])
+        sampler.exclude = frozenset({0})
+        sampler.record = SimpleNamespace(write=lambda *args, **fields: None)
+        sampler.wakeups = SimpleNamespace(receipt=lambda: {})
+        sampler.number, sampler.start, sampler.previous_time = 0, 0, 0
+        sampler.previous = {'cpu_ticks': 0}
+        with patch.object(ppu, 'sample', return_value={'cpu_ticks': 0}), \
+             patch.object(ppu, 'clock_now', return_value=1):
+            await sampler.tick()
+        self.assertEqual(called, [1, 2])
 
 
 class Framing(unittest.IsolatedAsyncioTestCase):

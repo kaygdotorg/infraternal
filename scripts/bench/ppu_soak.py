@@ -350,8 +350,9 @@ class Recorder:
 
 class FaultSampler:
     """Keep ten-second receipts for faults, including a final short-run sample."""
-    def __init__(self, host, record, interval):
+    def __init__(self, host, record, interval, exclude=()):
         self.host, self.record, self.interval = host, record, interval
+        self.exclude = frozenset(exclude)
         self.wakeups = Wakeups(host.pid)
         self.start = clock_now()
         self.previous = sample(host.pid)
@@ -360,7 +361,8 @@ class FaultSampler:
         self.task = asyncio.create_task(self.run())
 
     async def tick(self):
-        live = [(i, peer) for i, peer in enumerate(self.host.peers) if not peer.exit.done()]
+        live = [(i, peer) for i, peer in enumerate(self.host.peers)
+                if i not in self.exclude and not peer.exit.done()]
         # The fault's own oracle checks every survivor; this sampler measures
         # their representative echo without sending 1000 probes at each tick.
         selected = live[-min(100, len(live)):]
@@ -730,22 +732,31 @@ async def memory_pressure(host, record):
     events_before = (group / 'memory.events').read_text()
     record.write('memory-cap', working_set_bytes=working, limit_bytes=limit, events_before=events_before)
     victim = None
+    fence = b'memory-open-drained'
+    drained = asyncio.get_running_loop().create_future()
+    host.peers[0].waiters[fence] = drained
     try:
         (group / 'memory.max').write_text(str(limit))
         before = host.peers[0].bytes
+        octal = ''.join(f'\\{byte:03o}' for byte in fence)
         victim = asyncio.create_task(host.peers[0].echo(b'memory-victim-finished',
             b"printf '\\033]0;'; head -c 33554432 /dev/zero | tr '\\000' x; "
-            b"read -r ppu_resume; printf '\\007\\030\\033c'; "))
+            + f"printf '{octal}'; ".encode()
+            + b"read -r ppu_resume; printf '\\007\\030\\033c'; "))
         # Drain the complete payload, then keep its native parser state open
         # until siblings have accepted input. The explicit stdin release avoids
         # a machine-speed-dependent race against the string's terminator.
-        until = clock_now() + 30
-        while host.peers[0].bytes - before < 33554436:
+        # Shell framing can inflate byte counts. Only a marker emitted after
+        # the payload proves that it drained; octal keeps command echo from
+        # satisfying the existing raw-output matcher.
+        ready, _ = await asyncio.wait((victim, drained), timeout=30,
+                                      return_when=asyncio.FIRST_COMPLETED)
+        if drained not in ready:
             if victim.done():
                 await victim
-                raise AssertionError('control-string source ended before the held phase')
-            assert clock_now() < until, 'control-string source did not drain'
-            await asyncio.sleep(.001)
+            raise AssertionError('control-string source did not reach its drained fence')
+        await drained
+        assert host.peers[0].bytes - before >= 33554436, 'control-string payload was incomplete'
         if victim.done():
             await victim
             raise AssertionError('control string was not held open')
@@ -773,6 +784,9 @@ async def memory_pressure(host, record):
             events_after=(group / 'memory.events').read_text() if group.exists() else 'scope exited')
         return False
     finally:
+        host.peers[0].waiters.pop(fence, None)
+        if not drained.done():
+            drained.cancel()
         if victim is not None:
             if not victim.done():
                 victim.cancel()
@@ -816,7 +830,9 @@ async def run(args):
         if args.mode in ('soak', 'corpus'):
             return await soak(host, args, record, random.Random(args.seed))
         if args.mode == 'memory':
-            sampler = FaultSampler(host, record, args.interval)
+            # A sampler command must never satisfy the held source's stdin
+            # release. The memory oracle itself checks it after termination.
+            sampler = FaultSampler(host, record, args.interval, exclude={0})
             try:
                 return await memory_pressure(host, record)
             finally:
