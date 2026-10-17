@@ -200,6 +200,7 @@ struct Window {
 #[derive(Default)]
 struct State {
     sessions: HashMap<[u8; 16], Window>,
+    last_sweep: Option<Instant>,
 }
 
 struct Inner {
@@ -249,6 +250,7 @@ impl StreamCloseLog {
     fn record_at(&self, record: &CloseRecord, now: Instant) {
         let key = record.session_id;
         let mut summary = None;
+        let mut summaries = Vec::new();
         {
             let mut state = self
                 .0
@@ -283,14 +285,34 @@ impl StreamCloseLog {
                 }
                 summary = state.sessions.remove(&key);
             } else if state.sessions.len() >= MAX_TRACKED_SESSIONS {
-                // Session ids are held for at most one minute and the map is capped under churn.
-                if let Some(oldest) = state
-                    .sessions
-                    .iter()
-                    .min_by_key(|(_, window)| window.started)
-                    .map(|(session, _)| *session)
+                // Full map: drop windows that already ended, at most once a second so a
+                // flood of distinct sessions pays an amortised, not a per-close, scan.
+                // If every window is still live, this close is logged but not tracked, so
+                // memory stays bounded and each distinct session still gets its first line.
+                if state
+                    .last_sweep
+                    .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1))
                 {
-                    summary = state.sessions.remove(&oldest);
+                    state.last_sweep = Some(now);
+                    let expired = state
+                        .sessions
+                        .iter()
+                        .filter(|(_, window)| now >= window.started + CLOSE_WINDOW)
+                        .map(|(session, _)| *session)
+                        .collect::<Vec<_>>();
+                    for session in expired {
+                        if let Some(window) = state.sessions.remove(&session) {
+                            summaries.push(window);
+                        }
+                    }
+                }
+                if state.sessions.len() >= MAX_TRACKED_SESSIONS {
+                    drop(state);
+                    for window in &summaries {
+                        log_summary(window);
+                    }
+                    log_close(record);
+                    return;
                 }
             }
             state.sessions.insert(
@@ -304,6 +326,9 @@ impl StreamCloseLog {
         }
         if let Some(window) = summary {
             log_summary(&window);
+        }
+        for window in &summaries {
+            log_summary(window);
         }
         log_close(record);
         self.0.changed.notify_one();
@@ -563,6 +588,54 @@ mod tests {
             websocket_code: None,
             websocket_reason: None,
         }
+    }
+
+    /// Cost of the close path, run by hand in release mode (`--ignored --nocapture`).
+    /// A suppressed repeat (the storm case) must stay far below a frame's cost, and
+    /// frames themselves never call the logger, so the hot path adds nothing.
+    #[tokio::test]
+    #[ignore = "manual microbenchmark"]
+    async fn close_path_cost() {
+        let logger = StreamCloseLog::new();
+        let close = record([5; 16]);
+        logger.record(&close);
+        let n = 2_000_000u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            logger.record(std::hint::black_box(&close));
+        }
+        let per = t.elapsed().as_nanos() / u128::from(n);
+        println!("suppressed repeat: {per} ns/close");
+        let (capture, _guard) = Capture::start();
+        let n = 20_000u32;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let mut id = [0u8; 16];
+            id[..4].copy_from_slice(&i.to_le_bytes());
+            logger.record(&record(id));
+        }
+        let per = t.elapsed().as_nanos() / u128::from(n);
+        println!("first close of a new session (formats and writes one line): {per} ns/close");
+        assert_eq!(capture.events("terminal_stream_closed").len(), n as usize);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flood_of_distinct_sessions_keeps_memory_bounded_and_logs_each_first_close() {
+        let (capture, _guard) = Capture::start();
+        let logger = StreamCloseLog::new();
+        let total = MAX_TRACKED_SESSIONS + 500;
+        for i in 0..total {
+            let mut id = [0u8; 16];
+            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            logger.record(&record(id));
+        }
+        assert_eq!(capture.events("terminal_stream_closed").len(), total);
+        assert!(logger.0.state.lock().unwrap().sessions.len() <= MAX_TRACKED_SESSIONS);
+        // After the windows end the sweep frees the map and tracking resumes.
+        tokio::time::advance(CLOSE_WINDOW + Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        logger.record(&record([0xee; 16]));
+        assert!(logger.0.state.lock().unwrap().sessions.len() < MAX_TRACKED_SESSIONS);
     }
 
     #[tokio::test(start_paused = true)]
