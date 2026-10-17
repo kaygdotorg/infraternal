@@ -46,7 +46,7 @@ const ACTIONS: &[ActionDef] = &[
             r#"{"type":"object","properties":{"includeLive":{"type":"boolean"}},"additionalProperties":false}"#,
         ),
         output: infraternal_plugin_api::SchemaRef(
-            r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"sessionCount":{"type":"integer","minimum":0},"backgroundSessionCount":{"type":"integer","minimum":0},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
+            r#"{"type":"object","properties":{"os":{"type":"string"},"version":{"type":"string"},"kernel":{"type":"string"},"architecture":{"type":"string"},"model":{"type":"string"},"cpuModel":{"type":"string"},"logicalCpus":{"type":"integer"},"sessionCount":{"type":"integer","minimum":0},"backgroundSessionCount":{"type":"integer","minimum":0},"memory":{"type":"object"},"rootDisk":{"type":"object"},"uptimeSeconds":{"type":"integer"},"loadAverage":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"mode":{"enum":["embedded","remote"]},"executionUid":{"type":"integer"},"engines":{"type":"array","items":{"enum":["Docker","Podman"]}},"init":{"type":"string"},"virtualization":{"type":"string"},"shell":{"type":"string"},"locale":{"type":"string"},"hostname":{"type":"string"}},"required":["os","version","kernel","architecture","logicalCpus","mode","executionUid","engines"],"additionalProperties":false}"#,
         ),
         instructions: &[
             "Choose the host whose identity is needed.",
@@ -192,6 +192,10 @@ pub struct HostFacts {
     /// The session user's locale from the process environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
+    /// The machine's own hostname (`uname` node name). The server names a Mesh node by it when the host record
+    /// gives no name, e.g. a host added by IP address (#236). Additive: older readers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 /// Strict request decoder and collector failures.
@@ -501,6 +505,10 @@ pub fn collect_static_facts(mode: AgentMode) -> HostFacts {
         locale: ["LC_ALL", "LC_MESSAGES", "LANG"]
             .into_iter()
             .find_map(environment_label),
+        hostname: uname
+            .as_ref()
+            .and_then(|name| os_text(name.nodename()))
+            .filter(|name| !name.is_empty() && name != "(none)"),
     }
 }
 
