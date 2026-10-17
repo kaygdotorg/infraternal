@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,320,784 bytes |
-  | `aarch64-unknown-linux-musl` | 19,522,920 bytes |
+  | `x86_64-unknown-linux-musl` | 21,328,272 bytes |
+  | `aarch64-unknown-linux-musl` | 19,525,608 bytes |
 
   These are the #230 measurements of the full-feature release recipe after
   sharing the SSH setup-lock literal, optimizing its management crate for size,
@@ -161,7 +161,9 @@ Reviews and fixes run at the same time as the next lane's build.
   endpoints from one kernel socket dump instead of the text socket table
   removes another 3,904 / 3,328 bytes (#230). Checking live session
   endpoints through the same dump instead of socket names adds back 2,688
-  bytes on both targets, to the table values (#230 R10).
+  bytes on both targets (#230 R10). The helper's capability level and the
+  mount-device check on session endpoints add 7,488 / 2,688 bytes, to the
+  table values (#230 R11, R12).
   The earlier #198 reductions remain: unused native APIs, duplicated action
   metadata construction, OpenSSL's
   unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
