@@ -64,6 +64,8 @@ struct StalledWriter {
     input: Mutex<(Vec<u8>, usize)>,
     greeted: AtomicBool,
     retired: AtomicBool,
+    release: tokio::sync::Semaphore,
+    written: mpsc::UnboundedSender<Vec<u8>>,
 }
 #[cfg(feature = "remote")]
 impl Channel for StalledWriter {
@@ -83,17 +85,40 @@ impl Channel for StalledWriter {
         }
         std::future::pending().await
     }
-    async fn write(&self, _: &[u8]) -> io::Result<()> {
+    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
         if !self.greeted.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
-        std::future::pending().await
+        self.release.acquire().await.unwrap().forget();
+        self.written.send(bytes.to_vec()).unwrap();
+        Ok(())
     }
 }
 
 #[cfg(feature = "remote")]
 #[tokio::test]
-async fn saturated_replies_retire_connection_without_awaiting_writer_capacity() {
+async fn saturated_ping_replies_preserve_connection() {
+    saturated_replies_preserve_connection(false).await;
+}
+
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn saturated_action_replies_preserve_connection() {
+    saturated_replies_preserve_connection(true).await;
+}
+
+/// Remove only this fixture's state after its dispatcher has been cancelled.
+#[cfg(feature = "remote")]
+struct ReplyState(PathBuf);
+#[cfg(feature = "remote")]
+impl Drop for ReplyState {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(feature = "remote")]
+async fn saturated_replies_preserve_connection(action: bool) {
     let mut wire = Vec::new();
     let mut encoded = Vec::new();
     let frames = std::iter::once(Frame::Hello {
@@ -101,37 +126,81 @@ async fn saturated_replies_retire_connection_without_awaiting_writer_capacity() 
         caps: 0,
         client_info: "test",
     })
-    .chain((0..32).map(|nonce| Frame::Ping { nonce, sent_us: 0 }));
+    .chain((0..32).map(|nonce| {
+        if action {
+            Frame::Call {
+                call_id: u32::try_from(nonce).unwrap(),
+                action_id: "terminal.open",
+                input_json: b"{}",
+            }
+        } else {
+            Frame::Ping { nonce, sent_us: 0 }
+        }
+    }));
     for frame in frames {
         infraternal_protocol::encode_muxed_frame_into(0, &frame, &mut encoded).unwrap();
         wire.extend_from_slice(&encoded);
     }
+    let (written, mut frames) = mpsc::unbounded_channel();
     let channel = StalledWriter {
         input: Mutex::new((wire, 0)),
         greeted: AtomicBool::new(false),
         retired: AtomicBool::new(false),
+        release: tokio::sync::Semaphore::new(0),
+        written,
     };
-    let state = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join(".cache/codex-scratch/remote-agents")
-        .join(format!("readiness-{}", uuid::Uuid::new_v4()));
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        run_authenticated(
+    // Keep Unix socket paths short inside the caller's own build scratch root.
+    let target = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/infraternal/target")
+            .into_os_string()
+    }));
+    let state = ReplyState(target.parent().unwrap().join(format!(
+        "rp{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    )));
+    {
+        let running = run_authenticated(
             &channel,
-            Some(state.clone()),
+            Some(state.0.clone()),
             nix::unistd::Uid::effective().as_raw(),
-        ),
-    )
-    .await;
-    let _ = std::fs::remove_dir_all(state);
-    assert_eq!(
-        result
-            .expect("shared dispatcher stalled behind writer capacity")
-            .unwrap_err()
-            .kind(),
-        io::ErrorKind::WouldBlock
-    );
-    assert!(channel.retired.load(Ordering::Relaxed));
+        );
+        tokio::pin!(running);
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut running).await;
+        assert!(
+            result.is_err(),
+            "local queue saturation retired the connection: {result:?}"
+        );
+        assert!(!channel.retired.load(Ordering::Relaxed));
+        // Release the same writer, then prove that all replies survive in order.
+        channel.release.add_permits(64);
+        let drain = async {
+            let mut expected = 0;
+            while expected < 32 {
+                let wire = frames.recv().await.unwrap();
+                let decoded = infraternal_protocol::decode_muxed_frame(&wire).unwrap();
+                match decoded.frame {
+                    Frame::Pong { nonce, .. } if !action => {
+                        assert_eq!(nonce, expected);
+                        expected += 1;
+                    }
+                    Frame::Result {
+                        call_id, ok: false, ..
+                    } if action => {
+                        assert_eq!(u64::from(call_id), expected);
+                        expected += 1;
+                    }
+                    Frame::Event { .. } => {}
+                    other => panic!("unexpected reply {other:?}"),
+                }
+            }
+        };
+        tokio::select! {
+            result = &mut running => panic!("dispatcher ended before replies drained: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), drain) => result.unwrap(),
+        }
+    }
 }
 
 struct Capture(mpsc::UnboundedSender<Vec<u8>>);
