@@ -60,8 +60,12 @@ export interface WindowsModule {
   attach(rec: WinRec, sessionId: string): void;
   /** Brings a window's name and screen in line with its session in the inventory (a rename, a run again). */
   syncSession(rec: WinRec, reshow?: boolean): void;
-  /** The host said which system it runs: its terminals that had no mark yet take the system's (the pill's leading icon). */
-  setHostOs(host: string, os: HostPlatform): void;
+  /**
+   * The host's identity became known or changed (the host list, an add, the embedded host's facts): every open terminal of
+   * that host takes the system's mark and the shell's account at once, in place and without animation. `hostId` names a
+   * remote host; without it `host` names the embedded one. A key left out is left alone; `user: undefined` clears the account.
+   */
+  setHostIdentity(target: { host: string; hostId?: string }, identity: { os?: HostPlatform; user?: string | undefined }): void;
   /** Shows a session: flies to its window, or opens one (a detached or exited session) in Console. */
   openSession(host: string, sessionId: string): WinRec | undefined;
   /** Opens a shell on `host` as a window in Console (or flies to the one that is already there). */
@@ -502,12 +506,20 @@ export function createWindows(cx: Ctx): WindowsModule {
     make: (c, m) => makeWindow(cx, c, m),
     setActive: (rec) => setActive(cx, rec),
     addColumn, close, closeKey, split, newWindow, attach, syncSession,
-    setHostOs(host, os) {
+    setHostIdentity(target, identity) {
+      let painted = false;
       for (const c of views.values()) for (const rec of c.wins.values()) {
-        if (!isTerminal(rec) || rec.model.host !== host || rec.model.hostId || (rec.model.os && rec.model.os !== "unknown")) continue;
-        rec.model.os = os;
-        rec.card.setIcon(iconFor(rec.model));
+        if (!isTerminal(rec)) continue;
+        const m = rec.model;
+        if (target.hostId ? m.hostId !== target.hostId : m.hostId || m.noAccess || m.host !== target.host) continue;
+        if (identity.os !== undefined && m.os !== identity.os) { m.os = identity.os; rec.card.setIcon(iconFor(m)); }
+        if ("user" in identity && m.user !== identity.user) {
+          if (identity.user) m.user = identity.user; else delete m.user;
+          rec.card.setTitle({ host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) });
+          painted = true;
+        }
       }
+      if (painted) cx.pill.paint();
     },
     openSession, open, openFlow, pulse, flat,
     step(dir, instant = false) {

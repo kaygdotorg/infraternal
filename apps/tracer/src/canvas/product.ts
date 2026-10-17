@@ -59,7 +59,9 @@ export interface ProductCanvas {
 export async function mountProductCanvas(core: CoreScreen, options: ProductCanvasOptions): Promise<ProductCanvas> {
   // The embedded host's system names the mark in its windows' pills. It is asked once, after the first welcome, with the
   // light read (no live figures); until it answers the pill shows the machine glyph.
-  const embedded: { name: string; user?: string; os?: HostPlatform } = { ...options.host };
+  // Its account is the one the shell really runs as, not the signed-in person's name: the server does not send a login
+  // name, so only root (execution uid 0) can be named; any other account shows the host alone until the server says it.
+  const embedded: { name: string; user?: string; os?: HostPlatform } = { name: options.host.name };
   let canvasReady: (() => void) | undefined, osAsked = false;
   const connection: MuxConnection = new MuxConnection({
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
@@ -70,6 +72,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       connection.call("host.facts.read", { includeLive: false }).then((facts) => {
         if (typeof facts.os !== "string" || facts.os.length > 256) return;
         embedded.os = hostPlatformFromOs(facts.os);
+        if (facts.executionUid === 0) embedded.user = "root";
         // The mark's artwork loads on first sight; the pill shows the machine glyph until it can draw the real one.
         void ensureHostMarks([embedded.os]).then(() => canvasReady?.());
       }, () => undefined);
@@ -116,7 +119,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   const store = new LocalCanvasStore(options.accountId);
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
-    .then((m) => m.createLiveDetails({ host: options.host, connection, inventory, roundTrip: () => roundTrip }));
+    .then((m) => m.createLiveDetails({ host: embedded, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
   // The real provisioning glue loads with the wizard on first use, then stays for the page (D188 deferred budget).
   let provisioning: Promise<ProvisioningService> | undefined;
@@ -128,6 +131,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
         if (!host.hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
         sessions.registerHost({ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });
         canvas.cx.win.open(host.hostId);
+        applyIdentities([{ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
       }
     } },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
@@ -160,7 +164,11 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     float: false,
     persisted: (id) => id === "console" || id === "mesh",
   });
-  canvasReady = () => { if (embedded.os) canvas.cx.win.setHostOs(embedded.name, embedded.os); };
+  canvasReady = () => canvas.cx.win.setHostIdentity({ host: embedded.name }, { ...(embedded.os ? { os: embedded.os } : {}), ...(embedded.user ? { user: embedded.user } : {}) });
+  // Remote hosts: every open window of a host takes what the list says, whenever the list says it.
+  const applyIdentities = (hosts: readonly { id: string; name: string; user?: string; os?: HostPlatform }[]): void => {
+    for (const h of hosts) canvas.cx.win.setHostIdentity({ host: h.name, hostId: h.id }, { ...(h.os ? { os: h.os } : {}), user: h.user });
+  };
   canvas.setViews((m) => {
     const doc = saved?.views.find((v) => v.id === "console");
     const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
@@ -170,7 +178,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
         return { host: target.host, hostId: target.hostId, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
       }
       // Historical documents represent only the embedded host. Unknown labels are never rebound locally.
-      return target.host === options.host.name ? { host: options.host.name, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(options.host.user ? { user: options.host.user } : {}) } : undefined;
+      return target.host === options.host.name ? { host: options.host.name, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(embedded.user ? { user: embedded.user } : {}), ...(embedded.os ? { os: embedded.os } : {}) } : undefined;
     };
     let cols = doc && doc.layout.type === "tiled" ? columnsFromDocument(doc.layout, m, resolve) : [];
     // First run, or nothing left to restore: one new shell.
@@ -194,6 +202,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       if (disposed) return;
       offHosts = syncAdmittedHosts(connection, { replaceHosts(hosts) {
         const removed = new Set(sessions.replaceHosts(hosts));
+        applyIdentities(hosts);
         for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId && removed.has(rec.model.hostId)) canvas.cx.win.close(rec);
         if (removed.size) canvas.flush();
       } });
