@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,328,944 bytes |
-  | `aarch64-unknown-linux-musl` | 19,524,104 bytes |
+  | `x86_64-unknown-linux-musl` | 21,322,000 bytes |
+  | `aarch64-unknown-linux-musl` | 19,523,560 bytes |
 
   These are the #230 measurements of the full-feature release recipe after
   sharing the SSH setup-lock literal, optimizing its management crate for size,
@@ -156,6 +156,8 @@ Reviews and fixes run at the same time as the next lane's build.
   Lifetime-safe retry additionally shares startup and cleanup pollers, outlines
   filesystem admission, and uses size optimization for SSH management only.
   Its exact ceilings decrease by another 2,208 / 480 bytes respectively (#230).
+  Shared descriptor/argument paths and compact legacy inspection outcomes
+  reduce them by a further 6,944 / 544 bytes to the table values (#230).
   The earlier #198 reductions remain: unused native APIs, duplicated action
   metadata construction, OpenSSL's
   unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
