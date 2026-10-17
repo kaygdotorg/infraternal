@@ -52,20 +52,15 @@ async fn fresh_removal_revokes_offline_host_and_cannot_replay() {
             "host.example was removed here, but infraternal is still installed on it."
         )
     );
-    let manual = result["manual"].as_str().unwrap();
-    for leftover in [
-        "infraternal-agent.service",
-        "infraternal0",
-        "inet infraternal_mesh",
-        "/var/lib/infraternal",
-        "/usr/local/bin/infraternal",
-        "infraternal-session-*.scope",
-    ] {
-        assert!(
-            manual.contains(leftover),
-            "{leftover} is not removed by {manual}"
-        );
-    }
+    // The commands run the installed binary's own ownership-checked uninstall
+    // for exactly this host; they delete nothing by name.
+    assert_eq!(
+        result["manual"],
+        format!(
+            "/usr/local/bin/infraternal --bootstrap-uninstall {}",
+            host.simple()
+        )
+    );
     assert!(service.finish(&f.session, id, proof, NOW).await.is_err());
     let revoked: bool =
         sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")

@@ -4,7 +4,7 @@ import { recoveryAuth as auth, type AuthStart } from "../auth";
 import type { CoreScreen } from "../core-screen";
 import { isCanonicalUuid } from "../identifiers";
 interface RemovalStart extends AuthStart { action: { host_id: string; host: string; uninstall: boolean } }
-/** `manual` carries the shell commands that remove a leftover install, when the host could not uninstall itself. */
+/** `manual` carries the command that removes a leftover install, when the host could not uninstall itself. */
 interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null }
 async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`/remote/hosts/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -33,10 +33,10 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
           if (typeof manual === "string" && manual) {
             // The record is gone, so nothing here can retry: say so by name and hand over the commands (#235).
             core.toast.show({
-              message: `${name} was removed here, but infraternal is still installed on it. Copy the commands and run them there.`,
+              message: `${name} was removed here, but infraternal is still installed on it. Copy the command and run it there.`,
               tone: "error",
               dismissible: true,
-              action: { label: "Copy commands", onSelect: () => { void navigator.clipboard.writeText(manual).then(() => core.toast.show({ message: `Commands copied. Run them on ${name}.`, duration: 5000 }), () => core.toast.show({ message: result.message, tone: "error", dismissible: true })); } },
+              action: { label: "Copy command", onSelect: () => { void navigator.clipboard.writeText(manual).then(() => core.toast.show({ message: `Command copied. Run it on ${name}.`, duration: 5000 }), () => core.toast.show({ message: result.message, tone: "error", dismissible: true })); } },
             });
           } else {
             core.toast.show({ message: result.message, duration: 5000 });

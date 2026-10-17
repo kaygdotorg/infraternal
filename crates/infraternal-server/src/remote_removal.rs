@@ -156,12 +156,15 @@ impl Removal {
         {
             return Err(crate::auth::Error::Denied);
         }
-        let lookup: Option<String> =
+        // A coordinates row means infraternal setup installed this host; only
+        // then does a known installation exist to remove by hand (#235).
+        let bootstrap: Option<Option<String>> =
             sqlx::query_scalar("SELECT trust_lookup FROM remote_host_bootstrap WHERE host_id=?")
                 .bind(entry.host.as_bytes().as_slice())
                 .fetch_optional(&mut *tx)
-                .await?
-                .flatten();
+                .await?;
+        let installed_by_setup = bootstrap.is_some();
+        let lookup = bootstrap.flatten();
         let (mode, name): (String, String) = sqlx::query_as("SELECT h.mode,COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=?")
             .bind(entry.host.as_bytes().as_slice())
             .fetch_one(&mut *tx)
@@ -216,14 +219,31 @@ impl Removal {
             .commit_revocation(tx, entry.host)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let (message, manual) = outcome(cleanup, &mode, display_name(&name), &left);
+        let installation = installed_by_setup.then(|| entry.host.simple().to_string());
+        let (message, manual) = outcome(
+            cleanup,
+            &mode,
+            display_name(&name),
+            &left,
+            installation.as_deref(),
+        );
         Ok(
             json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual}),
         )
     }
 }
 /// What removal tells the person, and the commands for a leftover install.
-fn outcome(cleanup: &str, mode: &str, name: &str, left: &[&str]) -> (String, Option<String>) {
+///
+/// `installation` is the host id when infraternal setup installed the host:
+/// only then are there commands, because only then is there an installation
+/// whose ownership the host can check.
+fn outcome(
+    cleanup: &str,
+    mode: &str,
+    name: &str,
+    left: &[&str],
+    installation: Option<&str>,
+) -> (String, Option<String>) {
     match cleanup {
         "requested" => {
             let mut message =
@@ -240,10 +260,16 @@ fn outcome(cleanup: &str, mode: &str, name: &str, left: &[&str]) -> (String, Opt
             format!("{name} was removed here. Its infraternal agent stays installed on it."),
             None,
         ),
+        _ if installation.is_none() => (
+            format!(
+                "{name} was removed here. infraternal setup didn't install its infraternal agent, so remove that agent on {name} the way it was installed."
+            ),
+            None,
+        ),
         // Say plainly that the machine still runs it, and how to remove it
         // there; the record is gone, so nothing here can retry (#235).
         _ => {
-            let commands = manual_uninstall(mode);
+            let commands = manual_uninstall(mode, installation.unwrap_or_default());
             let account = if mode == "rootful" {
                 "as root"
             } else {
@@ -307,15 +333,20 @@ fn display_name(address: &str) -> &str {
         .rsplit_once('@')
         .map_or(address, |(_, machine)| machine)
 }
-/// Shell commands that remove what an installation of `mode` leaves on its machine.
+/// The command that removes a leftover installation of `mode` on its machine.
 ///
-/// They mirror the host-side cleanup: session scopes, the service, the mesh
-/// interface and packet filter (root only), the unit, the launcher and the data.
-fn manual_uninstall(mode: &str) -> String {
+/// It runs the installed binary's own uninstall, the same ownership-checked
+/// cleanup the host runs when asked (#235): nothing is removed unless that
+/// account's `.bootstrap-owner` names `host`; only that installation's shells
+/// are retired; the mesh interface and packet filter go only when that
+/// installation recorded them, in either packet-filter frontend; the server's
+/// CA and a joined node's data stay. It stops at its first failure. No
+/// names are deleted directly.
+fn manual_uninstall(mode: &str, host: &str) -> String {
     if mode == "rootful" {
-        "systemctl stop 'infraternal-session-*.scope'; systemctl disable --now infraternal-agent.service; ip link delete infraternal0; nft delete table inet infraternal_mesh; rm -rf /etc/systemd/system/infraternal-agent.service /usr/local/bin/infraternal /var/lib/infraternal; systemctl daemon-reload".into()
+        format!("/usr/local/bin/infraternal --bootstrap-uninstall {host}")
     } else {
-        "systemctl --user stop 'infraternal-session-*.scope'; systemctl --user disable --now infraternal-agent.service; rm -rf ~/.config/systemd/user/infraternal-agent.service ~/.local/bin/infraternal ~/.local/share/infraternal; systemctl --user daemon-reload".into()
+        format!("~/.local/bin/infraternal --bootstrap-uninstall {host}")
     }
 }
 #[cfg(test)]

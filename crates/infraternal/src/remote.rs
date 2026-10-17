@@ -429,7 +429,15 @@ impl infraternal_agent::remote_renewal::CertificatePublisher for IdentityPublish
 #[path = "remote_tests.rs"]
 mod tests;
 
-/// The internal independent service consumes the bounded public plan its infraternal agent left (#235).
+/// Host uninstall: the independent helper service, or the owner by hand (#235).
+///
+/// `--bootstrap-uninstall` alone is the transient service the infraternal
+/// agent started: it consumes the private plan that agent left.
+/// `--bootstrap-uninstall <host>` is the command the server hands the owner
+/// when it could not reach the host. Both run the same cleanup, which
+/// removes nothing unless this account's `.bootstrap-owner` names the host,
+/// retires only this installation's own shells, and leaves kernel objects and
+/// files it did not create.
 pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if arguments
@@ -438,15 +446,19 @@ pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
     {
         return None;
     }
-    let execute = || -> io::Result<()> {
-        if arguments.len() != 2 {
-            return Err(refused());
-        }
+    let by_hand = arguments.len() == 3;
+    let execute = || -> io::Result<Vec<String>> {
         let home = std::env::var_os("HOME").map_or_else(|| "/".into(), PathBuf::from);
-        let plan = infraternal_plugin_remote::uninstall::take_plan(
-            &home,
-            nix::unistd::Uid::effective().as_raw(),
-        )?;
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let plan = match arguments.as_slice() {
+            [_, _] => infraternal_plugin_remote::uninstall::take_plan(&home, uid)?,
+            [_, _, host] => infraternal_plugin_remote::uninstall::installation(
+                host.to_str().ok_or_else(refused)?,
+                &home,
+                uid,
+            ),
+            _ => return Err(refused()),
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -457,22 +469,33 @@ pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
                 report = infraternal_plugin_remote::uninstall::cleanup(
                     &plan,
                     &home,
-                    nix::unistd::Uid::effective().as_raw(),
+                    uid,
                     infraternal_agent::plugins::KERNEL,
                 )
                 .await?;
                 Ok(())
             }),
         )?;
-        // The helper's output goes to its unit's journal: name what stayed.
-        for line in report {
-            println!("{line}");
-        }
-        Ok(())
+        Ok(report)
     };
-    Some(if execute().is_ok() {
-        std::process::ExitCode::SUCCESS
-    } else {
-        std::process::ExitCode::FAILURE
+    // The helper's output goes to its unit's journal, the owner's to the terminal.
+    Some(match execute() {
+        Ok(report) => {
+            for line in report {
+                println!("{line}");
+            }
+            if by_hand {
+                println!("infraternal was removed from this machine.");
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            if by_hand {
+                eprintln!(
+                    "infraternal was not removed: {error}. It removes only the installation infraternal setup made for this host, as the account that installed it."
+                );
+            }
+            std::process::ExitCode::FAILURE
+        }
     })
 }

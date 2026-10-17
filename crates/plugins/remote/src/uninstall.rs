@@ -33,6 +33,27 @@ struct Layout {
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
+/// The one directory infraternal setup installs into for this account.
+fn base_dir(home: &Path, uid: u32) -> PathBuf {
+    if uid == 0 {
+        PathBuf::from("/var/lib/infraternal")
+    } else {
+        home.join(".local/share/infraternal")
+    }
+}
+/// This account's bootstrap installation for `host`, for an uninstall the
+/// owner runs by hand on the machine (#235). Nothing here is trusted: cleanup
+/// revalidates the layout and requires `.bootstrap-owner` to name `host`.
+#[must_use]
+pub fn installation(host: &str, home: &Path, uid: u32) -> Context {
+    let base = base_dir(home, uid);
+    Context {
+        host: host.into(),
+        uid,
+        data: base.join("state"),
+        sessions: base.join("sessions"),
+    }
+}
 fn layout(context: &Context, home: &Path, uid: u32) -> io::Result<Layout> {
     if context.uid != uid
         || context.host.len() != 32
@@ -45,11 +66,7 @@ fn layout(context: &Context, home: &Path, uid: u32) -> io::Result<Layout> {
         return Err(denied());
     }
     let user = uid != 0;
-    let base = if user {
-        home.join(".local/share/infraternal")
-    } else {
-        PathBuf::from("/var/lib/infraternal")
-    };
+    let base = base_dir(home, uid);
     if context.data != base.join("state") || context.sessions != base.join("sessions") {
         return Err(denied());
     }
@@ -292,11 +309,7 @@ impl AgentPlugin for UninstallPlugin {
 /// The private plan file the helper consumes, inside the installation it removes.
 const PLAN: &str = ".uninstall-plan";
 fn plan_path(home: &Path, uid: u32) -> PathBuf {
-    if uid == 0 {
-        PathBuf::from("/var/lib/infraternal").join(PLAN)
-    } else {
-        home.join(".local/share/infraternal").join(PLAN)
-    }
+    base_dir(home, uid).join(PLAN)
 }
 fn write_plan(path: &Path, plan: &[u8]) -> io::Result<()> {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
@@ -486,15 +499,45 @@ pub async fn cleanup(
     manager(&paths, &["disable", "--now", "infraternal-agent.service"]).await?;
     // Recheck after manager calls; never unlink a replacement made during stop.
     validate(context, home, uid)?;
-    let report = (kernel.retire)(&context.sessions)?
+    let report: Vec<String> = (kernel.retire)(&context.sessions)?
         .into_iter()
         .map(left_line)
         .collect();
     std::fs::remove_file(&paths.unit)?;
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;
-    std::fs::remove_dir_all(&paths.base)?;
-    Ok(report)
+    remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
+}
+/// Remove what infraternal setup and its infraternal agent put in `base`, then
+/// `base` itself when nothing else is in it.
+///
+/// The rootless base is `~/.local/share/infraternal`, which is also where the
+/// server keeps its CA (`ca`) and a joined node its data (`agent`) on the
+/// same account. Those are not this installation's: they stay, and so does
+/// the base that holds them (#235). `.bootstrap-owner` goes either way, so a
+/// re-add never meets this installation's identity again.
+fn remove_files(base: &Path) -> io::Result<Vec<String>> {
+    for directory in ["bin", "state", "sessions"] {
+        // Removes a symlink itself, never its target.
+        match std::fs::remove_dir_all(base.join(directory)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    for file in [".bootstrap-ready", PLAN, ".bootstrap-owner"] {
+        match std::fs::remove_file(base.join(file)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    match std::fs::remove_dir(base) {
+        Ok(()) => Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(vec![format!(
+            "Left {} because it holds files infraternal setup didn't create.",
+            base.display()
+        )]),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -736,6 +779,48 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
         assert!(result.is_ok_and(|r| r.is_ok()));
+    }
+    /// #235: the server's CA and a joined node's data can share the rootless
+    /// base; uninstall removes only setup's own entries and keeps the rest.
+    #[test]
+    fn file_removal_keeps_what_setup_did_not_create() {
+        let Some((home, context, _)) = installation("c", false) else {
+            return;
+        };
+        let base = context.data.parent().unwrap().to_owned();
+        std::fs::create_dir_all(base.join("ca")).unwrap();
+        std::fs::write(base.join("ca/key"), b"keep").unwrap();
+        std::fs::create_dir_all(context.sessions.join("sessions")).unwrap();
+        let kept = remove_files(&base).unwrap();
+        let ca = std::fs::read(base.join("ca/key")).ok();
+        let gone = ["bin", "sessions", ".bootstrap-owner"]
+            .iter()
+            .all(|entry| !base.join(entry).exists());
+        // Without foreign entries the base itself goes.
+        std::fs::remove_dir_all(base.join("ca")).unwrap();
+        let empty = remove_files(&base).unwrap();
+        let removed = !base.exists();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(ca.as_deref(), Some(&b"keep"[..]));
+        assert!(gone, "setup's own entries survived");
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(empty.is_empty() && removed);
+    }
+    /// #235: the command the owner copies names a host; it removes nothing
+    /// unless `.bootstrap-owner` names that same host.
+    #[tokio::test]
+    async fn manual_uninstall_refuses_another_hosts_installation() {
+        let Some((home, context, uid)) = installation("m", false) else {
+            return;
+        };
+        let other = super::installation("00000000000000000000000000000002", &home, uid);
+        let same = super::installation(&context.host, &home, uid);
+        let refused = cleanup(&other, &home, uid, Kernel::NONE).await;
+        let intact = validate(&context, &home, uid).is_ok();
+        let matches = same.data == context.data && same.sessions == context.sessions;
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(intact && matches);
     }
     #[test]
     fn uninstall_never_accepts_request_selected_paths_or_foreign_identity() {
