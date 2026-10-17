@@ -286,3 +286,64 @@ fn internal_dispatch_checks_exact_argument_counts() {
         None
     );
 }
+
+/// Review R09 (#230): `stat` and the kernel socket record can name different
+/// devices for the same file. Btrfs subvolumes and overlays whose layers sit on
+/// different filesystems report a per-subvolume or upper-layer `st_dev`, while
+/// the diagnostic record carries the superblock device. A legacy runtime bound
+/// there before `listen` must still be kept, never classified as stale.
+#[test]
+fn legacy_bound_endpoint_on_a_split_device_filesystem_is_kept() {
+    let fixture = Fixture::new();
+    for name in ["lower", "upper", "merged"] {
+        fs::create_dir(fixture.0.join(name)).unwrap();
+    }
+    let script = "set -e; cd \"$2\"; mount -t tmpfs lower lower; mount -t tmpfs upper upper; \
+        mkdir upper/u upper/w; \
+        mount -t overlay split -o lowerdir=lower,upperdir=upper/u,workdir=upper/w,xino=off merged; \
+        chmod 700 merged; \
+        RL230_SPLIT=\"$2/merged\" exec \"$1\" --exact \
+        runtime_lock::tests::split_device_inner --ignored --test-threads=1";
+    let Ok(status) = std::process::Command::new("unshare")
+        .args(["-Urm", "sh", "-c", script, "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .arg(&fixture.0)
+        .status()
+    else {
+        return;
+    };
+    assert!(
+        status.success(),
+        "a live bound endpoint was classified stale"
+    );
+}
+
+#[test]
+#[ignore = "runs inside the namespace prepared by the split-device test"]
+fn split_device_inner() {
+    use nix::sys::socket::bind;
+    let Some(runtime) = std::env::var_os("RL230_SPLIT") else {
+        return;
+    };
+    let runtime = PathBuf::from(runtime);
+    let path = runtime.join("plugins.sock");
+    let holder = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .unwrap();
+    bind(holder.as_raw_fd(), &UnixAddr::new(&path).unwrap()).unwrap();
+    let directory = directory(&runtime).unwrap();
+    let inspected = control(&directory, false, true);
+    let retired = control(&directory, true, true);
+    eprintln!(
+        "inspect={inspected:?} retire={retired:?} kept={}",
+        path.exists()
+    );
+    assert_eq!(inspected, Err(73));
+    assert_eq!(retired, Err(73));
+    assert!(path.exists());
+    nix::sys::socket::listen(&holder, nix::sys::socket::Backlog::new(1).unwrap()).unwrap();
+}
