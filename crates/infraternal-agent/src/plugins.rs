@@ -105,6 +105,23 @@ pub(crate) fn registry_at(
     Ok(registry)
 }
 
+/// Remove kernel objects a stopped infraternal agent leaves behind, for host uninstall (D273, #235).
+///
+/// The mesh interface and its packet filter belong to the kernel, not to the
+/// daemon process, so stopping the service keeps them (by design across
+/// restarts). Only the root infraternal agent can create them; a rootless
+/// installation has none to remove.
+/// # Errors
+/// Reports a kernel cleanup failure, or an interface or table with our name that we do not own.
+pub fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    if nix::unistd::Uid::effective().is_root() {
+        return infraternal_plugin_mesh::node::Node::retire(state);
+    }
+    let _ = state;
+    Ok(())
+}
+
 /// Exact private handoff decoder shared with parser fuzzing; parsing grants no authority.
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::uninstall::decode_request as decode_uninstall_request;

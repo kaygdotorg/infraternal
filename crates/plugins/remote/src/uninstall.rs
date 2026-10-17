@@ -383,9 +383,19 @@ async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
     Ok(())
 }
 /// Execute the private plan only in the independent helper, revalidating ownership.
+///
+/// `retire_kernel` runs once the service is stopped and before any file is
+/// removed, with the public state directory. It removes kernel objects that
+/// outlive the daemon process (the mesh interface and packet filter), which this
+/// crate does not own. A failure there stops cleanup with the files intact.
 /// # Errors
-/// Leaves unrelated artifacts untouched and refuses incomplete shell retirement or manager failure.
-pub async fn cleanup(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
+/// Leaves unrelated artifacts untouched and refuses incomplete shell retirement, manager or kernel failure.
+pub async fn cleanup(
+    context: &Context,
+    home: &Path,
+    uid: u32,
+    retire_kernel: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     validate(context, home, uid)?;
     let paths = layout(context, home, uid)?;
     let sockets = context.sessions.join("sessions");
@@ -410,6 +420,7 @@ pub async fn cleanup(context: &Context, home: &Path, uid: u32) -> io::Result<()>
     manager(&paths, &["disable", "--now", "infraternal-agent.service"]).await?;
     // Recheck after manager calls; never unlink a replacement made during stop.
     validate(context, home, uid)?;
+    retire_kernel(&context.sessions)?;
     std::fs::remove_file(&paths.unit)?;
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;

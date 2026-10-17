@@ -158,6 +158,39 @@ impl Node {
         }
         Ok(node)
     }
+    /// Remove every kernel object this component owns, without a running node.
+    ///
+    /// Host uninstall calls this after the service has stopped (#235). The
+    /// interface goes with its addresses, routes and keys; the packet filter is
+    /// removed through the frontend the node recorded. Absent objects are fine;
+    /// an interface or table with our name that we do not own is refused.
+    /// # Errors
+    /// Reports unsafe state, foreign ownership or a failed kernel deletion.
+    pub fn retire(path: &std::path::Path) -> io::Result<()> {
+        let backend = match crate::node_state::Store::open(path) {
+            Ok((_, state)) => state.backend,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if Device::owned()? {
+            Device::delete()?;
+        }
+        let mut firewall = backend.map_or_else(Firewall::default, Firewall::for_backend);
+        match firewall.adopt() {
+            Ok(()) => firewall.remove(),
+            // Without a supported packet-filter frontend the node could never
+            // install a filter, so there is none to remove; never block uninstall.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::Unsupported
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
     /// Read the retained component intent, including an explicitly stopped node.
     #[must_use]
     pub fn enabled(&self) -> bool {

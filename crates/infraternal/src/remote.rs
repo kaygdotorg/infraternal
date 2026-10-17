@@ -459,6 +459,7 @@ pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
                 &plan,
                 &home,
                 nix::unistd::Uid::effective().as_raw(),
+                infraternal_agent::plugins::retire_kernel_state,
             )),
         )
     };
