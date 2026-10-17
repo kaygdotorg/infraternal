@@ -62,7 +62,7 @@ pub(crate) const READER_FELL_BEHIND: CloseReason = CloseReason::new(
     "reader_fell_behind",
     "the terminal reader fell behind and is reconnecting",
 );
-const TERMINAL_ROUTE_IDLE: CloseReason = CloseReason::new(
+pub(crate) const TERMINAL_ROUTE_IDLE: CloseReason = CloseReason::new(
     "idle",
     "terminal_route_unresponsive",
     "the terminal on the host stopped responding",
@@ -71,6 +71,11 @@ pub(crate) const CREDIT_REFUSED: CloseReason = CloseReason::new(
     "flow_control_refusal",
     "credit_exceeded",
     "terminal output credit exceeded its limit",
+);
+pub(crate) const REPLY_QUEUE_FULL: CloseReason = CloseReason::new(
+    "flow_control_refusal",
+    "control_reply_queue_full",
+    "the server could not keep up with connection replies",
 );
 pub(crate) const FRAME_TOO_LARGE: CloseReason = CloseReason::new(
     "size_limit",
@@ -149,6 +154,8 @@ pub(crate) struct CloseRecord {
     pub(crate) agent_close_reason: Option<&'static str>,
     pub(crate) browser_stream_close_code: Option<u16>,
     pub(crate) browser_stream_close_reason: Option<&'static str>,
+    pub(crate) control_stream_close_code: Option<u16>,
+    pub(crate) control_stream_close_reason: Option<&'static str>,
     pub(crate) websocket_code: Option<u16>,
     pub(crate) websocket_reason: Option<&'static str>,
 }
@@ -176,6 +183,8 @@ impl CloseRecord {
             agent_close_reason: None,
             browser_stream_close_code: None,
             browser_stream_close_reason: None,
+            control_stream_close_code: None,
+            control_stream_close_reason: None,
             websocket_code: None,
             websocket_reason: None,
         }
@@ -266,6 +275,8 @@ impl StreamCloseLog {
                     window.last.agent_close_reason = record.agent_close_reason;
                     window.last.browser_stream_close_code = record.browser_stream_close_code;
                     window.last.browser_stream_close_reason = record.browser_stream_close_reason;
+                    window.last.control_stream_close_code = record.control_stream_close_code;
+                    window.last.control_stream_close_reason = record.control_stream_close_reason;
                     window.last.websocket_code = record.websocket_code;
                     window.last.websocket_reason = record.websocket_reason;
                     return;
@@ -371,12 +382,14 @@ fn log_close(record: &CloseRecord) {
         input_acked = record.input_acked,
         input_sent = record.input_sent,
         output_credit_bytes = record.output_credit_bytes,
-        agent_close_code = ?record.agent_close_code,
-        agent_close_reason = ?record.agent_close_reason,
-        browser_stream_close_code = ?record.browser_stream_close_code,
-        browser_stream_close_reason = ?record.browser_stream_close_reason,
-        websocket_code = ?record.websocket_code,
-        websocket_reason = ?record.websocket_reason,
+        agent_close_code = record.agent_close_code.unwrap_or_default(),
+        agent_close_reason = record.agent_close_reason.unwrap_or_default(),
+        browser_stream_close_code = record.browser_stream_close_code.unwrap_or_default(),
+        browser_stream_close_reason = record.browser_stream_close_reason.unwrap_or_default(),
+        control_stream_close_code = record.control_stream_close_code.unwrap_or_default(),
+        control_stream_close_reason = record.control_stream_close_reason.unwrap_or_default(),
+        websocket_code = record.websocket_code.unwrap_or_default(),
+        websocket_reason = record.websocket_reason.unwrap_or_default(),
     );
 }
 
@@ -409,12 +422,14 @@ fn log_summary(window: &Window) {
         input_acked = window.last.input_acked,
         input_sent = window.last.input_sent,
         output_credit_bytes = window.last.output_credit_bytes,
-        agent_close_code = ?window.last.agent_close_code,
-        agent_close_reason = ?window.last.agent_close_reason,
-        browser_stream_close_code = ?window.last.browser_stream_close_code,
-        browser_stream_close_reason = ?window.last.browser_stream_close_reason,
-        websocket_code = ?window.last.websocket_code,
-        websocket_reason = ?window.last.websocket_reason,
+        agent_close_code = window.last.agent_close_code.unwrap_or_default(),
+        agent_close_reason = window.last.agent_close_reason.unwrap_or_default(),
+        browser_stream_close_code = window.last.browser_stream_close_code.unwrap_or_default(),
+        browser_stream_close_reason = window.last.browser_stream_close_reason.unwrap_or_default(),
+        control_stream_close_code = window.last.control_stream_close_code.unwrap_or_default(),
+        control_stream_close_reason = window.last.control_stream_close_reason.unwrap_or_default(),
+        websocket_code = window.last.websocket_code.unwrap_or_default(),
+        websocket_reason = window.last.websocket_reason.unwrap_or_default(),
     );
 }
 
@@ -461,7 +476,7 @@ pub(crate) fn safe_agent_close_reason(reason: &str) -> &'static str {
 }
 
 /// A missing agent stream is a link drop; other terminal closes end just that stream.
-pub(crate) fn classify_agent_close(reason: &'static str) -> CloseReason {
+pub(crate) fn classify_terminal_close(reason: &'static str) -> CloseReason {
     match reason {
         "remote stream unavailable" => AGENT_CONNECTION_DROPPED,
         "terminal command queue full; reattach and replay unacknowledged input"
@@ -543,6 +558,8 @@ mod tests {
             agent_close_reason: None,
             browser_stream_close_code: None,
             browser_stream_close_reason: None,
+            control_stream_close_code: None,
+            control_stream_close_reason: None,
             websocket_code: None,
             websocket_reason: None,
         }
@@ -595,10 +612,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["fields"]["who"], "browser");
         assert_eq!(events[0]["fields"]["reason_category"], "client_went_away");
-        assert_eq!(events[0]["fields"]["websocket_code"], "Some(4000)");
+        assert_eq!(events[0]["fields"]["websocket_code"], 4000);
         assert_eq!(
             events[0]["fields"]["websocket_reason"],
-            "Some(\"connection unresponsive\")"
+            "connection unresponsive"
         );
         assert_eq!(events[0]["fields"]["out_seq"], 2048);
         assert_eq!(events[0]["fields"]["input_acked"], 128);
@@ -618,16 +635,19 @@ mod tests {
     #[test]
     fn an_unavailable_agent_stream_is_reported_as_a_link_drop() {
         let reason = safe_agent_close_reason("remote stream unavailable");
-        let close = classify_agent_close(reason);
+        let close = classify_terminal_close(reason);
         assert_eq!(close.category, "agent_connection_dropped");
         assert_eq!(close.kind, "server_link_lost");
-        let ended = classify_agent_close(safe_agent_close_reason("attachment ended"));
+        let ended = classify_terminal_close(safe_agent_close_reason("attachment ended"));
         assert_eq!(ended.category, "agent_stream_ended");
         assert_eq!(ended.kind, "terminal_stream_closed");
-        let input = classify_agent_close(safe_agent_close_reason(
+        let input = classify_terminal_close(safe_agent_close_reason(
             "terminal command queue full; reattach and replay unacknowledged input",
         ));
         assert_eq!(input.category, "flow_control_refusal");
         assert_eq!(input.kind, "input_queue_full");
+        let route = classify_terminal_close("terminal route unresponsive");
+        assert_eq!(route.category, "idle");
+        assert_eq!(route.kind, "terminal_route_unresponsive");
     }
 }

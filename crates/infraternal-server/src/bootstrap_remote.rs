@@ -849,6 +849,7 @@ async fn finish_canary(actor: &EmbeddedAgent, session: [u8; 16]) -> Result<(), F
                 }
                 TerminalOutput::Closed {
                     code: CLOSE_SESSION_GONE,
+                    ..
                 } => return Ok(()),
                 TerminalOutput::Closed { .. } => return Err(unavailable()),
                 _ => {}

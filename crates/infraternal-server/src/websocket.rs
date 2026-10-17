@@ -7,6 +7,12 @@ use crate::embedded::{
 use crate::{
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
+    stream_close::{
+        AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
+        CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL,
+        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE,
+        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
+    },
 };
 use axum::{
     Router,
@@ -94,6 +100,7 @@ pub(crate) struct WebSocketState {
     connections: Arc<Semaphore>,
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
     session_changes: watch::Sender<u64>,
+    close_logs: StreamCloseLog,
 }
 
 impl WebSocketState {
@@ -135,6 +142,7 @@ impl WebSocketState {
         )
         .await?;
         let (session_changes, _) = watch::channel(0_u64);
+        let close_logs = StreamCloseLog::new();
         let mut inventory = agent.session_inventory();
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
@@ -180,6 +188,7 @@ impl WebSocketState {
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             users: Arc::default(),
             session_changes,
+            close_logs,
         })
     }
 
@@ -394,6 +403,7 @@ async fn run_socket(
     }
 
     let mut pending_welcome = None;
+    let mut resume_attempt = None;
     let handshake = tokio::time::timeout_at(
         handshake_deadline,
         while_authorized(
@@ -410,11 +420,57 @@ async fn run_socket(
                 &user_id,
                 &session_token,
                 &mut pending_welcome,
+                &mut resume_attempt,
             ),
         ),
     )
     .await;
     let Ok(Ok((connection_id, proof_authority))) = handshake else {
+        if let Some(connection_id) = resume_attempt {
+            let rows = sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
+                .bind(connection_id.as_slice())
+                .bind(&user_id)
+                .fetch_all(&state.pool)
+                .await
+                .unwrap_or_default();
+            for row in rows {
+                let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice())
+                else {
+                    continue;
+                };
+                let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
+                let host_id = host_bytes
+                    .as_deref()
+                    .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
+                let stream_id =
+                    u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
+                state.close_logs.record(&CloseRecord::new(
+                    CloseWho::Server,
+                    RESUME_REFUSED,
+                    host_id,
+                    session_id,
+                    stream_id,
+                ));
+            }
+        }
+        let reason = if resume_attempt.is_some() {
+            RESUME_REFUSED
+        } else {
+            ATTACH_REFUSED
+        };
+        let _ = tokio::time::timeout(
+            CLOSE_TIMEOUT,
+            send_frame(
+                &mut sink,
+                CONTROL_STREAM,
+                &Frame::Close {
+                    code: 1008,
+                    reason: reason.client_text,
+                },
+                &mut encode,
+            ),
+        )
+        .await;
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None)))
             .await;
         drop(sink);
@@ -452,6 +508,8 @@ async fn run_socket(
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
     let mut loop_result = Ok(());
+    let mut teardown_reason = crate::stream_close::SERVER_PROCESSING_FAILED;
+    let mut close_already_logged = false;
     loop {
         transport.active(!attachments.is_empty());
         tokio::select! {
@@ -475,26 +533,93 @@ async fn run_socket(
                     ).await.is_err() { break; }
             }
             changed = revocations.changed() => {
-                if changed.is_err() { break; }
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                if changed.is_err() {
+                    teardown_reason = RESUME_REFUSED;
+                    loop_result = Err(());
+                    break;
+                }
+                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
+                    teardown_reason = RESUME_REFUSED;
+                    loop_result = Err(());
+                    break;
+                };
                 expiry = deadline;
             }
             () = tokio::time::sleep_until(expiry) => {
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
+                    teardown_reason = RESUME_REFUSED;
+                    loop_result = Err(());
+                    break;
+                };
                 expiry = deadline;
             }
             input = transport.recv() => {
-                let input = match input {
-                    Ok(Some(input)) => input,
-                    Ok(None) => break,
-                    Err(()) => {
-                        loop_result = Err(());
+                let Ok(Some(input)) = input else {
+                        let end = transport.end_reason();
+                        let socket_close = transport.socket_close();
+                        let who = if end == crate::websocket_transport::EndReason::ClientWentAway {
+                            CloseWho::Browser
+                        } else {
+                            CloseWho::Server
+                        };
+                        record_socket_close(
+                            &state,
+                            &attachments,
+                            who,
+                            end.close_reason(),
+                            socket_close.code,
+                            socket_close.reason,
+                        );
+                        close_already_logged = true;
+                        if end != crate::websocket_transport::EndReason::ClientWentAway
+                            && end != crate::websocket_transport::EndReason::ServerWriteFailed
+                        {
+                            let code = match end {
+                                crate::websocket_transport::EndReason::SizeLimit => 1009,
+                                crate::websocket_transport::EndReason::IdleTimeout => 1001,
+                                crate::websocket_transport::EndReason::AuthorizationRefused => 1008,
+                                crate::websocket_transport::EndReason::FlowControlRefused => 1013,
+                                _ => 1002,
+                            };
+                            let _ = tokio::time::timeout(
+                                CLOSE_TIMEOUT,
+                                send_frame(
+                                    &mut sink,
+                                    CONTROL_STREAM,
+                                    &Frame::Close {
+                                        code,
+                                        reason: end.close_reason().client_text,
+                                    },
+                                    &mut encode,
+                                ),
+                            )
+                            .await;
+                        }
                         break;
-                    }
                 };
                 match input {
                     Inbound::TransportPing(payload) => {
                         if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
+                    }
+                    Inbound::SocketClose { .. } | Inbound::Failure(_) => {
+                        let end = transport.end_reason();
+                        let socket_close = transport.socket_close();
+                        let who = if end == crate::websocket_transport::EndReason::ClientWentAway {
+                            CloseWho::Browser
+                        } else {
+                            CloseWho::Server
+                        };
+                        record_socket_close(
+                            &state,
+                            &attachments,
+                            who,
+                            end.close_reason(),
+                            socket_close.code,
+                            socket_close.reason,
+                        );
+                        close_already_logged = true;
+                        loop_result = Err(());
+                        break;
                     }
                     Inbound::Frame(wire) => {
                     if let Ok(decoded) = decode_muxed_frame(&wire)
@@ -525,7 +650,14 @@ async fn run_socket(
                     }
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Close { code, .. } = decoded.frame {
+                        && let Frame::Close { code, reason } = decoded.frame {
+                        record_control_close(
+                            &state,
+                            &attachments,
+                            code,
+                            reason,
+                        );
+                        close_already_logged = true;
                         let _ = while_authorized(&state, &user_id, &session_token, true, async {
                             send_frame(&mut sink, CONTROL_STREAM,
                                 &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
@@ -542,7 +674,8 @@ async fn run_socket(
                         }
                         Dispatch::Unhandled => {}
                     }
-                    if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
+                    let handled = while_authorized(&state, &user_id, &session_token, true, async {
+                        handle_client_frame(
                             wire,
                             &state,
                             &user_id,
@@ -555,7 +688,14 @@ async fn run_socket(
                             &output_tx,
                             &mut sink,
                             &mut encode,
-                        )).await.is_err() {
+                        ).await
+                    }).await;
+                    if handled.is_err() {
+                        teardown_reason = if session_is_live(&state, &user_id, &session_token).await {
+                            PROTOCOL_ERROR
+                        } else {
+                            RESUME_REFUSED
+                        };
                             loop_result = Err(());
                             break;
                         }
@@ -599,6 +739,15 @@ async fn run_socket(
     }
     pending_plugin_calls.shutdown().await;
     drop(plugins);
+    if !close_already_logged && !attachments.is_empty() {
+        let end = transport.end_reason();
+        let reason = if end == crate::websocket_transport::EndReason::Open {
+            teardown_reason
+        } else {
+            end.close_reason()
+        };
+        record_socket_close(&state, &attachments, CloseWho::Server, reason, None, None);
+    }
     drop(attachments);
     if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
         let _ = tokio::time::timeout(
@@ -608,7 +757,7 @@ async fn run_socket(
                 CONTROL_STREAM,
                 &Frame::Close {
                     code: 1011,
-                    reason: "connection ended",
+                    reason: teardown_reason.client_text,
                 },
                 &mut encode,
             ),
@@ -906,11 +1055,22 @@ where
             .await
             .is_ok()
         }
-        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired => {
+        event @ (TerminalOutput::Reconnecting | TerminalOutput::RouteExpired) => {
+            let reason = if matches!(event, TerminalOutput::RouteExpired) {
+                TERMINAL_ROUTE_IDLE
+            } else {
+                AGENT_CONNECTION_DROPPED
+            };
+            state.close_logs.record(&attachment.close_record(
+                stream_id,
+                CloseWho::InfraternalAgent,
+                reason,
+            ));
             attachment.awaiting_ack = true;
             let notice = serde_json::to_vec(&json!({
                 "type": "terminal.reconnecting",
                 "session_id": uuid::Uuid::from_bytes(attachment.session_id).to_string(),
+                "reason": reason.client_text,
             }))
             .map_err(|_| ())?;
             send_frame(
@@ -969,15 +1129,16 @@ where
                 .await
                 .is_ok()
         }
-        TerminalOutput::Closed { code } => {
+        TerminalOutput::Closed { who, code, reason } => {
             // The host's infraternal agent found no shim for the session: a final
             // answer, distinct from every transient close (wire §4, #158).
             let gone = code == CLOSE_SESSION_GONE;
-            let reason = if gone {
-                SESSION_GONE_REASON
-            } else {
-                "attachment ended"
-            };
+            let reason = if gone { SESSION_GONE_REASON } else { reason };
+            let close_reason = classify_terminal_close(reason);
+            let mut close = attachment.close_record(stream_id, who, close_reason);
+            close.agent_close_code = Some(code);
+            close.agent_close_reason = Some(reason);
+            state.close_logs.record(&close);
             let sent = send_frame(sink, stream_id, &Frame::Close { code, reason }, encode)
                 .await
                 .is_ok();
@@ -1004,6 +1165,7 @@ async fn handshake<S, K>(
     user_id: &str,
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
+    resume_attempt: &mut Option<[u8; 16]>,
 ) -> Result<([u8; 16], probe_authority::Lease), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
@@ -1035,6 +1197,7 @@ where
             ) => (*connection_id, *resume_token),
             _ => return Err(()),
         };
+        *resume_attempt = Some(id);
         resume_connection(
             &state.pool,
             user_id,
@@ -1414,6 +1577,16 @@ where
             }
             let mut session = [0_u8; 16];
             session.copy_from_slice(session_id);
+            let Ok(host_id) = session_host_id(&state.pool, user_id, &session).await else {
+                state.close_logs.record(&CloseRecord::new(
+                    CloseWho::Server,
+                    PROTOCOL_ERROR,
+                    None,
+                    session,
+                    stream_id,
+                ));
+                return Err(());
+            };
             let Ok((input_acked, writer_stream)) = owned_writer(
                 &state.pool,
                 user_id,
@@ -1431,6 +1604,16 @@ where
                 if session_is_live(state, user_id, session_token).await
                     && session_gone(&state.pool, user_id, &session).await?
                 {
+                    let mut close = CloseRecord::new(
+                        CloseWho::Server,
+                        AGENT_STREAM_ENDED,
+                        host_id,
+                        session,
+                        stream_id,
+                    );
+                    close.out_seq = last_out_seq;
+                    close.input_sent = last_in_seq;
+                    state.close_logs.record(&close);
                     ended.insert(stream_id)?;
                     let gone = Frame::Close {
                         code: CLOSE_SESSION_GONE,
@@ -1438,43 +1621,124 @@ where
                     };
                     return send_frame(sink, stream_id, &gone, encode).await;
                 }
-                return Err(());
+                let mut close = CloseRecord::new(
+                    CloseWho::Server,
+                    ATTACH_REFUSED,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_sent = last_in_seq;
+                return close_terminal_stream(
+                    state,
+                    TerminalClose {
+                        record: close,
+                        code: 1008,
+                    },
+                    attachments,
+                    ended,
+                    sink,
+                    encode,
+                )
+                .await;
             };
             if last_in_seq > input_acked {
+                let mut close = CloseRecord::new(
+                    CloseWho::Server,
+                    PROTOCOL_ERROR,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                state.close_logs.record(&close);
                 return Err(());
             }
             if !session_is_live(state, user_id, session_token).await {
+                let mut close = CloseRecord::new(
+                    CloseWho::Server,
+                    ATTACH_REFUSED,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                state.close_logs.record(&close);
                 return Err(());
             }
-            let host: Option<Vec<u8>> = sqlx::query_scalar(
-                "SELECT remote_host_id FROM terminal_sessions WHERE id=? AND user_id=?",
-            )
-            .bind(session.as_slice())
-            .bind(user_id)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(|_| ())?;
-            let agent = terminal_agent(
-                state,
-                user_id,
-                host.as_deref()
-                    .map(uuid::Uuid::from_slice)
-                    .transpose()
-                    .map_err(|_| ())?,
-            )
-            .await?;
-            let attachment = tokio::time::timeout(
+            let Ok(agent) = terminal_agent(state, user_id, host_id).await else {
+                let mut close = CloseRecord::new(
+                    CloseWho::Server,
+                    AGENT_CONNECTION_REFUSED,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                return close_terminal_stream(
+                    state,
+                    TerminalClose {
+                        record: close,
+                        code: 1013,
+                    },
+                    attachments,
+                    ended,
+                    sink,
+                    encode,
+                )
+                .await;
+            };
+            let Ok(Ok(attachment)) = tokio::time::timeout(
                 BACKEND_TIMEOUT,
                 agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
             )
             .await
-            .map_err(|_| ())?
-            .map_err(|_| ())?;
+            else {
+                let mut close = CloseRecord::new(
+                    CloseWho::InfraternalAgent,
+                    AGENT_CONNECTION_REFUSED,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                return close_terminal_stream(
+                    state,
+                    TerminalClose {
+                        record: close,
+                        code: 1013,
+                    },
+                    attachments,
+                    ended,
+                    sink,
+                    encode,
+                )
+                .await;
+            };
             if !session_is_live(state, user_id, session_token).await {
+                let mut close = CloseRecord::new(
+                    CloseWho::Server,
+                    ATTACH_REFUSED,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                state.close_logs.record(&close);
                 return Err(());
             }
             let (handle, mut output) = attachment.split();
-            let agent_stream = handle.stream_id();
             attachments.insert(
                 stream_id,
                 ClientAttachment {
@@ -1485,6 +1749,7 @@ where
                     ),
                     handle,
                     session_id: session,
+                    host_id,
                     last_out_seq,
                     last_in_acked: input_acked,
                     input_sent_end: input_acked,
@@ -1503,13 +1768,16 @@ where
                 // An isolated slow attachment closes its browser stream explicitly so the
                 // client reconnects from delivered offsets instead of waiting silently.
                 let _ = sender
-                    .send((stream_id, TerminalOutput::Closed { code: 1013 }))
+                    .send((
+                        stream_id,
+                        TerminalOutput::Closed {
+                            who: CloseWho::InfraternalAgent,
+                            code: 1013,
+                            reason: "attachment ended",
+                        },
+                    ))
                     .await;
             });
-            tracing::debug!(
-                agent_stream,
-                "attached browser terminal stream to embedded infraternal agent"
-            );
             send_frame(
                 sink,
                 stream_id,
@@ -1520,8 +1788,12 @@ where
             )
             .await
         }
-        Frame::Close { .. } if stream_id != 0 && stream_id % 2 == 1 => {
-            attachments.remove(&stream_id).ok_or(())?;
+        Frame::Close { code, reason } if stream_id != 0 && stream_id % 2 == 1 => {
+            let attachment = attachments.remove(&stream_id).ok_or(())?;
+            let mut close = attachment.close_record(stream_id, CloseWho::Browser, CLIENT_WENT_AWAY);
+            close.browser_stream_close_code = Some(code);
+            close.browser_stream_close_reason = Some(safe_agent_close_reason(reason));
+            state.close_logs.record(&close);
             Ok(())
         }
         Frame::Input { in_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
@@ -1539,7 +1811,7 @@ where
             if attachment.input.enqueue(passthrough).is_ok() {
                 return Ok(());
             }
-            retire_input_stream(stream_id, attachments, ended, sink, encode).await
+            retire_input_stream(state, stream_id, attachments, ended, sink, encode).await
         }
         Frame::Resize {
             cols,
@@ -1555,28 +1827,84 @@ where
             if attachment.input.enqueue(passthrough).is_ok() {
                 return Ok(());
             }
-            retire_input_stream(stream_id, attachments, ended, sink, encode).await
+            retire_input_stream(state, stream_id, attachments, ended, sink, encode).await
         }
         Frame::Credit { bytes } if stream_id != 0 && stream_id % 2 == 1 => {
-            let attachment = attachments.get_mut(&stream_id).ok_or(())?;
-            let credit = attachment.credit.checked_add(u64::from(bytes)).ok_or(())?;
-            if credit > MAX_CREDIT {
-                return Err(());
-            }
-            attachment.credit = credit;
-            attachment
-                .handle
-                .send_frame(passthrough)
-                .await
-                .map_err(|_| ())
+            let refused = {
+                let attachment = attachments.get_mut(&stream_id).ok_or(())?;
+                if let Some(credit) = attachment.credit.checked_add(u64::from(bytes))
+                    && credit <= MAX_CREDIT
+                {
+                    attachment.credit = credit;
+                    return attachment
+                        .handle
+                        .send_frame(passthrough)
+                        .await
+                        .map_err(|_| ());
+                }
+                true
+            };
+            debug_assert!(refused);
+            let close = attachments.get(&stream_id).ok_or(())?.close_record(
+                stream_id,
+                CloseWho::Server,
+                CREDIT_REFUSED,
+            );
+            close_terminal_stream(
+                state,
+                TerminalClose {
+                    record: close,
+                    code: 1013,
+                },
+                attachments,
+                ended,
+                sink,
+                encode,
+            )
+            .await
         }
         _ => Err(()),
     }
 }
 
+struct TerminalClose {
+    record: CloseRecord,
+    code: u16,
+}
+
+/// Log a terminal close once, retire its local attachment, and notify the browser.
+async fn close_terminal_stream<K>(
+    state: &WebSocketState,
+    close: TerminalClose,
+    attachments: &mut HashMap<u32, ClientAttachment>,
+    ended: &mut EndedStreams,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let stream_id = close.record.browser_stream_id;
+    let reason = close.record.reason.client_text;
+    attachments.remove(&stream_id);
+    state.close_logs.record(&close.record);
+    ended.insert(stream_id)?;
+    send_frame(
+        sink,
+        stream_id,
+        &Frame::Close {
+            code: close.code,
+            reason,
+        },
+        encode,
+    )
+    .await
+}
+
 /// FIFO overload retires only its stream; trailing Input/Resize/Credit are
 /// absorbed until explicit reattach, preserving control and sibling dispatch.
 async fn retire_input_stream<K>(
+    state: &WebSocketState,
     stream: u32,
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
@@ -1586,15 +1914,20 @@ async fn retire_input_stream<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    attachments.remove(&stream);
-    ended.insert(stream)?;
-    send_frame(
-        sink,
+    let close = attachments.get(&stream).ok_or(())?.close_record(
         stream,
-        &Frame::Close {
+        CloseWho::Server,
+        INPUT_QUEUE_FULL,
+    );
+    close_terminal_stream(
+        state,
+        TerminalClose {
+            record: close,
             code: 1013,
-            reason: "input queue full",
         },
+        attachments,
+        ended,
+        sink,
         encode,
     )
     .await
@@ -1684,12 +2017,68 @@ struct ClientAttachment {
     handle: AttachmentHandle,
     input: crate::websocket_input::InputQueue,
     session_id: [u8; 16],
+    host_id: Option<uuid::Uuid>,
     last_out_seq: u64,
     last_in_acked: u64,
     input_sent_end: u64,
     credit: u64,
     awaiting_ack: bool,
     needs_snapshot: bool,
+}
+
+impl ClientAttachment {
+    fn close_record(
+        &self,
+        browser_stream_id: u32,
+        who: CloseWho,
+        reason: CloseReason,
+    ) -> CloseRecord {
+        let mut record = CloseRecord::new(
+            who,
+            reason,
+            self.host_id,
+            self.session_id,
+            browser_stream_id,
+        );
+        record.agent_stream_id = self.handle.stream_id();
+        record.out_seq = self.last_out_seq;
+        record.input_acked = self.last_in_acked;
+        record.input_sent = self.input_sent_end;
+        record.output_credit_bytes = self.credit;
+        record
+    }
+}
+
+fn record_socket_close(
+    state: &WebSocketState,
+    attachments: &HashMap<u32, ClientAttachment>,
+    who: CloseWho,
+    reason: CloseReason,
+    code: Option<u16>,
+    websocket_reason: Option<&'static str>,
+) {
+    for (stream_id, attachment) in attachments {
+        let mut record = attachment.close_record(*stream_id, who, reason);
+        record.websocket_code = code;
+        record.websocket_reason = websocket_reason;
+        state.close_logs.record(&record);
+    }
+}
+
+/// Record a browser control-stream close separately from the native WebSocket close frame.
+fn record_control_close(
+    state: &WebSocketState,
+    attachments: &HashMap<u32, ClientAttachment>,
+    code: u16,
+    reason: &str,
+) {
+    let close_reason = safe_websocket_reason(reason);
+    for (stream_id, attachment) in attachments {
+        let mut record = attachment.close_record(*stream_id, CloseWho::Browser, CLIENT_WENT_AWAY);
+        record.control_stream_close_code = Some(code);
+        record.control_stream_close_reason = Some(close_reason);
+        state.close_logs.record(&record);
+    }
 }
 
 /// Browser plugin action adapter; dimensions arrive in the attachment's Resize.
@@ -1794,6 +2183,29 @@ async fn terminal_agent(
         return Err(());
     }
     state.remote_hosts.actor(host).await.ok_or(())
+}
+
+async fn session_host_id(
+    pool: &SqlitePool,
+    user: &str,
+    session: &[u8; 16],
+) -> Result<Option<uuid::Uuid>, ()> {
+    let Some(row) =
+        sqlx::query("SELECT remote_host_id FROM terminal_sessions WHERE id=? AND user_id=?")
+            .bind(session.as_slice())
+            .bind(user)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| ())?
+    else {
+        return Ok(None);
+    };
+    let bytes: Option<Vec<u8>> = row.get("remote_host_id");
+    bytes
+        .as_deref()
+        .map(uuid::Uuid::from_slice)
+        .transpose()
+        .map_err(|_| ())
 }
 
 /// Writer identity survives reconnect and supervision; output remains session-wide.
@@ -1920,6 +2332,19 @@ fn encode_session_id(session_id: &[u8; 16]) -> String {
 pub(super) enum Inbound {
     Frame(Bytes),
     TransportPing(Bytes),
+    SocketClose {
+        code: Option<u16>,
+        reason: Option<&'static str>,
+    },
+    Failure(ReceiveFailure),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ReceiveFailure {
+    ConnectionClosed,
+    Protocol,
+    SizeLimit,
+    IdleTimeout,
 }
 
 async fn next_wire<S, K>(
@@ -1938,6 +2363,7 @@ where
             Some(Inbound::TransportPing(payload)) => {
                 send_message(sink, Message::Pong(payload)).await?;
             }
+            Some(Inbound::SocketClose { .. } | Inbound::Failure(_)) => return Err(()),
             None => return Ok(None),
         }
     }
@@ -1969,10 +2395,13 @@ where
                 return Ok(Some(Inbound::Frame(frame)));
             }
             Err(DecodeError::Incomplete) => {}
-            Err(_) => return Err(()),
+            Err(DecodeError::FrameTooLarge { .. } | DecodeError::BufferLimitExceeded) => {
+                return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
+            }
+            Err(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::Protocol))),
         }
         if receive.len() >= MAX_SOCKET_BUFFER {
-            return Err(());
+            return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
         }
         // A silent authenticated socket has no completion work and no timer [41].
         // Preserve a begun mux frame's deadline across select cancellation and
@@ -1980,29 +2409,43 @@ where
         // bounded by message/frame size, admission and live authority, rather
         // than an idle-read timer that disconnects healthy terminals every 30s.
         let message = if let Some(end) = *deadline {
-            tokio::time::timeout_at(end, source.next())
-                .await
-                .map_err(|_| ())?
+            match tokio::time::timeout_at(end, source.next()).await {
+                Ok(message) => message,
+                Err(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::IdleTimeout))),
+            }
         } else {
             source.next().await
         };
         let Some(message) = message else {
             return Ok(None);
         };
-        match message.map_err(|_| ())? {
-            Message::Binary(bytes) => {
-                let new_len = receive.len().checked_add(bytes.len()).ok_or(())?;
-                if new_len > MAX_SOCKET_BUFFER {
-                    return Err(());
+        match message {
+            Err(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::ConnectionClosed))),
+            Ok(message) => match message {
+                Message::Binary(bytes) => {
+                    let Some(new_len) = receive.len().checked_add(bytes.len()) else {
+                        return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
+                    };
+                    if new_len > MAX_SOCKET_BUFFER {
+                        return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
+                    }
+                    receive.extend_from_slice(&bytes);
+                    let partial = tokio::time::Instant::now() + PARTIAL_FRAME_TIMEOUT;
+                    *deadline = Some(deadline.map_or(partial, |existing| existing.min(partial)));
                 }
-                receive.extend_from_slice(&bytes);
-                let partial = tokio::time::Instant::now() + PARTIAL_FRAME_TIMEOUT;
-                *deadline = Some(deadline.map_or(partial, |existing| existing.min(partial)));
-            }
-            Message::Ping(payload) => return Ok(Some(Inbound::TransportPing(payload))),
-            Message::Pong(_) => {}
-            Message::Close(_) => return Ok(None),
-            Message::Text(_) => return Err(()),
+                Message::Ping(payload) => return Ok(Some(Inbound::TransportPing(payload))),
+                Message::Pong(_) => {}
+                Message::Close(frame) => {
+                    let (code, reason) = frame.map_or((None, None), |frame| {
+                        (
+                            Some(frame.code),
+                            Some(safe_websocket_reason(frame.reason.as_ref())),
+                        )
+                    });
+                    return Ok(Some(Inbound::SocketClose { code, reason }));
+                }
+                Message::Text(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::Protocol))),
+            },
         }
     }
 }

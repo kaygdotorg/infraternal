@@ -5,6 +5,7 @@ use crate::remote_link::RemoteLink;
 #[cfg(not(feature = "remote"))]
 type RemoteLink = ();
 use crate::liveness::{Liveness, TICK};
+use crate::stream_close::{CloseWho, safe_agent_close_reason};
 use bytes::{Buf, Bytes, BytesMut};
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
@@ -94,8 +95,12 @@ pub(crate) enum TerminalOutput {
     Reconnecting,
     /// A route expired; only an authenticated browser consumer may request rebind.
     RouteExpired,
-    /// The agent retired one terminal stream.
-    Closed { code: u16 },
+    /// The server or infraternal agent retired one terminal stream with a safe reason.
+    Closed {
+        who: CloseWho,
+        code: u16,
+        reason: &'static str,
+    },
 }
 
 /// A single client attachment to a terminal session owned by its host infraternal agent.
@@ -730,6 +735,7 @@ enum Incoming {
     Close {
         stream_id: u32,
         code: u16,
+        reason: &'static str,
     },
     Ping {
         nonce: u64,
@@ -1383,7 +1389,11 @@ fn retain_owned_input(
         let extra = &bytes[skip..];
         if a.unacknowledged.len().saturating_add(extra.len()) > MAX_FRAME_LEN {
             let stream = a.stream_id;
-            let _ = a.output.try_send(TerminalOutput::Closed { code: 1013 });
+            let _ = a.output.try_send(TerminalOutput::Closed {
+                who: CloseWho::Server,
+                code: 1013,
+                reason: "terminal command queue full; reattach and replay unacknowledged input",
+            });
             attachments.remove(attachment_id);
             routes.remove(&stream);
             return Some(true);
@@ -2150,7 +2160,11 @@ async fn process_incoming(
             }
             true
         }
-        Incoming::Close { stream_id, code } => {
+        Incoming::Close {
+            stream_id,
+            code,
+            reason,
+        } => {
             let Some(attachment_id) = routes.remove(&stream_id) else {
                 return true;
             };
@@ -2158,7 +2172,11 @@ async fn process_incoming(
                 return false;
             };
             // Retirement is local even when the consumer has already dropped or filled its queue.
-            let _ = attachment.output.try_send(TerminalOutput::Closed { code });
+            let _ = attachment.output.try_send(TerminalOutput::Closed {
+                who: CloseWho::InfraternalAgent,
+                code,
+                reason,
+            });
             true
         }
         Incoming::Ping { nonce, sent_us } => {
@@ -2332,7 +2350,11 @@ async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
                         in_seq_acked,
                     },
                     Frame::Close { .. } if stream_id == CONTROL_STREAM => Incoming::Disconnected,
-                    Frame::Close { code, .. } => Incoming::Close { stream_id, code },
+                    Frame::Close { code, reason } => Incoming::Close {
+                        stream_id,
+                        code,
+                        reason: safe_agent_close_reason(reason),
+                    },
                     Frame::Pong { nonce, sent_us } if stream_id % 2 == 0 => Incoming::Pong {
                         stream_id,
                         nonce,

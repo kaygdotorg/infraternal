@@ -1,9 +1,14 @@
 //! Keeps authenticated browser proofs responsive while application work awaits SQL or a host [D265, #199].
 
 use super::websocket::{
-    Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, WebSocketState, receive_wire, send_messages,
+    Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, ReceiveFailure, WebSocketState, receive_wire,
+    send_messages,
 };
 use crate::liveness::Liveness;
+use crate::stream_close::{
+    CLIENT_WENT_AWAY, CloseReason, IDLE_TIMEOUT, PROTOCOL_ERROR, REPLY_QUEUE_FULL, RESUME_REFUSED,
+    SERVER_WRITE_FAILED,
+};
 use axum::extract::ws::{Message, WebSocket};
 use bytes::{Bytes, BytesMut};
 use futures_util::{
@@ -30,6 +35,52 @@ const PROOF_BATCH: usize = 64;
 // Application progress keeps the first-tick cadence briefly. Content-free
 // proofs bypass this window, and its expiry creates no separate timer.
 const FAST_PROBE_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum EndReason {
+    Open = 0,
+    ClientWentAway = 1,
+    ProtocolError = 2,
+    SizeLimit = 3,
+    IdleTimeout = 4,
+    AuthorizationRefused = 5,
+    ServerWriteFailed = 6,
+    FlowControlRefused = 7,
+}
+
+impl EndReason {
+    fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::ClientWentAway,
+            2 => Self::ProtocolError,
+            3 => Self::SizeLimit,
+            4 => Self::IdleTimeout,
+            5 => Self::AuthorizationRefused,
+            6 => Self::ServerWriteFailed,
+            7 => Self::FlowControlRefused,
+            _ => Self::Open,
+        }
+    }
+
+    pub(super) const fn close_reason(self) -> CloseReason {
+        match self {
+            Self::ClientWentAway => CLIENT_WENT_AWAY,
+            Self::ProtocolError => PROTOCOL_ERROR,
+            Self::SizeLimit => crate::stream_close::FRAME_TOO_LARGE,
+            Self::IdleTimeout => IDLE_TIMEOUT,
+            Self::AuthorizationRefused => RESUME_REFUSED,
+            Self::ServerWriteFailed | Self::Open => SERVER_WRITE_FAILED,
+            Self::FlowControlRefused => REPLY_QUEUE_FULL,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SocketClose {
+    pub(super) code: Option<u16>,
+    pub(super) reason: Option<&'static str>,
+}
 type Writer = Arc<Mutex<SplitSink<WebSocket, Message>>>;
 
 struct Queued {
@@ -49,22 +100,42 @@ struct Context {
     writer: Writer,
     lease: LeaseMutex<Liveness>,
     fast_until: LeaseMutex<tokio::time::Instant>,
-    // 0 is usable, 1 is an ordinary end, 2 is a protocol failure. The first end
-    // wins so teardown cannot turn malformed input into an ordinary disconnect.
+    // The first classified end wins so teardown cannot turn malformed input into an ordinary disconnect.
     ended: AtomicU8,
+    socket_close: LeaseMutex<SocketClose>,
     closed: Notify,
     proof_changed: Notify,
 }
 
 impl Context {
-    fn retire(&self, failed: bool) {
-        let _ = self.ended.compare_exchange(
-            0,
-            if failed { 2 } else { 1 },
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        self.closed.notify_waiters();
+    fn retire(&self, reason: EndReason) {
+        if reason != EndReason::Open
+            && self
+                .ended
+                .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            self.closed.notify_waiters();
+        }
+    }
+
+    fn end_reason(&self) -> EndReason {
+        EndReason::from_code(self.ended.load(Ordering::Acquire))
+    }
+
+    fn socket_close(&self) -> SocketClose {
+        *self
+            .socket_close
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_socket_close(&self, close: SocketClose) {
+        if let Ok(mut current) = self.socket_close.lock()
+            && current.code.is_none()
+        {
+            *current = close;
+        }
     }
 
     fn reset(&self) -> Result<(), ()> {
@@ -117,10 +188,17 @@ impl Context {
             };
             messages.push(message);
         }
-        let fast = self.fast_active()?;
+        let Ok(fast) = self.fast_active() else {
+            self.retire(EndReason::ServerWriteFailed);
+            return Err(());
+        };
         let probe = {
-            let mut lease = self.lease.lock().map_err(|_| ())?;
+            let Ok(mut lease) = self.lease.lock() else {
+                self.retire(EndReason::ServerWriteFailed);
+                return Err(());
+            };
             if active && lease.expired() {
+                self.retire(EndReason::IdleTimeout);
                 return Err(());
             }
             let due = lease
@@ -136,7 +214,11 @@ impl Context {
         if messages.is_empty() {
             return Ok(());
         }
-        send_messages(&mut *writer, messages.drain(..)).await
+        let result = send_messages(&mut *writer, messages.drain(..)).await;
+        if result.is_err() {
+            self.retire(EndReason::ServerWriteFailed);
+        }
+        result
     }
 }
 
@@ -151,7 +233,7 @@ pub(super) struct Transport {
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        self.context.retire(false);
+        self.context.retire(EndReason::ServerWriteFailed);
         self.tasks.abort_all();
     }
 }
@@ -175,6 +257,7 @@ impl Transport {
             lease: LeaseMutex::new(Liveness::answer_paced()),
             fast_until: LeaseMutex::new(tokio::time::Instant::now() + FAST_PROBE_WINDOW),
             ended: AtomicU8::new(0),
+            socket_close: LeaseMutex::new(SocketClose::default()),
             closed: Notify::new(),
             proof_changed: Notify::new(),
         });
@@ -218,6 +301,7 @@ impl Transport {
                         *failure
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                        context.retire(EndReason::ServerWriteFailed);
                     }
                     // Restore the state before reporting the error through the
                     // adapter. Cleanup may send another frame after a failure.
@@ -247,11 +331,19 @@ impl Transport {
         });
     }
 
+    pub(super) fn end_reason(&self) -> EndReason {
+        self.context.end_reason()
+    }
+
+    pub(super) fn socket_close(&self) -> SocketClose {
+        self.context.socket_close()
+    }
+
     pub(super) async fn recv(&mut self) -> Result<Option<Inbound>, ()> {
         loop {
             match self.context.ended.load(Ordering::Acquire) {
                 1 => return Ok(None),
-                2 => return Err(()),
+                2..=7 => return Err(()),
                 _ => {}
             }
             tokio::select! {
@@ -348,18 +440,32 @@ async fn read(
         let incoming = match incoming {
             Ok(Some(incoming)) => incoming,
             Ok(None) => {
-                context.retire(false);
+                context.retire(EndReason::ClientWentAway);
                 break;
             }
             Err(()) => {
-                context.retire(true);
+                context.retire(EndReason::ProtocolError);
                 break;
             }
         };
         let (incoming, size) = match incoming {
+            Inbound::SocketClose { code, reason } => {
+                context.set_socket_close(SocketClose { code, reason });
+                context.retire(EndReason::ClientWentAway);
+                break;
+            }
+            Inbound::Failure(failure) => {
+                context.retire(match failure {
+                    ReceiveFailure::ConnectionClosed => EndReason::ClientWentAway,
+                    ReceiveFailure::Protocol => EndReason::ProtocolError,
+                    ReceiveFailure::SizeLimit => EndReason::SizeLimit,
+                    ReceiveFailure::IdleTimeout => EndReason::IdleTimeout,
+                });
+                break;
+            }
             Inbound::TransportPing(payload) => {
                 if replies.try_send(Reply::Transport(payload)).is_err() {
-                    context.retire(true);
+                    context.retire(EndReason::FlowControlRefused);
                     break;
                 }
                 continue;
@@ -378,7 +484,7 @@ async fn read(
                                 Ok(true) => context.proof_changed.notify_one(),
                                 Ok(false) => {}
                                 Err(_) => {
-                                    context.retire(true);
+                                    context.retire(EndReason::ServerWriteFailed);
                                     break;
                                 }
                             }
@@ -386,7 +492,7 @@ async fn read(
                         }
                         Frame::Ping { nonce, sent_us } => {
                             if replies.try_send(Reply::Wire { nonce, sent_us }).is_err() {
-                                context.retire(true);
+                                context.retire(EndReason::FlowControlRefused);
                                 break;
                             }
                             continue;
@@ -399,7 +505,7 @@ async fn read(
             }
         };
         let Ok(size) = size else {
-            context.retire(true);
+            context.retire(EndReason::SizeLimit);
             break;
         };
         let admitted = async {
@@ -418,7 +524,7 @@ async fn read(
         };
         tokio::select! {
             () = context.closed.notified() => break,
-            result = admitted => if result.is_err() { context.retire(false); break; },
+            result = admitted => if result.is_err() { context.retire(EndReason::ServerWriteFailed); break; },
         }
     }
 }
@@ -438,6 +544,7 @@ async fn proofs(
             break;
         }
         let Ok(fast) = context.fast_active() else {
+            context.retire(EndReason::ServerWriteFailed);
             break;
         };
         let Ok((next_probe, response_deadline)) = context
@@ -445,6 +552,7 @@ async fn proofs(
             .lock()
             .map(|lease| (lease.next_probe_due(fast), lease.response_deadline()))
         else {
+            context.retire(EndReason::ServerWriteFailed);
             break;
         };
         let first = tokio::select! {
@@ -452,7 +560,10 @@ async fn proofs(
             changed = activity.changed() => {
                 if changed.is_err() { break; }
                 active = *activity.borrow_and_update();
-                if context.reset().is_err() { break; }
+                if context.reset().is_err() {
+                    context.retire(EndReason::ServerWriteFailed);
+                    break;
+                }
                 continue;
             }
             () = context.proof_changed.notified() => None,
@@ -466,6 +577,7 @@ async fn proofs(
         let active = *activity.borrow();
         if first.is_none() && replies.is_empty() {
             let Ok(fast) = context.fast_active() else {
+                context.retire(EndReason::ServerWriteFailed);
                 break;
             };
             let Ok(idle) = context.lease.lock().map(|lease| {
@@ -475,6 +587,7 @@ async fn proofs(
                             .next_probe_due(fast)
                             .is_none_or(|at| at > tokio::time::Instant::now()))
             }) else {
+                context.retire(EndReason::ServerWriteFailed);
                 break;
             };
             // An answer only changes scheduling; it does not need a writer or
@@ -497,10 +610,15 @@ async fn proofs(
             }
         }).await;
         if result.is_err() {
+            if context.end_reason() == EndReason::Open {
+                context.retire(EndReason::AuthorizationRefused);
+            }
             break;
         }
     }
-    context.retire(false);
+    if context.end_reason() == EndReason::Open {
+        context.retire(EndReason::AuthorizationRefused);
+    }
 }
 
 /// An absent deadline parks without creating a timer [D81].
@@ -508,5 +626,45 @@ async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! End conditions stay specific through socket teardown and structured logging.
+    use super::*;
+
+    #[test]
+    fn each_receive_end_has_a_structured_terminal_close_reason() {
+        let cases = [
+            (
+                EndReason::ClientWentAway,
+                "client_went_away",
+                "websocket_closed",
+            ),
+            (EndReason::ProtocolError, "protocol_error", "invalid_frame"),
+            (EndReason::SizeLimit, "size_limit", "frame_too_large"),
+            (EndReason::IdleTimeout, "idle", "liveness_timeout"),
+            (
+                EndReason::AuthorizationRefused,
+                "auth_resume_refusal",
+                "connection_resume_refused",
+            ),
+            (
+                EndReason::ServerWriteFailed,
+                "server_transport_error",
+                "websocket_write_failed",
+            ),
+            (
+                EndReason::FlowControlRefused,
+                "flow_control_refusal",
+                "control_reply_queue_full",
+            ),
+        ];
+        for (end, category, kind) in cases {
+            let reason = end.close_reason();
+            assert_eq!(reason.category, category);
+            assert_eq!(reason.kind, kind);
+        }
     }
 }

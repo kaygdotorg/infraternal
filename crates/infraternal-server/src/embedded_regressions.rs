@@ -463,7 +463,8 @@ async fn stream_close_must_not_restart_all_sessions() {
         process_incoming(
             Incoming::Close {
                 stream_id: 2,
-                code: 1000
+                code: 1000,
+                reason: "detached",
             },
             &mut link,
             &mut attachments,

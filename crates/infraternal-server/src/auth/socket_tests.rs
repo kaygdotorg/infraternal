@@ -900,3 +900,7 @@ mod session_gone;
 mod restart_open_liveness_review;
 #[path = "socket_tests/review_input_credit.rs"]
 mod review_input_credit;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/close_logging.rs"]
+mod close_logging;
