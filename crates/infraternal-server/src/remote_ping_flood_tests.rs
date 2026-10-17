@@ -336,7 +336,14 @@ async fn primary_ping_during_terminal_flood() {
     let uploaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
     if upload {
         let sink = b"exec cat > /dev/null\n";
-        terminal_send(&handles[2], Frame::Input { in_seq: sequence[2], bytes: sink }).await;
+        terminal_send(
+            &handles[2],
+            Frame::Input {
+                in_seq: sequence[2],
+                bytes: sink,
+            },
+        )
+        .await;
         let paste = handles[2].clone();
         let mut in_seq = sequence[2] + u64::try_from(sink.len()).unwrap();
         let counter = uploaded.clone();
@@ -345,9 +352,19 @@ async fn primary_ping_during_terminal_flood() {
             let mut line = vec![b'y'; 4000];
             *line.last_mut().unwrap() = b'\n';
             loop {
-                terminal_send(&paste, Frame::Input { in_seq, bytes: &line }).await;
+                terminal_send(
+                    &paste,
+                    Frame::Input {
+                        in_seq,
+                        bytes: &line,
+                    },
+                )
+                .await;
                 in_seq += u64::try_from(line.len()).unwrap();
-                counter.fetch_add(u64::try_from(line.len()).unwrap(), std::sync::atomic::Ordering::Relaxed);
+                counter.fetch_add(
+                    u64::try_from(line.len()).unwrap(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
         });
     }
