@@ -491,13 +491,13 @@ mod tests {
     async fn placeholder_names_become_the_machines_names() {
         let service = service().await;
         let host = "00000000-0000-4000-8000-000000000001";
-        // Enrolled before names were known: the node carries the placeholder.
+        // Enrolled before names were known: the node carries a placeholder.
         service
             .dataplane()
             .attach(host, PublicKey([2; 32]), None, false)
             .await
             .unwrap();
-        assert_eq!(names(&service).await, ["server", &format!("mesh-{host}")]);
+        assert_eq!(names(&service).await, ["server", "unnamed"]);
         sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,'root@minipc01')")
             .bind(uuid::Uuid::parse_str(host).unwrap().as_bytes().as_slice())
             .execute(&service.pool_for_tests())

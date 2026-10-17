@@ -1017,7 +1017,8 @@ impl MeshService {
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
         let scope_requirements = require_each_scope(&scopes);
         authorize(&mut tx, actor, MANAGE_NODES, &scope_requirements).await?;
-        let changed = sqlx::query("UPDATE mesh_nodes SET name=? WHERE id=?")
+        // A person's name is final: automatic naming never touches it again (store.rs `attach_named`, #236).
+        let changed = sqlx::query("UPDATE mesh_nodes SET name=?,name_source='hand' WHERE id=?")
             .bind(&request.name)
             .bind(id)
             .execute(&mut *tx)

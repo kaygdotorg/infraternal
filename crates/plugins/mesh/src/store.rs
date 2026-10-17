@@ -82,37 +82,192 @@ pub fn machine_name(source: &str) -> Option<String> {
     crate::api::validate_host(&label).ok()?;
     Some(label)
 }
-/// `wanted`, or `wanted-2` … `wanted-9` when another node holds it (names are unique, ignoring case).
-async fn free_name(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    wanted: Option<&str>,
-    except: i64,
-) -> Result<Option<String>, &'static str> {
-    let Some(wanted) = wanted else {
-        return Ok(None);
+/// Who named a node; a higher rank may move a lower one's automatic name aside (migration 0026, #236).
+fn rank(source: &str) -> u8 {
+    match source {
+        "hand" => 4,
+        "server" => 3,
+        "record" => 2,
+        "reported" => 1,
+        _ => 0,
+    }
+}
+/// The label no remote machine may be called automatically: viewers read it as the server.
+const SERVER_LABEL: &str = "server";
+/// What a node is called while no name is known.
+const UNNAMED: &str = "unnamed";
+/// A node's current name, as naming sees it.
+struct Named {
+    id: i64,
+    name: String,
+    source: String,
+    host: Option<String>,
+}
+/// One automatic name change, applied in order and written to the audit log with the attach's revision.
+struct Renamed {
+    id: i64,
+    from: String,
+    to: String,
+    source: String,
+}
+/// What one attach names: the attaching node's name and who gave it, and the other nodes it moves aside.
+struct Naming {
+    name: String,
+    source: &'static str,
+    moved: Vec<Renamed>,
+}
+/// Names a node of `host` (`id`, currently `current`) that `wanted` names, given every other node's name and the
+/// names the owner gave other hosts (`records`). Pure, so the whole decision is one place and testable.
+///
+/// Free: it takes the name. Held by a node of lower rank (an automatic name, never a person's): that node moves
+/// aside to a suffixed name and this one takes it. Held by an equal or higher rank: this node, the newcomer, gets
+/// the suffix (`minipc01-2` … `-9`). A reported hostname also yields to every other host's record name, enrolled
+/// or not, so a machine cannot pose as one the owner named. With no name, a new node is `unnamed`.
+/// `None` keeps the current name.
+fn naming(
+    nodes: &[Named],
+    id: i64,
+    host: &str,
+    current: Option<&str>,
+    wanted: Option<(String, &'static str)>,
+    records: &[String],
+) -> Option<Naming> {
+    // The first of `base` (unless `skip`) and `base-2` … `base-9` no node other than `except` holds.
+    let free = |base: &str, except: i64, skip: bool| {
+        let stem = base[..base.len().min(61)].trim_end_matches('-');
+        (usize::from(skip)..9)
+            .map(|n| {
+                if n == 0 {
+                    base.to_owned()
+                } else {
+                    format!("{stem}-{}", n + 1)
+                }
+            })
+            .find(|name| {
+                !nodes
+                    .iter()
+                    .any(|node| node.id != except && node.name == *name)
+            })
     };
-    for suffix in 1..10 {
-        let name = if suffix == 1 {
-            wanted.to_owned()
+    let Some((wanted, source)) = wanted else {
+        if current.is_some() {
+            return None;
+        }
+        let name = if host == SERVER_LABEL {
+            SERVER_LABEL.to_owned()
         } else {
-            // Keep room for the suffix inside the 63-byte label limit.
-            format!(
-                "{}-{suffix}",
-                wanted[..wanted.len().min(61)].trim_end_matches('-')
-            )
+            free(UNNAMED, id, false).unwrap_or_else(|| format!("mesh-{host}"))
         };
-        let taken: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE name=? AND id!=?)")
-                .bind(&name)
-                .bind(except)
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(|_| "Mesh storage unavailable.")?;
-        if !taken {
-            return Ok(Some(name));
+        return Some(Naming {
+            name,
+            source: "placeholder",
+            moved: Vec::new(),
+        });
+    };
+    let holder = nodes
+        .iter()
+        .find(|node| node.id != id && node.name == wanted);
+    let mut moved = Vec::new();
+    let name = if source == "reported" && records.contains(&wanted) {
+        free(&wanted, id, true)
+    } else if let Some(holder) = holder.filter(|holder| rank(&holder.source) < rank(source)) {
+        let to = free(&wanted, holder.id, true)
+            .unwrap_or_else(|| format!("mesh-{}", holder.host.as_deref().unwrap_or_default()));
+        moved.push(Renamed {
+            id: holder.id,
+            from: holder.name.clone(),
+            to,
+            source: holder.source.clone(),
+        });
+        Some(wanted)
+    } else {
+        free(&wanted, id, holder.is_some())
+    };
+    match (name, current) {
+        (Some(name), current) if current != Some(name.as_str()) => Some(Naming {
+            name,
+            source,
+            moved,
+        }),
+        (Some(_), _) | (None, Some(_)) => None,
+        (None, None) => naming(nodes, id, host, None, None, records),
+    }
+}
+/// What names a node of `host`, and who gives it, with the names the owner gave every other host.
+///
+/// The server is named after its own hostname; a remote machine after the name the owner typed when adding it,
+/// else its reported hostname. `server` is never a remote machine's automatic name.
+async fn wanted_name(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    host: &str,
+    server: bool,
+    reported: Option<&str>,
+) -> Result<(Option<(String, &'static str)>, Vec<String>), &'static str> {
+    let own = host.replace('-', "").to_ascii_lowercase();
+    let mut recorded = None;
+    let mut records = Vec::new();
+    for row in sqlx::query("SELECT lower(hex(host_id)) AS host,address FROM remote_host_bootstrap")
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?
+    {
+        let name = machine_name(&row.get::<String, _>("address"));
+        if row.get::<String, _>("host") == own {
+            recorded = name;
+        } else {
+            records.extend(name);
         }
     }
-    Ok(None)
+    let usable = |name: &String| name != SERVER_LABEL;
+    let wanted = if server {
+        reported.and_then(machine_name).map(|name| (name, "server"))
+    } else {
+        recorded
+            .filter(usable)
+            .map(|name| (name, "record"))
+            .or_else(|| {
+                reported
+                    .and_then(machine_name)
+                    .filter(usable)
+                    .map(|name| (name, "reported"))
+            })
+    };
+    Ok((wanted, records))
+}
+/// Applies automatic renames in order: a node moved aside first frees the name the next one takes.
+async fn rename(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    renamed: &[Renamed],
+) -> Result<(), &'static str> {
+    for rename in renamed {
+        sqlx::query("UPDATE mesh_nodes SET name=?,name_source=? WHERE id=?")
+            .bind(&rename.to)
+            .bind(&rename.source)
+            .bind(rename.id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|_| "Mesh identity conflicts.")?;
+    }
+    Ok(())
+}
+/// Audits automatic renames with the attach's revision. An automatic rename is attributed to the instance owner,
+/// the only person who adds hosts, and says it was automatic.
+async fn audit_renames(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    renamed: &[Renamed],
+    revision: i64,
+) -> Result<(), &'static str> {
+    for rename in renamed {
+        let detail = serde_json::json!({"node_id":rename.id,"name":rename.to,"previous":rename.from,"source":rename.source,"automatic":true});
+        sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) SELECT id,'mesh.node.name',?,?,unixepoch(),? FROM users WHERE owner=1 ORDER BY rowid LIMIT 1")
+            .bind(rename.id.to_string())
+            .bind(revision)
+            .bind(detail.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+    }
+    Ok(())
 }
 #[derive(Clone)]
 pub struct Store {
@@ -147,10 +302,12 @@ impl Store {
     }
     /// [`Self::attach`], naming the node after the machine (TASTE "Machines are called by their names", #236).
     ///
-    /// The name is the host record's (the host part of the address it was added with, the name its pill shows),
-    /// else `reported`, the hostname the machine's infraternal agent reports. A node still under its placeholder
-    /// (`server`, or `mesh-<host id>` from before names were known) takes the name on its next attach; a name a
-    /// person chose is never replaced. Without either name the placeholder stays until one is known.
+    /// Who may name a node, strongest first: a person (`mesh.node.rename`, enrolment), never replaced; the server's
+    /// own hostname, on the server's node; the host record (the host part of the address the owner added it with,
+    /// the name its pill shows); `reported`, the hostname the machine's infraternal agent reports, only for a host
+    /// the record cannot name. A collision suffixes the weaker claim (`minipc01-2`), so a machine can never take
+    /// the server's name, `server`, or a name the owner gave another host. Each automatic rename is audited.
+    /// Without any name a node is `unnamed` until one is known.
     /// # Errors
     /// Returns fixed public errors, not database input or authentication data.
     pub async fn attach_named(
@@ -172,7 +329,7 @@ impl Store {
         // The authenticated host is the sole selector; uniqueness refuses any
         // conflicting key without changing another node's grants [164,166,235].
         let existing = sqlx::query(
-            "SELECT id,name,public_key,endpoint,dataplane_host FROM mesh_nodes WHERE dataplane_host=?",
+            "SELECT id,name,name_source,public_key,endpoint,dataplane_host FROM mesh_nodes WHERE dataplane_host=?",
         )
         .bind(host)
         .fetch_optional(&mut *tx)
@@ -187,46 +344,42 @@ impl Store {
         if removed {
             return Err("Mesh membership was removed; authorized enrollment is required.");
         }
-        let placeholder = if server {
-            "server".to_owned()
-        } else {
-            format!("mesh-{host}")
-        };
-        let recorded: Option<String> = if server {
-            None
-        } else {
-            // The host record's address is the name the person gave the machine when adding it.
-            sqlx::query_scalar(
-                "SELECT address FROM remote_host_bootstrap WHERE lower(hex(host_id))=replace(lower(?),'-','')",
-            )
-            .bind(host)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| "Mesh storage unavailable.")?
-        };
-        let wanted = recorded
-            .as_deref()
-            .and_then(machine_name)
-            .or_else(|| reported.and_then(machine_name));
+        let (wanted, records) = wanted_name(&mut tx, host, server, reported).await?;
+        let nodes: Vec<Named> =
+            sqlx::query("SELECT id,name,name_source,dataplane_host FROM mesh_nodes")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?
+                .iter()
+                .map(|row| Named {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    source: row.get("name_source"),
+                    host: row.get("dataplane_host"),
+                })
+                .collect();
+        let mut renamed = Vec::new();
         let id = if let Some(row) = existing {
             // Temporary discovery absence is not an endpoint removal [166].
             // Keep the last known direct coordinate until an observed replacement arrives.
             let endpoint = endpoint.or_else(|| row.get::<Option<String>, _>("endpoint"));
             let id: i64 = row.get("id");
-            let rename = if row.get::<String, _>("name") == placeholder {
-                free_name(&mut tx, wanted.as_deref(), id).await?
-            } else {
-                None
-            };
-            if let Some(name) = &rename {
-                sqlx::query("UPDATE mesh_nodes SET name=? WHERE id=?")
-                    .bind(name)
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|_| "Mesh identity conflicts.")?;
+            let name: String = row.get("name");
+            // A person's name is final. Any automatic name is re-claimed on each attach, so a squatter yields
+            // once the owner's machine (or the server) comes along, and a placeholder heals.
+            if row.get::<String, _>("name_source") != "hand"
+                && let Some(naming) = naming(&nodes, id, host, Some(&name), wanted, &records)
+            {
+                renamed = naming.moved;
+                renamed.push(Renamed {
+                    id,
+                    from: name,
+                    to: naming.name,
+                    source: naming.source.to_owned(),
+                });
             }
-            if rename.is_none()
+            rename(&mut tx, &renamed).await?;
+            if renamed.is_empty()
                 && row.get::<Option<String>, _>("dataplane_host").as_deref() == Some(host)
                 && row.get::<Vec<u8>, _>("public_key") == key.0
                 && row.get::<Option<String>, _>("endpoint").as_deref() == endpoint.as_deref()
@@ -249,13 +402,16 @@ impl Store {
             id
         } else {
             let high:i64 = sqlx::query_scalar("UPDATE mesh_state SET node_id_high_water=node_id_high_water+1 WHERE singleton=1 AND node_id_high_water<9223372036854775807 RETURNING node_id_high_water").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
-            let name = free_name(&mut tx, wanted.as_deref(), 0)
-                .await?
-                .unwrap_or(placeholder);
-            sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,dataplane_host,endpoint) VALUES(?,?,?,?,?)").bind(high).bind(name).bind(key.0.as_slice()).bind(host).bind(&endpoint).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
+            // A new node always gets a name; only the nodes it moves aside are renames.
+            let naming = naming(&nodes, high, host, None, wanted, &records)
+                .ok_or("Mesh identity invalid.")?;
+            renamed = naming.moved;
+            rename(&mut tx, &renamed).await?;
+            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,public_key,dataplane_host,endpoint) VALUES(?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(key.0.as_slice()).bind(host).bind(&endpoint).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
             high
         };
-        sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
+        let revision = sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
+        audit_renames(&mut tx, &renamed, revision).await?;
         tx.commit().await.map_err(|_| "Mesh storage unavailable.")?;
         Ok((
             NodeId(u64::try_from(id).map_err(|_| "Mesh identity invalid.")?),
