@@ -297,6 +297,21 @@ fn control_strings_cannot_grow_session_carry_without_bound() {
             "string {introducer}: carry allocated {} bytes",
             terminal.pending.capacity()
         );
+        // A small Rust carry alone does not establish native isolation: the
+        // selected engine owns its own control-string and metadata storage.
+        let (ordinary, _, _, _, carry) = terminal.ownership().unwrap();
+        assert!(
+            ordinary <= 256 * 1024,
+            "native metadata exceeded its session share"
+        );
+        assert!(
+            carry <= 4096,
+            "accounted parser carry exceeded its session share"
+        );
+        assert!(
+            !terminal.memory().2,
+            "string {introducer}: streaming discard reached native allocation refusal"
+        );
         terminal.process(b"\x1b\\after\x1b[31mred");
         assert!(
             terminal.pending.is_empty(),
