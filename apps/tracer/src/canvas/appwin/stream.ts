@@ -11,6 +11,8 @@
  *   a while (at once on a phone) the worker and its surface are released too. The session stays on the machine, so
  *   coming back attaches again and the server sends a keyframe first.
  * - Input is sent only after control was approved, moves are coalesced to one per animation frame by the caller.
+ *   Control lost to a dropped connection is asked for again on the next welcome; control the person gave back, or a
+ *   window that went out of sight, waits for the person.
  *
  * The machine's own words about what is happening to a stream (the app quit, a permission was withdrawn, local input
  * pauses remote input) reach the page through `desktop.session.clock`, polled only while control is in use; the shape
@@ -114,6 +116,11 @@ export class AppStream {
   private statusTimer = 0;
   private statusBusy = false;
   private controlRefusedAt = -Infinity;
+  /**
+   * The person holds control and has not given it back. A dropped connection or a retired viewer clears the lease on
+   * the server; this remembers the intent so the next welcome asks again by itself (no click needed).
+   */
+  private keepControl = false;
   private lastInputAt = -Infinity;
   private pausedTimer = 0;
   private statsWaiters: Array<(stats: WorkerStats) => void> = [];
@@ -239,6 +246,7 @@ export class AppStream {
         // Attached again: a window that was live shows "reconnecting" until its first new picture; a paused one stays paused
         // until then; a window that never had a picture is still connecting.
         if (this.state.kind === "live" && this.hadPicture) this.setState({ kind: "reconnecting" });
+        if (this.keepControl) void this.takeControl();
       },
       onFrame: (frame) => this.frame(frame),
       onDisconnected: () => {
@@ -349,6 +357,8 @@ export class AppStream {
     if (!visible) {
       // Only a window with a picture to remember is "paused"; one still connecting stays connecting.
       if (this.hadPicture && (this.state.kind === "live" || this.state.kind === "reconnecting")) this.setState({ kind: "paused" });
+      // Out of sight is not a transient loss: control comes back only from the person.
+      this.keepControl = false;
       this.setControl({ kind: "none" });
       this.detach();
       window.clearTimeout(this.releaseTimer);
@@ -395,6 +405,7 @@ export class AppStream {
     try {
       await this.o.connection.call("desktop.session.control", { stream_id: id });
       if (this.streamId !== id) return false;
+      this.keepControl = true;
       this.setControl({ kind: "controlled" });
       this.pushSize();
       this.pollStatus();
@@ -402,6 +413,7 @@ export class AppStream {
     } catch {
       if (this.streamId === id) {
         this.controlRefusedAt = performance.now();
+        this.keepControl = false;
         this.setControl({ kind: "view-only", why: "rights" });
       }
       return false;
@@ -411,6 +423,7 @@ export class AppStream {
   /** The window lost focus: held keys and buttons are released on the machine, and the indicator goes quiet. */
   releaseControl(): void {
     const held = this.control.kind === "controlled" || this.control.kind === "paused" || this.control.kind === "requesting";
+    this.keepControl = false;
     this.setControl({ kind: "none" });
     window.clearTimeout(this.statusTimer);
     window.clearTimeout(this.pausedTimer);

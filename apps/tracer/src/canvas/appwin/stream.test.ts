@@ -178,3 +178,33 @@ test("a retired viewer's late control refusal does not throttle its replacement"
     expect(f.controller()).toBe(3);
   } finally { f.stream.dispose(); }
 });
+
+test("control held before a dropped connection comes back by itself on reconnect", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.stream.takeControl()).toBe(true);
+    const id = [...f.handlers.keys()][0]!;
+    f.handlers.get(id)!.onDisconnected(false);
+    expect(f.stream.controlState.kind).toBe("none");
+    // The socket reconnects: the same viewer is welcomed again, with no click from the person.
+    f.handlers.get(id)!.onWelcome(false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions.filter(action => action === "desktop.session.control")).toHaveLength(2);
+    expect(f.stream.controlState.kind).toBe("controlled");
+  } finally { f.stream.dispose(); }
+});
+
+test("control given back by the person is not taken again on reconnect", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.stream.takeControl()).toBe(true);
+    f.stream.releaseControl();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const id = [...f.handlers.keys()].at(-1)!;
+    f.handlers.get(id)!.onDisconnected(false);
+    f.handlers.get(id)!.onWelcome(false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions.filter(action => action === "desktop.session.control")).toHaveLength(1);
+    expect(f.stream.controlState.kind).toBe("none");
+  } finally { f.stream.dispose(); }
+});
