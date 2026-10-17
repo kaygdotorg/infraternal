@@ -496,7 +496,6 @@ pub struct MeshService {
     updates: broadcast::Sender<MeshChange>,
     // Runtime liveness from the server's own device; never persisted (presence.rs, #236).
     presence: std::sync::Arc<crate::presence::Presence>,
-    presence_updates: broadcast::Sender<()>,
     // Request-local authority is never installed in the shared service.
     fresh_authority: Option<String>,
     store: crate::store::Store,
@@ -512,14 +511,11 @@ impl MeshService {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
-        // Only "something changed" is carried: one pending notice is as good as many.
-        let (presence_updates, _) = broadcast::channel(1);
         Self {
             store: crate::store::Store::new(pool.clone()),
             pool,
             updates,
             presence: std::sync::Arc::default(),
-            presence_updates,
             fresh_authority: None,
             invalid_hosts: crate::diagnostics::InvalidHosts::default(),
             list_diagnostics: StorageDiagnostics::new("mesh.list"),
@@ -564,17 +560,17 @@ impl MeshService {
         self.pool.clone()
     }
 
-    /// Install the server's current reading of who is online; viewers hear of it only when it changed (#236).
+    /// Install the server's current reading of who is online; watchers wake only when it changed (#236).
     pub fn set_presence(&self, live: crate::presence::Live) {
-        if self.presence.replace(live) {
-            let _ = self.presence_updates.send(());
-        }
+        self.presence.replace(live);
     }
 
-    /// Subscribe to presence transitions. They advance no revision, so a viewer is sent a fresh snapshot.
+    /// Watch presence transitions. They advance no revision; socket.rs resyncs only viewers who see a change.
     #[must_use]
-    pub fn subscribe_presence(&self) -> broadcast::Receiver<()> {
-        self.presence_updates.subscribe()
+    pub fn subscribe_presence(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::sync::Arc<crate::presence::Live>> {
+        self.presence.subscribe()
     }
 
     /// Subscribe to post-commit revision invalidations; a lagging reader should reload its filtered list.

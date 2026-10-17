@@ -20,8 +20,8 @@
 //! - In memory, not in `mesh_nodes.last_seen`: writing an observation per peer per poll would cost an fsync, an audit
 //!   row and a revision per node every few seconds, and every viewer would relist for nothing. Presence is runtime
 //!   state; it starts empty after a restart and is rebuilt within one poll.
-//! - Pushed only on a transition: a change sends every Mesh viewer one authoritative resync snapshot, the same frame
-//!   the liveness-expiry path already uses, so an unchanged mesh costs viewers nothing.
+//! - Pushed only on a transition: a change notifies each Mesh viewer, who is sent a resync only when a node it can
+//!   see changed (socket.rs), so an unchanged mesh costs viewers nothing and a hidden node leaves no trace.
 //! - A poll every [`POLL`], not an event, and not on every Mesh revision: the kernel has no handshake
 //!   notification, and a revision does not change who passes traffic. A poll is one `mesh.status` call and one
 //!   `mesh.peers` listing in its compact presence form, which reads the kernel once however many pages it has
@@ -66,28 +66,41 @@ pub enum NodePath {
 /// Nodes that are online now, each with its path when one is known. Absent means offline.
 pub type Live = BTreeMap<NodeId, Option<NodePath>>;
 
-/// The server's view of who is online, shared by every Mesh list.
-#[derive(Default)]
+/// The server's view of who is online, shared by every Mesh list; socket workers watch it for transitions.
 pub struct Presence {
-    live: std::sync::Mutex<Live>,
+    live: tokio::sync::watch::Sender<Arc<Live>>,
+}
+
+impl Default for Presence {
+    fn default() -> Self {
+        Self {
+            live: tokio::sync::watch::Sender::new(Arc::default()),
+        }
+    }
 }
 
 impl Presence {
-    /// Replace the whole view. Returns whether anything a viewer can see changed.
+    /// Replace the whole view. Returns whether anything changed; watchers are woken only then.
+    // Watchers are already woken on a change; callers may ignore whether there was one.
+    #[allow(clippy::must_use_candidate)]
     pub fn replace(&self, next: Live) -> bool {
-        let Ok(mut live) = self.live.lock() else {
-            return false;
-        };
-        if *live == next {
-            return false;
-        }
-        *live = next;
-        true
+        self.live.send_if_modified(|live| {
+            if **live == next {
+                return false;
+            }
+            *live = Arc::new(next);
+            true
+        })
     }
     /// The node's presence: `None` offline, `Some(path)` online.
     #[must_use]
     pub fn get(&self, node: NodeId) -> Option<Option<NodePath>> {
-        self.live.lock().ok()?.get(&node).copied()
+        self.live.borrow().get(&node).copied()
+    }
+    /// Watch the view: each transition carries the whole new view.
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<Live>> {
+        self.live.subscribe()
     }
 }
 
@@ -347,10 +360,14 @@ mod tests {
     #[test]
     fn replace_reports_only_visible_changes() {
         let presence = Presence::default();
+        let mut watch = presence.subscribe();
         assert!(!presence.replace(Live::new()));
+        assert!(!watch.has_changed().unwrap());
         let next = Live::from([(NodeId(1), None), (NodeId(3), Some(NodePath::Direct))]);
         assert!(presence.replace(next.clone()));
+        assert_eq!(**watch.borrow_and_update(), next);
         assert!(!presence.replace(next));
+        assert!(!watch.has_changed().unwrap());
         assert_eq!(presence.get(NodeId(3)), Some(Some(NodePath::Direct)));
         assert_eq!(presence.get(NodeId(1)), Some(None));
         assert_eq!(presence.get(NodeId(2)), None);

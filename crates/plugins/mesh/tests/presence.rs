@@ -58,9 +58,12 @@ async fn nodes_the_server_sees_are_online_with_their_path_and_named_by_machine()
         .await
         .unwrap();
     assert!(before.nodes.iter().all(|node| !node.live));
-    let mut announced = service.subscribe_presence();
+    let announced = service.subscribe_presence();
     service.set_presence(Live::from([(server, None), (peer, Some(NodePath::Direct))]));
-    announced.try_recv().expect("a transition is announced");
+    assert!(
+        announced.has_changed().unwrap(),
+        "a transition is announced"
+    );
     let after = service
         .list("owner", MeshFilter::default(), NOW)
         .await
@@ -84,16 +87,17 @@ async fn an_unchanged_reading_is_not_announced_and_a_lost_session_goes_offline()
     let (service, server, peer) = service().await;
     let live = Live::from([(server, None), (peer, Some(NodePath::Direct))]);
     service.set_presence(live.clone());
-    let mut announced = service.subscribe_presence();
+    let announced = service.subscribe_presence();
     service.set_presence(live);
     assert!(
-        announced.try_recv().is_err(),
+        !announced.has_changed().unwrap(),
         "nothing changed, nothing sent"
     );
     service.set_presence(Live::from([(server, None)]));
-    announced
-        .try_recv()
-        .expect("the peer going offline is announced");
+    assert!(
+        announced.has_changed().unwrap(),
+        "the peer going offline is announced"
+    );
     let nodes = json_nodes(
         &service
             .list("owner", MeshFilter::default(), NOW)
