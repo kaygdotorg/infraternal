@@ -549,6 +549,49 @@ mod tests {
         assert_eq!(taken.unwrap().host, context.host);
         assert!(consumed);
     }
+    /// Break-it review (#235): planted files at the plan path are replaced, never
+    /// followed, and the helper refuses a plan that is not a private regular file.
+    #[test]
+    fn review_planted_plan_is_never_followed() {
+        use std::os::unix::fs::symlink;
+        let Some((home, context, uid)) = installation("p", false) else {
+            return;
+        };
+        let plan = plan_path(&home, uid);
+        let victim = home.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        symlink(&victim, &plan).unwrap();
+        // The helper refuses a symlinked plan and removes only the link.
+        let refused = take_plan(&home, uid).is_err();
+        let kept = std::fs::read(&victim).unwrap() == b"keep";
+        symlink(&victim, &plan).unwrap();
+        // The infraternal agent replaces a planted link without writing through it.
+        write_plan(&plan, &serde_json::to_vec(&context).unwrap()).unwrap();
+        let untouched = std::fs::read(&victim).unwrap() == b"keep";
+        let regular = std::fs::symlink_metadata(&plan).unwrap().is_file();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(refused && kept && untouched && regular);
+    }
+    /// Break-it review (#235): the launcher runs after the reply already said
+    /// "accepted". When it then fails (no user manager, a refused unit), the plan
+    /// must not stay behind in the installation as a standing order.
+    #[test]
+    fn review_failed_launcher_leaves_no_plan() {
+        let Some((home, context, uid)) = installation("f", false) else {
+            return;
+        };
+        let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid).unwrap();
+        plugin.launcher = "false";
+        let input =
+            serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":false})).unwrap();
+        let reply = plugin.call_with_reply(crate::UNINSTALL.id, &input).unwrap();
+        reply.after_write.unwrap()();
+        // Give the reaper thread time to observe the launcher's exit.
+        std::thread::sleep(Duration::from_millis(500));
+        let left = plan_path(&home, uid).exists();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(!left, "a failed launcher left its uninstall plan behind");
+    }
     #[tokio::test]
     async fn retirement_signals_the_shell_after_its_foreground_job_exits() {
         use infraternal_shim::frame::Frame;
