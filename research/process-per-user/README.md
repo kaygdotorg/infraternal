@@ -35,6 +35,18 @@ disposition with the default action and no flags. An inherited ignore or
 SA_NOCLDWAIT handler would otherwise let the kernel discard child exit status.
 Real-process regressions cover both dispositions, including a custom handler
 installed inside the fixture after exec.
+
+The PPU-R1 regression is retained as
+`review_ignored_child_notifications_do_not_lose_terminal_exit` in
+`crates/infraternal-shim/tests/ppu_reliability.rs`.
+`inherited_child_dispositions_are_reset_before_sessions_start` additionally
+requires successful startup, the default disposition, ordered exit status 7 and
+continued sibling input for both ignored and custom auto-reaping dispositions.
+Run the standalone real-PTY fixture with
+`cargo test -p infraternal-shim --features process-per-user --test ppu_reliability -- --test-threads=1`.
+The custom handler is installed after exec because exec clears caught handlers;
+installing it only in an exec launcher would leave that case untested.
+
 Every session retains its own mode-0600 socket under the mode-0700 runtime
 sessions directory. The production decoder, SO_PEERCRED check, wire layouts,
 capabilities, input cursors, writer handling, and PTY launcher are reused.
