@@ -783,28 +783,36 @@ async fn while_authorized_operation(
                 // polling its owner instead of suspending a transaction while
                 // waiting for that same pool. Neither completion nor progress
                 // renews the already-started authority read's deadline.
-                let authority = socket_deadline(state, user, token);
-                tokio::pin!(authority);
-                tokio::select! {
-                    biased;
-                    changed = revocations.changed() => {
-                        changed.map_err(|_| ())?;
-                        // A guarded poll may itself send bytes. Stop polling
-                        // it on authority loss; a late result check cannot
-                        // undo a write. Finish this same bounded read, then
-                        // recheck after the notification, not its old snapshot.
-                        authority.await?;
-                        expiry = socket_deadline(state, user, token).await?;
+                let recheck = {
+                    let authority = socket_deadline(state, user, token);
+                    tokio::pin!(authority);
+                    tokio::select! {
+                        biased;
+                        changed = revocations.changed() => {
+                            changed.map_err(|_| ())?;
+                            true
+                        }
+                        () = tokio::time::sleep_until(expiry) => true,
+                        checked = &mut authority => {
+                            expiry = checked?;
+                            false
+                        }
+                        result = &mut operation => {
+                            expiry = authority.await?;
+                            break result;
+                        }
                     }
-                    () = tokio::time::sleep_until(expiry) => {
-                        authority.await?;
-                        expiry = socket_deadline(state, user, token).await?;
-                    }
-                    checked = &mut authority => { expiry = checked?; }
-                    result = &mut operation => {
-                        expiry = authority.await?;
-                        break result;
-                    }
+                };
+                // Authority was lost or reached its deadline while a read was
+                // in flight. A guarded poll may itself send bytes, so the
+                // operation is no longer polled; a late result check cannot
+                // undo a write. The in-flight read began before the change and
+                // its answer is stale, so it is dropped here (with its permit
+                // and pool place) instead of awaited: one fresh read decides,
+                // and the socket closes within one bounded wait of the change
+                // (#240, review P3-4), not after two back to back.
+                if recheck {
+                    expiry = socket_deadline(state, user, token).await?;
                 }
             }
             result = &mut operation => break result,

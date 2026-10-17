@@ -253,7 +253,9 @@ async fn interrupted_authority_operation(interruption: Interruption) {
             "periodic authority read polled a send-like side effect after authority interruption"
         );
         // The frozen operation keeps the only connection, so the pending read
-        // can never finish: it fails closed at the bounded wait (#240).
+        // can never finish: it fails closed at the bounded wait (#240). The
+        // bound is measured from the interruption: the read in flight when it
+        // came is dropped, and one fresh read decides (review P3-4).
         let result = if let Some(result) = completed {
             result
         } else {
