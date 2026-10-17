@@ -5,6 +5,7 @@ use infraternal_protocol::{CLOSE_SESSION_GONE, Frame, decode_muxed_frame};
 use std::{
     io::Write,
     sync::{Arc, Mutex as StdMutex},
+    time::Duration,
 };
 
 #[derive(Clone, Default)]
@@ -54,7 +55,10 @@ async fn attaches_to_unowned_session_ids_cannot_flood_the_close_log() {
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
     let f = fixture().await;
-    let (f, address, server) = socket_fixture_from_fixture(f, None).await;
+    // 64 attaches each run several authority reads; the 25 ms production read bound
+    // fails one of them on a loaded build host and ends the socket, so the test uses
+    // the 2 s bound other socket tests use. The bound is not what this test checks.
+    let (f, address, server) = socket_fixture_from_fixture(f, Some(Duration::from_secs(2))).await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
         .await
@@ -85,12 +89,15 @@ async fn attaches_to_unowned_session_ids_cannot_flood_the_close_log() {
         )
         .await;
         let reply = read_client_frame(&mut browser).await;
+        let decoded = decode_muxed_frame(&reply).unwrap();
         assert!(
             matches!(
-                decode_muxed_frame(&reply).unwrap().frame,
+                decoded.frame,
                 Frame::Close { code, .. } if code == CLOSE_SESSION_GONE
             ),
-            "attach {i} for an unowned session id is answered as gone and the socket stays up"
+            "attach {i} for an unowned session id is answered as gone and the socket stays up: stream {} {:?}",
+            decoded.stream_id,
+            decoded.frame
         );
     }
     let lines = closed_lines(&capture);
