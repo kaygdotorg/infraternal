@@ -20,6 +20,21 @@ contention exclusions, exact image identities and the pooled comparison.
 Whole-host upgrade survival and production login integration remain separate
 requirements; a native socket fixture cannot certify either.
 
+Recompute a round from its three explicit shipping/prototype cell pairs:
+
+```sh
+python3 scripts/bench/ppu_d296_report.py "$receipts" \
+  --pair d0:p0 --pair d1:p1 --pair d2:p2
+```
+
+Use the actual cell names under the external receipt directory. Each cell has
+`samples.jsonl` and a sibling `<cell>s/segments.jsonl` directory. The reporter
+reuses the lock/scope audit, rejects diagnostic, incomplete or mismatched cells,
+and emits each run's p50/p99, exclusions, identities and the pooled comparison.
+It regenerates derived `comparison-report.json` files, without changing raw
+samples or their legacy outcomes. A shorter round does not recertify the
+historical two-hour aging result.
+
 ## Boundary and identity
 
 `cargo build -p infraternal --features process-per-user` adds the hidden
