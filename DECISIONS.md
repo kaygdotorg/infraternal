@@ -3132,3 +3132,29 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      up. The trim is still owed: a follow-up measures where the bytes go
      and removes what is free to cut, and the caps ratchet down with it.
      This is not a new allowance for other changes.
+299. **CLI overhaul, first answers (owner, 2026-10-17, #239; extends D202
+     and D239):**
+     - **One word: "machines" (C1):** the CLI says machine everywhere,
+       like the app: `infraternal machines`, `machines add root@10.0.0.5`.
+       "Node" stays only for the mesh role inside `status`. No hidden
+       aliases for other words.
+     - **The CLI recognises you, and asks only when it must (C2):** on a
+       joined machine the CLI acts as the person linked to the local
+       account it runs under; that link is set up by add-host (the local
+       login account used when adding, tied to the person who added it).
+       Other local accounts, and machines that aren't joined, use
+       `infraternal sign-in`. Destructive actions still ask for a fresh
+       passkey.
+     - **Bare `infraternal` is `status` (C4):** until the machine is joined
+       it says how to join (`infraternal up`); after that it shows the same
+       overview as `infraternal status`.
+     - **Every command has `--json` (C4):** one stable versioned envelope for
+       AI tools and scripts; fields are only ever added, a removal bumps the
+       schema version.
+     - **Unbuilt commands are hidden (C5)** from help and from generated
+       skills until they work.
+     - **Access rules in the app's words (C6):** for example
+       `infraternal access allow kayg deploy@build-01`, added to the CLI as
+       each piece ships in the app.
+     - Still open: which commands live at the root versus under
+       `infraternal canvas` (C3), and the exit-code table (C7).
