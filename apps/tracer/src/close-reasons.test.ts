@@ -45,7 +45,7 @@ test("unknown close text is discarded instead of reaching the person or console"
   }
 });
 
-test("a storm of closes prints one line per minute and summarises the rest", () => {
+test("a storm of closes prints one line per minute and counts the rest", () => {
   const notes = new CloseNotes();
   const lines: string[] = [];
   for (let i = 0; i < 512; i++) {
@@ -56,8 +56,20 @@ test("a storm of closes prints one line per minute and summarises the rest", () 
   expect(lines[0]).toContain("reconnect failed");
   expect(lines[0]).toContain('reason "other"');
   expect(lines[0]).not.toContain("constructor");
-  const next = notes.note(60_000, 4000, "connection unresponsive", 3, true);
-  expect(next).toContain("511 more closes in the previous 60 s");
+  expect(notes.summaryDue()).toBe(60_000);
+  const next = notes.note(60_000, 4000, "connection unresponsive", 3, true, "this page");
+  expect(next).toContain("511 more times since the previous line");
   expect(next).toContain('reason "connection unresponsive"');
+  expect(next).toContain("closed by this page");
   expect(next).toContain("code 4000");
+});
+
+test("counted closes are reported when their window ends, without another close", () => {
+  const notes = new CloseNotes();
+  expect(notes.note(0, 1006, "", 0, true)).toBeDefined();
+  expect(notes.note(10, 1006, "", 1, false)).toBeUndefined();
+  expect(notes.flush(59_999)).toBeUndefined();
+  expect(notes.flush(60_000)).toBe("Connection to the server closed 1 more time since the previous line");
+  expect(notes.summaryDue()).toBeUndefined();
+  expect(notes.flush(120_000)).toBeUndefined();
 });

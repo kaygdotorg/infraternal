@@ -145,6 +145,8 @@ export class MuxConnection {
   private retryTimer = 0;
   private retryAttempt = 0;
   private readonly closeNotes = new CloseNotes();
+  /** The console summary's timer. It runs on the global timer, apart from the reconnect schedule on `window`. */
+  private closeNoteTimer: ReturnType<typeof setTimeout> | undefined;
   /** A confirmed terminal gets one quick retry; repeated short-lived resumes retain backoff [D259]. */
   private fastRecovery = false;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
@@ -374,6 +376,8 @@ export class MuxConnection {
     if (this.closed) return;
     this.closed = true;
     this.clearRetryTimer();
+    globalThis.clearTimeout(this.closeNoteTimer);
+    this.closeNoteTimer = undefined;
     this.stopRetryHintListeners();
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
@@ -454,6 +458,13 @@ export class MuxConnection {
   private noteClose(code: number | undefined, reason: string | undefined, by?: string): void {
     const line = this.closeNotes.note(Date.now(), code, reason, this.retryAttempt, this.welcomed, by);
     if (line) console.warn(line);
+    const due = this.closeNotes.summaryDue();
+    if (due === undefined || this.closeNoteTimer !== undefined) return;
+    this.closeNoteTimer = globalThis.setTimeout(() => {
+      this.closeNoteTimer = undefined;
+      const summary = this.closeNotes.flush(Date.now());
+      if (summary) console.warn(summary);
+    }, Math.max(0, due - Date.now()));
   }
 
   /** Retire the route synchronously; closing a half-open socket need not produce an event. */

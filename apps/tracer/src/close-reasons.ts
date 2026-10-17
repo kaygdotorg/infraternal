@@ -53,10 +53,10 @@ export function plainCloseReason(reason: string | undefined, fallback = "The ter
 const CLOSE_NOTE_WINDOW_MS = 60_000;
 
 /**
- * One console line per socket close, at most one per minute. The first close of a window prints at once; the
- * rest are only counted and summarised in the next window's line, so a reconnect storm cannot flood the console.
- * It runs once per close event (never per frame). Only numbers and mapped reason keys are printed: peer text is
- * untrusted, so an unknown reason prints as "other".
+ * One console line per socket close, at most one per minute. The first close of a window prints at once; later ones
+ * are only counted, and the count prints when the window ends (`flush`, from a timer) or with the next line. Runs
+ * once per close event, never per frame. Only numbers and mapped reason keys are printed: peer text is untrusted, so
+ * an unknown reason prints as "other".
  */
 export class CloseNotes {
   private windowStart = Number.NEGATIVE_INFINITY;
@@ -68,13 +68,25 @@ export class CloseNotes {
       this.suppressed += 1;
       return undefined;
     }
-    const repeats = this.suppressed;
+    const counted = this.flush(now);
     this.windowStart = now;
-    this.suppressed = 0;
     const key = (reason ?? "").trim();
     const safe = key === "" ? "none" : known(key) !== undefined ? key : "other";
     const phase = welcomed ? "after the connection was established" : "before the connection was established (reconnect failed)";
-    const more = repeats > 0 ? `; ${repeats} more closes in the previous 60 s` : "";
-    return `Connection to the server closed ${phase}: closed by ${by}, code ${code ?? 0}, reason "${safe}", reconnect attempt ${attempt}${more}`;
+    const line = `Connection to the server closed ${phase}: closed by ${by}, code ${code ?? 0}, reason "${safe}", reconnect attempt ${attempt}`;
+    return counted ? `${counted}; ${line}` : line;
+  }
+
+  /** When counted closes wait for their summary, the time it is due. */
+  summaryDue(): number | undefined {
+    return this.suppressed > 0 ? this.windowStart + CLOSE_NOTE_WINDOW_MS : undefined;
+  }
+
+  /** The count of closes since the last printed line, once their window has ended. */
+  flush(now: number): string | undefined {
+    if (this.suppressed === 0 || now - this.windowStart < CLOSE_NOTE_WINDOW_MS) return undefined;
+    const count = this.suppressed;
+    this.suppressed = 0;
+    return `Connection to the server closed ${count} more ${count === 1 ? "time" : "times"} since the previous line`;
   }
 }
