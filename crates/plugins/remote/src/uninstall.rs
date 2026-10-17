@@ -155,6 +155,9 @@ pub struct UninstallPlugin {
     context: Context,
     home: PathBuf,
     uid: u32,
+    // The service manager's transient-unit launcher. Tests substitute an inert
+    // program so a handoff never starts a real unit on the build host.
+    launcher: &'static str,
 }
 impl UninstallPlugin {
     /// # Errors
@@ -164,7 +167,12 @@ impl UninstallPlugin {
         // Register the owned handler now; every call and cleanup rechecks the
         // lock, so installation must finish before any removal is accepted.
         validate_artifacts(&context, &home, uid, false)?;
-        Ok(Self { context, home, uid })
+        Ok(Self {
+            context,
+            home,
+            uid,
+            launcher: "systemd-run",
+        })
     }
 }
 #[derive(Deserialize)]
@@ -214,8 +222,11 @@ impl AgentPlugin for UninstallPlugin {
             });
         }
         let plan = serde_json::to_vec(&self.context).map_err(|_| PluginError::Rejected)?;
-        let mut command = Command::new("systemd-run");
-        infraternal_shim::prepare_child(command.as_std_mut());
+        // This runs on the synchronous plugin worker thread, which has no async
+        // runtime (#235): start and feed the launcher with blocking process
+        // primitives only. Nothing here may depend on an ambient reactor.
+        let mut command = std::process::Command::new(self.launcher);
+        infraternal_shim::prepare_child(&mut command);
         if self.uid != 0 {
             command.arg("--user");
         }
@@ -234,23 +245,62 @@ impl AgentPlugin for UninstallPlugin {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
             .spawn()
             .map_err(|_| PluginError::Rejected)?;
-        let mut stdin = child.stdin.take().ok_or(PluginError::Rejected)?;
+        let Some(stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PluginError::Rejected);
+        };
+        let mut handoff = Handoff {
+            child: Some(child),
+            stdin: Some(stdin),
+        };
         Ok(ActionReply {
             json: br#"{"state":"accepted","cleanup":"pending"}"#.to_vec(),
-            after_write: Some(Box::new(move || {
-                tokio::spawn(async move {
-                    let _ = tokio::time::timeout(Duration::from_secs(30), async move {
-                        stdin.write_all(&plan).await?;
-                        drop(stdin);
-                        child.wait().await.map(|_| ())
-                    })
-                    .await;
-                });
-            })),
+            after_write: Some(Box::new(move || handoff.deliver(&plan))),
         })
+    }
+}
+/// The started launcher and its private plan pipe, owned until the reply is written.
+///
+/// Dropping it undelivered (the reply write failed) kills and reaps the launcher;
+/// the helper then reads end-of-file instead of a plan and removes nothing.
+struct Handoff {
+    child: Option<std::process::Child>,
+    stdin: Option<std::process::ChildStdin>,
+}
+impl Handoff {
+    fn deliver(&mut self, plan: &[u8]) {
+        use std::io::Write;
+        // The plan is at most 8 KiB, below the kernel's minimum pipe capacity,
+        // so this write completes without waiting for the helper to read.
+        let Some(mut stdin) = self.stdin.take() else {
+            return;
+        };
+        if stdin.write_all(plan).is_err() {
+            return;
+        }
+        drop(stdin);
+        // The launcher waits for the transient unit (at most RuntimeMaxSec);
+        // reap it off the caller's thread. If no thread can start, the exited
+        // launcher stays unreaped only until the helper stops this process.
+        if let Some(mut child) = self.child.take() {
+            let _ = std::thread::Builder::new()
+                .name("uninstall-handoff".into())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+        }
+    }
+}
+impl Drop for Handoff {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 async fn shim_frame(
@@ -370,15 +420,17 @@ pub async fn cleanup(context: &Context, home: &Path, uid: u32) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn bootstrap_lock_delays_uninstall_without_omitting_its_handler() {
+    /// A complete rootless bootstrap layout under a private fixture home.
+    fn installation(name: &str, locked: bool) -> Option<(PathBuf, Context, u32)> {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let uid = nix::unistd::Uid::effective().as_raw();
         if uid == 0 {
-            return;
+            return None;
         } // Root's frozen layout cannot be redirected to a fixture.
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(format!(".cache/codex-scratch/a87/n{}", std::process::id()));
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
+            ".cache/codex-scratch/a87/{name}{}",
+            std::process::id()
+        ));
         let base = home.join(".local/share/infraternal");
         let context = Context {
             host: "00000000000000000000000000000001".into(),
@@ -391,9 +443,11 @@ mod tests {
             base.join("bin"),
             paths.unit.parent().unwrap().to_owned(),
             paths.launcher.parent().unwrap().to_owned(),
-            base.join(".bootstrap-lock"),
         ] {
             std::fs::create_dir_all(path).unwrap();
+        }
+        if locked {
+            std::fs::create_dir_all(base.join(".bootstrap-lock")).unwrap();
         }
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(base.join(".bootstrap-owner"), &context.host).unwrap();
@@ -403,6 +457,14 @@ mod tests {
         }
         symlink(base.join("bin/current"), &paths.launcher).unwrap();
         symlink(base.join("bin/live"), base.join("bin/current")).unwrap();
+        Some((home, context, uid))
+    }
+    #[test]
+    fn bootstrap_lock_delays_uninstall_without_omitting_its_handler() {
+        let Some((home, context, uid)) = installation("n", true) else {
+            return;
+        };
+        let base = context.data.parent().unwrap().to_owned();
         let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid);
         let registered = plugin.is_ok();
         if let Ok(plugin) = &mut plugin {
@@ -418,6 +480,31 @@ mod tests {
             registered,
             "the service starts before bootstrap removes its lock"
         );
+    }
+    /// #235: the plugin worker is a plain OS thread with no async runtime. The
+    /// accepted handoff used to start its launcher through the runtime's process
+    /// driver there, panicking with "there is no reactor running" and killing the
+    /// worker, so removal never uninstalled anything.
+    #[test]
+    fn accepted_handoff_runs_on_a_thread_without_an_async_runtime() {
+        let Some((home, context, uid)) = installation("h", false) else {
+            return;
+        };
+        let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid).unwrap();
+        plugin.launcher = "true";
+        let input =
+            serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":false})).unwrap();
+        let worker = std::thread::spawn(move || {
+            let reply = plugin.call_with_reply(crate::UNINSTALL.id, &input).unwrap();
+            // The reply writer runs this after a successful write; it must not
+            // need a runtime either, and dropping an unwritten reply is inert.
+            reply.after_write.unwrap()();
+            reply.json
+        })
+        .join();
+        std::fs::remove_dir_all(home).unwrap();
+        let json = worker.expect("the uninstall handoff panicked off the async runtime");
+        assert_eq!(json, br#"{"state":"accepted","cleanup":"pending"}"#);
     }
     #[tokio::test]
     async fn retirement_signals_the_shell_after_its_foreground_job_exits() {
