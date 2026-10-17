@@ -44,6 +44,28 @@ async fn fresh_removal_revokes_offline_host_and_cannot_replay() {
         .await
         .unwrap();
     assert_eq!(result["host_cleanup"], "unreachable");
+    // #235: an uninstall that did not happen is said plainly, by name, with the
+    // commands that remove the leftover rootful install on the machine itself.
+    let message = result["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "host.example was removed here, but infraternal is still installed on it."
+        )
+    );
+    let manual = result["manual"].as_str().unwrap();
+    for leftover in [
+        "infraternal-agent.service",
+        "infraternal0",
+        "inet infraternal_mesh",
+        "/var/lib/infraternal",
+        "/usr/local/bin/infraternal",
+        "infraternal-session-*.scope",
+    ] {
+        assert!(
+            manual.contains(leftover),
+            "{leftover} is not removed by {manual}"
+        );
+    }
     assert!(service.finish(&f.session, id, proof, NOW).await.is_err());
     let revoked: bool =
         sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")

@@ -162,31 +162,16 @@ impl Removal {
                 .fetch_optional(&mut *tx)
                 .await?
                 .flatten();
+        let (mode, name): (String, String) = sqlx::query_as("SELECT h.mode,COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=?")
+            .bind(entry.host.as_bytes().as_slice())
+            .fetch_one(&mut *tx)
+            .await?;
         // Record the authorized request before the node effect; the same writer
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
             .bind(entry.host.as_bytes().as_slice()).bind(&entry.user).bind(live).bind(entry.uninstall).execute(&mut *tx).await?;
         let cleanup = if entry.uninstall {
-            if let Some(actor) = self.hosts.actor(entry.host).await {
-                let input = serde_json::to_vec(
-                    &json!({"host":entry.host.simple().to_string(),"dry_run":false}),
-                )
-                .map_err(|_| crate::auth::Error::Json)?;
-                match actor
-                    .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
-                    .await
-                {
-                    Ok(bytes)
-                        if serde_json::from_slice::<Value>(&bytes)
-                            .is_ok_and(|reply| reply["state"] == "accepted") =>
-                    {
-                        "requested"
-                    }
-                    _ => "unreachable",
-                }
-            } else {
-                "unreachable"
-            }
+            request_uninstall(&self.hosts, entry.host).await
         } else {
             "retained"
         };
@@ -231,13 +216,80 @@ impl Removal {
             .commit_revocation(tx, entry.host)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let message = match cleanup {
-            "requested" => "Host removed. Uninstall was requested on the host.",
-            "retained" => "Host removed. The infraternal agent remains installed on the host.",
+        let name = display_name(&name);
+        let (message, manual) = match cleanup {
+            "requested" => (
+                format!(
+                    "{name} was removed. Its infraternal agent accepted the uninstall and is removing itself."
+                ),
+                None,
+            ),
+            "retained" => (
+                format!("{name} was removed here. Its infraternal agent stays installed on it."),
+                None,
+            ),
+            // Say plainly that the machine still runs it, and how to remove it
+            // there; the record is gone, so nothing here can retry (#235).
             _ => {
-                "Host removed. The host could not confirm uninstall; its service, binary and data may remain. Remove them on the host when it is reachable."
+                let commands = manual_uninstall(&mode);
+                let account = if mode == "rootful" {
+                    "as root"
+                } else {
+                    "as the account it was added with"
+                };
+                (
+                    format!(
+                        "{name} was removed here, but infraternal is still installed on it. Remove it there {account} with: {commands}"
+                    ),
+                    Some(commands),
+                )
             }
         };
-        Ok(json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message}))
+        Ok(
+            json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual}),
+        )
+    }
+}
+/// Ask a connected host's infraternal agent to uninstall itself (D273).
+///
+/// `requested` only when the host accepted the exact action; any refusal, error
+/// or absent connection is `unreachable`, which the caller reports as a leftover
+/// installation. The real-binary removal check calls this same path (#235).
+pub(crate) async fn request_uninstall(hosts: &RemoteHosts, host: Uuid) -> &'static str {
+    let Some(actor) = hosts.actor(host).await else {
+        return "unreachable";
+    };
+    let Ok(input) = serde_json::to_vec(&json!({"host":host.simple().to_string(),"dry_run":false}))
+    else {
+        return "unreachable";
+    };
+    match actor
+        .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
+        .await
+    {
+        Ok(bytes)
+            if serde_json::from_slice::<Value>(&bytes)
+                .is_ok_and(|reply| reply["state"] == "accepted") =>
+        {
+            "requested"
+        }
+        _ => "unreachable",
+    }
+}
+/// The machine part of a stored `account@machine` address, as people name the host.
+fn display_name(address: &str) -> &str {
+    address
+        .rsplit_once('@')
+        .map_or(address, |(_, machine)| machine)
+}
+/// Shell commands that remove what an installation of `mode` leaves on its machine.
+///
+/// They mirror the host-side cleanup: session scopes, the service, the mesh
+/// interface and packet filter (root only), the unit, the launcher and the data.
+fn manual_uninstall(mode: &str) -> String {
+    if mode == "rootful" {
+        "systemctl stop 'infraternal-session-*.scope'; systemctl disable --now infraternal-agent.service; ip link delete infraternal0; nft delete table inet infraternal_mesh; rm -rf /etc/systemd/system/infraternal-agent.service /usr/local/bin/infraternal /var/lib/infraternal; systemctl daemon-reload".into()
+    } else {
+        "systemctl --user stop 'infraternal-session-*.scope'; systemctl --user disable --now infraternal-agent.service; rm -rf ~/.config/systemd/user/infraternal-agent.service ~/.local/bin/infraternal ~/.local/share/infraternal; systemctl --user daemon-reload".into()
     }
 }
