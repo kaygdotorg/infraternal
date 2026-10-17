@@ -50,11 +50,17 @@ fn pending_video() -> (PendingVideo, watch::Receiver<Option<Video>>) {
     (PendingVideo { frames }, receive)
 }
 impl PendingVideo {
-    fn publish(&self, video: Video) {
+    async fn publish(&self, video: Video) {
         // One in-flight write and one newest pending frame bound storage. A
         // stalled native lane cannot pin an older queue entry ahead of damage.
         // Sequence gaps are repaired by the consumer before sending any delta.
         self.frames.send_replace(Some(video));
+        // A pipe read can make several access units ready in one executor turn.
+        // Give the awakened writer a scheduling opportunity before replacing its
+        // only pending slot; otherwise even a writable lane loses codec references.
+        // This never waits for a transport write: a blocked lane still retains
+        // only the newest pending picture, and control remains independent.
+        tokio::task::yield_now().await;
     }
 }
 pub(super) async fn run(config: Config, mut leg: Leg) -> Outcome {
@@ -133,7 +139,7 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
                     let (kind, body) = message.map_err(|_| PluginError::Rejected)?;
                     if kind == Kind::Video {
                         let video = video(&body, &leg.metadata)?;
-                        send.publish(video);
+                        send.publish(video).await;
                     } else if kind == Kind::Error { return Err(PluginError::Rejected); }
                     else if pending.front().is_some_and(|response| response.expected == kind) {
                         let response = pending.pop_front().ok_or(PluginError::Rejected)?;
@@ -415,6 +421,44 @@ mod pacing_tests {
             bytes: bytes::Bytes::from_static(b"\x00\x00\x00\x01\x65"),
         }
     }
+    /// An immediately writable transport must get a chance to consume each
+    /// coded reference when the pipe reader receives several units together.
+    #[tokio::test]
+    async fn ready_source_write_preserves_a_continuous_read_burst() {
+        let (entered, mut packets) = mpsc::unbounded_channel();
+        let lane = Arc::new(PausedLane {
+            entered,
+            release: tokio::sync::Notify::new(),
+        });
+        lane.release.notify_one();
+        let (repair, _repairs) = mpsc::channel(1);
+        let (publisher, receive) = pending_video();
+        let writing = tokio::spawn(send_video(
+            lane,
+            Delivery::Reliable,
+            Uuid::new_v4(),
+            receive,
+            repair,
+        ));
+        publisher.publish(frame(1)).await;
+        for sequence in 2..=6 {
+            let mut next = frame(sequence);
+            next.keyframe = false;
+            publisher.publish(next).await;
+        }
+        drop(publisher);
+        assert!(writing.await.unwrap().is_ok());
+        let mut sent = Vec::new();
+        while let Some(sequence) = packets.recv().await {
+            sent.push(sequence);
+        }
+        assert_eq!(
+            sent,
+            vec![1, 2, 3, 4, 5, 6],
+            "ready writer lost codec references to a producer read burst"
+        );
+    }
+
     #[tokio::test]
     async fn blocked_source_write_resumes_with_newest_pending_frame() {
         let (entered, mut packets) = mpsc::unbounded_channel();
@@ -431,10 +475,10 @@ mod pacing_tests {
             receive,
             repair,
         ));
-        publisher.publish(frame(1));
+        publisher.publish(frame(1)).await;
         assert_eq!(packets.recv().await, Some(1));
-        publisher.publish(frame(2));
-        publisher.publish(frame(3));
+        publisher.publish(frame(2)).await;
+        publisher.publish(frame(3)).await;
         drop(publisher);
         lane.release.notify_one();
         let resumed = packets.recv().await;
@@ -462,15 +506,15 @@ mod pacing_tests {
             receive,
             repair,
         ));
-        publisher.publish(frame(1));
+        publisher.publish(frame(1)).await;
         assert_eq!(packets.recv().await, Some(1));
-        publisher.publish(frame(2));
+        publisher.publish(frame(2)).await;
         let mut delta = frame(3);
         delta.keyframe = false;
-        publisher.publish(delta);
+        publisher.publish(delta).await;
         lane.release.notify_one();
         assert_eq!(repairs.recv().await.unwrap().kind, Kind::Keyframe);
-        publisher.publish(frame(4));
+        publisher.publish(frame(4)).await;
         drop(publisher);
         assert_eq!(packets.recv().await, Some(4));
         assert!(writing.await.unwrap().is_ok());
