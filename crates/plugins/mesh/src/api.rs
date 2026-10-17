@@ -863,6 +863,7 @@ impl MeshService {
                     access.all && !restrict_to_filter,
                     &visible_tags,
                     &self.invalid_hosts,
+                    !access.owner,
                 )
                 .await?;
                 transaction
@@ -1608,6 +1609,8 @@ impl MeshService {
 struct ViewAccess {
     all: bool,
     tags: BTreeSet<String>,
+    /// Host facts, a machine's reported hostname among them, are the owner's alone (websocket.rs).
+    owner: bool,
 }
 
 async fn view_access(
@@ -1624,6 +1627,7 @@ async fn view_access(
         return Ok(ViewAccess {
             all: true,
             tags: BTreeSet::new(),
+            owner: true,
         });
     }
     let rows = sqlx::query("SELECT DISTINCT ra.action,ra.scope_tag FROM mesh_user_roles AS ur JOIN mesh_role_actions AS ra ON ra.role_name=ur.role_name WHERE ur.user_id=?")
@@ -1775,12 +1779,14 @@ async fn read_snapshot(
     all: bool,
     scopes: &BTreeSet<String>,
     invalid_hosts: &crate::diagnostics::InvalidHosts,
+    hide_hostnames: bool,
 ) -> Result<MeshSnapshot, MeshApiError> {
-    let node_rows =
-        sqlx::query("SELECT id,name,public_key,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id")
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(|error| map_sql_error(error))?;
+    let node_rows = sqlx::query(
+        "SELECT id,name,name_source,public_key,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| map_sql_error(error))?;
     let mut memberships = BTreeMap::<i64, Vec<String>>::new();
     let mut tag_members = BTreeMap::<String, Vec<NodeId>>::new();
     for row in
@@ -1810,7 +1816,7 @@ async fn read_snapshot(
         if !all && !tags.iter().any(|tag| scopes.contains(tag)) {
             continue;
         }
-        if let Some(node) = decode_host(&row, id, tags, now) {
+        if let Some(node) = decode_host(&row, id, tags, now, hide_hostnames) {
             nodes.push(node);
         } else {
             invalid_hosts.report(id);
@@ -1895,9 +1901,19 @@ fn decode_host(
     id: i64,
     tags: Vec<String>,
     now: i64,
+    hide_hostnames: bool,
 ) -> Option<MeshNode> {
-    let host: String = row.try_get("name").ok()?;
+    let mut host: String = row.try_get("name").ok()?;
     validate_host(&host).ok()?;
+    // A name taken from a machine's own hostname is a host fact: a viewer without host facts sees a neutral
+    // label instead (#236). The owner typed record names, and a person chose hand-set ones.
+    if hide_hostnames {
+        match row.try_get::<String, _>("name_source").ok()?.as_str() {
+            "server" => "server".clone_into(&mut host),
+            "reported" => "unnamed".clone_into(&mut host),
+            _ => {}
+        }
+    }
     let key: Vec<u8> = row.try_get("public_key").ok()?;
     let last_seen: Option<i64> = row.try_get("last_seen").ok()?;
     let last_rtt: Option<i64> = row.try_get("last_rtt_us").ok()?;

@@ -1,4 +1,5 @@
-//! Automatic Mesh node names are audited and yield to the owner's names (#236, break-it review findings 1 and 4).
+//! Automatic Mesh node names are audited, yield to the owner's names, and hide hostnames from viewers without
+//! host facts (#236, break-it review findings 1, 4 and 9).
 #![cfg(feature = "server")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use infraternal_plugin_mesh::{
@@ -110,4 +111,48 @@ async fn a_squatter_yields_to_a_host_added_later_and_the_renames_are_audited() {
 
 async fn audits_len(pool: &SqlitePool) -> usize {
     audits(pool).await.len()
+}
+
+/// A Mesh viewer who is not the owner has no host facts, so a name taken from a machine's own hostname is not
+/// shown to them; names the owner typed are.
+#[tokio::test]
+async fn a_viewer_without_host_facts_does_not_see_reported_hostnames() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    add_host(&pool, B, "root@minipc01").await;
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('guest','guest',0,'fixture','guest','Guest')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO mesh_roles(name,created_at) VALUES('nodes',1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mesh_role_actions(role_name,action,scope_tag) VALUES('nodes','mesh.manage_nodes',NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mesh_user_roles(user_id,role_name) VALUES('guest','nodes')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let service = MeshService::new(pool);
+    let store = service.dataplane();
+    store
+        .attach_named("server", PublicKey([1; 32]), None, true, Some("monitor01"))
+        .await
+        .unwrap();
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, Some("lab07"))
+        .await
+        .unwrap();
+    store
+        .attach_named(B, PublicKey([11; 32]), None, false, Some("ignored"))
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&service, "owner").await,
+        ["monitor01", "lab07", "minipc01"]
+    );
+    assert_eq!(
+        names(&service, "guest").await,
+        ["server", "unnamed", "minipc01"]
+    );
 }
