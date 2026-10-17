@@ -266,10 +266,8 @@ fn bound_legacy_control_socket_retains_receipt(
 ) {
     let mut host = MinimalHost::new();
     if let Some(suffix) = home_suffix {
-        let root = host.root.with_file_name(format!(
-            "{}{suffix}",
-            host.root.file_name().unwrap().to_str().unwrap()
-        ));
+        let name = host.root.file_name().unwrap().to_str().unwrap();
+        let root = host.root.with_file_name(format!("{name}{suffix}"));
         fs::rename(&host.root, &root).unwrap();
         host.root = root;
     }
