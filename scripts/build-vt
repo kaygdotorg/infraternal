@@ -97,6 +97,8 @@ source = source.replace('const page_preheat = 4;', 'const page_preheat = 1;')
 edits = [
     ('const PagePool = std.heap.MemoryPoolAligned(',
      'const PagePool = @import("../infraternal_memory.zig").PagePool('),
+    ('var node_pool = try NodePool.initPreheated(gen_alloc, preheat);',
+     'var node_pool = try NodePool.initPreheated(@import("../infraternal_memory.zig").structureAllocator(gen_alloc), preheat);'),
     ('var page_pool = try PagePool.initPreheated(page_alloc, preheat);',
      'var page_pool = try PagePool.initTracked(gen_alloc, page_alloc, preheat);'),
     # Growth recycles the oldest history page when the session reservation

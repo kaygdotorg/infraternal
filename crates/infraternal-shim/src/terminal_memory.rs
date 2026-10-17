@@ -22,6 +22,11 @@ use std::{
 /// allocator ABI has no query entry; native growth asks before allocating so
 /// it can recycle its oldest history page instead of being refused.
 const FIT_QUERY: usize = usize::MAX - 2;
+/// Allocation tag for page-list structure: one node per page, so it grows
+/// with the page count that the history share already bounds. It is exact
+/// state charged to the reservation, but not to the ordinary-data cap that
+/// bounds parser, title and style data.
+const STRUCTURE: usize = usize::MAX - 3;
 
 /// Native bytes shared by every terminal of one host [D270, #205].
 ///
@@ -94,6 +99,7 @@ struct Block {
     layout: Layout,
     mapped: bool,
     encoded: bool,
+    structure: bool,
 }
 
 pub(super) struct Memory {
@@ -110,6 +116,7 @@ struct State {
     limit: usize,
     refused: bool,
     mapped_used: usize,
+    structure_used: usize,
     encoded_used: usize,
     encoded_limit: usize,
     page_size: usize,
@@ -146,6 +153,7 @@ impl Memory {
                 limit,
                 refused: false,
                 mapped_used: 0,
+                structure_used: 0,
                 encoded_used: 0,
                 encoded_limit,
                 page_size: page_size(),
@@ -172,8 +180,9 @@ impl Memory {
             count += 1;
         }
         (
-            state.used - state.mapped_used - state.encoded_used,
-            state.mapped_used,
+            state.used - state.mapped_used - state.structure_used - state.encoded_used,
+            // Page-list nodes scale with the pages they describe.
+            state.mapped_used + state.structure_used,
             count,
         )
     }
@@ -251,6 +260,34 @@ impl Memory {
     }
 }
 
+impl State {
+    /// The terminal reservation and the cap of the request's class: ordinary
+    /// data (parser, titles, styles) has its own 256 KiB cap; encoded history
+    /// has its share; page memory and page structure only the reservation.
+    fn class_admits(&self, size: usize, mapped: bool, encoded: bool, structure: bool) -> bool {
+        let ordinary = self.used - self.mapped_used - self.structure_used - self.encoded_used;
+        size <= self.limit.saturating_sub(self.used)
+            && (mapped
+                || encoded
+                || structure
+                || size <= (256 * 1024_usize).saturating_sub(ordinary))
+            && (!encoded || size <= self.encoded_limit.saturating_sub(self.encoded_used))
+    }
+    fn count(&mut self, size: usize, mapped: bool, encoded: bool, structure: bool) {
+        self.used += size;
+        if mapped {
+            self.mapped_used += size;
+        }
+        if structure {
+            self.structure_used += size;
+        }
+        if encoded {
+            self.encoded_used += size;
+        }
+        self.peak = self.peak.max(self.used);
+    }
+}
+
 fn page_size() -> usize {
     static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *SIZE.get_or_init(|| {
@@ -280,6 +317,7 @@ unsafe extern "C" fn allocate(
     };
     let mapped = return_address == usize::MAX;
     let encoded = return_address == usize::MAX - 1;
+    let structure = return_address == STRUCTURE;
     // The native adapter tags page-pool requests explicitly. Large untrusted
     // payloads cannot bypass the ordinary-data cap merely through their size.
     // Arena backing may request weaker alignment; stronger alignment is valid.
@@ -308,10 +346,7 @@ unsafe extern "C" fn allocate(
     let Some(layout) = size.and_then(|size| Layout::from_size_align(size, align).ok()) else {
         return ptr::null_mut();
     };
-    let ordinary = memory.used - memory.mapped_used - memory.encoded_used;
-    if layout.size() > memory.limit.saturating_sub(memory.used)
-        || (!mapped && !encoded && layout.size() > (256 * 1024_usize).saturating_sub(ordinary))
-        || (encoded && layout.size() > memory.encoded_limit.saturating_sub(memory.encoded_used))
+    if !memory.class_admits(layout.size(), mapped, encoded, structure)
         || (mapped && align > memory.page_size)
         // Charged last: the host pool takes bytes only for an admitted request.
         || memory
@@ -373,6 +408,7 @@ unsafe extern "C" fn allocate(
             layout,
             mapped,
             encoded,
+            structure,
         });
     }
     if let Some(mut first) = memory.first {
@@ -382,14 +418,7 @@ unsafe extern "C" fn allocate(
         }
     }
     memory.first = NonNull::new(block);
-    memory.used += layout.size();
-    if mapped {
-        memory.mapped_used += layout.size();
-    }
-    if encoded {
-        memory.encoded_used += layout.size();
-    }
-    memory.peak = memory.peak.max(memory.used);
+    memory.count(layout.size(), mapped, encoded, structure);
     payload.cast()
 }
 /// Native buffers never grow in place. The one exception to `false` is the
@@ -465,6 +494,9 @@ unsafe extern "C" fn release(ctx: *mut c_void, payload: *mut c_void, _: usize, _
     }
     if block.encoded {
         memory.encoded_used -= block.layout.size();
+    }
+    if block.structure {
+        memory.structure_used -= block.layout.size();
     }
     if block.mapped {
         memory.mapped_used -= block.layout.size();

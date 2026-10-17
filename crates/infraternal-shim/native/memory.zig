@@ -22,6 +22,26 @@ pub fn historyAllocator(allocator: std.mem.Allocator) std.mem.Allocator {
     if (allocator.vtable != &C.zig_vtable) return allocator;
     return .{ .ptr = allocator.ptr, .vtable = &history_vtable };
 }
+/// Page-list nodes: one per page, so their count follows the pages the
+/// history share bounds, not the parser/title/style data the smaller
+/// ordinary cap is for. With 80x32 standard pages a long history holds many
+/// nodes; charging them as ordinary data refused a widening reflow.
+pub fn structureAllocator(allocator: std.mem.Allocator) std.mem.Allocator {
+    if (allocator.vtable != &C.zig_vtable) return allocator;
+    return .{ .ptr = allocator.ptr, .vtable = &structure_vtable };
+}
+const structure_vtable: std.mem.Allocator.VTable = .{
+    .alloc = structureAlloc,
+    .resize = resize,
+    .remap = remap,
+    .free = structureFree,
+};
+fn structureAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+    return C.zig_vtable.alloc(ctx, len, alignment, marker - 3);
+}
+fn structureFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, _: usize) void {
+    C.zig_vtable.free(ctx, memory, alignment, marker - 3);
+}
 const history_vtable: std.mem.Allocator.VTable = .{
     .alloc = historyAlloc,
     .resize = resize,

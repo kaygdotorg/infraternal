@@ -189,3 +189,30 @@ fn report_native_memory_numbers() {
     let (used, peak, refused) = full.memory();
     eprintln!("17 MiB share after 40 MB: used {used} peak {peak} refused {refused}");
 }
+
+/// PPU-R3-1 (#205): page-list nodes grow with the page count, and 80x32
+/// pages make a full 17 MiB share hundreds of nodes; a reflow briefly holds
+/// both lists. They are page structure, charged to the reservation, not the
+/// 256 KiB ordinary-data cap for parser, title and style data, which they
+/// once exhausted mid-reflow.
+#[test]
+fn page_nodes_never_fill_the_ordinary_data_cap() {
+    let history = 17 * 1024 * 1024;
+    let mut terminal = Terminal::with_history_budget(80, 24, history).unwrap();
+    terminal.process(b"\x1bc");
+    let mut short = Vec::new();
+    for n in 0..200_000_usize {
+        short.extend_from_slice(format!("{n:08}\r\n").as_bytes());
+    }
+    terminal.process(&short);
+    for (cols, rows) in [(50, 20), (80, 24), (60, 30), (80, 24)] {
+        terminal.resize(cols, rows).unwrap();
+        let (ordinary, pages, _) = terminal.engine.allocation_classes();
+        eprintln!("{cols}x{rows}: ordinary {ordinary} pages+nodes {pages}");
+        assert!(!terminal.memory().2, "{cols}x{rows}: refused");
+        assert!(
+            ordinary < 128 * 1024,
+            "{cols}x{rows}: ordinary data {ordinary}"
+        );
+    }
+}
