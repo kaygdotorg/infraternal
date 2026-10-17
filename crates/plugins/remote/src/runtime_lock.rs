@@ -126,7 +126,10 @@ fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(&path)?;
     checked_lock(&file, &path)?;
-    file.try_lock().map_err(io::Error::other)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => io::ErrorKind::WouldBlock.into(),
+        std::fs::TryLockError::Error(error) => error,
+    })?;
     checked_lock(&file, &path)?;
     Ok(file)
 }

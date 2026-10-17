@@ -207,3 +207,12 @@ fn legacy_rows_preserve_names_and_refuse_unclear_identity() {
         assert_eq!(legacy_row(&row).unwrap(), None);
     }
 }
+
+/// A held lifetime description remains an explicit nonblocking refusal.
+#[test]
+fn lifetime_contention_preserves_would_block() {
+    let fixture = Fixture::new();
+    let _holder = acquire(&fixture.state()).unwrap();
+    let error = acquire(&fixture.state()).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+}
