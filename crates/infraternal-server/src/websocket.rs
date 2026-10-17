@@ -64,7 +64,8 @@ const BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 // Stored expiry changes do not publish revocations; poll only during pending work, never idle.
 const BUSY_AUTHORITY_INTERVAL: Duration = Duration::from_millis(25);
-// One authority read attempt; shutdown cannot inherit the normal one-second writer wait.
+// Deadline of one authority read attempt. Teardown makes exactly one attempt,
+// without renewal, so closing never holds a socket on a busy store for longer.
 const AUTHORITY_READ_TIMEOUT: Duration = Duration::from_millis(25);
 // A read that misses its deadline is a busy store, not a refusal (#240): it is
 // retried while the socket's work stays held, and fails closed after this wait.
@@ -684,7 +685,14 @@ async fn run_socket(
     pending_plugin_calls.shutdown().await;
     drop(plugins);
     drop(attachments);
-    if loop_result.is_err() && session_is_live(&state, &user_id, &session_token).await {
+    // Only a still-authorized browser hears why its socket ended. One attempt,
+    // no wait and no renewal: a busy store must not hold the transport open
+    // here, and a socket that is closing is not activity.
+    if loop_result.is_err()
+        && read_expiry(&state, &user_id, &session_token, false, Duration::ZERO)
+            .await
+            .is_ok()
+    {
         let _ = tokio::time::timeout(
             CLOSE_TIMEOUT,
             send_frame(
@@ -1752,7 +1760,7 @@ pub(super) async fn probe_deadline(
     let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
-    let expiry = read_expiry(state, user, token, false).await?;
+    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT).await?;
     let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
     started
         .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
@@ -1773,7 +1781,7 @@ async fn authority_deadline(
     token: &str,
     renew: bool,
 ) -> Result<tokio::time::Instant, ()> {
-    let expiry = read_expiry(state, user_id, token, renew).await?;
+    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT).await?;
     // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
     // wall clock after the read, so a slow store can never extend a session.
     let remaining = u64::try_from(expiry - unix_seconds()?).map_err(|_| ())?;
@@ -1783,8 +1791,9 @@ async fn authority_deadline(
 /// Read the session's expiry, and start its renewal when `renew` is set and it
 /// is due. Each attempt has the fixed per-read deadline. An attempt that misses
 /// it is a busy store, not a refusal (#240): it is dropped and tried again after
-/// a pause (5 ms doubling to 100 ms) until `AUTHORITY_WAIT` has passed, then
-/// the read fails closed. A store that answers (no live session, or a storage
+/// a pause (5 ms doubling to 100 ms) until `wait` has passed (`AUTHORITY_WAIT`
+/// everywhere but teardown, which passes zero for a single attempt), then the
+/// read fails closed. A store that answers (no live session, or a storage
 /// error) fails at once and is never retried. The caller does no work
 /// meanwhile: every call site awaits this before it polls the operation it
 /// guards, so input stays queued in order behind the read instead of being
@@ -1809,12 +1818,13 @@ async fn read_expiry(
     user_id: &str,
     token: &str,
     renew: bool,
+    wait: Duration,
 ) -> Result<i64, ()> {
     #[cfg(test)]
     let read_timeout = state.authority_read_timeout;
     #[cfg(not(test))]
     let read_timeout = AUTHORITY_READ_TIMEOUT;
-    let give_up = tokio::time::Instant::now() + AUTHORITY_WAIT;
+    let give_up = tokio::time::Instant::now() + wait;
     let mut pause = AUTHORITY_RETRY_PAUSE;
     let expiry = loop {
         let read = async {
@@ -1854,7 +1864,9 @@ async fn read_expiry(
 }
 
 async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> bool {
-    read_expiry(state, user_id, token, true).await.is_ok()
+    read_expiry(state, user_id, token, true, AUTHORITY_WAIT)
+        .await
+        .is_ok()
 }
 
 struct ClientAttachment {

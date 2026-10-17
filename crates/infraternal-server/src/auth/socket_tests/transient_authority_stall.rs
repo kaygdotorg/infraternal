@@ -297,3 +297,71 @@ async fn echo_host(
         }
     }
 }
+
+/// Wait for the server to end the socket and return how long it took. Control
+/// frames sent on the way out are drained.
+async fn closed_after(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Duration {
+    let started = tokio::time::Instant::now();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), socket.next()).await {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => return started.elapsed(),
+            Ok(Some(Ok(_))) => {}
+            Err(elapsed) => panic!("the socket did not end within 5 s: {elapsed}"),
+        }
+    }
+}
+
+/// A socket ending on a protocol error asks once whether its browser may still
+/// hear why. With a busy store that one attempt misses its deadline and the
+/// socket ends at once: teardown never takes the one-second authority wait
+/// while it holds the transport (#240, review P2).
+#[tokio::test]
+async fn teardown_with_a_busy_store_does_not_wait_for_authority() {
+    let _guard = SERIAL.lock().await;
+    let (f, server, mut socket) = welcomed_with_short_reads("teardown busy").await;
+    let held = f.auth.pool.acquire().await.unwrap();
+    socket
+        .send(Message::Binary(vec![0xff; 16].into()))
+        .await
+        .unwrap();
+    let took = closed_after(&mut socket).await;
+    drop(held);
+    server.abort();
+    assert!(
+        took < Duration::from_millis(500),
+        "teardown held the socket {took:?} waiting on a busy store"
+    );
+}
+
+/// Ending a socket is not activity: teardown reads authority without renewing
+/// the session, even when the session is due for its renewal (#240, review P2).
+#[tokio::test]
+async fn teardown_does_not_renew_the_session() {
+    let _guard = SERIAL.lock().await;
+    let (f, server, mut socket) = welcomed_with_short_reads("teardown renew").await;
+    let due = crate::websocket::now_seconds().unwrap() + 600;
+    sqlx::query("UPDATE sessions SET expires=? WHERE user_id=?")
+        .bind(due)
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    socket
+        .send(Message::Binary(vec![0xff; 16].into()))
+        .await
+        .unwrap();
+    closed_after(&mut socket).await;
+    // A renewal would run in the background: give it time to land.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let expires: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE user_id=?")
+        .bind(&f.user)
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    server.abort();
+    assert_eq!(expires, due, "teardown renewed the session");
+}
