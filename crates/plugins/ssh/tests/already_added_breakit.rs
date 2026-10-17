@@ -7,7 +7,7 @@ use infraternal_plugin_ssh::model::{Failure, FailureKind};
 
 #[test]
 fn a_host_key_challenge_never_serializes_as_a_host_id() {
-    let challenge = uuid::Uuid::from_u128(0xc0ffee);
+    let challenge = uuid::Uuid::from_u128(0x00c0_ffee);
     let mut failure = Failure::new(FailureKind::HostKey, "Confirm this host key.");
     failure.set_host_key_challenge(Some(challenge));
     // `already_added` stays a public field; any future duplicate path that marks
