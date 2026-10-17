@@ -43,6 +43,19 @@ unsafe extern "C" {
 // Default builds retain retired allocations until shim exit (#37). The
 // shared host owns a separate allocation list and reclaims that list without
 // traversing the retired graph; neither path revives an invalid handle.
+/// Visible screens, parser/style state and reflow transients of one bounded
+/// engine, beyond its history share [D270].
+#[cfg(feature = "process-per-user")]
+pub(super) const SCREEN_RESERVATION: usize = 8 * 1024 * 1024;
+/// Each screen-pool item is charged one header page on top of the item that
+/// native history accounting counts. Items are at least eight pages, so an
+/// eighth of the share covers every header; a unit test pins the ratio.
+/// Compact history reserves twice its share instead.
+#[cfg(all(
+    feature = "process-per-user",
+    any(test, not(feature = "compact-history"))
+))]
+pub(super) const ITEM_HEADER_SHARE: usize = 8;
 pub(super) struct Engine(
     Option<NonNull<c_void>>,
     #[cfg(feature = "process-per-user")] Option<Box<crate::terminal_memory::Memory>>,
@@ -61,14 +74,21 @@ impl Engine {
             Err(io::Error::other("native mode query failed"))
         }
     }
+    /// A shared-host engine whose reservation is derived from its history
+    /// share: the share itself, one header page per screen-pool item, and a
+    /// fixed allowance for the visible screens, parser state and the
+    /// transient pages of a reflow. A history share therefore always fits,
+    /// whatever share the host hands out.
     #[cfg(feature = "process-per-user")]
     pub fn bounded(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
         #[cfg(not(feature = "compact-history"))]
-        let limit = 8 * 1024 * 1024;
+        let limit = SCREEN_RESERVATION
+            .saturating_add(bytes)
+            .saturating_add(bytes / ITEM_HEADER_SHARE);
         // Cold pages retain virtual mappings for infallible exact restore.
         // Their encoded allocations still obey the configured history share.
         #[cfg(feature = "compact-history")]
-        let limit = 8 * 1024 * 1024 + bytes.saturating_mul(2);
+        let limit = SCREEN_RESERVATION + bytes.saturating_mul(2);
         Self::build(cols, rows, bytes, limit)
     }
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {

@@ -460,8 +460,15 @@ its own killed shell; an uninterruptible child exit can stall that reactor.
 Adoption needs a nonblocking child reaper. A panic hook must never include PTY output or input in diagnostics.
 
 Shared terminals own every native allocation through a stable boxed allocator.
-The ordinary hard per-terminal reservation ceiling is **8 MiB**, including transient
-allocations, intrusive ownership headers and mapping prefixes. Ordinary native
+The hard per-terminal reservation is **8 MiB plus the history share plus an
+eighth of it** for the one header page each screen-pool item is charged. The
+8 MiB covers both screens, parser state, transient reflow pages, intrusive
+ownership headers and mapping prefixes, so every share the host hands out
+(up to 17 MiB) fits. Screen-pool items are separate allocations with a reserve
+of two free items; pages released by erased history, a reset or a smaller
+geometry return to the allocator at once. Growth asks the allocator whether
+another item fits and otherwise recycles its oldest history page, so the
+reservation never makes ordinary output refuse an allocation. Ordinary native
 payload/metadata allocations share a **256 KiB** ceiling; explicitly tagged
 page-pool allocations use the remaining reservation. Size/alignment alone
 cannot identify a page request. Native page backing is zero-filled anonymous

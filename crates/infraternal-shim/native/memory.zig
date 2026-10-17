@@ -6,6 +6,7 @@
 const std = @import("std");
 const C = @import("terminal/lib.zig").alloc.Allocator;
 const marker = std.math.maxInt(usize);
+const mem = @import("terminal/mem.zig");
 
 pub fn pageAllocator(allocator: std.mem.Allocator) std.mem.Allocator {
     // The public C API permits a null allocator, which selects the native
@@ -50,4 +51,130 @@ fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: u
 }
 fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, _: usize) void {
     C.zig_vtable.free(ctx, memory, alignment, marker);
+}
+
+/// Asks the session's allocator whether one more screen-pool item of `len`
+/// bytes fits its reservation, without allocating and without counting a
+/// refusal. Growth uses the answer to recycle its oldest history page
+/// instead of requesting memory that would be refused: a refusal mid-write
+/// would drop terminal state, while recycling keeps every visible cell exact.
+/// The probe travels through the resize callback with its own tag because
+/// the C allocator ABI has no query entry; an empty slice is never resized.
+pub fn fits(page_alloc: std.mem.Allocator, len: usize) bool {
+    if (page_alloc.vtable != &vtable) return true;
+    var none: [0]u8 = .{};
+    return C.zig_vtable.resize(page_alloc.ptr, &none, .fromByteUnits(std.heap.page_size_min), len, marker - 2);
+}
+
+/// Screen-pool storage for shared-host terminals [D270, #205].
+///
+/// Every item is its own page-aligned allocation and a released item beyond
+/// a small reserve returns to the session allocator at once. Retained bytes
+/// therefore follow the live page count: a geometry storm or erased history
+/// gives its memory back, and growth asks for exactly one item at a time, so
+/// the history share is reachable without a geometric chunk crossing the
+/// reservation first. All items are tracked so reset and deinit release
+/// them without walking terminal pages. Free items keep the upstream
+/// invariant: zero apart from the leading free-list pointer.
+pub fn PagePool(comptime Item: type, comptime alignment: std.mem.Alignment) type {
+    return struct {
+        const Pool = @This();
+        pub const item_size = @sizeOf(Item);
+        const ItemPtr = *align(alignment.toByteUnits()) Item;
+        const Free = struct { next: ?*Free };
+        // Reflow destroys an old page right before it creates the next one,
+        // and compression borrows one scratch item; two cover both without
+        // a mapping round trip per page.
+        const reserve = 2;
+        comptime {
+            std.debug.assert(item_size >= @sizeOf(Free));
+            std.debug.assert(alignment.toByteUnits() >= @alignOf(Free));
+        }
+
+        /// Named for the upstream field that call sites read the page
+        /// allocator from; there is no arena behind it.
+        arena: struct { child_allocator: std.mem.Allocator },
+        gen: std.mem.Allocator,
+        items: std.ArrayList(ItemPtr) = .empty,
+        free_list: ?*Free = null,
+        free_count: usize = 0,
+
+        pub fn initTracked(gen: std.mem.Allocator, page: std.mem.Allocator, preheat: usize) error{OutOfMemory}!Pool {
+            var pool: Pool = .{ .arena = .{ .child_allocator = page }, .gen = gen };
+            errdefer pool.deinit();
+            for (0..preheat) |_| pool.push(try pool.allocNew());
+            return pool;
+        }
+
+        pub fn deinit(pool: *Pool) void {
+            for (pool.items.items) |item| pool.release(item);
+            pool.items.deinit(pool.gen);
+            pool.* = undefined;
+        }
+
+        /// Free-list item or one new mapping; at most one allocation each.
+        pub fn canCreate(pool: *const Pool) bool {
+            return pool.free_list != null or fits(pool.arena.child_allocator, item_size);
+        }
+
+        pub fn create(pool: *Pool) error{OutOfMemory}!ItemPtr {
+            if (pool.free_list) |node| {
+                pool.free_list = node.next;
+                pool.free_count -= 1;
+                return @ptrCast(@alignCast(node));
+            }
+            return pool.allocNew();
+        }
+
+        pub fn destroy(pool: *Pool, item: ItemPtr) void {
+            if (pool.free_count < reserve) return pool.push(item);
+            var index = pool.items.items.len;
+            while (index > 0) {
+                index -= 1;
+                if (pool.items.items[index] == item) break;
+            } else unreachable;
+            _ = pool.items.swapRemove(index);
+            pool.release(item);
+        }
+
+        /// Invalidates every item. Retained items are zeroed for reuse,
+        /// as the screen expects fresh pages to be.
+        pub fn reset(pool: *Pool, mode: std.heap.ArenaAllocator.ResetMode) bool {
+            const keep_bytes: usize = switch (mode) {
+                .free_all => 0,
+                .retain_capacity => std.math.maxInt(usize),
+                .retain_with_limit => |limit| limit,
+            };
+            const keep = @min(keep_bytes / item_size, pool.items.items.len);
+            while (pool.items.items.len > keep) pool.release(pool.items.pop().?);
+            pool.free_list = null;
+            pool.free_count = 0;
+            for (pool.items.items) |item| {
+                if (!mem.decommit(.zero, item, item.len)) @memset(item, 0);
+                pool.push(item);
+            }
+            return true;
+        }
+
+        fn allocNew(pool: *Pool) error{OutOfMemory}!ItemPtr {
+            try pool.items.ensureUnusedCapacity(pool.gen, 1);
+            // Fresh anonymous mappings are zero-filled.
+            const raw = pool.arena.child_allocator.rawAlloc(item_size, alignment, @returnAddress()) orelse
+                return error.OutOfMemory;
+            const item: ItemPtr = @ptrCast(@alignCast(raw));
+            pool.items.appendAssumeCapacity(item);
+            return item;
+        }
+
+        fn push(pool: *Pool, item: ItemPtr) void {
+            const node: *Free = @ptrCast(@alignCast(item));
+            node.* = .{ .next = pool.free_list };
+            pool.free_list = node;
+            pool.free_count += 1;
+        }
+
+        fn release(pool: *Pool, item: ItemPtr) void {
+            pool.arena.child_allocator.rawFree(item, alignment, @returnAddress());
+        }
+    };
 }

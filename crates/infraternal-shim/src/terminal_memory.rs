@@ -12,6 +12,11 @@ use std::{
     ptr::{self, NonNull},
 };
 
+/// Resize-callback tag for a fit query on one more screen-pool item. The C
+/// allocator ABI has no query entry; native growth asks before allocating so
+/// it can recycle its oldest history page instead of being refused.
+const FIT_QUERY: usize = usize::MAX - 2;
+
 #[repr(C)]
 struct Vtable {
     alloc: unsafe extern "C" fn(*mut c_void, usize, u8, usize) -> *mut c_void,
@@ -304,15 +309,34 @@ unsafe extern "C" fn allocate(
     memory.peak = memory.peak.max(memory.used);
     payload.cast()
 }
+/// Native buffers never grow in place. The one exception to `false` is the
+/// tagged fit query: whether a screen-pool item of `len` bytes would be
+/// charged successfully right now. It allocates nothing and never marks the
+/// terminal refused.
 unsafe extern "C" fn resize(
-    _: *mut c_void,
+    ctx: *mut c_void,
     _: *mut c_void,
     _: usize,
     _: u8,
-    _: usize,
-    _: usize,
+    len: usize,
+    return_address: usize,
 ) -> bool {
-    false
+    if return_address != FIT_QUERY {
+        return false;
+    }
+    // SAFETY: the C ABI points into the live boxed context; read-only here.
+    let memory = unsafe { &*ctx.cast::<State>() };
+    // Same charge as a page-aligned mapping: a header prefix page plus the
+    // payload, rounded to whole pages.
+    let page = memory.page_size;
+    let Some(size) = len
+        .max(1)
+        .checked_add(std::mem::size_of::<Block>().next_multiple_of(page))
+        .and_then(|n| n.checked_next_multiple_of(page))
+    else {
+        return false;
+    };
+    size <= memory.limit.saturating_sub(memory.used)
 }
 unsafe extern "C" fn remap(
     _: *mut c_void,
