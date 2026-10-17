@@ -110,3 +110,65 @@ fn retire_checks_every_object_before_deleting_any() {
         "retire deleted the interface, then refused the foreign table: half-done uninstall"
     );
 }
+
+fn owned_table() {
+    assert!(
+        Command::new("nft")
+            .args([
+                "add",
+                "table",
+                "inet",
+                "infraternal_mesh",
+                "{ comment \"infraternal.mesh.v1\"; }"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+fn table_present() -> bool {
+    Command::new("nft")
+        .args(["list", "table", "inet", "infraternal_mesh"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// The interface and filter this installation's node created go with it (#235).
+#[test]
+#[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
+fn retire_removes_the_interface_and_filter_this_installation_created() {
+    let state = fresh_state("retire-own");
+    Node::restore(&state).unwrap().up().unwrap();
+    owned_table();
+    let result = Node::retire(&state);
+    let (link, table) = (link_present(), table_present());
+    cleanup(&state);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(!link && !table, "link {link}, table {table} survived");
+}
+
+/// Two installations on one machine: removing one whose node never made the
+/// live interface leaves that interface and its filter to the other (#235).
+#[test]
+#[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
+fn retire_leaves_another_installations_interface_and_filter() {
+    let other = fresh_state("retire-other-owner");
+    let ours = fresh_state("retire-other-ours");
+    // Ours once made an interface (its record names that key), since replaced.
+    Node::restore(&ours).unwrap().up().unwrap();
+    assert!(ip(&["link", "delete", "infraternal0"]));
+    Node::restore(&other).unwrap().up().unwrap();
+    owned_table();
+    let result = Node::retire(&ours);
+    let (link, table) = (link_present(), table_present());
+    cleanup(&other);
+    cleanup(&ours);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        link && table,
+        "link {link}, table {table}: another installation's mesh was removed"
+    );
+}

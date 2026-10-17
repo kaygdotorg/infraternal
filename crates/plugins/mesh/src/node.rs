@@ -158,24 +158,51 @@ impl Node {
         }
         Ok(node)
     }
-    /// Remove every kernel object this component owns, without a running node.
+    /// Remove the kernel objects this installation created, without a running node.
     ///
     /// Host uninstall calls this after the service has stopped (#235). The
-    /// interface goes with its addresses, routes and keys; the packet filter is
-    /// removed through the frontend the node recorded. Absent objects are fine;
-    /// an interface or table with our name that we do not own is refused.
+    /// interface name and the component marker are shared by every infraternal
+    /// agent on the machine, so neither proves the object is this
+    /// installation's: the server's embedded infraternal agent and `mesh up`
+    /// make the same marked `infraternal0`. Only an interface whose `WireGuard`
+    /// key is the one this state recorded (or, for state written before that
+    /// record existed, the key the coordinator bound) is ours. Its packet
+    /// filter is ours when the state recorded a frontend and no other node's
+    /// interface is live. Anything else stays.
     /// # Errors
     /// Reports unsafe state, foreign ownership or a failed kernel deletion.
     pub fn retire(path: &std::path::Path) -> io::Result<()> {
-        let backend = match crate::node_state::Store::open(path) {
-            Ok((_, state)) => state.backend,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        let (recorded, backend) = match crate::node_state::Store::open(path) {
+            Ok((store, state)) => (
+                store
+                    .recorded_interface()?
+                    .or_else(|| state.config.and_then(|config| config.local_key)),
+                state.backend,
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
             Err(error) => return Err(error),
         };
-        if Device::owned()? {
+        // This installation never created a mesh interface: nothing is ours.
+        let Some(recorded) = recorded else {
+            return Ok(());
+        };
+        let interface = if Device::owned()? {
+            // A marked link without a readable WireGuard key is not provably ours.
+            Some(Device::identity().is_ok_and(|(key, _)| key == recorded))
+        } else {
+            None
+        };
+        if interface == Some(true) {
             Device::delete()?;
         }
-        let mut firewall = backend.map_or_else(Firewall::default, Firewall::for_backend);
+        let Some(backend) = backend else {
+            return Ok(());
+        };
+        if interface == Some(false) {
+            // Another node's live interface owns the filter with our name.
+            return Ok(());
+        }
+        let mut firewall = Firewall::for_backend(backend);
         match firewall.adopt() {
             Ok(()) => firewall.remove(),
             // Without a supported packet-filter frontend the node could never
@@ -251,6 +278,11 @@ impl Node {
         }
         self.firewall.adopt()?;
         let (key, public_key) = Key::generate()?;
+        // Name the interface in this installation's state before it exists:
+        // host uninstall removes only an interface whose key matches (#235).
+        if let Some(store) = &self.store {
+            store.record_interface(&public_key)?;
+        }
         Device::create()?;
         self.owned = true;
         let port = 0;
