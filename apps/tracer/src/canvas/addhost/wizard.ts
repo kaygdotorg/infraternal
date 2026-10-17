@@ -793,13 +793,14 @@ export class Wizard {
 
   private renderFailure(page: HTMLElement): void {
     const job = this.fixing!;
-    const guide: Guide = guideFor(job.entry.label, job.view.failure);
+    const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
+    const openId = hostId ? hostId : undefined;
+    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined);
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
     const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
       <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${this.detailsBlock(job)}`;
-    const openId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${guide.fix === "none" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);

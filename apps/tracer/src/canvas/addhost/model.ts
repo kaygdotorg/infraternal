@@ -9,6 +9,7 @@
  *   diagnostic text stays in Details and never determines the failure category (contracts/ssh-bootstrap.md).
  * - `parseTarget` and `parseSshConfig` read what the person types or pastes into the host field.
  */
+import { shortcutLabel } from "../../../../../packages/ui/src/platform";
 import { awaitingFresh } from "../../provisioning-client";
 import type { AuthenticationInfo, FailureDetail, FailureKind, NetworkProvider, TargetView } from "../../provisioning-client";
 
@@ -122,8 +123,10 @@ export const STEP_ADVICE: Record<NonNullable<FailureDetail["failed_step"]>, stri
 const GENERIC_ADVICE = "Try again, or open the details to see where it stopped.";
 
 /** Plain-language account of a failed host. `name` is what the person typed or picked. */
-export function guideFor(name: string, failure: FailureDetail | undefined): Guide {
-  if (failure?.already_added) return { title: `${name} is already added`, happened: "It's already in Console.", next: "", fix: "none", tone: "info" };
+export function guideFor(name: string, failure: FailureDetail | undefined, canOpen = false): Guide {
+  // Without a button to open its terminal (an older server sends no host id; the page may not list the host) the
+  // copy carries the route itself, so the page is never a dead end. Keys follow the platform (⌘ only on Apple keyboards).
+  if (failure?.already_added) return { title: `${name} is already added`, happened: "It's already in Console.", next: canOpen ? "" : `Find its terminal with ${shortcutLabel({ mac: "⌘K", other: "Ctrl K" })}.`, fix: "none", tone: "info" };
   switch (failure?.kind) {
     case "unreachable": return {
       title: `${name} isn't answering`,
