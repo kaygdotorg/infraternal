@@ -75,6 +75,24 @@ from the person's private socket/state directory. This is an adoption
 integration requirement; frozen frame layouts need no change. Rootless
 same-UID connections remain covered by the prototype.
 
+### Mesh SSH prerequisites (#221)
+
+This branch supplies an optional PTY runtime inside an **already authorized**
+person login. Its session bounds and child-exit handling do not supply the
+production identity or access controller. The dependency boundary is:
+
+| Production requirement | Supplied here | Integration still required |
+| --- | --- | --- |
+| Login authority and spawner | Same-UID research entry and existing PTY launcher. | Connect authenticated person/account metadata to the real login lifetime from #172, validate the expected peer UID, and hold current Login access checks through registration. |
+| Target-user file handling | None. | A file provider running as the selected account, with ownership and access-removal checks. |
+| Session ownership and retirement | Bounded session IDs, terminal state, child reaping and local socket lifetime within the optional host. | Person ownership on every SSH attachment and reattachment; retire shells, attachments and file handles when applicable access is removed. |
+| All-shell enforcement | Caller must provide an already authorized login. | One current Login access evaluator across app terminals, mesh SSH shell/exec and files; no separate access store for this prototype. |
+
+The #221 transport interfaces and the #172 login implementation live on their
+own branches. This branch neither installs their production adapters nor
+enables mesh SSH. Whole-host restart handoff remains a separate D128 acceptance
+requirement. Passing native echo admission does not certify these integrations.
+
 The feature lives in the existing shim crate as a research implementation,
 not a new shipping node component. Adoption must expose launch/lifecycle
 through the SSH plugin and its shared action definitions (D198/D202), not
