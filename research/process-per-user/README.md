@@ -11,6 +11,15 @@ output. Mixed-soak latency and whole-host upgrade survival have separate
 admission gates. Passing focused tests and the cold-history footprint does not
 authorize adoption. Current results and failures are recorded on issue #205.
 
+D296 replaces the five-millisecond merge threshold with a matched shipping
+comparison: pooled native echo p99 must be no higher than the shipping terminal
+on the same venue and workload, with three runs of each in a round. The original
+five-millisecond outcome remains in historical and raw reports as a long-term
+aim; it does not decide admission. Report each run, retained sample counts,
+contention exclusions, exact image identities and the pooled comparison.
+Whole-host upgrade survival and production login integration remain separate
+requirements; a native socket fixture cannot certify either.
+
 ## Boundary and identity
 
 `cargo build -p infraternal --features process-per-user` adds the hidden
