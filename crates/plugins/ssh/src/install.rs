@@ -814,9 +814,11 @@ fi
     ) -> String {
         let script = Self::unprivileged_script(mode, host, transaction, body);
         if mode == InstallMode::Root {
+            // Bind the program once: both branches execute the same bytes, and
+            // a second quoted copy would double every root command, which
+            // nests inside restaging and must fit one kernel argument (#230).
             format!(
-                "if [ \"$(id -u)\" = 0 ]; then exec sh -c {}; else exec sudo -n sh -c {}; fi",
-                shell_quote(&script),
+                "program={}\nif [ \"$(id -u)\" = 0 ]; then exec sh -c \"$program\"; else exec sudo -n sh -c \"$program\"; fi",
                 shell_quote(&script)
             )
         } else {

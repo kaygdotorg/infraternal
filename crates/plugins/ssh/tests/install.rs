@@ -3568,7 +3568,12 @@ impl SshSession for LengthRecorder {
         true
     }
     fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
-        self.0.lock().unwrap().push(script.len());
+        // The session executes `sh -c <quoted script>` as one argument.
+        let argument = format!(
+            "sh -c {}",
+            infraternal_plugin_ssh::transport::shell_quote(script)
+        );
+        self.0.lock().unwrap().push(argument.len());
         Box::pin(async { Err(Failure::install("recorded")) })
     }
 }
