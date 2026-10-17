@@ -274,13 +274,31 @@ impl AgentPlugin for UninstallPlugin {
             });
         }
         let plan = serde_json::to_vec(&self.context).map_err(|_| PluginError::Rejected)?;
-        let path = plan_path(&self.home, self.uid);
-        write_plan(&path, &plan).map_err(|_| PluginError::Rejected)?;
+        let armed = plan_path(&self.home, self.uid);
+        let staged = armed.with_file_name(STAGED);
+        // A plan left by an earlier attempt is replaced, never followed.
+        for path in [&staged, &armed] {
+            match std::fs::remove_file(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(PluginError::Rejected);
+                }
+                _ => {}
+            }
+        }
+        write_plan(&staged, &plan).map_err(|_| PluginError::Rejected)?;
+        // Disarm on every exit below that does not hand the reply over.
+        let handoff = Handoff {
+            staged,
+            armed,
+            pending: true,
+        };
         // The helper runs as a separate transient service so it survives this
-        // daemon's stop. It is started only after the reply is written, with no
-        // stdin pipe and without waiting: both of those need the manager's bus,
-        // which hosts without a per-user bus lack (#235). Starting a unit needs
-        // only the manager's private socket. The plan travels in a private file.
+        // daemon's stop. It starts before the reply so a launch failure is
+        // reported instead of "accepted" (#235), but waits until the reply is
+        // written and the plan armed, so it cannot stop this daemon first.
+        // No stdin pipe and no wait for the unit itself: both need the
+        // manager's bus, which hosts without a per-user bus lack. Starting a
+        // unit needs only the manager's private socket.
         let mut command = std::process::Command::new(self.launcher);
         infraternal_shim::prepare_child(&mut command);
         if self.uid != 0 {
@@ -293,21 +311,50 @@ impl AgentPlugin for UninstallPlugin {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut handoff = Handoff {
-            command: Some(command),
-            plan: path,
-        };
+        if !launched(&mut command) {
+            drop(handoff);
+            return Ok(ActionReply {
+                json: br#"{"state":"failed","cleanup":"not-started"}"#.to_vec(),
+                after_write: None,
+            });
+        }
+        let mut handoff = handoff;
         Ok(ActionReply {
             json: serde_json::to_vec(
                 &serde_json::json!({"state":"accepted","cleanup":"pending","left":left}),
             )
             .map_err(|_| PluginError::Rejected)?,
-            after_write: Some(Box::new(move || handoff.start())),
+            after_write: Some(Box::new(move || handoff.arm())),
         })
+    }
+}
+/// Run the transient-unit launcher to completion within a bound.
+///
+/// It returns once the manager has queued the unit, normally in milliseconds;
+/// a launcher still running after the bound is killed and counts as failed.
+fn launched(command: &mut std::process::Command) -> bool {
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 /// The private plan file the helper consumes, inside the installation it removes.
 const PLAN: &str = ".uninstall-plan";
+/// The plan before the reply that accepts it is written; the helper ignores it.
+const STAGED: &str = ".uninstall-plan.staged";
 fn plan_path(home: &Path, uid: u32) -> PathBuf {
     base_dir(home, uid).join(PLAN)
 }
@@ -318,6 +365,7 @@ fn write_plan(path: &Path, plan: &[u8]) -> io::Result<()> {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
+    // The helper accepts only a private regular file; never inherit a mode.
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -327,50 +375,47 @@ fn write_plan(path: &Path, plan: &[u8]) -> io::Result<()> {
     file.write_all(plan)?;
     file.sync_all()
 }
-/// Read and consume the plan the infraternal agent left for its uninstall helper.
+/// Wait for, read and consume the plan the infraternal agent left for its uninstall helper.
+///
+/// The helper starts before the agent's reply is written; the agent arms the
+/// plan only after that write. An unarmed plan is never read, and a reply
+/// that never went out leaves the helper with nothing to do (#235).
 /// # Errors
 /// Refuses a missing, foreign, shared-writable, oversized or malformed plan.
 pub fn take_plan(home: &Path, uid: u32) -> io::Result<Context> {
     let path = plan_path(home, uid);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while matches!(std::fs::symlink_metadata(&path), Err(ref error) if error.kind() == io::ErrorKind::NotFound)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let body = public_file(&path, uid, 8192);
     // Consume it whatever it holds: one accepted request starts one cleanup.
     let _ = std::fs::remove_file(&path);
     serde_json::from_str(&body?).map_err(|_| denied())
 }
-/// The prepared launcher and its plan, owned until the reply is written.
+/// The staged plan of a started helper, owned until the reply is written.
 ///
-/// Dropping it unstarted (the reply write failed) removes the plan, so nothing
-/// can act on a request the server never saw accepted.
+/// Arming renames it to the name the helper waits for. Dropping it unarmed
+/// (the launch failed, or the reply write failed) removes it, so nothing can
+/// act on a request the server never saw accepted.
 struct Handoff {
-    command: Option<std::process::Command>,
-    plan: PathBuf,
+    staged: PathBuf,
+    armed: PathBuf,
+    pending: bool,
 }
 impl Handoff {
-    fn start(&mut self) {
-        let Some(mut command) = self.command.take() else {
-            return;
-        };
-        match command.spawn() {
-            // The launcher returns once the unit is queued; reap it off the
-            // caller's thread. If no thread starts, the exited launcher stays
-            // unreaped only until the helper stops this process.
-            Ok(mut child) => {
-                let _ = std::thread::Builder::new()
-                    .name("uninstall-handoff".into())
-                    .spawn(move || {
-                        let _ = child.wait();
-                    });
-            }
-            Err(_) => {
-                let _ = std::fs::remove_file(&self.plan);
-            }
+    fn arm(&mut self) {
+        if std::fs::rename(&self.staged, &self.armed).is_ok() {
+            self.pending = false;
         }
     }
 }
 impl Drop for Handoff {
     fn drop(&mut self) {
-        if self.command.is_some() {
-            let _ = std::fs::remove_file(&self.plan);
+        if self.pending {
+            let _ = std::fs::remove_file(&self.staged);
         }
     }
 }
@@ -524,7 +569,7 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
             _ => {}
         }
     }
-    for file in [".bootstrap-ready", PLAN, ".bootstrap-owner"] {
+    for file in [".bootstrap-ready", PLAN, STAGED, ".bootstrap-owner"] {
         match std::fs::remove_file(base.join(file)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
@@ -619,11 +664,13 @@ mod tests {
         let input =
             serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":false})).unwrap();
         let plan = plan_path(&home, uid);
-        let observed = plan.clone();
+        let observed = plan.with_file_name(STAGED);
+        let armed = plan.clone();
         let worker = std::thread::spawn(move || {
             // An unwritten reply is dropped: its plan must not survive it.
             let unwritten = plugin.call_with_reply(crate::UNINSTALL.id, &input).unwrap();
-            assert!(observed.exists());
+            // Until the reply is written the helper has nothing to follow.
+            assert!(observed.exists() && !armed.exists());
             drop(unwritten);
             assert!(!observed.exists(), "a dropped reply left its plan");
             // The reply writer runs this after a successful write; it must not
@@ -682,11 +729,16 @@ mod tests {
         let input =
             serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":false})).unwrap();
         let reply = plugin.call_with_reply(crate::UNINSTALL.id, &input).unwrap();
-        reply.after_write.unwrap()();
-        // Give the reaper thread time to observe the launcher's exit.
-        std::thread::sleep(Duration::from_millis(500));
-        let left = plan_path(&home, uid).exists();
+        // Fix (#235): the launcher runs before the reply, so its failure is
+        // the reply: never "accepted", and nothing left to arm.
+        let plan = plan_path(&home, uid);
+        let left = plan.exists() || plan.with_file_name(STAGED).exists();
         std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&reply.json).unwrap()["state"],
+            "failed"
+        );
+        assert!(reply.after_write.is_none());
         assert!(!left, "a failed launcher left its uninstall plan behind");
     }
     /// #235: kernel ownership is decided before the service is stopped; a
