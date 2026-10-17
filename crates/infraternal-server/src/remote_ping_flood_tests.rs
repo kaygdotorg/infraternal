@@ -179,8 +179,14 @@ async fn primary_ping_during_terminal_flood() {
             {
                 previous = Some(connection.stable_id());
                 admitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                connection.closed().await;
+                let reason = connection.closed().await;
                 connection_ends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!(
+                    "PING_FLOOD_PRIMARY_CLOSED reason={reason:?} actor_lines={:?}",
+                    crate::embedded::TEST_CLOSE_LINES
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                );
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

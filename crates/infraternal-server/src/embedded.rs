@@ -2582,12 +2582,19 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
     )
 }
 
+#[cfg_attr(test, track_caller)]
 fn connection_lost(
     connection: AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
     routes: &mut HashMap<u32, u64>,
     pending: &mut HashMap<u32, PendingCall>,
 ) {
+    // Measurement fixtures name the actor branch that retired a primary.
+    #[cfg(test)]
+    TEST_CLOSE_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(std::panic::Location::caller().line());
     routes.clear();
     notify_reconnecting(attachments);
     for (_, call) in pending.drain() {
@@ -2771,6 +2778,10 @@ async fn next_writes(writes: &mut writes::State) -> (u32, bool) {
 async fn next_writes(_state: &mut ()) -> (u32, bool) {
     std::future::pending().await
 }
+
+/// Source lines of every `connection_lost` call, in order, for diagnostics.
+#[cfg(test)]
+pub(crate) static TEST_CLOSE_LINES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(all(test, feature = "remote"))]
 pub(crate) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bool, usize)> {
