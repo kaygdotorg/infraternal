@@ -16,8 +16,8 @@ use infraternal_plugin_mesh::{
 };
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 const A: &str = "00000000-0000-4000-8000-00000000000a";
@@ -310,7 +310,8 @@ fn poll_cost() {
                 let page = serde_json::json!({"peers":rows,"version":4,"next_cursor":if more {last.map(|node| serde_json::json!({"version":4,"node":node}))} else {None}});
                 let wire = serde_json::to_vec(&page).unwrap();
                 let page: serde_json::Value = serde_json::from_slice(&wire).unwrap();
-                match infraternal_plugin_mesh::presence::read_peers(&page, 1_800_000_000, &mut live) {
+                match infraternal_plugin_mesh::presence::read_peers(&page, 1_800_000_000, &mut live)
+                {
                     Some(next) => cursor = next["node"].as_u64(),
                     None => break,
                 }
