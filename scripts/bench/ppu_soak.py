@@ -153,17 +153,30 @@ class Peer:
     @classmethod
     async def connect(cls, path):
         reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(path), 30)
-        hello = await cls.frame(reader)
-        assert len(hello) == 59 and hello[0] == 1, 'invalid frozen Hello'
-        pid = struct.unpack_from('<I', hello, 27)[0]
-        head = struct.unpack_from('<Q', hello, 43)[0]
-        peer = cls(reader, writer, head, pid)
-        await peer.send(2, struct.pack('<Q', CAPS))
-        await peer.send(0x1b, struct.pack('<I', WRITER))
-        await peer.send(0x19)
-        peer.accepted = await asyncio.wait_for(peer.state, 30)
-        await peer.send(0x13, struct.pack('<Q', head))
-        return peer
+        peer = None
+        try:
+            hello = await cls.frame(reader)
+            assert len(hello) == 59 and hello[0] == 1, 'invalid frozen Hello'
+            pid = struct.unpack_from('<I', hello, 27)[0]
+            head = struct.unpack_from('<Q', hello, 43)[0]
+            peer = cls(reader, writer, head, pid)
+            await peer.send(2, struct.pack('<Q', CAPS))
+            await peer.send(0x1b, struct.pack('<I', WRITER))
+            await peer.send(0x19)
+            peer.accepted = await asyncio.wait_for(peer.state, 30)
+            await peer.send(0x13, struct.pack('<Q', head))
+            return peer
+        except (Exception, asyncio.CancelledError):
+            # Churn can be cancelled before the caller receives the new peer.
+            # Retire this setup's socket and task here; Host.close cannot find
+            # a peer that was never published into its owned session list.
+            if peer is not None:
+                await peer.close()
+            else:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+            raise
 
     @staticmethod
     async def frame(reader):

@@ -182,6 +182,52 @@ class MemoryPhases(unittest.IsolatedAsyncioTestCase):
 
 
 class Framing(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_connect_closes_the_writer_and_joins_its_reader(self):
+        for phase in ('hello', 'state'):
+            with self.subTest(phase=phase):
+                reader = asyncio.StreamReader()
+                ready = asyncio.Event()
+                before = asyncio.all_tasks()
+                class Writer:
+                    closed = False
+                    def write(self, frame):
+                        if frame[4] == 0x19:
+                            ready.set()
+                    async def drain(self):
+                        pass
+                    def close(self):
+                        self.closed = True
+                    async def wait_closed(self):
+                        pass
+                writer = Writer()
+                read = reader.readexactly
+                async def receiving(length):
+                    if phase == 'hello':
+                        ready.set()
+                    return await read(length)
+                reader.readexactly = receiving
+                async def opened(*unused):
+                    return reader, writer
+                if phase == 'state':
+                    hello = struct.pack('<BHQ16sIHHQQQ', 1, 1, 31, bytes(16), 42, 80, 24, 0, 0, 0)
+                    reader.feed_data(struct.pack('<I', len(hello)) + hello)
+                with patch.object(ppu.asyncio, 'open_unix_connection', side_effect=opened):
+                    connecting = asyncio.create_task(ppu.Peer.connect('unused'))
+                    try:
+                        await asyncio.wait_for(ready.wait(), 3)
+                        connecting.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await connecting
+                        self.assertTrue(writer.closed, 'cancelled setup retained its viewer socket')
+                        self.assertFalse(asyncio.all_tasks() - before,
+                                         'cancelled setup retained its receive task')
+                    finally:
+                        # A red test still owns and retires every task it made.
+                        pending = asyncio.all_tasks() - before
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+
     async def test_oversized_or_zero_frame_rejected_before_payload(self):
         for length in (0, ppu.MAX_FRAME + 1):
             reader = asyncio.StreamReader()
