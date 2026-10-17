@@ -1,4 +1,4 @@
-//! Accumulates consecutive Credit without occupying the bounded ordered FIFO; credit fences preserve Input/Resize recovery order [130], #78.
+//! Accumulates Credit and skips probes at capacity while preserving bounded Input/Resize recovery order [130], #78, #234.
 use super::Command;
 use tokio::sync::{mpsc, watch};
 
@@ -70,19 +70,24 @@ impl Sender {
             }
         } else {
             let credit_before = *self.credits.borrow();
-            self.raw
-                .try_send(Ordered {
-                    command,
-                    credit_before,
-                })
-                .map_err(|error| match error {
-                    mpsc::error::TrySendError::Full(ordered) => {
-                        mpsc::error::TrySendError::Full(ordered.command)
-                    }
-                    mpsc::error::TrySendError::Closed(ordered) => {
-                        mpsc::error::TrySendError::Closed(ordered.command)
-                    }
-                })
+            match self.raw.try_send(Ordered {
+                command,
+                credit_before,
+            }) {
+                // A probe cannot displace accepted input or retire its writer
+                // under local pressure. Its caller retains the reply deadline.
+                Ok(())
+                | Err(mpsc::error::TrySendError::Full(Ordered {
+                    command: Command::Ping(..),
+                    ..
+                })) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(ordered)) => {
+                    Err(mpsc::error::TrySendError::Full(ordered.command))
+                }
+                Err(mpsc::error::TrySendError::Closed(ordered)) => {
+                    Err(mpsc::error::TrySendError::Closed(ordered.command))
+                }
+            }
         }
     }
 }

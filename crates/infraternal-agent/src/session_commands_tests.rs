@@ -107,3 +107,25 @@ async fn credit_allowance_does_not_cross_ordered_command_barriers() {
         Some(Command::Resize(80, 24, 0, 0))
     ));
 }
+
+#[tokio::test]
+async fn probe_at_full_command_capacity_preserves_accepted_input() {
+    let (mut sender, mut receiver) = channel();
+    for seq in 0..8 {
+        sender.try_send(Command::Input(seq, vec![b'x'])).unwrap();
+    }
+    assert!(
+        sender.try_send(Command::Ping(41, 73)).is_ok(),
+        "probe overload must not retire the terminal"
+    );
+    for seq in 0..8 {
+        assert!(matches!(receiver.next().await, Some(Command::Input(actual, _)) if actual == seq));
+    }
+    sender.try_send(Command::Ping(42, 74)).unwrap();
+    assert!(matches!(receiver.next().await, Some(Command::Ping(42, 74))));
+    drop(receiver);
+    assert!(matches!(
+        sender.try_send(Command::Ping(43, 75)),
+        Err(mpsc::error::TrySendError::Closed(_))
+    ));
+}
