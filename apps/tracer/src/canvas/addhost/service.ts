@@ -106,4 +106,6 @@ export interface EnrolledHost {
 export interface AddHostSink {
   /** Called once per batch result with the hosts that are ready, in the order they finished. */
   enrolled(hosts: EnrolledHost[]): void;
+  /** Opens a new terminal on a host that is already added (the failure named it); the canvas focuses it. */
+  openHost?(hostId: string): void;
 }

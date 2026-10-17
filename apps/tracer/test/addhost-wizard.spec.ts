@@ -7,7 +7,7 @@
 import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 
-type Probe = { views(): Array<{ id: string; windows: string[] }> };
+type Probe = { views(): Array<{ id: string; windows: string[] }>; activeWindow(): string | undefined };
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
@@ -504,6 +504,24 @@ test("a setup that is still running: wait, then try again", async ({ page }) => 
 });
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`an already-added host offers its terminal and shows no empty Details at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "added.lab");
+    await expect(page.getByRole("heading", { name: "added.lab is already added" })).toBeVisible({ timeout: 15_000 });
+    const failure = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(failure.locator(".ah-lede")).toHaveText("It's already in Console.");
+    await expect(failure.locator(".ah-text")).toHaveCount(0);
+    await expect(failure.locator(".ah-details")).toHaveCount(0);
+    await expect(inWizard(page, "Back")).toBeVisible();
+    await page.screenshot({ path: tracerEvidencePath("already-added-open", `after-${viewport.width}.png`) });
+    await inWizard(page, "Open a terminal").click();
+    await gone(page);
+    // The same thing the palette's "Open shell on <host>" does: that host's terminal is the focused window.
+    await expect.poll(() => probe(page, (p) => p.activeWindow())).toContain("build-01");
+  });
+
   test(`connect failure has one summary and distinct Details at ${viewport.width}`, async ({ page }) => {
     await open(page);
     await page.setViewportSize(viewport);

@@ -123,7 +123,7 @@ const GENERIC_ADVICE = "Try again, or open the details to see where it stopped."
 
 /** Plain-language account of a failed host. `name` is what the person typed or picked. */
 export function guideFor(name: string, failure: FailureDetail | undefined): Guide {
-  if (failure?.already_added) return { title: `${name} is already added`, happened: failure.message, next: "Open its terminal from Console or the command palette.", fix: "none", tone: "info" };
+  if (failure?.already_added) return { title: `${name} is already added`, happened: "It's already in Console.", next: "", fix: "none", tone: "info" };
   switch (failure?.kind) {
     case "unreachable": return {
       title: `${name} isn't answering`,
@@ -256,7 +256,8 @@ export const looksLikeSshConfig = (text: string): boolean => /^\s*Host\s+\S/im.t
 
 /** Details retain diagnostic evidence once, excluding sentences already displayed in the failure card. */
 export function failureDiagnostics(failure: FailureDetail | undefined, guide: Guide): string[] {
-  if (!failure) return [];
+  // The server's sentence for a duplicate says what the page already says; there is nothing more to show.
+  if (!failure || failure.already_added) return [];
   const visible = `${guide.happened} ${guide.next}`;
   const evidence = [failure.kind !== "stale_previous_attempt" ? failure.message : "", ...failure.log_tail];
   return [...new Set(evidence.filter((line) => line && !visible.includes(line)))];

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, test } from "bun:test";
 import { awaitingFresh, foldEvent, pendingTarget, type BootstrapEvent, type FailureKind } from "../../provisioning-client";
-import { authLabel, failureLine, guideFor, looksLikeSshConfig, matchListed, parseSshConfig, parseTarget, stagesOf } from "./model";
+import { authLabel, failureDiagnostics, failureLine, guideFor, looksLikeSshConfig, matchListed, parseSshConfig, parseTarget, stagesOf } from "./model";
 
 const event = (step: BootstrapEvent["step"], extra: Partial<BootstrapEvent> = {}): BootstrapEvent => ({ sequence: 1, target: "h", attempt: 1, step, message: `${step} message`, elapsed_ms: 1, log_tail: [], ...extra });
 const fold = (...events: BootstrapEvent[]) => events.reduce(foldEvent, pendingTarget());
@@ -211,7 +211,8 @@ test("missing payload tells the operator the architecture and expected server pa
 test("an already added host says so and offers opening its existing terminal", () => {
   const failure = { kind: "install" as const, message: "This host is already added. Open its terminal from Console.", log_tail: [], already_added: true };
   expect(guideFor("worker", failure).title).toBe("worker is already added");
-  expect(guideFor("worker", failure).happened).toContain("already added");
+  expect(guideFor("worker", failure)).toMatchObject({ happened: "It's already in Console.", next: "" });
+  expect(failureDiagnostics(failure, guideFor("worker", failure))).toEqual([]);
   expect(guideFor("worker", failure).fix).toBe("none");
 });
 
