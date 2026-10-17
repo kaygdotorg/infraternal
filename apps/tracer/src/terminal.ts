@@ -916,7 +916,7 @@ export class TerminalClient {
       case "Close":
         if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
         this.setStatus(plainCloseReason(frame.reason));
-        if (this.ownsConnection) this.conn.forceClose();
+        if (this.ownsConnection) this.conn.forceClose(frame.code, frame.reason);
         else this.retryStream();
         return;
       default:

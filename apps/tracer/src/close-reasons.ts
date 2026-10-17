@@ -62,7 +62,8 @@ export class CloseNotes {
   private windowStart = Number.NEGATIVE_INFINITY;
   private suppressed = 0;
 
-  note(now: number, code: number | undefined, reason: string | undefined, attempt: number, welcomed: boolean): string | undefined {
+  /** `by` names who closed: "the server" for a named Close frame, "this page" for its own checks. */
+  note(now: number, code: number | undefined, reason: string | undefined, attempt: number, welcomed: boolean, by = "the server or network"): string | undefined {
     if (now - this.windowStart < CLOSE_NOTE_WINDOW_MS) {
       this.suppressed += 1;
       return undefined;
@@ -74,6 +75,6 @@ export class CloseNotes {
     const safe = key === "" ? "none" : known(key) !== undefined ? key : "other";
     const phase = welcomed ? "after the connection was established" : "before the connection was established (reconnect failed)";
     const more = repeats > 0 ? `; ${repeats} more closes in the previous 60 s` : "";
-    return `Connection to the server closed ${phase}: closed by the server or network, code ${code ?? 0}, reason "${safe}", reconnect attempt ${attempt}${more}`;
+    return `Connection to the server closed ${phase}: closed by ${by}, code ${code ?? 0}, reason "${safe}", reconnect attempt ${attempt}${more}`;
   }
 }
