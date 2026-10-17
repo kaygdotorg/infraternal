@@ -156,6 +156,131 @@ for before, after in edits:
     assert source.count(before) == 1, 'native screen resize boundary changed: ' + before
     source = source.replace(before, after)
 screen.write_text(source)
+# Pages here hold 80x32 cells, so a row wider than 80 columns fits fewer
+# rows per page: widening a full history to 133 columns needs ~1.7x its
+# bytes, at 400 columns ~5x, and the reflow allocates all of it before
+# any prune. That crossed the session reservation and refused the resize.
+# Before a wider resize, drop the oldest whole history pages that the new
+# width could not keep within the history share; prune would drop them on
+# the next output anyway. Only node metadata is read.
+pages = root / 'src/terminal/PageList.zig'
+source = pages.read_text()
+call_before = '    self.page_compression.reset();\n    self.page_compression.markActivity();\n\n    if (comptime std.debug.runtime_safety) {\n'
+call_after = '    self.page_compression.reset();\n    self.page_compression.markActivity();\n    if (opts.cols) |cols| self.trimHistoryForCols(cols, opts.reflow);\n\n    if (comptime std.debug.runtime_safety) {\n'
+anchor = '/// Resize the pagelist with reflow by adding or removing columns.\nfn resizeCols(\n'
+trim = '''/// Shared-host history bound for a wider geometry [D270, #205]. Whole
+/// pages from the oldest end only, never a page with active rows, so
+/// tracked pins and the cursor keep their rows.
+fn trimHistoryForCols(self: *PageList, cols: size.CellCountInt, reflow: bool) void {
+    if (cols <= self.cols) return;
+    const max = self.maxSize();
+    // Cheap metadata bound first: every row kept, none unwrapped. It holds
+    // for most resizes, which then read no page memory at all.
+    var bound: usize = 0;
+    var it = self.pages.first;
+    while (it) |node| : (it = node.next) bound +|= widenedNodeBytes(node, cols);
+    if (bound <= max) return;
+    const history = self.total_rows - self.rows;
+    var erase: usize = 0;
+    if (!reflow) {
+        // Without reflow every page is copied on its own, as the bound counts.
+        it = self.pages.first;
+        while (it) |node| : (it = node.next) {
+            if (bound <= max or erase + node.rows() > history) break;
+            erase += node.rows();
+            bound -|= widenedNodeBytes(node, cols);
+        }
+    } else {
+        // Reflow packs unwrapped lines into pages of the first page's shape.
+        const shape = widenedShape(self.pages.first.?.capacity(), cols);
+        var line: usize = 0;
+        var rows: usize = 0;
+        it = self.pages.first;
+        while (it) |node| : (it = node.next) rows += reflowedRows(node, cols, &line);
+        rows += lineRows(line, cols);
+        line = 0;
+        it = self.pages.first;
+        while (it) |node| : (it = node.next) {
+            const bytes = (std.math.divCeil(usize, rows, shape.rows) catch unreachable) * shape.bytes;
+            if (bytes <= max or erase + node.rows() > history) break;
+            erase += node.rows();
+            rows -|= reflowedRows(node, cols, &line);
+        }
+    }
+    if (erase == 0) return;
+    // Never keep the tail of a line whose head is gone: the orphaned rows
+    // would reflow as a line of their own.
+    if (self.pin(.{ .history = .{ .y = @intCast(erase - 1) } })) |last| {
+        var next = last.down(1);
+        while (next) |p| : (next = p.down(1)) {
+            if (erase >= history or !p.rowAndCell().row.wrap_continuation) break;
+            erase += 1;
+        }
+    }
+    self.eraseHistory(.{ .history = .{ .y = @intCast(erase - 1) } });
+}
+
+const WidenedShape = struct { rows: usize, bytes: usize };
+
+/// Rows per page and bytes per page once `capacity` is `cols` wide, as
+/// reflow and the no-reflow copy allocate them: pool items or heap pages.
+fn widenedShape(capacity: Capacity, cols: size.CellCountInt) WidenedShape {
+    const cap = capacity.adjust(.{ .cols = cols }) catch wide: {
+        var cap = capacity;
+        cap.cols = cols;
+        cap.rows = @max(1, @min(capacity.rows, std_capacity.rows));
+        break :wide cap;
+    };
+    const total = Page.layout(cap).total_size;
+    return .{ .rows = cap.rows, .bytes = if (total <= std_size) PagePool.item_size else total };
+}
+
+fn widenedNodeBytes(node: *const List.Node, cols: size.CellCountInt) usize {
+    const capacity = node.capacity();
+    if (capacity.cols >= cols) return switch (node.owned) {
+        .pool => PagePool.item_size,
+        .heap => node.metadata().memory.len,
+    };
+    const shape = widenedShape(capacity, cols);
+    return (std.math.divCeil(usize, node.rows(), shape.rows) catch unreachable) * shape.bytes;
+}
+
+/// Rows one logical line of `cells` takes at `cols`; blank lines keep a row.
+fn lineRows(cells: usize, cols: size.CellCountInt) usize {
+    return @max(1, std.math.divCeil(usize, cells, cols) catch unreachable);
+}
+
+/// Rows the lines ending in `node` take after reflow to `cols`. `line`
+/// carries the cells of a line that continues into the next node. Widths
+/// follow reflowRow: wrapped rows count in full, the last row of a line
+/// without its trailing blanks.
+fn reflowedRows(node: *List.Node, cols: size.CellCountInt, line: *usize) usize {
+    const page = node.page();
+    var rows: usize = 0;
+    for (page.rows.ptr(page.memory)[0..page.size.rows]) |*row| {
+        if (!row.wrap_continuation and line.* > 0) {
+            rows += lineRows(line.*, cols);
+            line.* = 0;
+        }
+        var used: usize = page.size.cols;
+        if (!row.wrap) {
+            const cells = page.getCells(row);
+            while (used > 0 and cells[used - 1].isEmpty()) used -= 1;
+        }
+        if (used == 0 and !row.wrap_continuation and line.* == 0) {
+            rows += 1;
+            continue;
+        }
+        line.* += used;
+    }
+    return rows;
+}
+
+'''
+for before, after in ((call_before, call_after), (anchor, trim + anchor)):
+    assert source.count(before) == 1, 'native resize boundary changed: ' + before
+    source = source.replace(before, after)
+pages.write_text(source)
 # Restoring cold pages decodes into a retained mapping. Keep the decoder's
 # bounds checks in release builds too: a damaged page then stops the
 # process instead of writing past its mapping into a neighbour's memory.

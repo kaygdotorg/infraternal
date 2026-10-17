@@ -216,3 +216,38 @@ fn page_nodes_never_fill_the_ordinary_data_cap() {
         );
     }
 }
+
+/// PPU-R3-1 (#205): a row wider than the 80x32 standard page fits fewer
+/// rows per page, so widening a full history needs more bytes than the
+/// share (about 1.7x at 133 columns, 5x at 400) and the resize allocated
+/// all of it before any prune. Widening now keeps the newest history that
+/// fits the share at the new width, with and without reflow.
+#[test]
+fn widening_a_full_history_stays_inside_its_share() {
+    let history = 17 * 1024 * 1024;
+    let stream = super::review_r3_default::mixed_stream(40_000);
+    for wraparound in [true, false] {
+        let mut terminal = Terminal::with_history_budget(80, 24, history).unwrap();
+        terminal.process(b"\x1bc");
+        if !wraparound {
+            terminal.process(b"\x1b[?7l");
+        }
+        for chunk in stream.chunks(4096) {
+            terminal.process(chunk);
+        }
+        for (cols, rows) in [(133, 40), (400, 100), (80, 24), (400, 160), (200, 50)] {
+            terminal.resize(cols, rows).unwrap();
+            let (used, peak, refused) = terminal.memory();
+            let kept = terminal.retained_history_rows();
+            eprintln!(
+                "wraparound {wraparound} {cols}x{rows}: used {used} peak {peak} history rows {kept}"
+            );
+            assert!(!refused, "{cols}x{rows}: refused");
+            assert!(kept > 1000, "{cols}x{rows}: kept only {kept} history rows");
+            let limit = SCREEN_RESERVATION + history + history / ITEM_HEADER_SHARE;
+            assert!(peak <= limit, "{cols}x{rows}: peak {peak} over {limit}");
+        }
+        terminal.process(b"after widening\r\n");
+        assert!(!terminal.memory().2);
+    }
+}
