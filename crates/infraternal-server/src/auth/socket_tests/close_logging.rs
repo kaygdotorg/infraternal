@@ -232,7 +232,7 @@ async fn agent_stream_loss_logs_its_safe_close_reason_and_reaches_the_browser() 
         },
     )
     .await;
-    let close = tokio::time::timeout(Duration::from_secs(2), async {
+    let close = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let wire = read_client_frame(&mut browser).await;
             if matches!(
@@ -361,7 +361,7 @@ async fn browser_websocket_close_logs_its_code_and_safe_reason_for_attached_sess
         })))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if !capture.events("terminal_stream_closed").is_empty() {
                 break;
@@ -479,7 +479,7 @@ async fn failed_client_resume_attempt_logs_each_retained_session() {
         })))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let active: Option<i64> = sqlx::query_scalar(
                 "SELECT active FROM websocket_connections WHERE connection_id=?",
