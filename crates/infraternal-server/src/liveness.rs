@@ -1,4 +1,11 @@
 //! Bounded correlated Ping/Pong deadlines for pipelined and answer-paced routes [D265, #199].
+//!
+//! Host routes follow the measured path [D300]: a reply held behind one lost
+//! packet on the ordered stream is retransmitted after about one more round
+//! trip, so their allowance spans two smoothed round trips. The primary host
+//! link only reports doubt on its first miss and retires on the second
+//! consecutive one; terminal routes and browser routes end their lease on the
+//! first miss, because their consumers rebind without cutting a shared link.
 
 use std::{collections::VecDeque, time::Duration};
 use tokio::time::Instant;
@@ -11,6 +18,21 @@ const SERIAL_GAP: Duration = Duration::from_millis(26);
 // transport timeouts. Slow routes instead follow their measured RTT and jitter.
 const RESPONSE_FLOOR: Duration = Duration::from_millis(250);
 const RESPONSE_MARGIN: Duration = Duration::from_millis(50);
+// Covers the peer's acknowledgement delay on top of one retransmission [D300].
+const HOST_MARGIN: Duration = Duration::from_millis(75);
+// Bounds dead-host detection on slow or jittery paths; also the startup grace.
+const RESPONSE_CEILING: Duration = Duration::from_secs(2);
+
+/// Which reply allowance and miss policy a route follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Allowance {
+    /// Browser routes: approximately one round trip [D265, #199].
+    Browser,
+    /// Host terminal routes: two round trips; the first miss ends the lease.
+    Terminal,
+    /// The primary host link: two round trips; the first miss only raises doubt.
+    HostLink { doubt: bool },
+}
 
 pub(crate) struct Liveness {
     origin: Instant,
@@ -21,6 +43,7 @@ pub(crate) struct Liveness {
     srtt: Option<Duration>,
     rttvar: Duration,
     answer_paced: bool,
+    allowance: Allowance,
     issued: VecDeque<u64>,
 }
 
@@ -34,10 +57,11 @@ impl Liveness {
             acked: 0,
             issued: VecDeque::new(),
             answer_paced: false,
+            allowance: Allowance::Terminal,
             srtt: None,
             rttvar: Duration::ZERO,
             // Before the first sample, allow greeting/replay and an unknown link RTT.
-            budget: Duration::from_secs(2),
+            budget: RESPONSE_CEILING,
         }
     }
 
@@ -45,6 +69,15 @@ impl Liveness {
     pub(crate) fn answer_paced() -> Self {
         Self {
             answer_paced: true,
+            allowance: Allowance::Browser,
+            ..Self::new()
+        }
+    }
+
+    /// The primary host link doubts before it retires [D300].
+    pub(crate) fn host_link() -> Self {
+        Self {
+            allowance: Allowance::HostLink { doubt: false },
             ..Self::new()
         }
     }
@@ -54,7 +87,7 @@ impl Liveness {
     pub(crate) fn restart(&mut self) {
         self.answered = Instant::now();
         self.acked = 0;
-        self.budget = Duration::from_secs(2);
+        self.budget = RESPONSE_CEILING;
         self.srtt = None;
         self.rttvar = Duration::ZERO;
         self.issued.clear();
@@ -105,8 +138,8 @@ impl Liveness {
         self.sent = u64::try_from(self.origin.elapsed().as_micros())
             .unwrap_or(u64::MAX)
             .max(self.sent.saturating_add(1));
-        // The startup grace admits at most 80 ticks; bound retained correlation
-        // even if a caller pipelines faster. Eviction cannot renew readiness.
+        // Two ceiling allowances admit at most 160 ticks; bound retained
+        // correlation regardless. Eviction cannot renew readiness.
         if self.issued.len() == 128 {
             self.issued.pop_front();
         }
@@ -120,7 +153,7 @@ impl Liveness {
         if nonce != sent_us
             || nonce <= self.acked
             || !self.issued.contains(&nonce)
-            || self.expired()
+            || self.retired()
         {
             return false;
         }
@@ -143,12 +176,46 @@ impl Liveness {
             rtt
         };
         self.srtt = Some(srtt);
-        self.budget = (srtt + self.rttvar * 4 + RESPONSE_MARGIN).max(RESPONSE_FLOOR);
+        self.budget = if self.allowance == Allowance::Browser {
+            (srtt + self.rttvar * 4 + RESPONSE_MARGIN).max(RESPONSE_FLOOR)
+        } else {
+            (srtt * 2 + self.rttvar * 4 + HOST_MARGIN).clamp(RESPONSE_FLOOR, RESPONSE_CEILING)
+        };
+        if let Allowance::HostLink { doubt } = &mut self.allowance {
+            *doubt = false;
+        }
         true
     }
 
     pub(crate) fn expired(&self) -> bool {
         !self.issued.is_empty() && self.answered.elapsed() > self.budget
+    }
+
+    /// True once per episode when a proven host link misses its first reply.
+    /// An unproven link has no health to doubt; it retires at the startup grace.
+    pub(crate) fn doubt_started(&mut self) -> bool {
+        let expired = self.acked != 0 && self.expired();
+        match &mut self.allowance {
+            Allowance::HostLink { doubt } if expired && !*doubt => {
+                *doubt = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn doubtful(&self) -> bool {
+        self.allowance == Allowance::HostLink { doubt: true }
+    }
+
+    /// The lease is over: a host link after its second consecutive allowance,
+    /// every other route after its first. No reply can renew it afterwards.
+    pub(crate) fn retired(&self) -> bool {
+        if matches!(self.allowance, Allowance::HostLink { .. }) && self.acked != 0 {
+            !self.issued.is_empty() && self.answered.elapsed() > self.budget * 2
+        } else {
+            self.expired()
+        }
     }
 }
 
@@ -402,5 +469,130 @@ mod tests {
             route.next_probe_due(false),
             Some(Instant::now() + SERIAL_GAP)
         );
+    }
+
+    /// Settles a route on one constant round trip.
+    async fn settle(route: &mut Liveness, rtt: Duration, samples: usize) {
+        for _ in 0..samples {
+            let (nonce, stamp) = route.ping();
+            tokio::time::advance(rtt).await;
+            assert!(route.pong(nonce, stamp));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_allowance_covers_one_loss_recovery_and_browser_routes_keep_theirs() {
+        let mut host = Liveness::new();
+        let mut browser = Liveness::answer_paced();
+        tokio::time::advance(TICK).await;
+        for rtt in [100, 200] {
+            let (host_nonce, host_stamp) = host.ping();
+            let (browser_nonce, browser_stamp) = browser.ping();
+            tokio::time::advance(Duration::from_millis(rtt)).await;
+            assert!(host.pong(host_nonce, host_stamp));
+            assert!(browser.pong(browser_nonce, browser_stamp));
+        }
+        // srtt 112.5 ms, rttvar 62.5 ms: 2 x 112.5 + 4 x 62.5 + 75 = 550 ms [D300].
+        assert_eq!(host.budget, Duration::from_millis(550));
+        assert_eq!(browser.budget, Duration::from_micros(412_500));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_allowance_has_a_floor_a_settled_long_haul_value_and_a_ceiling() {
+        let mut lan = Liveness::new();
+        settle(&mut lan, Duration::from_millis(1), 50).await;
+        assert_eq!(
+            lan.budget,
+            Duration::from_millis(250),
+            "LAN keeps the floor"
+        );
+        let mut long_haul = Liveness::new();
+        settle(&mut long_haul, Duration::from_millis(150), 200).await;
+        // One retransmission of a lost ordered reply costs about one more round trip.
+        assert!(long_haul.budget >= Duration::from_millis(375));
+        assert!(long_haul.budget < Duration::from_millis(380));
+        let mut far = Liveness::new();
+        settle(&mut far, Duration::from_millis(1500), 20).await;
+        assert_eq!(
+            far.budget,
+            Duration::from_secs(2),
+            "dead-host detection stays bounded"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_link_doubts_on_the_first_miss_and_retires_on_the_second() {
+        let mut route = Liveness::host_link();
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(nonce, stamp));
+        tokio::time::advance(TICK).await;
+        route.ping();
+        let budget = route.budget;
+        tokio::time::advance(budget).await;
+        assert!(
+            !route.doubt_started(),
+            "the allowance boundary is inclusive"
+        );
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert!(route.doubt_started(), "the first miss marks doubt");
+        assert!(!route.doubt_started(), "doubt is reported once per episode");
+        assert!(route.doubtful());
+        assert!(!route.retired(), "one miss never retires the link");
+        // Probes pipelined during doubt cannot renew the outstanding deadline.
+        route.ping();
+        tokio::time::advance(budget.checked_sub(Duration::from_nanos(1)).unwrap()).await;
+        assert!(!route.retired());
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert!(route.retired(), "the second consecutive miss retires");
+        let (nonce, stamp) = route.ping();
+        assert!(
+            !route.pong(nonce, stamp),
+            "a retired lease cannot be revived"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_during_doubt_clears_it_and_renews_the_route() {
+        let mut route = Liveness::host_link();
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(nonce, stamp));
+        tokio::time::advance(TICK).await;
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(route.budget + Duration::from_millis(100)).await;
+        assert!(route.doubt_started());
+        // The reply held behind one lost packet arrives inside the second allowance.
+        assert!(route.pong(nonce, stamp));
+        assert!(!route.doubtful());
+        assert!(!route.expired());
+        assert!(!route.retired());
+        assert!(route.response_deadline().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_host_link_retires_at_the_startup_grace_without_doubt() {
+        let mut route = Liveness::host_link();
+        route.ping();
+        tokio::time::advance(Duration::from_secs(2) + Duration::from_nanos(1)).await;
+        assert!(
+            !route.doubt_started(),
+            "an unproven link has no health to doubt"
+        );
+        assert!(route.retired());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_routes_still_end_their_lease_on_the_first_miss() {
+        let mut route = Liveness::new();
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(nonce, stamp));
+        tokio::time::advance(TICK).await;
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(route.budget + Duration::from_nanos(1)).await;
+        assert!(!route.doubt_started());
+        assert!(route.retired());
+        assert!(!route.pong(nonce, stamp));
     }
 }

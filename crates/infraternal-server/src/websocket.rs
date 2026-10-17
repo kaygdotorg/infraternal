@@ -888,6 +888,7 @@ where
     let Some(attachment) = attachments.get_mut(&stream_id) else {
         return Ok(());
     };
+    let recovered = matches!(output, TerminalOutput::Recovered);
     let sent = match output {
         TerminalOutput::Output { out_seq, bytes } => {
             let Some(end) = out_seq.checked_add(bytes.len() as u64) else {
@@ -969,13 +970,21 @@ where
             .await
             .is_ok()
         }
-        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired => {
-            attachment.awaiting_ack = true;
-            let notice = serde_json::to_vec(&json!({
-                "type": "terminal.reconnecting",
-                "session_id": uuid::Uuid::from_bytes(attachment.session_id).to_string(),
-            }))
-            .map_err(|_| ())?;
+        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired | TerminalOutput::Recovered => {
+            let session_id = uuid::Uuid::from_bytes(attachment.session_id).to_string();
+            let notice = if recovered {
+                // The host link never changed, so readiness resumes at exactly
+                // the bytes this socket already forwarded: no replay [D300].
+                json!({
+                    "type": "terminal.replay_complete",
+                    "session_id": session_id,
+                    "out_seq": attachment.last_out_seq.to_string(),
+                })
+            } else {
+                attachment.awaiting_ack = true;
+                json!({"type": "terminal.reconnecting", "session_id": session_id})
+            };
+            let notice = serde_json::to_vec(&notice).map_err(|_| ())?;
             send_frame(
                 sink,
                 stream_id,

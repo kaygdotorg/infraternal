@@ -739,3 +739,6 @@ mod control_queue;
 
 #[path = "remote_control_pause_tests.rs"]
 mod control_pause;
+
+#[path = "remote_liveness_doubt_tests.rs"]
+mod liveness_doubt;

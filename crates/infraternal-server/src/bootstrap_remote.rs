@@ -955,6 +955,7 @@ async fn canary_output(
             TerminalOutput::Closed { .. } => break,
             TerminalOutput::Ack { .. }
             | TerminalOutput::Reconnecting
+            | TerminalOutput::Recovered
             | TerminalOutput::RouteExpired => {}
         }
     }

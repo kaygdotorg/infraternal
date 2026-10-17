@@ -92,6 +92,9 @@ pub(crate) enum TerminalOutput {
     Ack { in_seq_acked: u64 },
     /// The shared host link is rebinding; keep this stream and its input writer.
     Reconnecting,
+    /// The shared host link answered again after doubt, without rebinding:
+    /// confirm readiness at the bytes already forwarded [D300].
+    Recovered,
     /// A route expired; only an authenticated browser consumer may request rebind.
     RouteExpired,
     /// The agent retired one terminal stream.
@@ -850,7 +853,9 @@ async fn run_actor(
     #[cfg(not(feature = "remote"))]
     let mut writes = ();
     let mut probe_queue = std::collections::VecDeque::new();
-    let mut liveness = Liveness::new();
+    let mut liveness = Liveness::host_link();
+    // Windows told about the current doubt episode; only they get its recovery.
+    let mut doubted = Vec::new();
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -878,7 +883,7 @@ async fn run_actor(
                     if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                         writes.stop().await;
                         // The promoted connection has not answered this route's probes yet.
-                        liveness = Liveness::new();
+                        liveness = Liveness::host_link();
                     }
                     process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
                 },
@@ -909,7 +914,7 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
-                liveness = Liveness::new();
+                liveness = Liveness::host_link();
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -924,7 +929,7 @@ async fn run_actor(
         };
         // Nothing probes an unused host link. A later attachment gets a fresh lease.
         if attachments.is_empty() {
-            liveness = Liveness::new();
+            liveness = Liveness::host_link();
         }
         #[cfg(feature = "remote")]
         let control_ready = writes.can_admit();
@@ -964,7 +969,7 @@ async fn run_actor(
                 if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                     writes.stop().await;
                     // The promoted connection has not answered this route's probes yet.
-                    liveness = Liveness::new();
+                    liveness = Liveness::host_link();
                 }
                 #[cfg(feature = "remote")]
                 process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
@@ -979,7 +984,11 @@ async fn run_actor(
                     write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
                 };
                 let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
-                if (liveness.expired() || !probe_ok
+                // One miss may be a single lost packet held behind retransmission:
+                // the windows show reconnecting and the link stays [D300].
+                let doubt_ok = !liveness.doubt_started()
+                    || notify_doubt(false, &mut doubted, link, &mut attachments, &mut routes, &mut pending).await;
+                if (liveness.retired() || !probe_ok || !doubt_ok
                     || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
@@ -1090,17 +1099,23 @@ async fn run_actor(
                     && serde_json::from_slice::<serde_json::Value>(event_json).is_ok_and(|value|value["type"]=="plugin.event" || value["type"]=="plugins.resync") {
                     changes.send_replace(());continue;
                 }
-                if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
-                    liveness.pong(nonce, sent_us);
-                    continue;
-                }
-                if let Incoming::SessionInventory(ids) = incoming {
+                let ok = if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
+                    // The reply that clears doubt confirms the same windows on the same link.
+                    let doubtful = liveness.doubtful();
+                    if !liveness.pong(nonce, sent_us) || !doubtful
+                        || notify_doubt(true, &mut doubted, link, &mut attachments, &mut routes, &mut pending).await {
+                        continue;
+                    }
+                    false
+                } else if let Incoming::SessionInventory(ids) = incoming {
                     session_inventory
                         .send_replace(SessionInventoryState::Available(Arc::from(ids)));
                     retire_fallback(&attachments, &mut fallback).await;
                     continue;
-                }
-                if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
+                } else {
+                    process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await
+                };
+                if !ok {
                     let link = connection.take();
                     if let Some(link) = link {
                         #[cfg(feature = "remote")]
@@ -2603,6 +2618,60 @@ fn connection_lost(
     // An old child gets bounded TERM/KILL cleanup independently of recovery.
     // Accepted shim input and surviving session processes remain authoritative.
     tokio::spawn(cleanup_connection(connection));
+}
+
+/// Tells settled windows that the shared host link is doubtful, or that it
+/// answered again [D300]. Doubt never changes the link, and recovery confirms
+/// only the windows that doubt reached; replays and rebinds own their fences.
+/// A consumer too far behind for an ordered notice is retired, as for any
+/// other notice, so no window waits for a confirmation it cannot receive.
+async fn notify_doubt(
+    recovered: bool,
+    doubted: &mut Vec<u64>,
+    connection: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+) -> bool {
+    let ids: Vec<u64> = if recovered {
+        std::mem::take(doubted)
+    } else {
+        doubted.clear();
+        attachments.keys().copied().collect()
+    };
+    let mut behind = Vec::new();
+    for id in ids {
+        let Some(a) = attachments.get(&id) else {
+            continue;
+        };
+        if a.awaiting_ack || a.proof_rebind_pending {
+            continue;
+        }
+        let notice = if recovered {
+            TerminalOutput::Recovered
+        } else {
+            TerminalOutput::Reconnecting
+        };
+        if a.output.try_send(notice).is_err() {
+            behind.push(id);
+        } else if !recovered {
+            doubted.push(id);
+        }
+    }
+    for attachment_id in behind {
+        if !process_command(
+            Command::Detach { attachment_id },
+            connection,
+            attachments,
+            routes,
+            pending,
+        )
+        .await
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// A stalled host does not retire its surviving PTYs. A full consumer still
