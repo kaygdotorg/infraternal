@@ -3560,3 +3560,42 @@ async fn review_unrelated_user_relative_socket_does_not_block_stale_cleanup() {
         receipt.exists(),
     );
 }
+
+/// Records generated command lengths; every exec fails at once.
+struct LengthRecorder(std::sync::Mutex<Vec<usize>>);
+impl SshSession for LengthRecorder {
+    fn setup_steps(&self) -> bool {
+        true
+    }
+    fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+        self.0.lock().unwrap().push(script.len());
+        Box::pin(async { Err(Failure::install("recorded")) })
+    }
+}
+
+#[tokio::test]
+async fn every_setup_command_fits_one_kernel_argument_in_both_modes() {
+    // The remote shell receives each program as one `sh -c` argument, which
+    // Linux bounds at 128 KiB (MAX_ARG_STRLEN). Root restaging nests its
+    // cleanup inside the privileged upload step (#230).
+    let f = Fixture::new();
+    for mode in [InstallMode::Rootless, InstallMode::Root] {
+        let recorder = Arc::new(LengthRecorder(std::sync::Mutex::new(Vec::new())));
+        let target = Target {
+            mode,
+            root_consent: mode == InstallMode::Root,
+            ..f.target.clone()
+        };
+        let install = Installation::new(recorder.clone(), &target, &f.join).unwrap();
+        let _ = install.restart_setup_with(&f.binary, &f.join, None).await;
+        let _ = install.stage_and_setup(&f.binary, &f.join).await;
+        let _ = install.rollback().await;
+        let lengths = recorder.0.lock().unwrap().clone();
+        assert_eq!(lengths.len(), 3, "{mode:?}: {lengths:?}");
+        println!("{mode:?} command lengths {lengths:?}");
+        assert!(
+            lengths.iter().all(|length| *length < 131_072),
+            "{mode:?} command lengths {lengths:?}"
+        );
+    }
+}

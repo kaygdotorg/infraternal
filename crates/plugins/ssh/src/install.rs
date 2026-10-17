@@ -425,7 +425,11 @@ impl Installation {
         if let Some(cleanup) = cleanup {
             // Observe the child status explicitly: conditional function calls
             // would disable errexit inside the journal recovery program.
-            let guarded_cleanup = Self::script_for(
+            // The upload step already runs privileged in root mode, so the
+            // child takes only the prelude. A second root wrapper would quote
+            // the cleanup four levels deep and push the root restage command
+            // past the kernel's 128 KiB limit for one argument (#230).
+            let guarded_cleanup = Self::unprivileged_script(
                 self.mode,
                 self.host,
                 self.transaction,
@@ -808,6 +812,29 @@ fi
         transaction: uuid::Uuid,
         body: &str,
     ) -> String {
+        let script = Self::unprivileged_script(mode, host, transaction, body);
+        if mode == InstallMode::Root {
+            format!(
+                "if [ \"$(id -u)\" = 0 ]; then exec sh -c {}; else exec sudo -n sh -c {}; fi",
+                shell_quote(&script),
+                shell_quote(&script)
+            )
+        } else {
+            script
+        }
+    }
+
+    /// The mode's installation variables and ownership prelude, without the
+    /// root privilege wrapper. Only a program already running inside a
+    /// wrapped root step may use it directly (#230).
+    #[cold]
+    #[inline(never)]
+    fn unprivileged_script(
+        mode: InstallMode,
+        host: uuid::Uuid,
+        transaction: uuid::Uuid,
+        body: &str,
+    ) -> String {
         let host = host.simple().to_string();
         let (base, launcher, unit, manager) = match mode {
             InstallMode::Rootless => (
@@ -829,21 +856,12 @@ fi
             "default.target"
         };
         // Existing data must be private to the execution uid before any read or write.
-        let script = format!(
+        format!(
             "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
-        );
-        if mode == InstallMode::Root {
-            format!(
-                "if [ \"$(id -u)\" = 0 ]; then exec sh -c {}; else exec sudo -n sh -c {}; fi",
-                shell_quote(&script),
-                shell_quote(&script)
-            )
-        } else {
-            script
-        }
+        )
     }
 
     /// Join into staged state on private stdin; previous enrolled state remains untouched.
