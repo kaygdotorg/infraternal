@@ -3158,3 +3158,61 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        each piece ships in the app.
      - Still open: which commands live at the root versus under
        `infraternal canvas` (C3), and the exit-code table (C7).
+300. **When the server gives up on a quiet host (owner, 2026-10-17, #234;
+     amends D265):** a missed liveness reply no longer cuts a healthy link.
+     (A) The reply deadline follows the measured path: about twice the
+     smoothed round trip plus four times its variation plus a small margin,
+     so one lost packet's recovery fits (measured at 150 ms with 1% loss:
+     12 cut links in 10 minutes down to 1). (B) One miss only marks the
+     route doubtful and the window shows reconnecting; the link is retired
+     after a second consecutive miss. A dead host is noticed after about
+     0.4 s at 150 ms instead of 0.25 s; LAN is unchanged. (C) sending probes
+     outside the ordered stream is a later, separate design question.
+301. **Size exceptions accepted, trim later (owner, 2026-10-17; one-off
+     D243 exceptions like D298):** replacing a stuck agent (#231/#235,
+     about +53 KB), the honest Mesh view (#236, about +37 KB),
+     connection-close logging (#227, about +37 KB) and edge auto-update
+     (#211, about +636 KB x86_64 / ~800 KB aarch64) ship at their measured
+     sizes; each keeps a trim follow-up and the caps ratchet down with it.
+302. **Remote control rules, completing D297 (owner, 2026-10-17, #170):**
+     1. Plain SSH is not covered by the per-machine switch; the switch says
+        "SSH is separate" (SSH keeps D235/D289 login rules).
+     2. Typing into another person's session needs both an admin's
+        approval for the automation and the session owner's consent (D187).
+     3. Another account on the same machine always asks an admin, whatever
+        the global setting.
+     4. An approval covers what that shell can do, said plainly; opening a
+        new root session or falling back to root needs a fresh approval; AI
+        tools never supply the D274 password.
+     5. "Allow when a rule permits" counts as standing approval for
+        unattended jobs; "Off" means automation is off.
+     6. "A rule permits" means a named "Automate" action in Roles plus Login
+        access and the session's sharing rights; the prompt shows which rule
+        allowed it.
+     7. The per-machine switch needs an admin covering all of the machine's
+        tags (D211); widening the global setting needs an instance-wide admin
+        and a fresh passkey.
+     8. People handing Remote Desktop control follow D294; the switch covers
+        AI tools and `infraternal sessions` only; idle handover never gives
+        control to an AI tool.
+     9. One approval is one described action on one session; a watch lasts
+        until stopped; broader standing permission comes from Roles.
+     10. Automation runs only while the target is connected to the server;
+        losing the link stops it; a cold server restart ends approvals (shells
+        stay); the UI shows "stop requested" apart from "stopped on the
+        machine".
+     The mesh default stays as D216 decided: the community edition allows
+     members to reach each other by default, the enterprise edition starts
+     with no rules (deny).
+303. **CLI layout and exit codes (owner, 2026-10-17, #239; completes D299):**
+     - **Where things happen (C3):** root commands act here, in this
+       terminal: `status`, `machines`, `open <machine>` (a shell right here),
+       `sessions` (list, attach, send, read, close: the D288 automation lives
+       here), `logs`, `mesh`, `access`, `update`, `sign-in`, `up`, `skill`.
+       `infraternal canvas …` acts on the person's screens in the app:
+       `canvas open`, `canvas windows`, `canvas focus`, `canvas close`, and
+       it is how AI tools put something in front of the person.
+     - **Exit codes (C7, POSIX-safe):** 0 ok, 1 failed, 2 usage, 3 not
+       allowed, 4 not found, 5 off or unreachable, 6 partly done, 130
+       interrupted; `status` exits 5 when something that should run is down.
+       The JSON envelope only ever gains fields; a removal bumps its version.
