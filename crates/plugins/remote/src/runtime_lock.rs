@@ -35,7 +35,11 @@ fn directory(path: &Path) -> io::Result<File> {
 #[cold]
 #[inline(never)]
 fn at(file: &File, name: &str) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}/{name}", file.as_raw_fd()))
+    let mut path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    if !name.is_empty() {
+        path.push(name);
+    }
+    path
 }
 fn same(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
@@ -318,8 +322,7 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
             Err(nix::errno::Errno::ECONNREFUSED) => {}
             Err(_) => return Err(77),
         }
-        let resolved =
-            fs::read_link(format!("/proc/self/fd/{}", runtime.as_raw_fd())).map_err(|_| 77)?;
+        let resolved = fs::read_link(at(runtime, "")).map_err(|_| 77)?;
         if legacy_bound(&resolved, &before).map_err(|_| 77)? {
             return Err(73);
         }
