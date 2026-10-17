@@ -19,6 +19,9 @@ fn review_r2_host_history_share_fits_the_native_reservation() {
     for sessions in [1_usize, 4, 10] {
         let history = (64 * 1024 * 1024 / sessions).min(17 * 1024 * 1024);
         let mut terminal = Terminal::with_history_budget(80, 24, history).unwrap();
+        // Faithful snapshots require the RIS-initialized prompt flag; a
+        // fresh native terminal is never certifiable (snapshot.zig).
+        terminal.process(b"\x1bc");
         let mut line = [b'y'; 81];
         line[79] = b'\r';
         line[80] = b'\n';
@@ -90,7 +93,6 @@ fn string(rng: &mut Lcg, filler: usize, out_long: &mut Vec<u8>, out_short: &mut 
         body.push(byte);
     }
     let terminator: &[u8] = match rng.below(if osc { 5 } else { 4 }) {
-        0 => b"\x1b\\",
         1 => b"\x18",
         2 => b"\x1a",
         3 if osc => b"\x07",
@@ -259,7 +261,7 @@ fn review_r2_limiter_is_transparent_for_short_control_mixtures() {
     let shown: Vec<String> = failures
         .iter()
         .take(8)
-        .map(|b| format!("{:02x?}", b))
+        .map(|b| format!("{b:02x?}"))
         .collect();
     assert!(
         failures.is_empty(),
