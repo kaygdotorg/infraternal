@@ -3124,3 +3124,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        Rejected: same machine means allowed.
      - Unattended requests with nobody to approve are denied with a clear
        message (D288 Q2c).
+298. **Real logins ship before their size trim (owner, 2026-10-17, #172;
+     a one-off D243 exception):** "you can ship it now and trim later".
+     Real logins (#172) grow the shipping binary by 311,040 B on x86_64 and
+     274,712 B on aarch64, against D243's 16 KiB allowance. The caps are
+     raised to the measured sizes so SSH over the mesh (#221) is not held
+     up. The trim is still owed: a follow-up measures where the bytes go
+     and removes what is free to cut, and the caps ratchet down with it.
+     This is not a new allowance for other changes.
