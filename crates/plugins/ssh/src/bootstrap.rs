@@ -244,14 +244,32 @@ impl Bootstrap {
         let work = async {
             self.setup
                 .emit(&authority.owner, host, Stage::Install, State::Running, None)?;
-            let channel = saved.installation.resume_session(saved.session_id).await?;
+            let mut installation = saved.installation.clone();
+            let channel = match installation.resume_session(saved.session_id).await {
+                Ok(channel) => channel,
+                Err(failure) if failure.kind == crate::model::FailureKind::Unreachable => {
+                    // Retry is a fresh authorized operation: resolve the stored credential reference and enforce
+                    // SSH host trust again, then reattach only the already-owned shim ID.
+                    let resolved = self
+                        .backend
+                        .resolve(&authority, &saved.target, saved.credential.as_deref())
+                        .await?;
+                    let session = self
+                        .transport
+                        .open(resolved.destination, resolved.credentials, resolved.mesh)
+                        .await?;
+                    installation = installation.with_session(session);
+                    installation.resume_session(saved.session_id).await?
+                }
+                Err(failure) => return Err(failure),
+            };
             self.backend
                 .publish_terminal(
                     &authority,
                     host,
                     saved.session_id,
                     channel,
-                    saved.installation.ssh_session(),
+                    installation.ssh_session(),
                 )
                 .await?;
             // A previous acquisition may have failed before a full image existed.
@@ -260,7 +278,7 @@ impl Bootstrap {
                 .resolve_payload(saved.architecture, false, self.payload_budget(started))
                 .await?;
             let join = self.backend.reissue_invitation(&authority, host).await?;
-            saved.installation.restart_setup(&binary, &join).await?;
+            installation.restart_setup(&binary, &join).await?;
             drop(join);
             for stage in [Stage::Install, Stage::Join, Stage::Start] {
                 self.setup
@@ -268,7 +286,7 @@ impl Bootstrap {
             }
             self.setup
                 .emit(&authority.owner, host, Stage::Ready, State::Running, None)?;
-            self.complete_setup(&authority, host, &saved.installation, true)
+            self.complete_setup(&authority, host, &installation, true)
                 .await?;
             self.setup
                 .emit(&authority.owner, host, Stage::Ready, State::Done, None)
@@ -1010,6 +1028,7 @@ impl Bootstrap {
                             owner: batch.authority.owner.clone(),
                             batch: batch.authority.batch,
                             target: target.clone(),
+                            credential: target.credential.clone().or(batch.credential.clone()),
                             session_id,
                             installation: transaction.clone(),
                             architecture: check.architecture,
@@ -1462,6 +1481,8 @@ struct SetupAttempt {
     owner: String,
     batch: uuid::Uuid,
     target: Target,
+    /// Credential reference only; plaintext material is resolved for each explicit authorized retry.
+    credential: Option<String>,
     session_id: uuid::Uuid,
     installation: Installation,
     architecture: crate::probe::Architecture,

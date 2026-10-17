@@ -97,6 +97,18 @@ pub struct Installation {
     // exact-version image. Neither digest comes from the target or its journal.
     images: Arc<[std::sync::OnceLock<Arc<str>>; 2]>,
 }
+impl Installation {
+    /// Rebind a failed retry to a freshly authenticated SSH route without changing shell ownership or image pins.
+    pub(crate) fn with_session(&self, session: Arc<dyn SshSession>) -> Self {
+        Self {
+            session,
+            host: self.host,
+            transaction: self.transaction,
+            mode: self.mode,
+            images: self.images.clone(),
+        }
+    }
+}
 
 /// Nonsecret rollback coordinates retained for a later retry with fresh SSH credentials.
 #[derive(Clone, Copy)]

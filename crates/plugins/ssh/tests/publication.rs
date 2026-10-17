@@ -265,6 +265,310 @@ async fn failed_setup(
     .unwrap()
 }
 
+struct RecoverableTransport {
+    opens: std::sync::atomic::AtomicUsize,
+    disconnected: Arc<std::sync::atomic::AtomicBool>,
+}
+impl SshTransport for RecoverableTransport {
+    fn open(
+        &self,
+        _: Destination,
+        _: Credentials,
+        _: MeshEvidence,
+    ) -> Operation<'_, Arc<dyn SshSession>> {
+        let generation = self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let disconnected = self.disconnected.clone();
+        Box::pin(async move {
+            Ok(Arc::new(RecoverableSession {
+                generation,
+                disconnected,
+            }) as Arc<dyn SshSession>)
+        })
+    }
+}
+struct RecoverableSession {
+    generation: usize,
+    disconnected: Arc<std::sync::atomic::AtomicBool>,
+}
+impl RecoverableSession {
+    fn available(&self) -> bool {
+        self.generation != 0 || !self.disconnected.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+impl SshSession for RecoverableSession {
+    fn session_bridge(&self) -> bool {
+        true
+    }
+    fn stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        if !self.available() {
+            return Box::pin(async {
+                Err(infraternal_plugin_ssh::model::Failure::new(
+                    infraternal_plugin_ssh::model::FailureKind::Unreachable,
+                    "The SSH connection has closed.",
+                ))
+            });
+        }
+        Receipts.stream(script)
+    }
+    fn run<'a>(&'a self, script: &'a str, _input: Input<'a>) -> Operation<'a, CommandOutput> {
+        if !self.available() {
+            return Box::pin(async {
+                Err(infraternal_plugin_ssh::model::Failure::new(
+                    infraternal_plugin_ssh::model::FailureKind::Unreachable,
+                    "The SSH connection has closed.",
+                ))
+            });
+        }
+        let stdout = if script.contains("INFRATERNAL_CHECK_V1") {
+            b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n".to_vec()
+        } else if script.contains("printf 'reuse\\n'") {
+            b"reuse\n".to_vec()
+        } else if script.contains("enable-linger") {
+            b"no\n".to_vec()
+        } else {
+            Vec::new()
+        };
+        Box::pin(async move { Ok(CommandOutput { stdout }) })
+    }
+}
+
+struct RetryOncePayload {
+    path: std::path::PathBuf,
+    full_calls: std::sync::atomic::AtomicUsize,
+}
+impl infraternal_plugin_ssh::install::PayloadSource for RetryOncePayload {
+    fn session(
+        &self,
+        _: infraternal_plugin_ssh::probe::Architecture,
+    ) -> Operation<'_, Option<std::path::PathBuf>> {
+        let path = self.path.clone();
+        Box::pin(async move { Ok(Some(path)) })
+    }
+    fn get(
+        &self,
+        _: infraternal_plugin_ssh::probe::Architecture,
+    ) -> Operation<'_, std::path::PathBuf> {
+        let call = self
+            .full_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = self.path.clone();
+        Box::pin(async move {
+            if call == 0 {
+                Err(infraternal_plugin_ssh::model::Failure::install(
+                    "the upload was interrupted by the target network reset.",
+                )
+                .at(infraternal_plugin_ssh::model::InstallStep::GetX86_64Binary))
+            } else {
+                Ok(path)
+            }
+        })
+    }
+}
+
+struct RetryBackend {
+    host: uuid::Uuid,
+    disconnect: Arc<std::sync::atomic::AtomicBool>,
+    sessions: std::sync::Mutex<Vec<uuid::Uuid>>,
+    resolves: std::sync::atomic::AtomicUsize,
+}
+impl RetryBackend {
+    fn material(&self) -> JoinMaterial {
+        JoinMaterial {
+            host: self.host,
+            url: "https://fixture.test/join".into(),
+            stdin: Secret::new(b"synthetic-private-input".to_vec()),
+        }
+    }
+}
+impl Backend for RetryBackend {
+    fn early_terminal(&self) -> bool {
+        true
+    }
+    fn resolve<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        credential: Option<&'a str>,
+    ) -> Operation<'a, Resolved> {
+        self.resolves
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(credential, Some("saved-key"));
+        Refused.resolve(authority, target, credential)
+    }
+    fn invitation<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: &'a Target,
+        _: &'a Check,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move { Ok(self.material()) })
+    }
+    fn reissue_invitation<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move { Ok(self.material()) })
+    }
+    fn publish_terminal<'a>(
+        &'a self,
+        _: &'a Authority,
+        host: uuid::Uuid,
+        session: uuid::Uuid,
+        channel: infraternal_plugin_ssh::duplex::Duplex,
+        _: Arc<dyn SshSession>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            assert_eq!(host, self.host);
+            channel.write(b"typed-before-full-image\n").await.unwrap();
+            assert_eq!(
+                channel.line(64).await.unwrap(),
+                b"typed-before-full-image\n"
+            );
+            let mut sessions = self.sessions.lock().unwrap();
+            if sessions.is_empty() {
+                // Model a transport that dies after publishing its usable shell.
+                self.disconnect
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            sessions.push(session);
+            Ok(())
+        })
+    }
+    fn connected_facts<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn terminal_canary<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn failed<'a>(&'a self, _: &'a Authority, _: uuid::Uuid) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+async fn setup_attempt_end(
+    status: &infraternal_plugin_ssh::setup::Status,
+    host: uuid::Uuid,
+    attempt: u32,
+) -> infraternal_plugin_ssh::setup::Event {
+    let mut changed = status.subscribe("owner", host).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(event) =
+                status
+                    .events("owner", host, 0)
+                    .unwrap()
+                    .1
+                    .into_iter()
+                    .find(|event| {
+                        event.attempt == attempt
+                            && (event.state == infraternal_plugin_ssh::setup::State::Failed
+                                || (event.stage == infraternal_plugin_ssh::setup::Stage::Ready
+                                    && event.state == infraternal_plugin_ssh::setup::State::Done))
+                    })
+            {
+                return event;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn retry_reopens_ssh_after_transport_loss_and_keeps_the_published_shell() {
+    let path = common::scratch().join(format!("reconnect-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&path, b"synthetic verified full payload").unwrap();
+    let disconnected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let transport = Arc::new(RecoverableTransport {
+        opens: std::sync::atomic::AtomicUsize::new(0),
+        disconnected: disconnected.clone(),
+    });
+    let backend = Arc::new(RetryBackend {
+        host: uuid::Uuid::new_v4(),
+        disconnect: disconnected,
+        sessions: std::sync::Mutex::new(Vec::new()),
+        resolves: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let source = Arc::new(RetryOncePayload {
+        path: path.clone(),
+        full_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let runner = Bootstrap::new(
+        transport.clone(),
+        backend.clone(),
+        BinaryPaths {
+            x86_64: "unverified-local-image-must-not-be-used".into(),
+            aarch64: "unverified-local-image-must-not-be-used".into(),
+        },
+    )
+    .with_payload_source(source);
+    let batch = runner
+        .start(
+            "owner".into(),
+            vec![Target {
+                id: "host".into(),
+                address: TargetAddress::Manual("user@fixture".into()),
+                credential: Some("saved-key".into()),
+                mode: InstallMode::Rootless,
+                root_consent: false,
+            }],
+            None,
+        )
+        .unwrap();
+    let published = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if !backend.sessions.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        published.is_ok(),
+        "initial attempt events: {:?}",
+        batch.events(0).1
+    );
+    let failed = failed_setup(&runner.setup_status(), backend.host, 1).await;
+    assert!(failed.retry_available);
+    runner
+        .retry_setup(
+            "owner".into(),
+            Secret::new(b"synthetic-requester-session".to_vec()),
+            backend.host,
+        )
+        .unwrap();
+    let completed = setup_attempt_end(&runner.setup_status(), backend.host, 2).await;
+    assert_eq!(
+        completed.stage,
+        infraternal_plugin_ssh::setup::Stage::Ready,
+        "retry event={completed:?}, opens={}, resolves={}, published_sessions={}",
+        transport.opens.load(std::sync::atomic::Ordering::SeqCst),
+        backend.resolves.load(std::sync::atomic::Ordering::SeqCst),
+        backend.sessions.lock().unwrap().len(),
+    );
+    assert_eq!(completed.state, infraternal_plugin_ssh::setup::State::Done);
+    assert_eq!(transport.opens.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        backend.resolves.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    let sessions = backend.sessions.lock().unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(
+        sessions[0], sessions[1],
+        "retry replaced the published shell"
+    );
+    drop(sessions);
+    drop(batch);
+    std::fs::remove_file(path).unwrap();
+}
+
 #[tokio::test]
 async fn signed_session_is_typable_before_full_resolution_and_late_failure_retries_the_same_shell()
 {
