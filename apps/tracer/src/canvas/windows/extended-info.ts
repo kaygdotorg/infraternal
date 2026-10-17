@@ -1,6 +1,6 @@
 /**
- * "Extended machine info" (Settings -> Appearance): whether the details popover's machine tab shows every fact the host
- * reported, in titled sections, or only the essentials. Off by default. A device-local preference like the theme and the
+ * "Extended machine info" (Settings -> Appearance): whether the details popover's machine tab adds the technical facts
+ * (init, virtualization, shell, locale, how it is reached) to the default ones (D126, D156). Off by default. A device-local preference like the theme and the
  * window sizes; it applies the next time a tab is shown, so a popover that is already open follows on its next tab press.
  */
 import { readLocal, writeLocal } from "../../../../../packages/ui/src/local-pref";
