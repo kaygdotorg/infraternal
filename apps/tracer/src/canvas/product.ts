@@ -100,6 +100,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       return session?.gone ? (session.exit ? { status: session.exit.code } : {}) : undefined;
     },
   });
+  // Setup owns a shell before the account inventory admits its host; snapshots must not detach that window.
+  const setupPendingHostIds = new Set<string>();
   const offSessionInventory = connection.subscribe({ topic: "terminal.sessions" }, (event) => {
     if (event.type === "terminal.sessions.unavailable") {
       inventory.unavailable(options.host.name);
@@ -134,15 +136,17 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       void onDemand(() => import("../terminal")).then(({ TerminalClient }) => TerminalClient.prepare(font)).catch(() => {});
     }, enrolled(hosts, status) {
       for (const host of hosts) {
-        if (!host.hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
-        sessions.registerHost({ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });
+        const hostId = host.hostId;
+        if (!hostId) { core.toast.show({ message: "The host did not return its connection identity. Add it again.", tone: "error", duration: 5000 }); continue; }
+        sessions.registerHost({ id: hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });
         if (host.sessionId) {
-          inventory.attach(host.hostId, host.sessionId);
+          setupPendingHostIds.add(hostId);
+          inventory.attach(hostId, host.sessionId);
           // The shell is attachable now; install, join and start go on behind it and show in this window's machine pill.
-          const rec = canvas.cx.win.openSession(host.hostId, host.sessionId);
-          if (rec) void attachSetup(rec, { host: host.name, hostId: host.hostId, status });
-        } else canvas.cx.win.open(host.hostId);
-        applyIdentities([{ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
+          const rec = canvas.cx.win.openSession(hostId, host.sessionId);
+          if (rec) void attachSetup(rec, { host: host.name, hostId, status, onComplete: () => { setupPendingHostIds.delete(hostId); } });
+        } else canvas.cx.win.open(hostId);
+        applyIdentities([{ id: hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os }]);
       }
     } },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
@@ -159,6 +163,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), remove: (id, name, anchor) => readyRemoval?.remove(id, name, anchor) };
   // Registry metadata is optional chrome: load it without delaying the first terminal.
   void onDemand(() => import("./host-removal.on-demand")).then((module) => module.createHostRemoval(core, (id) => {
+    setupPendingHostIds.delete(id);
     sessions.forgetHost(id);
     for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId === id) canvas.cx.win.close(rec);
     canvas.flush();
@@ -212,7 +217,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     void import("./sessions/hosts").then(({ syncAdmittedHosts }) => {
       if (disposed) return;
       offHosts = syncAdmittedHosts(connection, { replaceHosts(hosts) {
-        const removed = new Set(sessions.replaceHosts(hosts));
+        for (const host of hosts) setupPendingHostIds.delete(host.id);
+        const removed = new Set(sessions.replaceHosts(hosts, [...setupPendingHostIds]));
         applyIdentities(hosts);
         for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId && removed.has(rec.model.hostId)) canvas.cx.win.close(rec);
         if (removed.size) canvas.flush();

@@ -45,11 +45,15 @@ export interface SetupPillOptions {
   from?: Element;
   /** How long the tick stays before the system icon returns (ms). Default 600; a mockup can lengthen it to photograph the tick. */
   tickHold?: number;
+  /** The server confirmed the host is joined and the final setup stage completed. */
+  onComplete?(): void;
 }
 
 export interface SetupPill {
   /** The pill was pressed. True when the setup took the press (a failure is explained); false lets the details open. */
   handlePill(source: "pointer" | "keyboard"): boolean;
+  /** Whether another setup event can still change the status or offer a retry. */
+  isPending(): boolean;
   dispose(): void;
 }
 
@@ -64,7 +68,7 @@ const stagesOf = (view: SetupView): RingStageState[] => view.stages;
 export function bindSetupPill(options: SetupPillOptions): SetupPill {
   const { card, host, hostId, source } = options;
   const mark = card.pill.querySelector<HTMLElement>(".ui-window-mark");
-  if (!mark) return { handlePill: () => false, dispose() { /* a card without a mark has nothing to show */ } };
+  if (!mark) return { handlePill: () => false, isPending: () => false, dispose() { /* a card without a mark has nothing to show */ } };
 
   let view = freshSetup();
   const ringPart: SetupRing = mountSetupRing(mark, { segments: SETUP_STAGES.length, label: `Setting up ${host}` });
@@ -148,6 +152,7 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
       // A flight still in the air lands first, so the tick never starts under a copy that is still travelling.
       land();
       finish();
+      options.onComplete?.();
     }
   }, {
     reset() { if (alive) { view = freshSetup(); paint(); } },
@@ -163,6 +168,7 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
   });
 
   return {
+    isPending() { return !view.complete; },
     handlePill() {
       if (failedIndex(view) < 0) return false;
       if (tip) { tip.close(false); tip = undefined; return true; }

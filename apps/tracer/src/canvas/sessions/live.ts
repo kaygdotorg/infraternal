@@ -57,11 +57,11 @@ export interface LiveSessions extends SessionService {
   activeClient(): TerminalClient | undefined;
   /** Applies an authoritative inventory removal to every open window for the session. */
   markGone(host: string, sessionId: string, status?: number): void;
-  /** Registers only an admitted UUID; readable labels never become routing authority. */
+  /** Registers a known UUID that this page may open; readable labels never become routing authority. */
   registerHost(host: HostEntry & { address?: string }): void;
   forgetHost(id: string): void;
-  /** Replaces remote admission in one notification; returns identities whose access disappeared. */
-  replaceHosts(hosts: (HostEntry & { address?: string })[]): string[];
+  /** Replaces remote admission while keeping locally enrolled hosts whose setup has not finished; returns removed identities. */
+  replaceHosts(hosts: (HostEntry & { address?: string })[], keepWhileSettingUp?: readonly string[]): string[];
   dispose(): void;
 }
 
@@ -339,12 +339,15 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       remotes.set(entry.id, { ...entry });
       for (const listener of listeners) listener();
     },
-    replaceHosts(entries) {
+    replaceHosts(entries, keepWhileSettingUp = []) {
       const ids = new Set(entries.map((entry) => entry.id));
       if (entries.some((entry) => !isCanonicalUuid(entry.id)) || ids.size !== entries.length) throw new Error("Host inventory is not valid.");
-      const removed = [...remotes.keys()].filter((id) => !ids.has(id));
+      const keeping = new Set(keepWhileSettingUp.filter(isCanonicalUuid));
+      const retained = [...remotes].filter(([id]) => keeping.has(id) && !ids.has(id));
+      const removed = [...remotes.keys()].filter((id) => !ids.has(id) && !keeping.has(id));
       remotes.clear();
       for (const entry of entries) remotes.set(entry.id, { ...entry });
+      for (const [id, entry] of retained) remotes.set(id, entry);
       for (const listener of listeners) listener();
       return removed;
     },
