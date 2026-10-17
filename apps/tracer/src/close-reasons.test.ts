@@ -14,6 +14,12 @@ test("server and host close reasons identify why a terminal reconnects", () => {
   expect(plainCloseReason("the server refused to resume the connection")).toBe("Connection closed: the server refused to resume the connection.");
 });
 
+test("server-generated terminal route reasons keep their specific explanation", () => {
+  expect(plainCloseReason("the terminal reader fell behind and is reconnecting")).toBe("Connection closed: the terminal reader fell behind and is reconnecting.");
+  expect(plainCloseReason("the terminal on the host stopped responding")).toBe("Connection closed: the terminal on the host stopped responding.");
+  expect(plainCloseReason("the stream closed repeatedly for different reasons")).toBe("Connection closed: the stream closed repeatedly for different reasons.");
+});
+
 test("routine detach and connection rotation reasons stay neutral", () => {
   expect(plainCloseReason("detached")).toBe("This window was detached from its terminal.");
   expect(plainCloseReason("tracer connection rotation")).toBe("The connection is being refreshed.");
