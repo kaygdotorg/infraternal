@@ -774,7 +774,9 @@ fn binary_digest(path: &Path) -> crate::transport::Operation<'_, String> {
             Failure::install("The matching static infraternal binary is unavailable.")
         })?;
         let mut digest = Sha256::new();
-        let mut bytes = vec![0; 64 * 1024];
+        // Amortize file-read handoffs with a bounded per-setup heap buffer;
+        // terminal sessions do not retain this allocation.
+        let mut bytes = vec![0; 512 * 1024];
         loop {
             let count = file.read(&mut bytes).await.map_err(|_| {
                 Failure::install("The static infraternal binary could not be read.")
