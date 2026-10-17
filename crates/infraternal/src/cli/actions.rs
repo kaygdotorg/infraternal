@@ -412,8 +412,14 @@ mod tests {
             .expect("internal SSH session action is registered");
         assert!(!action.action.visible);
         assert_eq!(action.action.cli_handler, CliHandler::SshSession);
-        assert_eq!(action.action.input.required, ["state"]);
-        assert!(action.action.input.properties.contains_key("session"));
+        assert_eq!(action.action.input_schema.required, ["state".to_owned()]);
+        assert!(
+            action
+                .action
+                .input_schema
+                .properties
+                .contains_key("session")
+        );
     }
 
     #[cfg(feature = "plugin-mesh")]
