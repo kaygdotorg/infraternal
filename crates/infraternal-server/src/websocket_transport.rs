@@ -42,6 +42,16 @@ enum Reply {
     Transport(bytes::Bytes),
 }
 
+/// Admit a best-effort proof reply without parking the shared socket reader.
+fn queue_reply(sender: &mpsc::Sender<Reply>, reply: Reply) -> bool {
+    // A full local queue is temporary pressure. Keep reading correlated Pongs
+    // and let their existing deadline decide liveness; a closed writer is fatal.
+    match sender.try_send(reply) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 struct Context {
     state: Arc<WebSocketState>,
     user: String,
@@ -358,7 +368,7 @@ async fn read(
         };
         let (incoming, size) = match incoming {
             Inbound::TransportPing(payload) => {
-                if replies.try_send(Reply::Transport(payload)).is_err() {
+                if !queue_reply(&replies, Reply::Transport(payload)) {
                     context.retire(true);
                     break;
                 }
@@ -385,7 +395,7 @@ async fn read(
                             continue;
                         }
                         Frame::Ping { nonce, sent_us } => {
-                            if replies.try_send(Reply::Wire { nonce, sent_us }).is_err() {
+                            if !queue_reply(&replies, Reply::Wire { nonce, sent_us }) {
                                 context.retire(true);
                                 break;
                             }
@@ -508,5 +518,72 @@ async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    //! Keeps proof reply overflow separate from an actually closed writer, #234.
+    use super::*;
+
+    #[tokio::test]
+    async fn full_browser_wire_proof_queue_keeps_connection_usable() {
+        verify_full_proof_queue(Reply::Wire {
+            nonce: 2,
+            sent_us: 3,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn full_browser_transport_proof_queue_keeps_connection_usable() {
+        verify_full_proof_queue(Reply::Transport(Bytes::from_static(b"probe"))).await;
+    }
+
+    async fn verify_full_proof_queue(reply: Reply) {
+        let (sender, mut receiver) = mpsc::channel(1);
+        assert!(queue_reply(
+            &sender,
+            Reply::Wire {
+                nonce: 1,
+                sent_us: 1
+            }
+        ));
+        assert!(
+            queue_reply(&sender, reply),
+            "local proof queue fullness must not retire the socket"
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Some(Reply::Wire {
+                nonce: 1,
+                sent_us: 1
+            })
+        ));
+        assert!(queue_reply(
+            &sender,
+            Reply::Wire {
+                nonce: 4,
+                sent_us: 5
+            }
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(Reply::Wire {
+                nonce: 4,
+                sent_us: 5
+            })
+        ));
+        drop(receiver);
+        assert!(
+            !queue_reply(
+                &sender,
+                Reply::Wire {
+                    nonce: 6,
+                    sent_us: 7
+                }
+            ),
+            "a closed reply writer still fails"
+        );
     }
 }
