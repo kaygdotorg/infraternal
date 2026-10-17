@@ -108,4 +108,6 @@ export interface AddHostSink {
   enrolled(hosts: EnrolledHost[]): void;
   /** Opens a new terminal on a host that is already added (the failure named it); the canvas focuses it. */
   openHost?(hostId: string): void;
+  /** Whether this page lists the host. An id the page does not know would open a window titled with a raw UUID. */
+  hasHost?(hostId: string): boolean;
 }

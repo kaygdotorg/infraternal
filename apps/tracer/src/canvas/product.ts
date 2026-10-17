@@ -129,7 +129,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
         sessions.registerHost({ id: host.hostId, name: host.name, ...(host.user ? { user: host.user } : {}), os: host.os, ...(host.address ? { address: host.address } : {}) });
         canvas.cx.win.open(host.hostId);
       }
-    }, openHost(hostId) { canvas.cx.win.open(hostId); } },
+    }, openHost(hostId) { canvas.cx.win.open(hostId); }, hasHost: (hostId) => sessions.hosts().some((host) => host.id === hostId) },
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
   });
   const authority = createAuthorityControl(core, { service: loadProvisioning });

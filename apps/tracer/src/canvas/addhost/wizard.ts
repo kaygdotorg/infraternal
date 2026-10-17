@@ -794,7 +794,7 @@ export class Wizard {
   private renderFailure(page: HTMLElement): void {
     const job = this.fixing!;
     const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
-    const openId = hostId ? hostId : undefined;
+    const openId = hostId && this.deps.sink.hasHost?.(hostId) !== false ? hostId : undefined;
     const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined);
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
     const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
