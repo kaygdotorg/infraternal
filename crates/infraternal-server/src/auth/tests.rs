@@ -1754,6 +1754,13 @@ where
             match socket.next().await {
                 // RFC Pong is transport housekeeping, never authority-bearing output.
                 Some(Ok(Message::Pong(_))) => {}
+                // The server names why it closes (#227) with an application Close
+                // frame before the native close; it carries no authority.
+                Some(Ok(Message::Binary(ref wire)))
+                    if matches!(
+                        decode_muxed_frame(wire).map(|d| d.frame),
+                        Ok(Frame::Close { .. })
+                    ) => {}
                 next => break next,
             }
         }

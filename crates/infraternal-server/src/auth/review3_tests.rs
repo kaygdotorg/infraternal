@@ -788,9 +788,22 @@ async fn review3_revoked_resume_must_not_welcome() {
     // time is asserted, and any Welcome still fails the authority assertion.
     drop(clock);
     let start = Instant::now();
-    let next = tokio::time::timeout(Duration::from_secs(30), socket.next())
-        .await
-        .expect("revoked Resume must close the websocket");
+    let next = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match socket.next().await {
+                // The server names why it closes (#227) with an application Close
+                // frame first; it is not a Welcome and carries no authority.
+                Some(Ok(Message::Binary(ref wire)))
+                    if matches!(
+                        decode_muxed_frame(wire).map(|d| d.frame),
+                        Ok(Frame::Close { .. })
+                    ) => {}
+                next => break next,
+            }
+        }
+    })
+    .await
+    .expect("revoked Resume must close the websocket");
     assert!(
         matches!(next, None | Some(Ok(Message::Close(_)) | Err(_))),
         "revoked Resume must close without minting Welcome"
