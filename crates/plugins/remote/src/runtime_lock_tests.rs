@@ -219,3 +219,37 @@ fn lifetime_contention_preserves_would_block() {
     let error = acquire(&fixture.state()).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
 }
+
+#[test]
+fn internal_dispatch_reads_only_the_normal_command_name() {
+    let mut arguments = ["status", "--json"]
+        .map(std::ffi::OsString::from)
+        .into_iter();
+    assert_eq!(command(&mut arguments), None);
+    assert_eq!(arguments.next().unwrap(), "--json");
+}
+
+#[test]
+fn internal_dispatch_checks_exact_argument_counts() {
+    for arguments in [
+        vec!["--bootstrap-runtime"],
+        vec!["--bootstrap-runtime", "/unused", "1:2", "inspect", "extra"],
+    ] {
+        assert_eq!(
+            command(&mut arguments.into_iter().map(Into::into)),
+            Some(71)
+        );
+    }
+    assert_eq!(
+        command(&mut ["--bootstrap-runtime-version"].into_iter().map(Into::into)),
+        Some(0)
+    );
+    assert_eq!(
+        command(
+            &mut ["--bootstrap-runtime-version", "extra"]
+                .into_iter()
+                .map(Into::into)
+        ),
+        None
+    );
+}

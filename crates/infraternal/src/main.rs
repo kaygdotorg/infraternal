@@ -89,9 +89,9 @@ fn run_invocation() -> ExitCode {
         return ExitCode::FAILURE;
     }
     #[cfg(feature = "remote")]
-    if let Some(result) = infraternal_plugin_remote::runtime_lock::command(
-        &std::env::args_os().skip(1).collect::<Vec<_>>(),
-    ) {
+    if let Some(result) =
+        infraternal_plugin_remote::runtime_lock::command(&mut std::env::args_os().skip(1))
+    {
         return ExitCode::from(result);
     }
     #[cfg(feature = "remote")]

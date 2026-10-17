@@ -355,24 +355,25 @@ fn lock_status(error: &std::fs::TryLockError) -> u8 {
 #[must_use]
 #[cold]
 #[inline(never)]
-pub fn command(arguments: &[std::ffi::OsString]) -> Option<u8> {
-    if arguments.len() == 1 && arguments[0] == "--bootstrap-runtime-version" {
-        return Some(0);
+pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Option<u8> {
+    let first = arguments.next()?;
+    if first == "--bootstrap-runtime-version" {
+        return arguments.next().is_none().then_some(0);
     }
-    if arguments
-        .first()
-        .is_none_or(|arg| arg != "--bootstrap-runtime")
-    {
+    if first != "--bootstrap-runtime" {
         return None;
     }
-    let execute = || -> Result<(), u8> {
-        if arguments.len() != 4 {
+    let mut execute = || -> Result<(), u8> {
+        let base = arguments.next().ok_or(71)?;
+        let identity = arguments.next().ok_or(71)?;
+        let mode = arguments.next().ok_or(71)?;
+        if arguments.next().is_some() {
             return Err(71);
         }
-        let base = Path::new(&arguments[1]);
+        let base = Path::new(&base);
         let root = directory(base).map_err(|_| 71)?;
         let metadata = root.metadata().map_err(|_| 71)?;
-        if arguments[2] != format!("{}:{}", metadata.dev(), metadata.ino()).as_str() {
+        if identity != format!("{}:{}", metadata.dev(), metadata.ino()).as_str() {
             return Err(71);
         }
         let runtime = directory(&at(&root, "sessions")).map_err(|_| 71)?;
@@ -388,7 +389,7 @@ pub fn command(arguments: &[std::ffi::OsString]) -> Option<u8> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => true,
             Err(_) => return Err(71),
         };
-        let mode = arguments[3].to_str().ok_or(71)?;
+        let mode = mode.to_str().ok_or(71)?;
         if !matches!(mode, "inspect" | "retire") {
             return Err(71);
         }
