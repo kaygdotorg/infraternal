@@ -109,6 +109,7 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = ssh_internal::run_if_requested() {
         return result;
     }
+    #[cfg(feature = "session-payload")]
     if shim_cli::PAYLOAD_ONLY {
         return shim_cli::payload_entry();
     }

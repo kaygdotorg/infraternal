@@ -1,5 +1,10 @@
 //! Shares the internal shim startup schema and identity checks across executable build profiles (D13, D255).
 
+/// Read only by the entry points compiled with the agent or payload features.
+#[cfg_attr(
+    not(any(feature = "plugin-agent", feature = "session-payload")),
+    allow(dead_code)
+)]
 pub(crate) const PAYLOAD_ONLY: bool = cfg!(all(
     feature = "session-payload",
     not(any(
@@ -13,6 +18,7 @@ pub(crate) use infraternal_shim::startup::Options;
 
 /// SSH entrypoints are dispatched first through their existing implementations.
 /// This final private route can only start the shim using its shared runner.
+#[cfg(feature = "session-payload")]
 pub(crate) fn payload_entry() -> std::process::ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     if arguments.next().is_none_or(|command| command != "__shim") {
