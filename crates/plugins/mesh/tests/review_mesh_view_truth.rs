@@ -258,7 +258,7 @@ async fn a_peer_does_not_stay_online_past_its_session_when_the_server_node_stops
     );
 }
 
-/// Poll cost at scale, userspace only: the server node's `mesh.peers` paging as node_actions.rs builds it
+/// Poll cost at scale, userspace only: the server node's `mesh.peers` paging as `node_actions.rs` builds it
 /// (re-encode the page after every row, 8 KiB pages, skip rows up to the cursor) and the server's `read_peers`
 /// over every page. The real poll adds one kernel peer dump per page. Run with
 /// `cargo test -p infraternal-plugin-mesh --release --test review_mesh_view_truth -- --ignored --nocapture poll_cost`.
