@@ -47,3 +47,31 @@ export function plainCloseReason(reason: string | undefined, fallback = "Connect
   const key = (reason ?? "").trim();
   return Object.prototype.hasOwnProperty.call(KNOWN, key) ? KNOWN[key]! : fallback;
 }
+
+const CLOSE_NOTE_WINDOW_MS = 60_000;
+
+/**
+ * One console line per socket close, at most one per minute. The first close of a window prints at once; the
+ * rest are only counted and summarised in the next window's line, so a reconnect storm cannot flood the console.
+ * It runs once per close event (never per frame). Only numbers and mapped reason keys are printed: peer text is
+ * untrusted, so an unknown reason prints as "other".
+ */
+export class CloseNotes {
+  private windowStart = Number.NEGATIVE_INFINITY;
+  private suppressed = 0;
+
+  note(now: number, code: number | undefined, reason: string | undefined, attempt: number, welcomed: boolean): string | undefined {
+    if (now - this.windowStart < CLOSE_NOTE_WINDOW_MS) {
+      this.suppressed += 1;
+      return undefined;
+    }
+    const repeats = this.suppressed;
+    this.windowStart = now;
+    this.suppressed = 0;
+    const key = (reason ?? "").trim();
+    const safe = key === "" ? "none" : Object.prototype.hasOwnProperty.call(KNOWN, key) ? key : "other";
+    const phase = welcomed ? "after the connection was established" : "before the connection was established (reconnect failed)";
+    const more = repeats > 0 ? `; ${repeats} more closes in the previous 60 s` : "";
+    return `Connection to the server closed ${phase}: closed by the server or network, code ${code ?? 0}, reason "${safe}", reconnect attempt ${attempt}${more}`;
+  }
+}

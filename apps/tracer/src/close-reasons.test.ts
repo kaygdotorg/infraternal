@@ -1,6 +1,6 @@
 /** Keep socket close reasons readable while retries retain the specific cause. */
 import { expect, test } from "bun:test";
-import { plainCloseReason } from "./close-reasons";
+import { CloseNotes, plainCloseReason } from "./close-reasons";
 
 test("a missed connection response keeps a plain and stable reason", () => {
   expect(plainCloseReason("connection unresponsive")).toBe("Connection closed: the server did not respond in time.");
@@ -37,4 +37,21 @@ test("unknown close text is discarded instead of reaching the person or console"
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test("a storm of closes prints one line per minute and summarises the rest", () => {
+  const notes = new CloseNotes();
+  const lines: string[] = [];
+  for (let i = 0; i < 512; i++) {
+    const line = notes.note(i * 100, 1006, "constructor", i, false);
+    if (line) lines.push(line);
+  }
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("reconnect failed");
+  expect(lines[0]).toContain('reason "other"');
+  expect(lines[0]).not.toContain("constructor");
+  const next = notes.note(60_000, 4000, "connection unresponsive", 3, true);
+  expect(next).toContain("511 more closes in the previous 60 s");
+  expect(next).toContain('reason "connection unresponsive"');
+  expect(next).toContain("code 4000");
 });

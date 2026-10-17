@@ -20,7 +20,7 @@
  * closing the socket: an intermediary may never deliver its close event. Streams retain unacknowledged input.
  */
 import { noteWsMessage } from "./perf-activity";
-import { plainCloseReason } from "./close-reasons";
+import { CloseNotes, plainCloseReason } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -144,6 +144,7 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
+  private readonly closeNotes = new CloseNotes();
   /** A confirmed terminal gets one quick retry; repeated short-lived resumes retain backoff [D259]. */
   private fastRecovery = false;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
@@ -434,7 +435,14 @@ export class MuxConnection {
     socket.onclose = (event) => {
       if (this.socket !== socket || this.closed) return;
       const internalRotation = event?.code === 4001 && event.reason === "tracer connection rotation";
+      // Read before disconnect() resets them; a failed reconnect names itself in the console (#227).
+      const welcomed = this.welcomed;
+      const attempt = this.retryAttempt;
       this.disconnect(socket);
+      if (!internalRotation) {
+        const line = this.closeNotes.note(Date.now(), event?.code, event?.reason, attempt, welcomed);
+        if (line) console.warn(line);
+      }
       if (!internalRotation) this.status(plainCloseReason(event?.reason || "connection ended"));
     };
   }
