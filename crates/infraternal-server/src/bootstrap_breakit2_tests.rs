@@ -676,6 +676,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let mut changed = batch.subscribe();
     let mut retry_private = retry_private;
     let mut selected_attempt = 1;
+    let mut joined_host = None;
     let result = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
@@ -706,6 +707,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                         "METRIC breakit2 failed_step={:?} status={:?}",
                         failure.failed_step, failure.exit_status
                     );
+                }
+                if event.step == Step::Done {
+                    joined_host = event.host_id;
                 }
                 if event.step == Step::Done && std::env::var_os("ADDHOST_INSTANT").is_some() {
                     assert!(event.session_id.is_some(), "instant acceptance requires a published shim, never a legacy completion");
@@ -748,6 +752,31 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     })
     .await
     .unwrap();
+    if std::env::var_os("BREAKIT2_REMOVE").is_some() {
+        // #235: removal asks the joined host to uninstall itself through the
+        // same server path as the canvas, then revokes it. The harness then
+        // proves on the machine that nothing is left and that it re-adds.
+        let host = joined_host.expect("removal needs a joined host");
+        // Let the harness place the kernel objects a running rootful mesh node
+        // owns before removal starts, so their removal is observed, not assumed.
+        std::fs::write(scratch.join("removal-ready"), b"").unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !scratch.join("removal-go").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the harness did not release removal");
+        let cleanup = crate::remote_removal::request_uninstall(&f.backend.hosts, host).await;
+        println!("REMOVAL breakit2 host_cleanup={cleanup}");
+        assert_eq!(cleanup, "requested", "the joined host did not accept its uninstall");
+        f.backend
+            .issuer
+            .store()
+            .revoke("owner", host, crate::runtime::unix_seconds().unwrap())
+            .await
+            .unwrap();
+    }
     let active: i64 =
         sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
             .fetch_one(&f.pool)
