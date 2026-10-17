@@ -13,7 +13,7 @@ pub const ID: &str = "agent";
 pub fn plugin() -> PluginDefinition {
     let plugin = PluginDefinition::new(
         ID,
-        "Manage the infraternal agent component on this node.",
+        "Connect this machine to a server.",
         [
             ActionDefinition::new(
                 ["agent"],

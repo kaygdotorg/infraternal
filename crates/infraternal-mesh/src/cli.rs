@@ -23,7 +23,7 @@ pub fn plugin() -> PluginDefinition {
                 JsonSchema::object(
                     [(
                         "ssh".to_owned(),
-                        JsonSchema::boolean("Request SSH connectivity."),
+                        JsonSchema::boolean("Also turn on SSH access over the mesh."),
                     )],
                     std::iter::empty(),
                 ),

@@ -447,6 +447,9 @@ pub struct ActionDefinition {
     /// Permission and effect metadata shared with non-CLI adapters.
     #[serde(flatten)]
     pub contract: ActionContract,
+    /// Inputs that still parse but are left out of help because they are for scripts and tests.
+    #[serde(skip)]
+    pub cli_hidden_inputs: Vec<String>,
     /// Original hosted descriptor, retaining schema references and any-of permissions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hosted: Option<crate::ActionDef>,
@@ -513,6 +516,7 @@ impl ActionDefinition {
             cli_handler: CliHandler::Unavailable,
             cli_positionals: Vec::new(),
             cli_requires: BTreeMap::new(),
+            cli_hidden_inputs: Vec::new(),
         }
     }
 
@@ -530,6 +534,16 @@ impl ActionDefinition {
         names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.cli_positionals = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Keep these inputs out of `--help`; they stay accepted and stay in generated skills.
+    #[must_use]
+    pub fn with_cli_hidden_inputs(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.cli_hidden_inputs = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -646,6 +660,9 @@ pub struct PluginDefinition {
     pub description: String,
     /// Actions declared by this plugin.
     pub actions: Vec<ActionDefinition>,
+    /// Descriptions of command groups below the plugin's own, keyed by the space-joined path
+    /// such as `server release`, so help never shows a group with no words.
+    pub groups: Vec<(String, String)>,
 }
 
 impl PluginDefinition {
@@ -660,7 +677,15 @@ impl PluginDefinition {
             id: id.into(),
             description: description.into(),
             actions: actions.into_iter().collect(),
+            groups: Vec::new(),
         }
+    }
+
+    /// Describe a command group (the path of words before its commands) for help.
+    #[must_use]
+    pub fn with_group(mut self, path: impl Into<String>, description: impl Into<String>) -> Self {
+        self.groups.push((path.into(), description.into()));
+        self
     }
 }
 

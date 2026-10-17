@@ -108,7 +108,7 @@ fn release_plugin() -> PluginDefinition {
 fn cli_plugin() -> PluginDefinition {
     let plugin = PluginDefinition::new(
         "cli",
-        "Inspect this node and manage its configured components.",
+        "Run and manage infraternal on this machine.",
         [
             status_action(),
             up_action(),
@@ -156,11 +156,11 @@ fn status_action() -> ActionDefinition {
     );
     ActionDefinition::new(
         ["status"],
-        "Show this node's role and running components.",
-        "Use this command to check which infraternal services are running on this node.",
+        "Show what infraternal runs on this machine.",
+        "Use this to see which infraternal services run here and whether any is down. It exits 5 when an installed service is not running.",
         [
-            "Read the local infraternal service units and data directories.",
-            "Review the role and component states in the result.",
+            "Read the service files and data folders on this machine.",
+            "Read the components table: each line says whether that part is running.",
         ],
         JsonSchema::empty_object(),
         JsonSchema::command_result_with(status_data),
@@ -172,7 +172,7 @@ fn status_action() -> ActionDefinition {
         ),
     )
     .with_cli_handler(CliHandler::Status)
-    .with_example("status", "Show this node's current role and components.")
+    .with_example("status", "Show what runs on this machine.")
 }
 
 fn up_action() -> ActionDefinition {
@@ -210,12 +210,12 @@ fn up_action() -> ActionDefinition {
 fn skill_action() -> ActionDefinition {
     ActionDefinition::new(
         ["skill"],
-        "List commands or print generated skills for AI agents.",
-        "Use this command to discover enabled commands or share their contracts with an AI agent.",
+        "List the commands, or print one as instructions for an AI agent.",
+        "Use this to give an AI agent the exact contract of a command: what it does, its options and its JSON output.",
         [
-            "Run `infraternal skill` to list the commands enabled in this build.",
-            "Add a command path to print its generated skill and stable JSON output shape.",
-            "Pass --write DIR to save one Markdown skill file per visible command.",
+            "Run `infraternal skill` to list the commands you can use.",
+            "Add a command, such as `infraternal skill mesh peers`, to print its instructions.",
+            "Add --write DIR to save one Markdown file per command.",
         ],
         skill_input_schema(),
         JsonSchema::command_result_with(skill_output_data_schema()),
@@ -317,12 +317,12 @@ fn skill_input_schema() -> JsonSchema {
                 "command".to_owned(),
                 JsonSchema::array(
                     JsonSchema::string("Command path part."),
-                    "Optional command path following `skill`.",
+                    "The command to print, such as `status` or `mesh peers`.",
                 ),
             ),
             (
                 "write".to_owned(),
-                JsonSchema::string("Directory receiving one skill file per visible command."),
+                JsonSchema::string("Folder to save one skill file per command in."),
             ),
         ],
         std::iter::empty(),
@@ -629,7 +629,7 @@ mod release_tests {
             assert_eq!(action.cli_handler, CliHandler::ServerPlugin);
             assert!(action.hosted.is_some());
             let skill = crate::cli::skills::render_action(action).expect("operator skill");
-            assert!(skill.contains("VERSION") || skill.contains("unreviewed"));
+            assert!(skill.contains("signature") || skill.contains("unreviewed"));
         }
         let full = registry().expect("full registry");
         for source in infraternal_plugin_release::descriptor::DESCRIPTOR.actions {
