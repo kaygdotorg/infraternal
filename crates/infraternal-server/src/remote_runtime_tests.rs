@@ -829,3 +829,6 @@ async fn late_native_detach_after_peer_stop_keeps_the_control_connection() {
     ));
     assert!(peer.close_reason().is_none());
 }
+
+#[path = "remote_ping_flood_tests.rs"]
+mod ping_flood;

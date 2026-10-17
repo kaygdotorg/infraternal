@@ -3,7 +3,7 @@ use super::*;
 use bytes::Bytes;
 use infraternal_agent::remote_native::NativeChannel;
 
-async fn connect_control(
+pub(super) async fn connect_control(
     address: SocketAddr,
     identity: &Identity,
     root: &X509,
