@@ -3091,3 +3091,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      encrypted recovery checkpoints with a separate recovery supervisor and
      certificate restoration (estimated 4-7 days of work for the same
      outcome). Broader backup and disaster recovery remain separate work.
+296. **Per-person login typing target is measured, not 5 ms (owner,
+     2026-10-17, #205; amends the 5 ms echo target used for D270):** echo
+     p99 of 5 ms is not reachable on our hosts; the shipping terminal
+     measured 24.53 ms pooled p99 and the per-person login prototype
+     31.13 ms on the perf VM. The bar is now: the per-person login path is
+     no slower than the shipping terminal on the same venue and workload
+     (pooled echo p99 ≤ the shipping baseline, about 25 ms today), measured
+     side by side in each round. 5 ms stays the long-term aim, not a merge
+     gate. India to Germany adds about 150 ms per key, so the gap is small
+     to the person typing. Rejected: keeping 5 ms as a hard gate, which
+     blocks SSH over the mesh (#221) for days with no known fix.
