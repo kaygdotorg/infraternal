@@ -23,6 +23,9 @@ impl Drop for PtyCleanup {
 
 /// Datagrams the delay relay dropped at its queue bound, reported with each result.
 static RELAY_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Once set, both relays drop every datagram: from the server, the host is dead.
+/// The host runs in this process, so this stands in for stopping its process.
+static RELAY_BLACKHOLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// One ordered datagram relay delays each direction without changing host networking.
 /// A full delay queue tail-drops, as a bounded router queue would; QUIC recovers.
@@ -45,6 +48,7 @@ async fn delayed_link(
                     let Some(client) = client else { continue; };
                     client
                 } else { client = Some(source); server };
+                if RELAY_BLACKHOLE.load(std::sync::atomic::Ordering::Relaxed) { continue; }
                 if queued.len() >= 32768 || rand::random::<u32>() % 1_000_000 < loss_ppm {
                     RELAY_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
@@ -86,6 +90,12 @@ async fn primary_ping_during_terminal_flood() {
     // A third PTY absorbs a continuous paste, so server-to-host traffic competes
     // with control frames on the same connection, as an upload does.
     let upload = std::env::var("INFRATERNAL_PING_UPLOAD").is_ok_and(|value| value == "1");
+    let flood_on = std::env::var("INFRATERNAL_PING_FLOOD").map_or(true, |value| value != "0");
+    // Dead-host mode: after this many seconds the host goes silent; report when
+    // the window is first told and when the primary is retired, then stop.
+    let dead_after = std::env::var("INFRATERNAL_PING_DEAD_AFTER_S")
+        .ok()
+        .map(|value| Duration::from_secs(value.parse().unwrap()));
     let terminals = if upload { 3 } else { 2 };
     let state = PathBuf::from(std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").unwrap())
         .join(format!("{:08x}", rand::random::<u32>()));
@@ -170,6 +180,8 @@ async fn primary_ping_during_terminal_flood() {
     let admissions = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let connection_ends = primary_closes.clone();
     let admitted = admissions.clone();
+    let close_times = Arc::new(std::sync::Mutex::new(Vec::<Instant>::new()));
+    let closed_at = close_times.clone();
     tasks.spawn(async move {
         let mut previous = None;
         loop {
@@ -180,6 +192,7 @@ async fn primary_ping_during_terminal_flood() {
                 previous = Some(connection.stable_id());
                 admitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let reason = connection.closed().await;
+                closed_at.lock().unwrap().push(Instant::now());
                 connection_ends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
                     "PING_FLOOD_PRIMARY_CLOSED reason={reason:?} actor_lines={:?}",
@@ -330,15 +343,17 @@ async fn primary_ping_during_terminal_flood() {
     let flood = b"while :; do head -c 33554432 /dev/zero | tr '\\000' x; done\n";
     let prepare = b"stty -echo -opost; printf 'READY_%s\\n' PING\n";
     let mut sequence = vec![u64::try_from(prepare.len()).unwrap(); terminals];
-    terminal_send(
-        &handles[0],
-        Frame::Input {
-            in_seq: sequence[0],
-            bytes: flood,
-        },
-    )
-    .await;
-    sequence[0] += u64::try_from(flood.len()).unwrap();
+    if flood_on {
+        terminal_send(
+            &handles[0],
+            Frame::Input {
+                in_seq: sequence[0],
+                bytes: flood,
+            },
+        )
+        .await;
+        sequence[0] += u64::try_from(flood.len()).unwrap();
+    }
     let uploaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
     if upload {
         let sink = b"exec cat > /dev/null\n";
@@ -382,6 +397,9 @@ async fn primary_ping_during_terminal_flood() {
     let mut flood_bytes = 0_u64;
     let mut closes = 0_u64;
     let mut retired = 0_u64;
+    let mut recoveries = 0_u64;
+    let mut dead_at: Option<Instant> = None;
+    let mut noticed_at: Option<Instant> = None;
     let mut echo_tail = Vec::new();
     println!(
         "PING_FLOOD_START rtt_ms={rtt} loss_ppm={loss_ppm} duration_s={seconds} terminals={terminals} load={}",
@@ -391,6 +409,16 @@ async fn primary_ping_during_terminal_flood() {
         tokio::select! {
             _ = interval.tick() => {
                 if started.elapsed() >= Duration::from_secs(seconds) { break; }
+                if let Some(dead) = dead_at {
+                    let link_gone = close_times.lock().unwrap().iter().any(|at| *at >= dead);
+                    if (noticed_at.is_some() && link_gone) || dead.elapsed() > Duration::from_secs(10) { break; }
+                    continue;
+                }
+                if dead_after.is_some_and(|after| started.elapsed() >= after) {
+                    RELAY_BLACKHOLE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    dead_at = Some(Instant::now());
+                    continue;
+                }
                 if sent.is_none() {
                     nonce += 1;
                     let command = format!("printf 'ECHO_%s\\n' {nonce}\n");
@@ -411,7 +439,11 @@ async fn primary_ping_during_terminal_flood() {
                             echo_tail.clear();
                         }
                     }
-                    TerminalOutput::Reconnecting if index == 1 => closes += 1,
+                    TerminalOutput::Reconnecting if index == 1 => {
+                        closes += 1;
+                        if dead_at.is_some() && noticed_at.is_none() { noticed_at = Some(Instant::now()); }
+                    }
+                    TerminalOutput::Recovered if index == 1 => recoveries += 1,
                     // Count instead of panicking so a failing variant still reports numbers.
                     TerminalOutput::Closed { code } => {
                         retired += 1;
@@ -426,6 +458,22 @@ async fn primary_ping_during_terminal_flood() {
         .load(std::sync::atomic::Ordering::Relaxed)
         .saturating_sub(1);
     let primary_closes = primary_closes.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(dead) = dead_at {
+        let millis = |at: Option<Instant>| {
+            at.map_or(-1.0, |at| at.duration_since(dead).as_secs_f64() * 1000.0)
+        };
+        let retired_at = close_times
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .find(|at| *at >= dead);
+        println!(
+            "PING_FLOOD_DEAD rtt_ms={rtt} flood={flood_on} notice_ms={:.1} retire_ms={:.1} recoveries={recoveries}",
+            millis(noticed_at),
+            millis(retired_at)
+        );
+    }
     samples.sort_by(f64::total_cmp);
     let quantile = |q: usize| {
         samples
@@ -434,7 +482,7 @@ async fn primary_ping_during_terminal_flood() {
             .unwrap_or(f64::NAN)
     };
     println!(
-        "PING_FLOOD_RESULT rtt_ms={rtt} loss_ppm={loss_ppm} upload_bytes={} duration_s={seconds} primary_closes={primary_closes} primary_loss_notices={closes} terminals_retired={retired} reconnects={reconnects} relay_drops={} flood_bytes={flood_bytes} echo_samples={} echo_p50_ms={:.3} echo_p99_ms={:.3} load={}",
+        "PING_FLOOD_RESULT rtt_ms={rtt} loss_ppm={loss_ppm} upload_bytes={} duration_s={seconds} primary_closes={primary_closes} primary_loss_notices={closes} recoveries={recoveries} terminals_retired={retired} reconnects={reconnects} relay_drops={} flood_bytes={flood_bytes} echo_samples={} echo_p50_ms={:.3} echo_p99_ms={:.3} load={}",
         uploaded.load(std::sync::atomic::Ordering::Relaxed),
         RELAY_DROPS.load(std::sync::atomic::Ordering::Relaxed),
         samples.len(),
@@ -458,7 +506,7 @@ async fn primary_ping_during_terminal_flood() {
         println!("PING_FLOOD_CLEANUP shim_pid={pid} present=false");
     }
     assert!(
-        u64::try_from(samples.len()).unwrap() >= (seconds * 9 / 10).max(1),
+        dead_at.is_some() || u64::try_from(samples.len()).unwrap() >= (seconds * 9 / 10).max(1),
         "insufficient echo coverage: {} samples over {seconds}s",
         samples.len()
     );
