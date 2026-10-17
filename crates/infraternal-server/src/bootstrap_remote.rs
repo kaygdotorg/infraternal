@@ -173,8 +173,8 @@ impl RemoteBackend {
                 host,
                 published: false,
             };
-            let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) LIMIT 1")
-                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).fetch_optional(&self.issuer.store().0).await.map_err(|_|unavailable())?;
+            let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+                .bind(&authority.owner).bind(address).bind(&lookup).bind(&lookup).bind(address).fetch_optional(&self.issuer.store().0).await.map_err(|_|unavailable())?;
             if let Some(host_id) = existing {
                 let host_id = Uuid::from_slice(&host_id).map_err(|_| unavailable())?;
                 return Err(Failure::install(
