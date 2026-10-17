@@ -3102,3 +3102,25 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      gate. India to Germany adds about 150 ms per key, so the gap is small
      to the person typing. Rejected: keeping 5 ms as a hard gate, which
      blocks SSH over the mesh (#221) for days with no known fix.
+297. **Controlling machines from other machines is one switch per machine
+     (owner, 2026-10-16/17; completes D288's open rule syntax and approval
+     UX):** "this is the simpler version for sure".
+     - **One switch (Q1):** each machine has "Can be controlled from other
+       machines", off by default. On: `infraternal mux` and AI tools on the
+       person's other machines may open, type into and read that machine's
+       sessions, subject to the approval setting. Off: nothing from another
+       machine can control it; the person still uses it normally in the
+       browser. Turning it off ends any control in progress at once. No
+       separate rule syntax for this; access rules (D2xx) still decide who
+       may reach the machine at all.
+     - **Approval setting (D288 Q3):** global, with "Ask each time"
+       (default), "Allow when a rule permits", or "Off"; a mark in the
+       pill, an Inbox entry and Revoke for every grant (D288 Q4).
+     - **Who approves (Q2):** anyone may start a request; only admins can
+       answer the prompt. Rejected: only admins may automate at all.
+     - **Other accounts on the same machine (Q5):** a request from another
+       account on the same machine (`deploy` wanting to type into `kayg`'s
+       terminal) asks first, exactly like one from another machine.
+       Rejected: same machine means allowed.
+     - Unattended requests with nobody to approve are denied with a clear
+       message (D288 Q2c).
