@@ -515,35 +515,44 @@ async fn failed_client_resume_attempt_logs_each_retained_session() {
         .await
         .unwrap();
     assert_server_hello(&mut retry).await;
-    client_ws_send(
-        &mut retry,
+    // Hello (with the resume capability) and Resume travel in one message, as the
+    // browser sends them; the server reads them as an adjacent pair.
+    let invalid_resume_token = [0xFF; 32];
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
         0,
         &Frame::Hello {
             version: 1,
             caps: 1,
             client_info: "failed-resume-close-log",
         },
+        &mut wire,
     )
-    .await;
-    let invalid_resume_token = [0xFF; 32];
-    client_ws_send(
-        &mut retry,
+    .unwrap();
+    let mut resume = Vec::new();
+    encode_muxed_frame_into(
         0,
         &Frame::Resume {
             connection_id: &connection_id,
             resume_token: &invalid_resume_token,
         },
+        &mut resume,
     )
-    .await;
-    assert!(matches!(
-        decode_muxed_frame(&read_client_frame(&mut retry).await)
-            .unwrap()
-            .frame,
-        Frame::Close {
-            code: 1008,
-            reason: "the server refused to resume the connection"
-        }
-    ));
+    .unwrap();
+    wire.extend_from_slice(&resume);
+    retry.send(Message::Binary(wire.into())).await.unwrap();
+    let refusal = read_client_frame(&mut retry).await;
+    let refusal = decode_muxed_frame(&refusal).unwrap().frame;
+    assert!(
+        matches!(
+            refusal,
+            Frame::Close {
+                code: 1008,
+                reason: "the server refused to resume the connection"
+            }
+        ),
+        "unexpected refusal frame: {refusal:?}"
+    );
     let events = capture.events("terminal_stream_closed");
     let resumed = events
         .iter()
