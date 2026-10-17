@@ -69,18 +69,31 @@ echo "unit_active=$active session_scopes=$scopes infraternal_processes=$processe
 
 
 def prove_removed(mode):
-    """Poll until the host-side uninstall finished (bounded by its 30 s limit), then require nothing left."""
+    """Poll until the host-side uninstall finished (bounded by its 30 s limit), then require nothing of it left.
+
+    The rootful seed is a marked interface and table this installation never
+    recorded, as the server's own infraternal agent would own on its machine:
+    uninstall must leave both (#235). The kernel tests in
+    crates/plugins/mesh/tests/review_retire_ownership.rs prove that a
+    recorded interface and filter are removed.
+    """
     clean = "unit_active=inactive session_scopes=0 infraternal_processes=0 data_present=False unit_present=False launcher_present=False"
+    seeded = mode == "root"
+    kept = f"mesh_link_present={seeded} mesh_table_present={seeded}"
     deadline = time.monotonic() + 45
     while True:
         state = subprocess.run(DOCKER + ["exec", TARGET, "sh", "-c", REMOVAL_PROBE, "probe", mode], capture_output=True, text=True).stdout.strip()
         mesh = mesh_state()
-        done = state == clean and mesh == "mesh_link_present=False mesh_table_present=False"
+        done = state == clean and mesh == kept
         if done or time.monotonic() > deadline:
             break
         time.sleep(0.25)
     print(f"REMOVED mode={mode} {state} {mesh}", flush=True)
-    assert done, "removal left infraternal on the host"
+    if seeded:
+        # Leave the fixture as the seed found it for the re-add run.
+        subprocess.run(DOCKER + ["exec", TARGET, "ip", "link", "delete", "infraternal0"], capture_output=True)
+        subprocess.run(DOCKER + ["exec", TARGET, "/usr/sbin/nft", "delete table inet infraternal_mesh"], capture_output=True)
+    assert done, "removal left infraternal on the host, or took a mesh object it did not create"
 
 
 def main():
@@ -246,9 +259,10 @@ def main():
                 stage_packet_filter()
             import threading
             def seed():
-                # Wait for the joined host, then place the kernel objects a
-                # running rootful mesh node owns: the marked interface and the
-                # marked inet table. Removal must take both away.
+                # Wait for the joined host, then place marked kernel objects
+                # this installation never recorded, as another infraternal
+                # agent on the machine would own them. Removal must leave both
+                # and name them (#235).
                 deadline = time.monotonic() + 300
                 while not (scratch / "removal-ready").exists():
                     if time.monotonic() > deadline:

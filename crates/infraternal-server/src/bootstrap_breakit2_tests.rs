@@ -771,6 +771,11 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             crate::remote_removal::request_uninstall(&f.backend.hosts, host).await;
         println!("REMOVAL breakit2 host_cleanup={cleanup} left={left:?}");
         assert_eq!(cleanup, "requested", "the joined host did not accept its uninstall");
+        // The harness seeds marked mesh objects this installation never
+        // recorded on a rootful host; the host must name them as left (#235).
+        if std::env::var("BREAKIT2_MODE").as_deref() == Ok("root") {
+            assert_eq!(left, ["infraternal0", "infraternal_mesh"]);
+        }
         f.backend
             .issuer
             .store()
