@@ -237,8 +237,14 @@ impl Memory {
     }
     #[cfg(test)]
     pub(super) fn refuse_new_allocations(&mut self) {
+        self.refuse_beyond(0);
+    }
+    /// Lets `headroom` more bytes through, then refuses: places a refusal
+    /// at a chosen point inside a multi-allocation native operation.
+    #[cfg(test)]
+    pub(super) fn refuse_beyond(&mut self, headroom: usize) {
         let state = self.state.get_mut();
-        state.limit = state.used;
+        state.limit = state.used.saturating_add(headroom);
     }
     pub(super) fn abi(&self) -> *const c_void {
         (&raw const self.abi).cast()

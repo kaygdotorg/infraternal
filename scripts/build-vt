@@ -127,6 +127,52 @@ after = 'pub const std_capacity: Capacity = .{\n    .cols = 80,\n    .rows = 32,
 assert source.count(before) == 1, 'native standard page capacity changed'
 page.write_text(source.replace(before, after))
 PY_PAGES
+    # A refused allocation can stop a reflow half way: the page list is then
+    # partly rebuilt and the cursor still pins a page the reflow freed. The
+    # upstream resize reloads the cursor style and untracks the saved cursor
+    # in defers that also run on that error path, so they read the freed page
+    # (decoded as garbage and written out of bounds) before the error returns.
+    # Shared hosts retire the whole engine on any resize error without
+    # walking it [D270, #205], so on error those defers must not run at all.
+    tar -xOf "$archive" "ghostty-$version/src/terminal/Screen.zig" > "$source_dir/src/terminal/Screen.zig"
+    tar -xOf "$archive" "ghostty-$version/src/terminal/compress/lz4.zig" > "$source_dir/src/terminal/compress/lz4.zig"
+    python3 - "$source_dir" <<'PY_RESIZE'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+screen = root / 'src/terminal/Screen.zig'
+source = screen.read_text()
+edits = [
+    ('    self.manualStyleUpdate() catch unreachable;\n    defer {\n        // Restore the cursor style.\n',
+     '    self.manualStyleUpdate() catch unreachable;\n    var resize_failed = false;\n    defer restore: {\n        if (resize_failed) break :restore;\n        // Restore the cursor style.\n'),
+    ('    defer if (saved_cursor_pin) |p| self.pages.untrackPin(p);\n',
+     '    defer if (!resize_failed) if (saved_cursor_pin) |p| self.pages.untrackPin(p);\n'
+     '    // Declared after both defers so it runs first on any error below.\n'
+     '    errdefer resize_failed = true;\n'),
+]
+for before, after in edits:
+    assert source.count(before) == 1, 'native screen resize boundary changed: ' + before
+    source = source.replace(before, after)
+screen.write_text(source)
+# Restoring cold pages decodes into a retained mapping. Keep the decoder's
+# bounds checks in release builds too: a damaged page then stops the
+# process instead of writing past its mapping into a neighbour's memory.
+lz4 = root / 'src/terminal/compress/lz4.zig'
+source = lz4.read_text()
+heads = [
+    'pub fn decompress(input: []const u8, output: []u8) DecompressError!usize {\n',
+    'fn copyMatch(output: []u8, op_: usize, offset: usize, match_len: usize) void {\n',
+]
+for head in heads:
+    assert source.count(head) == 1, 'native decoder boundary changed: ' + head
+    source = source.replace(head, head + '    @setRuntimeSafety(true);\n')
+for helper in ('readIntAt', 'writeIntAt', 'copyIntAt'):
+    start = source.index('inline fn ' + helper + '(')
+    body = source.index('{\n', start) + len('{\n')
+    assert source[start:body].count('{') == 1, 'native decoder helper changed: ' + helper
+    source = source[:body] + '    @setRuntimeSafety(true);\n' + source[body:]
+lz4.write_text(source)
+PY_RESIZE
 fi
 if [[ -n "$compact_history" ]]; then
     cp "$root/crates/infraternal-shim/native/history.zig" "$source_dir/src/infraternal_history.zig"

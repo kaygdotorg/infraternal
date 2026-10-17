@@ -312,4 +312,41 @@ mod owned_memory_tests {
         assert_eq!(engine.memory().0, 0);
         engine.process(b"later output");
     }
+
+    /// PPU-R3-1 (#205): a refusal in the middle of a widening reflow leaves
+    /// the native page list half rebuilt, with the cursor still pinned to a
+    /// page the reflow already freed. The engine must report the error
+    /// without touching that page, so the caller can retire it; reading it
+    /// decoded freed memory as a compressed page and wrote out of bounds.
+    /// Refusal points step through the reflow, so several land mid-reflow.
+    #[test]
+    fn refusal_inside_reflow_never_touches_freed_pages() {
+        let mut history = Vec::new();
+        for n in 0..3000_usize {
+            let line = match n % 3 {
+                0 => format!("\x1b[3{}m{n:08} plain\x1b[0m\r\n", n % 7 + 1),
+                1 => format!("{n:08} {}\r\n", "wrap-".repeat(30)),
+                _ => format!("{n:08} 漢字かな{}\r\n", "é".repeat(20)),
+            };
+            history.extend_from_slice(line.as_bytes());
+        }
+        let mut failed = 0;
+        for step in 0..24_usize {
+            let mut engine = Engine::new(80, 24, 17 * 1024 * 1024).unwrap();
+            engine.process(b"\x1bc");
+            engine.process(&history);
+            // A styled cursor makes the resize reload its style afterwards.
+            engine.process(b"\x1b[1;4;35mstyled");
+            engine.1.as_mut().unwrap().refuse_beyond(step * 32 * 1024);
+            if engine.resize(133, 40).is_err() {
+                failed += 1;
+                assert!(engine.0.is_none() && engine.1.is_none());
+                assert_eq!(engine.memory().0, 0);
+            }
+        }
+        assert!(
+            failed >= 8,
+            "only {failed} refusal points landed in the reflow"
+        );
+    }
 }
