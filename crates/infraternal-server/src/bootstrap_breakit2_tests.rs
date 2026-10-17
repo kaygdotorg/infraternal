@@ -761,7 +761,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                                 runner.retry_setup("owner".into(), Secret::new(f.cookie.as_bytes().to_vec()), host).unwrap();
                                 continue;
                             }
-                            panic!("published setup failed at {:?}", failure.stage);
+                            panic!("published setup failed at {:?}: step={:?} message={:?}", failure.stage, failure.failed_step, failure.message);
                         }
                         if events.iter().filter(current).any(|event| event.stage == infraternal_plugin_ssh::setup::Stage::Ready && event.state == infraternal_plugin_ssh::setup::State::Done) { break; }
                         setup_changed.changed().await.unwrap();
