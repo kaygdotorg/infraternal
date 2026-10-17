@@ -1,8 +1,23 @@
 # Serialize host provisioning shell commands without creating an unowned lock file.
 # Proof notes are beside Installation::script in install.rs [17][243].
+lease_birth_field() {
+ # The comm field may contain spaces and parentheses; field 22 is the twentieth suffix field.
+ lease_suffix=${1##*) }
+ [ "$lease_suffix" != "$1" ] || return 1
+ case "$lease_suffix" in *[!a-zA-Z0-9\ -]*) return 1;; esac
+ set -- $lease_suffix
+ lease_actual_birth=${20-}
+ case "$lease_actual_birth" in ''|*[!0-9]*) return 1;; esac
+}
+read_lease_birth() {
+ IFS= read -r lease_stat < "/proc/$1/stat" || return 1
+ lease_birth_field "$lease_stat"
+}
 setup_guard() {
  [ "${setup_guarded:-no}" != yes ] || return 0
- parent=$(dirname "$base")
+ # Installation roots are fixed absolute paths ending in infraternal, without a trailing slash.
+ parent=${base%/*}
+ [ -n "$parent" ] || parent=/
  if [ -e "$parent" ] || [ -L "$parent" ]; then
   [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
   permissions=$(stat -c '%a' "$parent")
@@ -17,19 +32,23 @@ start_setup_lease() {
  flock -n 7 || exit 73
  (exec 9<&-; if [ "${lease_runtime:-no}" != yes ]; then exec 6<&-; fi; exec sleep 180) >/dev/null 2>&1 &
  lease_pid=$!
- lease_birth=$(awk '{print $22}' "/proc/$lease_pid/stat")
+ read_lease_birth "$lease_pid" || exit 73
+ lease_birth=$lease_actual_birth
  printf '%s %s\n' "$lease_pid" "$lease_birth" > "$stage/lease"
  exec 7<&-
 }
 retire_setup_lease() {
  if [ -e "$stage/lease" ] || [ -L "$stage/lease" ]; then
-  [ -f "$stage/lease" ] && [ ! -L "$stage/lease" ] && [ -O "$stage/lease" ] && [ "$(stat -c '%a:%h' "$stage/lease")" = 600:1 ] || exit 71
-  [ "$(stat -c '%s' "$stage/lease")" -le 64 ] || exit 71
+  [ -f "$stage/lease" ] && [ ! -L "$stage/lease" ] && [ -O "$stage/lease" ] || exit 71
+  case "$(stat -c '%a:%h:%s' "$stage/lease")" in
+   600:1:[0-9]|600:1:[1-5][0-9]|600:1:6[0-4]) :;;
+   *) exit 71;;
+  esac
   read -r lease_pid lease_birth extra < "$stage/lease"
   [ -z "$extra" ] || exit 71
   case "$lease_pid:$lease_birth" in *[!0-9:]*|:*|*:) exit 71;; esac
-  if [ -r "/proc/$lease_pid/stat" ] && [ "$(awk '{print $22}' "/proc/$lease_pid/stat")" = "$lease_birth" ]; then
-   [ "$(readlink "/proc/$lease_pid/fd/7" 2>/dev/null || :)" = "$stage" ] || exit 73
+  if [ -r "/proc/$lease_pid/stat" ] && read_lease_birth "$lease_pid" && [ "$lease_actual_birth" = "$lease_birth" ]; then
+   [ ! -L "$stage" ] && [ "$stage" -ef "/proc/$lease_pid/fd/7" ] || exit 73
    kill "$lease_pid" || exit 73
   fi
  fi

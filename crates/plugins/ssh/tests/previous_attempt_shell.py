@@ -411,5 +411,34 @@ class EarlierSetup(unittest.TestCase):
         self.assertTrue(outside.exists(), 'host provisioning removed the redirected directory')
         self.assertTrue(receipt.exists(), 'the refused journal must survive')
 
+class LeaseBirthFields(unittest.TestCase):
+    def decode(self, records):
+        script = 'set -eu\n' + INSPECT + '''
+while IFS= read -r record; do
+  if lease_birth_field "$record"; then printf '%s\\n' "$lease_actual_birth"
+  else printf 'refused\\n'; fi
+done
+'''
+        result = subprocess.run(['/bin/sh', '-c', script], input=('\n'.join(records) + '\n').encode(), capture_output=True, check=True)
+        return result.stdout.decode().splitlines()
+
+    def test_kernel_start_time_corpus_preserves_comm_boundaries(self):
+        records, expected = [], []
+        for name in ['sh', 'sleep', 'two words', 'inner) name', '(name)', ') )', '* [name]', 'tést\tname']:
+            for value in range(64):
+                fields = ['S'] + ['0'] * 49
+                fields[19] = str(100000 + value)
+                records.append(f'123 ({name}) ' + ' '.join(fields))
+                expected.append(fields[19])
+        self.assertEqual(self.decode(records), expected)
+
+    def test_uncertain_start_time_records_are_refused(self):
+        records = ['', 'no delimiter', '123 (sleep) S 1']
+        for value in ['invalid', '-1', '*', '[0]', '0;1']:
+            fields = ['S'] + ['0'] * 49
+            fields[19] = value
+            records.append('123 (sleep) ' + ' '.join(fields))
+        self.assertEqual(self.decode(records), ['refused'] * len(records))
+
 if __name__ == '__main__':
     unittest.main()
