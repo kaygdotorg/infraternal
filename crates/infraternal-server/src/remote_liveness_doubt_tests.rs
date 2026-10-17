@@ -83,7 +83,7 @@ async fn one_missed_primary_reply_shows_reconnecting_and_only_a_second_retires_t
         .expect("a missed reply must surface reconnecting");
     let doubted_after = silent.elapsed();
     assert!(
-        matches!(notice, Some(TerminalOutput::Reconnecting)),
+        matches!(notice, Some(TerminalOutput::LinkDoubt)),
         "unexpected first notice {notice:?}"
     );
     assert!(
@@ -118,6 +118,12 @@ async fn one_missed_primary_reply_shows_reconnecting_and_only_a_second_retires_t
     // Two consecutive misses retire the link.
     answer.store(false, Ordering::SeqCst);
     let silent = std::time::Instant::now();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap(),
+        Some(TerminalOutput::LinkDoubt)
+    ));
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(2), output.recv())
             .await

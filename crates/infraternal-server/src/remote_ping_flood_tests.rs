@@ -439,7 +439,7 @@ async fn primary_ping_during_terminal_flood() {
                             echo_tail.clear();
                         }
                     }
-                    TerminalOutput::Reconnecting if index == 1 => {
+                    TerminalOutput::Reconnecting | TerminalOutput::LinkDoubt if index == 1 => {
                         closes += 1;
                         if dead_at.is_some() && noticed_at.is_none() { noticed_at = Some(Instant::now()); }
                     }

@@ -118,13 +118,13 @@ async fn retired_doubt_never_confirms_a_replacement_link_mid_replay() {
     // Prove the loopback link: its allowance settles at the 250 ms floor.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Silence: first miss → Reconnecting (doubt), second miss → retire.
+    // Silence: first miss → LinkDoubt (link kept), second miss → retire.
     answer_a.store(false, Ordering::SeqCst);
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(2), output.recv())
             .await
             .unwrap(),
-        Some(TerminalOutput::Reconnecting)
+        Some(TerminalOutput::LinkDoubt)
     ));
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(2), output.recv())

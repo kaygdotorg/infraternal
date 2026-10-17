@@ -51,6 +51,10 @@ use tokio::sync::{Semaphore, mpsc, watch};
 
 const CONTROL_STREAM: u32 = 0;
 const RESUME_NEXT: u64 = 1;
+/// Browser Hello bit 1: the viewer understands `terminal.link_doubt` and
+/// `terminal.link_recovered`. Older viewers reject unknown notices, so they
+/// are never sent one and simply see no indicator for a kept link [D300].
+const LINK_DOUBT_NOTICES: u64 = 1 << 1;
 const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
@@ -431,7 +435,7 @@ async fn run_socket(
         ),
     )
     .await;
-    let Ok(Ok((connection_id, proof_authority))) = handshake else {
+    let Ok(Ok((connection_id, proof_authority, link_doubt_notices))) = handshake else {
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None)))
             .await;
         drop(sink);
@@ -590,7 +594,7 @@ async fn run_socket(
                     .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
                 if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                     &state, &user_id, &session_token, &connection_id, stream_id, output,
-                    &mut attachments, &mut ended, &mut sink, &mut encode,
+                    link_doubt_notices, &mut attachments, &mut ended, &mut sink, &mut encode,
                 )).await.is_err() { break; }
                 if let Some(handle) = reconnect
                     && while_authorized(&state, &user_id, &session_token, true,
@@ -877,6 +881,7 @@ async fn handle_terminal_output<K>(
     connection_id: &[u8; 16],
     stream_id: u32,
     output: TerminalOutput,
+    link_doubt_notices: bool,
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
     sink: &mut K,
@@ -888,7 +893,6 @@ where
     let Some(attachment) = attachments.get_mut(&stream_id) else {
         return Ok(());
     };
-    let recovered = matches!(output, TerminalOutput::Recovered);
     let sent = match output {
         TerminalOutput::Output { out_seq, bytes } => {
             let Some(end) = out_seq.checked_add(bytes.len() as u64) else {
@@ -970,21 +974,17 @@ where
             .await
             .is_ok()
         }
-        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired | TerminalOutput::Recovered => {
-            let session_id = uuid::Uuid::from_bytes(attachment.session_id).to_string();
-            let notice = if recovered {
-                // The host link never changed, so readiness resumes at exactly
-                // the bytes this socket already forwarded: no replay [D300].
-                json!({
-                    "type": "terminal.replay_complete",
-                    "session_id": session_id,
-                    "out_seq": attachment.last_out_seq.to_string(),
-                })
-            } else {
-                attachment.awaiting_ack = true;
-                json!({"type": "terminal.reconnecting", "session_id": session_id})
+        TerminalOutput::Reconnecting
+        | TerminalOutput::RouteExpired
+        | TerminalOutput::LinkDoubt
+        | TerminalOutput::Recovered => {
+            let Some((kind, awaits_ack)) = link_notice(&output, link_doubt_notices) else {
+                return Ok(());
             };
-            let notice = serde_json::to_vec(&notice).map_err(|_| ())?;
+            attachment.awaiting_ack |= awaits_ack;
+            let session_id = uuid::Uuid::from_bytes(attachment.session_id).to_string();
+            let notice = serde_json::to_vec(&json!({"type": kind, "session_id": session_id}))
+                .map_err(|_| ())?;
             send_frame(
                 sink,
                 stream_id,
@@ -1066,6 +1066,26 @@ where
     Ok(())
 }
 
+/// The browser notice for a host-link state change, and whether the stream
+/// now awaits a fresh Ack. A replaced link replays, so its stream waits for the
+/// replacement's Ack. A doubted link is kept: the viewer only shows an
+/// indicator and keeps live replies and input flowing, so neither doubt nor
+/// recovery relaxes the Ack check, and recovery is never a replay fence.
+/// Viewers that did not announce `LINK_DOUBT_NOTICES` get no doubt notice
+/// [D300, #234].
+fn link_notice(output: &TerminalOutput, link_doubt_notices: bool) -> Option<(&'static str, bool)> {
+    match output {
+        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired => {
+            Some(("terminal.reconnecting", true))
+        }
+        TerminalOutput::LinkDoubt => link_doubt_notices.then_some(("terminal.link_doubt", false)),
+        TerminalOutput::Recovered => {
+            link_doubt_notices.then_some(("terminal.link_recovered", false))
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handshake<S, K>(
     source: &mut S,
@@ -1076,7 +1096,7 @@ async fn handshake<S, K>(
     user_id: &str,
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
-) -> Result<([u8; 16], probe_authority::Lease), ()>
+) -> Result<([u8; 16], probe_authority::Lease, bool), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
@@ -1084,13 +1104,13 @@ where
     let hello = next_wire(source, sink, receive).await?.ok_or(())?;
     socket_deadline(state, user_id, session_token).await?;
     let decoded = decode_muxed_frame(&hello).map_err(|_| ())?;
-    let resume = match (decoded.stream_id, decoded.frame) {
+    let (resume, link_doubt_notices) = match (decoded.stream_id, decoded.frame) {
         (
             CONTROL_STREAM,
             Frame::Hello {
                 version: 1, caps, ..
             },
-        ) => caps & RESUME_NEXT != 0,
+        ) => (caps & RESUME_NEXT != 0, caps & LINK_DOUBT_NOTICES != 0),
         _ => return Err(()),
     };
     let welcome = if resume {
@@ -1150,7 +1170,7 @@ where
     {
         return Err(());
     }
-    Ok((welcome.connection_id, proof_authority))
+    Ok((welcome.connection_id, proof_authority, link_doubt_notices))
 }
 
 #[derive(Clone)]
@@ -2257,3 +2277,35 @@ impl SocketHost for PluginHost {
 #[cfg(test)]
 #[path = "websocket_cookie_tests.rs"]
 mod cookie_tests;
+
+#[cfg(test)]
+mod link_notice_tests {
+    //! A kept, doubted host link is never presented as a replay [D300, #234].
+    use super::*;
+
+    #[test]
+    fn doubt_notices_reach_only_viewers_that_announced_them_and_never_await_an_ack() {
+        assert_eq!(
+            link_notice(&TerminalOutput::LinkDoubt, true),
+            Some(("terminal.link_doubt", false))
+        );
+        assert_eq!(
+            link_notice(&TerminalOutput::Recovered, true),
+            Some(("terminal.link_recovered", false))
+        );
+        // Older viewers reject unknown notices; they keep working without one.
+        assert_eq!(link_notice(&TerminalOutput::LinkDoubt, false), None);
+        assert_eq!(link_notice(&TerminalOutput::Recovered, false), None);
+        // A replaced link still makes every viewer wait for the replay's Ack.
+        for viewer in [false, true] {
+            assert_eq!(
+                link_notice(&TerminalOutput::Reconnecting, viewer),
+                Some(("terminal.reconnecting", true))
+            );
+            assert_eq!(
+                link_notice(&TerminalOutput::RouteExpired, viewer),
+                Some(("terminal.reconnecting", true))
+            );
+        }
+    }
+}

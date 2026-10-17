@@ -505,13 +505,26 @@ The browser response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
 Host routes (the primary host link and its terminal streams) carry ordered
 replies that one lost packet holds back for about one more round trip, so
 their allowance is `clamp(2 × srtt + 4 × rttvar + 75 ms, 250 ms, 2 s)` [D300].
-On the primary host link a first miss only marks the route doubtful: each
-settled retained stream receives `terminal.reconnecting` and the link, its
-streams and writers stay. A correlated reply within a second allowance clears
-the doubt; those streams then receive `terminal.replay_complete` at the cursor
-the server already forwarded, because nothing was replaced or replayed. The
-link is retired only after the second consecutive allowance passes without a
-reply. A link that has never answered retires at its startup grace.
+On the primary host link a first miss only marks the route doubtful: the
+link, its streams and writers stay. Each settled stream of a viewer that set
+browser Hello caps bit 1 (`LINK_DOUBT_NOTICES`) receives
+`{"type":"terminal.link_doubt","session_id":"UUID"}`. The viewer shows that
+the link may be reconnecting and changes nothing else: live output is not
+replay, so it keeps answering terminal queries and sending input, and the
+server keeps its Ack checks strict. A correlated reply within a second
+allowance clears the doubt; the same streams then receive
+`terminal.link_recovered`, which clears only that indicator and is never a
+replay fence. A doubt belongs to its link: once the link is retired or
+replaced, the streams receive `terminal.reconnecting` and only the
+replacement's own `terminal.replay_complete` confirms them. Viewers without
+bit 1 receive neither notice. A stream whose queue was full when doubt began
+is told on a later tick of the same episode. The link is retired only after
+the second consecutive allowance passes without a reply. A link that has never
+answered retires at its startup grace. A link whose doubt recovered while its
+allowance sat at the 2 s ceiling raises no further doubt (its delay is the
+path, not a loss) until a reply brings the allowance below the ceiling; it
+still retires after two allowances. Viewers ignore terminal notice types they
+do not know.
 The floor tolerates a 150 ms scheduler/main-thread stall on a healthy low-RTT
 route, rather than confusing local load with peer loss. A settled quiet link
 therefore detects silence within that floor plus one probe interval (at most

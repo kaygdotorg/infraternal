@@ -92,8 +92,12 @@ pub(crate) enum TerminalOutput {
     Ack { in_seq_acked: u64 },
     /// The shared host link is rebinding; keep this stream and its input writer.
     Reconnecting,
-    /// The shared host link answered again after doubt, without rebinding:
-    /// confirm readiness at the bytes already forwarded [D300].
+    /// The shared host link missed one reply but is kept: show that it may be
+    /// reconnecting while live output, terminal replies and input keep flowing.
+    /// Unlike `Reconnecting`, nothing is replaced and nothing is replayed [D300].
+    LinkDoubt,
+    /// The doubted host link answered again: clear only the `LinkDoubt`
+    /// indicator. It never confirms a replay; replays own their fences [D300].
     Recovered,
     /// A route expired; only an authenticated browser consumer may request rebind.
     RouteExpired,
@@ -2656,7 +2660,7 @@ fn notify_doubt(
         for (&id, a) in attachments {
             if settled(a)
                 && !doubted.contains(&id)
-                && a.output.try_send(TerminalOutput::Reconnecting).is_ok()
+                && a.output.try_send(TerminalOutput::LinkDoubt).is_ok()
             {
                 doubted.push(id);
             }

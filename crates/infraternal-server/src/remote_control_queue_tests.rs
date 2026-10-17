@@ -276,6 +276,7 @@ async fn verify_saturated_primary(wait_for_probe: bool) {
         Ok(Some(TerminalOutput::Ack { .. })) => "ack",
         Ok(Some(TerminalOutput::RouteExpired)) => "route expired",
         Ok(Some(TerminalOutput::Reconnecting)) => "reconnecting",
+        Ok(Some(TerminalOutput::LinkDoubt)) => "link doubt",
         Ok(Some(TerminalOutput::Recovered)) => "recovered",
         Ok(Some(TerminalOutput::Closed { .. })) => "closed",
     };
