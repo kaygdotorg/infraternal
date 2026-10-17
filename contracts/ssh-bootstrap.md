@@ -445,7 +445,11 @@ The cache creates no background task and grants no host admission authority.
 The existing authenticated SSH check also classifies setup ownership, without a
 second SSH command. A live directory-lock holder, installation executable, open
 setup descriptor or live session socket returns `setup_running`: “Setup is already
-running on this host. Wait for it to finish, then try again.” New setup commands
+running on this host. Wait for it to finish, then try again.” Live shims are
+non-dumpable, so a session socket counts as live when the native helper's one
+socket-diagnostic dump reports any socket bound to an owned `sessions/*.sock`,
+matched by owner and inode, never by name; an unavailable or unexpected dump is
+uncertain and retains the attempt. New setup commands
 serialize on the private installation parent and hold a bounded 180-second
 transaction lease across command gaps. Commit and rollback retire only the
 lease whose PID birth and inherited descriptor match that transaction.

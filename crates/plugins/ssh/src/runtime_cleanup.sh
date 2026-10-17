@@ -1,14 +1,17 @@
 # Validate runtime lifetime under the cleanup shell's inherited lock descriptor (#230).
+runtime_helper() {
+ helper="$base.bootstrap-cache/payload"
+ [ -d "$base.bootstrap-cache" ] && [ ! -L "$base.bootstrap-cache" ] && [ -O "$base.bootstrap-cache" ] && [ "$(stat -c '%a' "$base.bootstrap-cache")" = 700 ] || exit 76
+ [ -f "$helper" ] && [ ! -L "$helper" ] && [ -O "$helper" ] && [ "$(stat -c '%a' "$helper")" = 700 ] || exit 76
+ "$helper" --bootstrap-runtime-version >/dev/null 2>&1 || exit 76
+}
 control_socket() {
  [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0
  [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ] && [ "$(stat -c '%a' "$base/sessions")" = 700 ] || exit 71
  control="$base/sessions/plugins.sock"
  lifetime="$base/sessions/.lifetime-lock"
  if [ ! -e "$control" ] && [ ! -L "$control" ] && [ ! -e "$lifetime" ] && [ ! -L "$lifetime" ]; then return 0; fi
- helper="$base.bootstrap-cache/payload"
- [ -d "$base.bootstrap-cache" ] && [ ! -L "$base.bootstrap-cache" ] && [ -O "$base.bootstrap-cache" ] && [ "$(stat -c '%a' "$base.bootstrap-cache")" = 700 ] || exit 76
- [ -f "$helper" ] && [ ! -L "$helper" ] && [ -O "$helper" ] && [ "$(stat -c '%a' "$helper")" = 700 ] || exit 76
- "$helper" --bootstrap-runtime-version >/dev/null 2>&1 || exit 76
+ runtime_helper
  if [ -e "$lifetime" ] || [ -L "$lifetime" ]; then
   [ -f "$lifetime" ] && [ ! -L "$lifetime" ] && [ -O "$lifetime" ] && [ "$(stat -c '%a:%h' "$lifetime")" = 600:1 ] || exit 71
   if [ "${runtime_locked:-no}" != yes ]; then exec 6< "$lifetime"; runtime_locked=yes; fi

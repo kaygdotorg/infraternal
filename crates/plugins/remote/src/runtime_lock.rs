@@ -238,23 +238,23 @@ pub fn check_diagnostic_datagram(data: &[u8]) -> Option<Vec<Option<u32>>> {
     Some(owners)
 }
 
-// Legacy runtimes did not hold the lifetime lock. A refused connect alone is
-// insufficient before listen. Ask the kernel whether any socket is bound to
-// this file (UID, inode), instead of inspecting private process
-// descriptors, which cannot establish absence. Unknown inspection retains state.
+// Ask the kernel whether any socket is bound to one of the given files,
+// instead of inspecting private process descriptors (absent for non-dumpable
+// holders) or bound names (distorted by newlines and aliases). `None` means
+// the dump proved nothing, and callers retain state.
+//
+// Files match on owner and inode only. The kernel reports the superblock
+// device, and stat reports the filesystem's own device; they differ on btrfs
+// and on overlays with layers on different filesystems, so comparing them
+// would miss a bound endpoint there (#230 R09). A match only preserves state,
+// so a false match (same inode on another filesystem, 32-bit projection) is
+// safe.
 #[cold]
 #[inline(never)]
-fn legacy_bound(expected: &fs::Metadata) -> Option<bool> {
+fn kernel_bound(files: &[fs::Metadata]) -> Option<bool> {
     use nix::sys::socket::{
         MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
     };
-    // Match on owner and inode only. The kernel reports the superblock device,
-    // and stat reports the filesystem's own device; they differ on btrfs and on
-    // overlays with layers on different filesystems, so comparing them would
-    // miss a bound endpoint there (#230 R09). A match only preserves state, so
-    // a false match (same inode on another filesystem, 32-bit projection) is
-    // safe. New runtimes use the lifetime lock instead of this legacy fallback.
-    let inode = expected.ino() & u64::from(u32::MAX);
     let query = socket(
         AddressFamily::Netlink,
         SockType::Datagram,
@@ -292,7 +292,9 @@ fn legacy_bound(expected: &fs::Metadata) -> Option<bool> {
         let (mut bound, mut done) = (false, false);
         dump_datagram(&response[..count], |record| match record {
             DumpRecord::Bound(owner) => {
-                bound |= owner.uid == expected.uid() && u64::from(owner.inode) == inode;
+                bound |= files.iter().any(|file| {
+                    owner.uid == file.uid() && u64::from(owner.inode) == file.ino() & 0xffff_ffff
+                });
             }
             DumpRecord::Unbound => {}
             DumpRecord::Done => done = true,
@@ -334,7 +336,9 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
             Err(nix::errno::Errno::ECONNREFUSED) => {}
             Err(_) => return Err(77),
         }
-        if legacy_bound(&before).ok_or(77)? {
+        // Legacy runtimes did not hold the lifetime lock, and a refused
+        // connect alone is insufficient before listen.
+        if kernel_bound(std::slice::from_ref(&before)).ok_or(77)? {
             return Err(73);
         }
     }
@@ -348,6 +352,46 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
     }
     if retire {
         fs::remove_file(path).map_err(|_| 77)?;
+    }
+    Ok(())
+}
+// Session endpoints belong to shims, which are non-dumpable while live, so the
+// kernel table is the only sign of a holder. Any owned endpoint still bound
+// means the runtime is live (73); an unreadable directory or dump is unsure.
+#[cold]
+#[inline(never)]
+fn sessions(runtime: &File) -> Result<(), u8> {
+    let nested = match directory(&at(runtime, "sessions")) {
+        Ok(nested) => Some(nested),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return Err(71),
+    };
+    let mut files = Vec::new();
+    for (directory, top) in [(Some(runtime), true), (nested.as_ref(), false)] {
+        let Some(directory) = directory else { continue };
+        for entry in fs::read_dir(at(directory, "")).map_err(|_| 77)? {
+            let entry = entry.map_err(|_| 77)?;
+            let name = entry.file_name();
+            let name = name.as_encoded_bytes();
+            if !name.ends_with(b".sock") || (top && name == b"plugins.sock") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(entry.path()).map_err(|_| 77)?;
+            if metadata.file_type().is_socket()
+                && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+            {
+                files.push(metadata);
+                if files.len() > 1024 {
+                    return Err(77);
+                }
+            }
+        }
+    }
+    if files.is_empty() {
+        return Ok(());
+    }
+    if kernel_bound(&files).ok_or(77)? {
+        return Err(73);
     }
     Ok(())
 }
@@ -387,6 +431,10 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
             return Err(71);
         }
         let runtime = directory(&at(&root, "sessions")).map_err(|_| 71)?;
+        // Session inspection takes no lock and never removes anything.
+        if mode == "sessions" {
+            return sessions(&runtime);
+        }
         let lock_path = at(&runtime, LOCK);
         let legacy = match fs::symlink_metadata(&lock_path) {
             Ok(_) => {

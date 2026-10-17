@@ -18,14 +18,14 @@ not_live() {
  else
   base_real=$(CDPATH= cd -P "$(dirname "$base")" && pwd -P)/${base##*/}
  fi
- [ -r /proc/net/unix ] || exit 75
- while read -r num refs protocol flags type state inode path; do
-  for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
-   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || continue
-   [ "$entry" != "$base/sessions/plugins.sock" ] || continue
-   case "$path" in "$entry"|"$base_real/${entry#"$base/"}"|"${entry##*/}"|*/"${entry##*/}") exit 73;; esac
-  done
- done < /proc/net/unix
+ # Non-dumpable shims: the helper asks the kernel by owner+inode, never by name.
+ for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
+  [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || continue
+  [ "$entry" != "$base/sessions/plugins.sock" ] || continue
+  runtime_helper
+  "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions </dev/null || exit $?
+  break
+ done
  case "$base" in *[\*\?\[]*) exit 75;; esac
  case "$base_real" in *[\*\?\[]*) exit 75;; esac
  set --

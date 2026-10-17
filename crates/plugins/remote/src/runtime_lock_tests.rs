@@ -212,12 +212,12 @@ fn legacy_inspection_finds_a_real_bound_socket() {
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
     let _pair = std::os::unix::net::UnixStream::pair().unwrap();
     let expected = fs::metadata(&path).unwrap();
-    assert_eq!(legacy_bound(&expected), Some(true));
+    assert_eq!(kernel_bound(std::slice::from_ref(&expected)), Some(true));
     let other = fixture.state().join("other.sock");
     drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
-    assert_eq!(legacy_bound(&fs::metadata(other).unwrap()), Some(false));
+    assert_eq!(kernel_bound(&[fs::metadata(other).unwrap()]), Some(false));
     drop(listener);
-    assert_eq!(legacy_bound(&expected), Some(false));
+    assert_eq!(kernel_bound(std::slice::from_ref(&expected)), Some(false));
 }
 
 /// Names are never read: newline homes and absolute aliases keep the same identity.
@@ -236,11 +236,31 @@ fn legacy_inspection_is_independent_of_the_bound_name() {
         ),
     ] {
         let listener = std::os::unix::net::UnixListener::bind(&bound).unwrap();
-        assert_eq!(legacy_bound(&fs::metadata(&probed).unwrap()), Some(true));
+        assert_eq!(kernel_bound(&[fs::metadata(&probed).unwrap()]), Some(true));
         drop(listener);
-        assert_eq!(legacy_bound(&fs::metadata(&probed).unwrap()), Some(false));
+        assert_eq!(kernel_bound(&[fs::metadata(&probed).unwrap()]), Some(false));
         fs::remove_file(probed).unwrap();
     }
+}
+
+/// Session endpoints are live while any socket is bound to them, nested or
+/// not and before `listen`; the control socket and leftover files are not.
+#[test]
+fn session_inspection_finds_bound_endpoints_by_identity() {
+    let fixture = Fixture::new();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = directory(&fixture.state()).unwrap();
+    let control =
+        std::os::unix::net::UnixListener::bind(fixture.state().join("plugins.sock")).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(nested.join("left.sock")).unwrap());
+    assert_eq!(sessions(&runtime), Ok(()));
+    let bound = std::os::unix::net::UnixDatagram::bind(nested.join("live.sock")).unwrap();
+    assert_eq!(sessions(&runtime), Err(73));
+    drop(bound);
+    assert_eq!(sessions(&runtime), Ok(()));
+    drop(control);
 }
 
 /// A held lifetime description remains an explicit nonblocking refusal.
