@@ -9,7 +9,9 @@
 //! window is written at once; later ones are only counted and summarised in one line
 //! when the 60 s window ends. The key is chosen by the server, never by the client: a
 //! client can name any session id in an attach, but it cannot change the account that
-//! owns its socket.
+//! owns its socket. When the per-account table is full, closes fall into one
+//! server-wide window per reason category, so the line rate stays bounded during a
+//! storm across many accounts too.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -363,8 +365,7 @@ impl DropReport {
     }
 }
 
-/// Whether a line's window is one account's, or the close was written untracked
-/// because the account table was full.
+/// Whether a line's window is one account's or the server-wide overflow window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
     Account,
@@ -372,13 +373,15 @@ enum Scope {
 }
 
 struct Window {
+    started: Instant,
     closes: u64,
     last: CloseRecord,
 }
 
 impl Window {
-    fn new(record: CloseRecord) -> Self {
+    fn new(record: CloseRecord, now: Instant) -> Self {
         Self {
+            started: now,
             closes: 1,
             last: record,
         }
@@ -415,6 +418,9 @@ struct Limiter {
     /// `now` for every record, so starts never decrease and the front holds the
     /// earliest deadline: finding and ending due windows costs O(1) per window.
     order: VecDeque<(Instant, WindowKey)>,
+    /// Server-wide windows by reason category, used only while `accounts` is full.
+    /// The category table is fixed, so this stays a handful of entries.
+    overflow: Vec<(&'static str, Window)>,
 }
 
 impl Limiter {
@@ -434,11 +440,19 @@ impl Limiter {
         if self.accounts.len() < MAX_TRACKED_WINDOWS {
             out(&record, 1, Scope::Account);
             self.order.push_back((now, key));
-            self.accounts.insert(key, Window::new(record));
+            self.accounts.insert(key, Window::new(record, now));
             return;
         }
-        // Full table: write the line without tracking it, so memory stays bounded.
+        if let Some((_, window)) = self
+            .overflow
+            .iter_mut()
+            .find(|(category, _)| *category == key.1)
+        {
+            window.absorb(record);
+            return;
+        }
         out(&record, 1, Scope::Server);
+        self.overflow.push((key.1, Window::new(record, now)));
     }
 
     fn expire(&mut self, now: Instant, out: &mut impl FnMut(&CloseRecord, u64, Scope)) {
@@ -451,12 +465,23 @@ impl Limiter {
                 summarize(&window, Scope::Account, out);
             }
         }
+        self.overflow.retain(|(_, window)| {
+            if now < window.started + CLOSE_WINDOW {
+                return true;
+            }
+            summarize(window, Scope::Server, out);
+            false
+        });
     }
 
     fn next_deadline(&self) -> Option<Instant> {
         self.order
             .front()
-            .map(|(started, _)| *started + CLOSE_WINDOW)
+            .map(|(started, _)| *started)
+            .into_iter()
+            .chain(self.overflow.iter().map(|(_, window)| window.started))
+            .min()
+            .map(|started| started + CLOSE_WINDOW)
     }
 
     /// Shutdown: summarise every window that is still open.
@@ -464,6 +489,9 @@ impl Limiter {
         self.order.clear();
         for (_, window) in self.accounts.drain() {
             summarize(&window, Scope::Account, out);
+        }
+        for (_, window) in self.overflow.drain(..) {
+            summarize(&window, Scope::Server, out);
         }
     }
 }
@@ -718,6 +746,46 @@ mod tests {
             limiter.record(unowned, now, &mut lines.sink());
         }
         assert_eq!(lines.0, [(1, Scope::Account)]);
+        assert_eq!(limiter.accounts.len(), 1);
+    }
+
+    /// With the table full of live windows, every further account still gets rate
+    /// limited through the server-wide window of its category (#227 review P1-2).
+    #[test]
+    fn a_full_table_keeps_rate_limiting_a_storm() {
+        let mut limiter = Limiter::default();
+        let mut lines = Lines::default();
+        let start = Instant::now();
+        for i in 0..MAX_TRACKED_WINDOWS as u64 {
+            limiter.record(record(owner(i), session(i)), start, &mut lines.sink());
+        }
+        lines.0.clear();
+        let storm = start + Duration::from_secs(1);
+        for i in 0..1000 {
+            limiter.record(record(owner(1 << 40), session(i)), storm, &mut lines.sink());
+        }
+        for i in 0..1000_u64 {
+            limiter.record(
+                record(owner((1 << 41) + i), session(i)),
+                storm,
+                &mut lines.sink(),
+            );
+        }
+        assert_eq!(lines.0, [(1, Scope::Server)], "one line for 2000 closes");
+        assert_eq!(limiter.accounts.len(), MAX_TRACKED_WINDOWS);
+        assert_eq!(limiter.overflow.len(), 1);
+        // The account windows end first; the overflow window ends a second later.
+        limiter.expire(start + CLOSE_WINDOW, &mut lines.sink());
+        assert!(limiter.accounts.is_empty());
+        assert_eq!(limiter.overflow.len(), 1);
+        limiter.expire(storm + CLOSE_WINDOW, &mut lines.sink());
+        assert_eq!(lines.0.last(), Some(&(2000, Scope::Server)));
+        // Tracking per account resumes once the table has room.
+        limiter.record(
+            record(owner(3), session(3)),
+            storm + CLOSE_WINDOW,
+            &mut lines.sink(),
+        );
         assert_eq!(limiter.accounts.len(), 1);
     }
 
