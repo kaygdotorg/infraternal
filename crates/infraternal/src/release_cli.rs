@@ -121,27 +121,32 @@ pub(crate) fn run(
     match result {
         Ok(value) => present(value, &command, json_output),
         Err(error) => {
-            let (message, next, exit) = if error == EDGE_WARNING {
-                (
-                    error,
-                    "Confirm explicitly on a TTY or pass --yes to acknowledge unreviewed edge builds.",
-                    Exit::NotAllowed,
-                )
-            } else if error == "existing server storage is unsafe" {
-                (
-                    "The server's data directory is not private to this account.",
-                    "Run this as the account that owns the server's data directory.",
-                    Exit::NotAllowed,
-                )
-            } else {
-                (
-                    "No server was found in that data directory.",
-                    "Pass --data with the data directory of the running server.",
-                    Exit::NotFound,
-                )
-            };
+            let (message, next, exit) = classify(error);
             refusal(&command, json_output, message, next, exit)
         }
+    }
+}
+
+/// Each cause of a failed release read gets its own sentence, next step and exit code (D303).
+fn classify(error: &'static str) -> (&'static str, &'static str, Exit) {
+    if error == EDGE_WARNING {
+        (
+            error,
+            "Confirm explicitly on a TTY or pass --yes to acknowledge unreviewed edge builds.",
+            Exit::NotAllowed,
+        )
+    } else if error == "existing server storage is unsafe" {
+        (
+            "The server's data directory is not private to this account.",
+            "Run this as the account that owns the server's data directory.",
+            Exit::NotAllowed,
+        )
+    } else {
+        (
+            "No server was found in that data directory.",
+            "Pass --data with the data directory of the running server.",
+            Exit::NotFound,
+        )
     }
 }
 

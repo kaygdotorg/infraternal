@@ -41,7 +41,9 @@ use std::{
 use std::net::SocketAddr;
 
 use clap::ArgMatches;
-use cli::output::{CommandResult, CommandState, Exit, emit, render_json, write_output};
+use cli::output::{CommandResult, CommandState, Exit, emit};
+#[cfg(feature = "plugin-server")]
+use cli::output::{render_json, write_output};
 use infraternal_plugin_api::{
     ActionAvailability, ActionDefinition, ActionRegistry, CliHandler, JsonSchema, JsonSchemaType,
 };

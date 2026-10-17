@@ -151,6 +151,10 @@ pub enum CommandState {
     /// The requested service or component is stopped.
     Stopped,
     /// The command waits for a step that only a person can take (a passkey, a confirmation).
+    #[cfg_attr(
+        not(any(feature = "remote", feature = "plugin-agent")),
+        allow(dead_code)
+    )]
     Pending,
     /// This build does not provide the command handler.
     Unavailable,
@@ -202,8 +206,11 @@ pub enum Exit {
     /// The command line is wrong.
     Usage,
     /// The request was understood and refused: wrong account, missing proof.
+    #[allow(dead_code)]
+    // Used by the server, agent and remote commands, which a minimal build leaves out.
     NotAllowed,
     /// What the command was asked about does not exist.
+    #[allow(dead_code)] // Used by the server commands, which a minimal build leaves out.
     NotFound,
     /// A component or the thing to talk to is off or does not answer.
     Unreachable,

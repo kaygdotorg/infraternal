@@ -9,7 +9,7 @@ pub(crate) fn present(action: &str, output: &[u8], width: usize) -> Result<Prese
     let value: Value = serde_json::from_slice(output).map_err(|_| PluginError::Rejected)?;
     match action {
         "mesh.status" => status(value, width),
-        "mesh.peers" => peers(value, width),
+        "mesh.peers" => peers(&value, width),
         _ => Err(PluginError::UnknownAction),
     }
 }
@@ -131,84 +131,97 @@ fn now_secs() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-fn peers(value: Value, width: usize) -> Result<Presented, PluginError> {
+fn peers(value: &Value, width: usize) -> Result<Presented, PluginError> {
     peers_at(value, width, now_secs())
 }
 
-/// The peers page as people and scripts read it. `now` is the wall clock in seconds, so tests can fix it.
-fn peers_at(value: Value, width: usize, now: u64) -> Result<Presented, PluginError> {
-    let mut rows = Vec::new();
-    let mut records = Vec::new();
-    let mut waiting: Vec<(String, String)> = Vec::new();
-    for row in value["peers"].as_array().ok_or(PluginError::Rejected)? {
-        let node = row["node"].as_u64().ok_or(PluginError::Rejected)?;
-        let address: std::net::Ipv4Addr = row["peer"]["addresses"]["ipv4"]
-            .as_str()
-            .ok_or(PluginError::Rejected)?
-            .parse()
-            .map_err(|_| PluginError::Rejected)?;
-        let endpoint = row["peer"]["endpoint"]
-            .as_str()
-            .map(|endpoint| endpoint.parse::<std::net::SocketAddr>())
-            .transpose()
-            .map_err(|_| PluginError::Rejected)?;
-        let path = row["path"].as_str().ok_or(PluginError::Rejected)?;
-        let direct = match path {
-            "Direct" => true,
-            "Unproven" => false,
-            _ => return Err(PluginError::Rejected),
-        };
-        let received = row["counters"]["received_bytes"]
-            .as_u64()
-            .ok_or(PluginError::Rejected)?;
-        let sent = row["counters"]["sent_bytes"]
-            .as_u64()
-            .ok_or(PluginError::Rejected)?;
-        // The kernel reports the time of the last handshake; people want its age.
-        let handshake = row["counters"]["handshake_secs"]
-            .as_u64()
-            .filter(|secs| *secs > 0);
-        let ago = handshake.map(|secs| now.saturating_sub(secs));
-        let key: Vec<u8> = row["peer"]["key"]
-            .as_array()
-            .ok_or(PluginError::Rejected)?
-            .iter()
-            .map(|byte| byte.as_u64().and_then(|byte| u8::try_from(byte).ok()))
-            .collect::<Option<_>>()
-            .ok_or(PluginError::Rejected)?;
-        // The server will send machine names once the mesh configuration carries them; until
-        // then a peer is known by its mesh address.
-        let name = row["peer"]["name"].as_str().map(str::to_owned);
-        let label = name.clone().unwrap_or_else(|| address.to_string());
-        if !direct {
-            waiting.push((label.clone(), address.to_string()));
-        }
-        rows.push(vec![
-            label,
+/// One peer as a table row, a JSON record, and, when it has no direct path yet, its label and address.
+struct PeerView {
+    cells: Vec<String>,
+    record: Value,
+    waiting: Option<(String, String)>,
+}
+
+fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
+    let node = row["node"].as_u64().ok_or(PluginError::Rejected)?;
+    let address: std::net::Ipv4Addr = row["peer"]["addresses"]["ipv4"]
+        .as_str()
+        .ok_or(PluginError::Rejected)?
+        .parse()
+        .map_err(|_| PluginError::Rejected)?;
+    let endpoint = row["peer"]["endpoint"]
+        .as_str()
+        .map(str::parse::<std::net::SocketAddr>)
+        .transpose()
+        .map_err(|_| PluginError::Rejected)?;
+    let direct = match row["path"].as_str() {
+        Some("Direct") => true,
+        Some("Unproven") => false,
+        _ => return Err(PluginError::Rejected),
+    };
+    let received = row["counters"]["received_bytes"]
+        .as_u64()
+        .ok_or(PluginError::Rejected)?;
+    let sent = row["counters"]["sent_bytes"]
+        .as_u64()
+        .ok_or(PluginError::Rejected)?;
+    // The kernel reports the time of the last handshake; people want its age.
+    let ago = row["counters"]["handshake_secs"]
+        .as_u64()
+        .filter(|secs| *secs > 0)
+        .map(|secs| now.saturating_sub(secs));
+    let key: Vec<u8> = row["peer"]["key"]
+        .as_array()
+        .ok_or(PluginError::Rejected)?
+        .iter()
+        .map(|byte| byte.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+        .collect::<Option<_>>()
+        .ok_or(PluginError::Rejected)?;
+    // The server will send machine names once the mesh configuration carries them; until
+    // then a peer is known by its mesh address.
+    let name = row["peer"]["name"].as_str().map(str::to_owned);
+    let label = name.clone().unwrap_or_else(|| address.to_string());
+    let mut record = serde_json::json!({
+        "node": node,
+        "address": address.to_string(),
+        "path": if direct { "direct" } else { "unproven" },
+        "key": base64(&key),
+        "received_bytes": received,
+        "sent_bytes": sent,
+    });
+    if let Some(name) = name {
+        record["name"] = name.into();
+    }
+    if let Some(endpoint) = endpoint {
+        record["endpoint"] = endpoint.to_string().into();
+    }
+    if let Some(ago) = ago {
+        record["last_handshake_secs_ago"] = ago.into();
+    }
+    Ok(PeerView {
+        cells: vec![
+            label.clone(),
             if direct { "direct" } else { "none yet" }.to_owned(),
             bytes(received),
             bytes(sent),
             ago.map_or_else(|| "never".to_owned(), age),
             endpoint.map_or_else(String::new, |endpoint| endpoint.to_string()),
-        ]);
-        let mut record = serde_json::json!({
-            "node": node,
-            "address": address.to_string(),
-            "path": if direct { "direct" } else { "unproven" },
-            "key": base64(&key),
-            "received_bytes": received,
-            "sent_bytes": sent,
-        });
-        if let Some(name) = name {
-            record["name"] = name.into();
-        }
-        if let Some(endpoint) = endpoint {
-            record["endpoint"] = endpoint.to_string().into();
-        }
-        if let Some(ago) = ago {
-            record["last_handshake_secs_ago"] = ago.into();
-        }
-        records.push(record);
+        ],
+        record,
+        waiting: (!direct).then(|| (label, address.to_string())),
+    })
+}
+
+/// The peers page as people and scripts read it. `now` is the wall clock in seconds, so tests can fix it.
+fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginError> {
+    let mut rows = Vec::new();
+    let mut records = Vec::new();
+    let mut waiting = Vec::new();
+    for row in value["peers"].as_array().ok_or(PluginError::Rejected)? {
+        let view = peer_view(row, now)?;
+        rows.push(view.cells);
+        records.push(view.record);
+        waiting.extend(view.waiting);
     }
     let more = !value["next_cursor"].is_null();
     let count = records.len() as u64;
@@ -313,7 +326,7 @@ mod tests {
     #[test]
     fn peers_show_units_ages_and_no_hint_when_every_path_is_direct() {
         let page = serde_json::json!({"peers": [peer(3, "10.254.0.3", 988)], "version": 4, "next_cursor": null});
-        let shown = peers_at(page, 100, 1000).expect("present peers");
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
         assert_eq!(shown.message, "1 peer on the mesh, all direct.");
         assert_eq!(
             shown.body,
@@ -334,7 +347,7 @@ mod tests {
     #[test]
     fn an_unproven_peer_gets_a_hint_that_names_it() {
         let page = serde_json::json!({"peers": [peer(3, "10.254.0.3", 990), peer(4, "10.254.0.4", 0)], "next_cursor": null});
-        let shown = peers_at(page, 100, 1000).expect("present peers");
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
         assert_eq!(
             shown.message,
             "2 peers on the mesh, 1 without a direct path yet."
@@ -350,7 +363,7 @@ mod tests {
         row["peer"]["endpoint"] = "[2001:db8:1234:5678:9abc:def0:1234:5678]:47823".into();
         let page =
             serde_json::json!({"peers": [row, peer(4, "10.254.0.4", 990)], "next_cursor": null});
-        let shown = peers_at(page, 80, 1000).expect("present peers");
+        let shown = peers_at(&page, 80, 1000).expect("present peers");
         assert!(
             shown.body.lines().all(|line| line.chars().count() <= 80),
             "{}",

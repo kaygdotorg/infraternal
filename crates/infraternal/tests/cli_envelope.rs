@@ -256,7 +256,7 @@ fn status_exits_5_when_something_that_should_run_is_down() {
         let found = envelopes("status down", &output);
         assert_eq!(found[0]["ok"], false);
         assert_eq!(found[0]["error"]["code"], "component_down");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr.len(), 0);
     }
     // Text mode: the report is information, so it is on standard output even though the exit is 5.
     let text = status_in(&home, &["status"]);
@@ -269,7 +269,7 @@ fn status_exits_5_when_something_that_should_run_is_down() {
 fn status_exits_0_on_a_machine_with_nothing_installed() {
     let home = std::env::temp_dir().join(format!("cli-status-none-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
-    let system_units = std::fs::read_dir("/etc/systemd/system").map_or(false, |entries| {
+    let system_units = std::fs::read_dir("/etc/systemd/system").is_ok_and(|entries| {
         entries.flatten().any(|entry| {
             entry
                 .file_name()

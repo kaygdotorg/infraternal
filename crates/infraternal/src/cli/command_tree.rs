@@ -367,10 +367,10 @@ mod tests {
         let help = help_command.render_long_help().to_string();
         assert!(help.contains("Show what infraternal runs on this machine."));
         assert!(!help.contains("server install"));
-        let init_help = build(&registry)
-            .try_get_matches_from(["infraternal", "server", "init", "--help"])
+        let status_help = build(&registry)
+            .try_get_matches_from(["infraternal", "status", "--help"])
             .expect_err("help is an early exit");
-        assert!(init_help.to_string().contains("Steps:"));
+        assert!(status_help.to_string().contains("Steps:"));
     }
 
     #[test]
