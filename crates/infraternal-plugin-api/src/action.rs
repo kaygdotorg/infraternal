@@ -554,6 +554,13 @@ impl ActionDefinition {
         self
     }
 
+    /// Whether people and AI agents should be told about this command: it works and is not internal.
+    /// Placeholders for components that are not built yet are neither listed nor callable (D299 C5).
+    #[must_use]
+    pub fn is_public(&self) -> bool {
+        self.visible && self.availability == ActionAvailability::Available
+    }
+
     /// Keep an action registered for internal execution without displaying it.
     #[must_use]
     pub const fn hidden(mut self) -> Self {

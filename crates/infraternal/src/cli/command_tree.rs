@@ -108,6 +108,11 @@ fn insert_action<'a>(
     plugin: &'a PluginDefinition,
     action: &'a ActionDefinition,
 ) {
+    // A placeholder for a component that is not built yet is neither shown nor parsed:
+    // typing it is an unknown command, like any typo (D299 C5).
+    if action.availability == infraternal_plugin_api::ActionAvailability::NotAvailableYet {
+        return;
+    }
     let Some((first, remainder)) = action.command.split_first() else {
         return;
     };
@@ -279,15 +284,36 @@ mod tests {
         let mut help_command = build(&registry);
         let help = help_command.render_long_help().to_string();
         assert!(help.contains("Show this node's role and running components."));
-        assert!(help.contains("Start the configured node components."));
         assert!(!help.contains("server install"));
-        let up_help = build(&registry)
-            .try_get_matches_from(["infraternal", "up", "--help"])
+        let init_help = build(&registry)
+            .try_get_matches_from(["infraternal", "server", "init", "--help"])
             .expect_err("help is an early exit");
+        assert!(init_help.to_string().contains("Steps:"));
+    }
+
+    #[test]
+    fn unbuilt_placeholders_are_neither_shown_nor_parsed() {
+        // D299 C5: `up`, `relay`, `mesh list` and friends only say "not available yet".
+        let registry = registry().expect("action registry");
+        let help = build(&registry).render_long_help().to_string();
+        for placeholder in ["relay", "backup", "release", "host "] {
+            assert!(
+                !help.contains(&format!("\n  {placeholder}")),
+                "{placeholder}: {help}"
+            );
+        }
+        for command in [["up"], ["relay"], ["release"]] {
+            assert!(
+                build(&registry)
+                    .try_get_matches_from(std::iter::once("infraternal").chain(command))
+                    .is_err(),
+                "{command:?}"
+            );
+        }
         assert!(
-            up_help
-                .to_string()
-                .contains("Start the node components when lifecycle management is available.")
+            registry
+                .actions()
+                .any(|a| !a.action.is_public() && a.action.visible)
         );
     }
 

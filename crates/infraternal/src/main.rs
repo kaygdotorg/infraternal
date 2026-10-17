@@ -446,8 +446,7 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
                     CommandState::Ready,
                     format!("Wrote {} command skill files.", files.len()),
                     json!({"commands": [], "skill": "", "files": files}),
-                )
-                .with_next_step("Open a generated Markdown file to review its command contract.");
+                );
                 print_result(&result, json_output, false);
                 ExitCode::SUCCESS
             }
@@ -468,7 +467,7 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
             format!("{} commands are enabled in this build.", commands.len()),
             json!({"commands": commands, "skill": "", "files": []}),
         )
-        .with_next_step("Run `infraternal skill <command>` to print one command skill.");
+        .with_next_step("infraternal skill <command>");
         print_result(&result, json_output, false);
         return ExitCode::SUCCESS;
     }
@@ -485,11 +484,11 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
             json_output,
         );
     };
-    if !registered.action.visible {
+    if !registered.action.is_public() {
         return report_failure(
             "skill",
             "The requested command has no generated skill in this build.",
-            "internal commands are not listed as skills".to_owned(),
+            "internal and unbuilt commands are not listed as skills".to_owned(),
             json_output,
         );
     }
@@ -508,7 +507,7 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         let result = CommandResult::new(
             format!("skill {}", command.join(" ")),
             CommandState::Ready,
-            format!("Generated the skill for `infraternal {path}`."),
+            format!("Generated the skill for infraternal {path}."),
             json!({"commands": [], "skill": markdown, "files": []}),
         );
         print_result(&result, true, false);
@@ -819,9 +818,9 @@ fn install_server(
                 data,
             )
             .with_next_step(if install_args.dry_run {
-                "Review the plan, then run `infraternal server init --yes` to apply it."
+                "infraternal server init --yes"
             } else {
-                "Run `infraternal status` to review the server service."
+                "infraternal status"
             });
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
