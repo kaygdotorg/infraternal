@@ -96,7 +96,10 @@ fn a_live_legacy_runtime_cannot_publish_an_unheld_lifetime_file() {
     let fixture = Fixture::new();
     let listener =
         std::os::unix::net::UnixListener::bind(fixture.state().join("plugins.sock")).unwrap();
-    assert!(acquire(&fixture.state()).is_err());
+    assert_eq!(
+        acquire(&fixture.state()).unwrap_err().kind(),
+        io::ErrorKind::AddrInUse
+    );
     assert!(!fixture.state().join(LOCK).exists());
     drop(listener);
     assert!(acquire(&fixture.state()).is_ok());

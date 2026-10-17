@@ -107,12 +107,8 @@ fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             // Never publish a new-protocol lock beside a live legacy runtime:
             // a later cleanup would otherwise treat that unheld file as authority.
-            control(&directory, false, true).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    "Runtime ownership is not available",
-                )
-            })?;
+            control(&directory, false, true)
+                .map_err(|_| io::Error::from(io::ErrorKind::AddrInUse))?;
         }
         Err(error) => return Err(error),
         Ok(_) => {}
