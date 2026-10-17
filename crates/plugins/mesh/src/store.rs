@@ -92,7 +92,7 @@ async fn free_name(
             // Keep room for the suffix inside the 63-byte label limit.
             format!(
                 "{}-{suffix}",
-                &wanted[..wanted.len().min(61)].trim_end_matches('-')
+                wanted[..wanted.len().min(61)].trim_end_matches('-')
             )
         };
         let taken: bool =

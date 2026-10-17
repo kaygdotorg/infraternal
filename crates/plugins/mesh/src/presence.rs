@@ -1,4 +1,4 @@
-//! Live Mesh presence: which nodes pass traffic right now, read from the server's own WireGuard device [201], #236.
+//! Live Mesh presence: which nodes pass traffic right now, read from the server's own `WireGuard` device [201], #236.
 //!
 //! The Mesh view, the pill dot and `infraternal mesh peers` must tell the same truth (docs/design/TASTE.md, "Status
 //! tells the truth everywhere"). The only first-hand record of whether a peer passes traffic is the kernel's
@@ -6,7 +6,7 @@
 //! `mesh.peers`. This module reads them on the server and keeps the answer in memory:
 //!
 //! - **The server node is online while its own Mesh component is On.** It is the machine answering the request.
-//! - **A peer is online, on a direct path, while its last handshake is recent.** WireGuard discards a session
+//! - **A peer is online, on a direct path, while its last handshake is recent.** `WireGuard` discards a session
 //!   [`SESSION_SECS`] after its handshake and renews it every two minutes while traffic flows, so a handshake
 //!   younger than that window means packets can pass now; an older one (or none) means they cannot.
 //!
@@ -29,7 +29,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// WireGuard's reject-after time: a session this old carries no packets.
+/// `WireGuard`'s reject-after time: a session this old carries no packets.
 pub const SESSION_SECS: u64 = 180;
 /// How often the server reads its own peer table.
 pub const POLL: Duration = Duration::from_secs(5);
@@ -40,7 +40,7 @@ const MAX_PAGES: usize = 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NodePath {
-    /// A WireGuard session straight between the server and the node.
+    /// A `WireGuard` session straight between the server and the node.
     Direct,
 }
 
@@ -275,13 +275,22 @@ mod tests {
             state: "Off",
             handshake: NOW - 30,
         };
-        assert_eq!(observe(&node, Some(NodeId(1)), NOW).await, Some(Live::new()));
+        assert_eq!(
+            observe(&node, Some(NodeId(1)), NOW).await,
+            Some(Live::new())
+        );
     }
 
     #[tokio::test]
     async fn an_unreadable_node_keeps_the_last_reading() {
-        let node = ServerNode { state: "On", handshake: NOW - 30 };
-        let unreadable = ServerNode { state: "unreadable", handshake: 0 };
+        let node = ServerNode {
+            state: "On",
+            handshake: NOW - 30,
+        };
+        let unreadable = ServerNode {
+            state: "unreadable",
+            handshake: 0,
+        };
         assert!(observe(&node, None, NOW).await.is_some());
         assert_eq!(observe(&Broken(unreadable), None, NOW).await, None);
     }
@@ -290,7 +299,7 @@ mod tests {
     struct Broken(ServerNode);
     impl NodeChannel for Broken {
         fn id(&self) -> &'static str {
-            self.0.id()
+            "server"
         }
         fn observed_ip(&self) -> std::net::IpAddr {
             self.0.observed_ip()
