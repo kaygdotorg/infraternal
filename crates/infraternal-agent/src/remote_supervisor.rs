@@ -5,6 +5,54 @@ use tokio::sync::watch;
 const OFFLINE_LIMIT: Duration = Duration::from_mins(5);
 pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Rate limit for repeated server-link close lines: the first line of a window
+/// prints at once, later ones are only counted and summarised in the next
+/// window's first line. Runs once per link end (never per frame), so the cost is
+/// one clock read per reconnect, which is already bounded by the retry backoff.
+pub(super) struct LinkNotes {
+    window_start: Option<tokio::time::Instant>,
+    suppressed: u64,
+}
+
+pub(super) const LINK_NOTE_WINDOW: Duration = Duration::from_secs(60);
+
+impl LinkNotes {
+    pub(super) const fn new() -> Self {
+        Self {
+            window_start: None,
+            suppressed: 0,
+        }
+    }
+
+    /// Returns the line to print, if this event is not suppressed. `line` is only
+    /// built for printed events.
+    pub(super) fn note(
+        &mut self,
+        now: tokio::time::Instant,
+        line: impl FnOnce() -> String,
+    ) -> Option<String> {
+        match self.window_start {
+            Some(start) if now.duration_since(start) < LINK_NOTE_WINDOW => {
+                self.suppressed = self.suppressed.saturating_add(1);
+                None
+            }
+            _ => {
+                let repeats = std::mem::take(&mut self.suppressed);
+                self.window_start = Some(now);
+                let line = line();
+                Some(if repeats > 0 {
+                    format!(
+                        "{line}; {repeats} more link closes in the previous {} s",
+                        LINK_NOTE_WINDOW.as_secs()
+                    )
+                } else {
+                    line
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 tokio::task_local! {
     /// Exercise real worker/filesystem ordering without a five-minute wall wait.
@@ -92,6 +140,24 @@ mod tests {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn link_close_notes_print_once_per_window_and_summarise_repeats() {
+        let mut notes = LinkNotes::new();
+        let start = tokio::time::Instant::now();
+        let mut printed = 0;
+        for i in 0..500 {
+            let at = start + Duration::from_millis(i * 100);
+            if notes.note(at, || "closed".to_owned()).is_some() {
+                printed += 1;
+            }
+        }
+        assert_eq!(printed, 1, "500 closes in 50 s print one line");
+        let next = notes
+            .note(start + LINK_NOTE_WINDOW, || "closed".to_owned())
+            .unwrap();
+        assert_eq!(next, "closed; 499 more link closes in the previous 60 s");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn every_error_kind_and_successful_return_retries() {
