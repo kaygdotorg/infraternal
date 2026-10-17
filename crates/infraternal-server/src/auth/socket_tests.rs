@@ -896,6 +896,8 @@ mod terminal_exit;
 #[path = "socket_tests/session_gone.rs"]
 mod session_gone;
 
+#[path = "socket_tests/authority_stall_soak.rs"]
+mod authority_stall_soak;
 #[path = "socket_tests/restart_open_liveness_review.rs"]
 mod restart_open_liveness_review;
 #[path = "socket_tests/review_input_credit.rs"]
