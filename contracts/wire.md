@@ -501,7 +501,17 @@ unknown and retains the bounded two-second startup grace. Correlated replies
 initialize `srtt = RTT`, `rttvar = RTT / 2`; subsequent samples update
 `rttvar = 3/4 × rttvar + 1/4 × abs(srtt − RTT)` before
 `srtt = 7/8 × srtt + 1/8 × RTT` ([RFC 6298 §2](https://www.rfc-editor.org/rfc/rfc6298.html#section-2) estimator).
-The response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
+The browser response allowance is `max(srtt + 4 × rttvar + 50 ms, 250 ms)`.
+Host routes (the primary host link and its terminal streams) carry ordered
+replies that one lost packet holds back for about one more round trip, so
+their allowance is `clamp(2 × srtt + 4 × rttvar + 75 ms, 250 ms, 2 s)` [D300].
+On the primary host link a first miss only marks the route doubtful: each
+settled retained stream receives `terminal.reconnecting` and the link, its
+streams and writers stay. A correlated reply within a second allowance clears
+the doubt; those streams then receive `terminal.replay_complete` at the cursor
+the server already forwarded, because nothing was replaced or replayed. The
+link is retired only after the second consecutive allowance passes without a
+reply. A link that has never answered retires at its startup grace.
 The floor tolerates a 150 ms scheduler/main-thread stall on a healthy low-RTT
 route, rather than confusing local load with peer loss. A settled quiet link
 therefore detects silence within that floor plus one probe interval (at most
