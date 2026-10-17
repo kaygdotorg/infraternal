@@ -131,7 +131,7 @@ export declare class CanvasRenderer {
         endX: number;
         endY: number;
     } | null): void;
-    /** Stores visible underline ranges for a separate paint pass after affected rows render. */
+    /** Stores caller-owned ranges; callers replace them rather than mutating them. */
     setHoveredLinkRanges(ranges: readonly {
         startX: number;
         startY: number;

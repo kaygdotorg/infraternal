@@ -16,8 +16,8 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
 -    endY: number;
 -  } | null = null;
 +  // Temporary underline ranges stay separate from terminal text and colors.
-+  private hoveredLinkRanges: Array<{ startX: number; startY: number; endX: number; endY: number }> | null = null;
-+  private previousHoveredLinkRanges: Array<{ startX: number; startY: number; endX: number; endY: number }> | null = null;
++  private hoveredLinkRanges: readonly { startX: number; startY: number; endX: number; endY: number }[] | null = null;
++  private previousHoveredLinkRanges: readonly { startX: number; startY: number; endX: number; endY: number }[] | null = null;
  
    constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
      this.canvas = canvas;
@@ -164,7 +164,7 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
    public setHoveredLinkRange(
      range: {
        startX: number;
-@@ -1137,7 +1096,40 @@
+@@ -1137,7 +1096,37 @@
        endY: number;
      } | null
    ): void {
@@ -172,13 +172,11 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
 +    this.setHoveredLinkRanges(range ? [range] : null);
 +  }
 +
-+  /** Stores visible underline ranges for a separate paint pass after affected rows render. */
++  /** Stores caller-owned ranges; callers replace them rather than mutating them. */
 +  public setHoveredLinkRanges(
 +    ranges: readonly { startX: number; startY: number; endX: number; endY: number }[] | null
 +  ): void {
-+    const next = ranges?.length ? ranges.map((range) => ({ ...range })) : null;
-+    if (sameLinkRanges(this.hoveredLinkRanges, next)) return;
-+    this.hoveredLinkRanges = next;
++    this.hoveredLinkRanges = ranges?.length ? ranges : null;
 +  }
 +
 +  private renderHoveredLinkRangesForRow(row: number, cols: number, line: GhosttyCell[], lineOffset: number): void {
@@ -194,8 +192,7 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
 +      const lastColumn = Math.min(cols - 1, row === range.endY ? range.endX : cols - 1);
 +      if (lastColumn < firstColumn) continue;
 +      // Ghostty stores a wide glyph's width on its lead cell; the continuation cell has width zero.
-+      const endpointWidth = row === range.endY ? line[lineOffset + lastColumn]?.width : undefined;
-+      const endColumn = Math.min(cols, lastColumn + (endpointWidth === 2 ? 2 : 1));
++      const endColumn = Math.min(cols, lastColumn + (line[lineOffset + lastColumn]!.width || 1));
 +      const underlineY = row * this.metrics.height + this.metrics.baseline + 2;
 +      this.ctx.beginPath();
 +      this.ctx.moveTo(firstColumn * this.metrics.width, underlineY);
@@ -206,21 +203,3 @@ diff --git a/lib/renderer.ts b/lib/renderer.ts
    }
  
    /**
-@@ -1172,3 +1164,17 @@
-     this.stopCursorBlink();
-   }
- }
-+
-+/** Link ranges compare by coordinates so repeated pointer events do not redraw a stable underline. */
-+function sameLinkRanges(
-+  left: readonly { startX: number; startY: number; endX: number; endY: number }[] | null,
-+  right: readonly { startX: number; startY: number; endX: number; endY: number }[] | null,
-+): boolean {
-+  if (left === right) return true;
-+  if (!left || !right || left.length !== right.length) return false;
-+  return left.every((range, index) => {
-+    const other = right[index];
-+    return other !== undefined && range.startX === other.startX && range.startY === other.startY &&
-+      range.endX === other.endX && range.endY === other.endY;
-+  });
-+}
