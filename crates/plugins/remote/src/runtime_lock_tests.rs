@@ -366,3 +366,61 @@ fn split_device_inner() {
     assert!(path.exists());
     nix::sys::socket::listen(&holder, nix::sys::socket::Backlog::new(1).unwrap()).unwrap();
 }
+
+/// Review R12 (#230): owner+inode matching ignores the filesystem, so a dead
+/// session endpoint is reported live while any unrelated socket of the same
+/// user on another filesystem is bound to a file with the same 32-bit inode.
+/// That socket (a desktop bus, an agent socket, a system service in root mode)
+/// usually lives until reboot, so every Retry answers "Setup is already
+/// running" and the earlier attempt can never be finished. Two fresh tmpfs
+/// mounts number their inodes from the same start, which makes the collision
+/// deterministic here; on real hosts it needs the same inode on another mount.
+#[test]
+fn stale_session_endpoint_is_not_held_live_by_a_foreign_inode_twin() {
+    let fixture = Fixture::new();
+    for name in ["a", "b"] {
+        fs::create_dir(fixture.0.join(name)).unwrap();
+    }
+    let script = "set -e; cd \"$2\"; mount -t tmpfs a a; mount -t tmpfs b b; chmod 700 a b; \
+        RL230_TWIN=\"$2\" exec \"$1\" --exact \
+        runtime_lock::tests::foreign_inode_twin_inner --ignored --test-threads=1";
+    let Ok(status) = std::process::Command::new("unshare")
+        .args(["-Urm", "sh", "-c", script, "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .arg(&fixture.0)
+        .status()
+    else {
+        return;
+    };
+    assert!(
+        status.success(),
+        "a dead session endpoint was held live by an unrelated socket"
+    );
+}
+
+#[test]
+#[ignore = "runs inside the namespace prepared by the foreign-inode test"]
+fn foreign_inode_twin_inner() {
+    let Some(root) = std::env::var_os("RL230_TWIN") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let (runtime, other) = (root.join("a"), root.join("b"));
+    let stale = runtime.join("33333333333333333333333333333333.sock");
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    let target = fs::metadata(&stale).unwrap().ino();
+    let mut unrelated = None;
+    for index in 0..64 {
+        let path = other.join(format!("agent{index}.sock"));
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        if fs::metadata(&path).unwrap().ino() == target {
+            unrelated = Some(listener);
+            break;
+        }
+    }
+    let _unrelated = unrelated.expect("no inode twin on the second mount");
+    let directory = directory(&runtime).unwrap();
+    let result = sessions(&directory);
+    eprintln!("target inode={target} sessions={result:?}");
+    assert_eq!(result, Ok(()), "dead endpoint reported live (73)");
+}
