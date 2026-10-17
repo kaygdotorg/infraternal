@@ -519,8 +519,11 @@ pub async fn cleanup(
     uid: u32,
     kernel: Kernel,
 ) -> io::Result<Vec<String>> {
-    validate(context, home, uid)?;
     let paths = layout(context, home, uid)?;
+    // Held until return: a re-add of this host meanwhile is refused with
+    // "Setup is already running" instead of racing the removal (#235).
+    let _setup = setup_guard(&paths.base).await?;
+    validate(context, home, uid)?;
     (kernel.inspect)(&context.sessions)?;
     let sockets = context.sessions.join("sessions");
     if sockets.exists() {
@@ -552,6 +555,31 @@ pub async fn cleanup(
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
+}
+/// Take the lock every infraternal setup command takes first (an exclusive
+/// `flock` on the base's parent directory, see the ssh plugin's
+/// `setup_guard.sh`), waiting a bounded time for a running setup step.
+///
+/// While it is held, setup admits no new attempt on this account (exit 73,
+/// "Setup is already running on this host"). Setup holds it only for one
+/// command, so the wait is short; a longer one refuses with nothing changed.
+async fn setup_guard(base: &Path) -> io::Result<nix::fcntl::Flock<std::fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = base.parent().ok_or_else(denied)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(parent)?;
+        match nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Ok(guard) => return Ok(guard),
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err((_, error)) => return Err(error.into()),
+        }
+    }
 }
 /// Remove what infraternal setup and its infraternal agent put in `base`, then
 /// `base` itself when nothing else is in it.
@@ -740,6 +768,39 @@ mod tests {
         );
         assert!(reply.after_write.is_none());
         assert!(!left, "a failed launcher left its uninstall plan behind");
+    }
+    /// #235: while setup holds its lock on this account, uninstall waits a
+    /// bounded time and then refuses with nothing changed; while uninstall
+    /// holds it, setup's own `flock -n` admission fails (its exit 73).
+    #[tokio::test]
+    async fn uninstall_and_setup_exclude_each_other() {
+        let Some((home, context, uid)) = installation("l", false) else {
+            return;
+        };
+        let parent = context.data.parent().unwrap().parent().unwrap().to_owned();
+        let held = nix::fcntl::Flock::lock(
+            std::fs::File::open(&parent).unwrap(),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        )
+        .map_err(|(_, error)| error)
+        .unwrap();
+        let started = std::time::Instant::now();
+        let refused = cleanup(&context, &home, uid, Kernel::NONE).await;
+        let waited = started.elapsed();
+        let intact = validate(&context, &home, uid).is_ok();
+        drop(held);
+        let guard = setup_guard(context.data.parent().unwrap()).await.unwrap();
+        let setup = std::process::Command::new("flock")
+            .arg("-n")
+            .arg(&parent)
+            .arg("true")
+            .status()
+            .unwrap();
+        drop(guard);
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(waited >= Duration::from_secs(5) && intact);
+        assert!(!setup.success(), "setup was admitted during uninstall");
     }
     /// #235: kernel ownership is decided before the service is stopped; a
     /// failed check leaves a working installation, not a stopped one.
