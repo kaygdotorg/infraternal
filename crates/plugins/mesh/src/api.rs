@@ -475,7 +475,7 @@ fn validate_name(name: &str) -> Result<(), MeshApiError> {
     Ok(())
 }
 
-fn validate_host(name: &str) -> Result<(), MeshApiError> {
+pub(crate) fn validate_host(name: &str) -> Result<(), MeshApiError> {
     validate_name(name)
 }
 
@@ -547,6 +547,11 @@ impl MeshService {
         let mut request = self.clone();
         request.fresh_authority = Some(token_hash);
         request
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool_for_tests(&self) -> SqlitePool {
+        self.pool.clone()
     }
 
     /// Subscribe to post-commit revision invalidations; a lagging reader should reload its filtered list.

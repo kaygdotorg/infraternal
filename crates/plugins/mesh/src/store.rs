@@ -52,6 +52,62 @@ impl Snapshot {
         Ok(config)
     }
 }
+/// The name a machine is called by, from an address (`user@minipc01`, `minipc01.lan:22`) or a reported hostname.
+///
+/// Takes the first DNS label, lowercased; an IP address or anything that is not a valid Mesh host name gives
+/// nothing, so a numeric address never becomes a name and the caller falls back to the next source.
+#[must_use]
+pub fn machine_name(source: &str) -> Option<String> {
+    let host = source
+        .rsplit_once('@')
+        .map_or(source, |(_, host)| host)
+        .trim();
+    if host.parse::<std::net::IpAddr>().is_ok()
+        || host.parse::<SocketAddr>().is_ok()
+        || host.starts_with('[')
+    {
+        return None;
+    }
+    let host = host.split_once(':').map_or(host, |(host, _)| host);
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    let label = host.split('.').next()?.to_ascii_lowercase();
+    crate::api::validate_host(&label).ok()?;
+    Some(label)
+}
+/// `wanted`, or `wanted-2` … `wanted-9` when another node holds it (names are unique, ignoring case).
+async fn free_name(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    wanted: Option<&str>,
+    except: i64,
+) -> Result<Option<String>, &'static str> {
+    let Some(wanted) = wanted else {
+        return Ok(None);
+    };
+    for suffix in 1..10 {
+        let name = if suffix == 1 {
+            wanted.to_owned()
+        } else {
+            // Keep room for the suffix inside the 63-byte label limit.
+            format!(
+                "{}-{suffix}",
+                &wanted[..wanted.len().min(61)].trim_end_matches('-')
+            )
+        };
+        let taken: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE name=? AND id!=?)")
+                .bind(&name)
+                .bind(except)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?;
+        if !taken {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -81,6 +137,24 @@ impl Store {
         endpoint: Option<SocketAddr>,
         server: bool,
     ) -> Result<(NodeId, bool), &'static str> {
+        self.attach_named(host, key, endpoint, server, None).await
+    }
+    /// [`Self::attach`], naming the node after the machine (TASTE "Machines are called by their names", #236).
+    ///
+    /// The name is the host record's (the host part of the address it was added with, the name its pill shows),
+    /// else `reported`, the hostname the machine's infraternal agent reports. A node still under its placeholder
+    /// (`server`, or `mesh-<host id>` from before names were known) takes the name on its next attach; a name a
+    /// person chose is never replaced. Without either name the placeholder stays until one is known.
+    /// # Errors
+    /// Returns fixed public errors, not database input or authentication data.
+    pub async fn attach_named(
+        &self,
+        host: &str,
+        key: PublicKey,
+        endpoint: Option<SocketAddr>,
+        server: bool,
+        reported: Option<&str>,
+    ) -> Result<(NodeId, bool), &'static str> {
         if server != (host == "server") {
             return Err("Mesh host identity invalid.");
         }
@@ -92,7 +166,7 @@ impl Store {
         // The authenticated host is the sole selector; uniqueness refuses any
         // conflicting key without changing another node's grants [164,166,235].
         let existing = sqlx::query(
-            "SELECT id,public_key,endpoint,dataplane_host FROM mesh_nodes WHERE dataplane_host=?",
+            "SELECT id,name,public_key,endpoint,dataplane_host FROM mesh_nodes WHERE dataplane_host=?",
         )
         .bind(host)
         .fetch_optional(&mut *tx)
@@ -107,12 +181,47 @@ impl Store {
         if removed {
             return Err("Mesh membership was removed; authorized enrollment is required.");
         }
+        let placeholder = if server {
+            "server".to_owned()
+        } else {
+            format!("mesh-{host}")
+        };
+        let recorded: Option<String> = if server {
+            None
+        } else {
+            // The host record's address is the name the person gave the machine when adding it.
+            sqlx::query_scalar(
+                "SELECT address FROM remote_host_bootstrap WHERE lower(hex(host_id))=replace(lower(?),'-','')",
+            )
+            .bind(host)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?
+        };
+        let wanted = recorded
+            .as_deref()
+            .and_then(machine_name)
+            .or_else(|| reported.and_then(machine_name));
         let id = if let Some(row) = existing {
             // Temporary discovery absence is not an endpoint removal [166].
             // Keep the last known direct coordinate until an observed replacement arrives.
             let endpoint = endpoint.or_else(|| row.get::<Option<String>, _>("endpoint"));
             let id: i64 = row.get("id");
-            if row.get::<Option<String>, _>("dataplane_host").as_deref() == Some(host)
+            let rename = if row.get::<String, _>("name") == placeholder {
+                free_name(&mut tx, wanted.as_deref(), id).await?
+            } else {
+                None
+            };
+            if let Some(name) = &rename {
+                sqlx::query("UPDATE mesh_nodes SET name=? WHERE id=?")
+                    .bind(name)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|_| "Mesh identity conflicts.")?;
+            }
+            if rename.is_none()
+                && row.get::<Option<String>, _>("dataplane_host").as_deref() == Some(host)
                 && row.get::<Vec<u8>, _>("public_key") == key.0
                 && row.get::<Option<String>, _>("endpoint").as_deref() == endpoint.as_deref()
             {
@@ -134,11 +243,9 @@ impl Store {
             id
         } else {
             let high:i64 = sqlx::query_scalar("UPDATE mesh_state SET node_id_high_water=node_id_high_water+1 WHERE singleton=1 AND node_id_high_water<9223372036854775807 RETURNING node_id_high_water").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
-            let name = if server {
-                "server".to_owned()
-            } else {
-                format!("mesh-{host}")
-            };
+            let name = free_name(&mut tx, wanted.as_deref(), 0)
+                .await?
+                .unwrap_or(placeholder);
             sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,dataplane_host,endpoint) VALUES(?,?,?,?,?)").bind(high).bind(name).bind(key.0.as_slice()).bind(host).bind(&endpoint).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
             high
         };
@@ -148,6 +255,15 @@ impl Store {
             NodeId(u64::try_from(id).map_err(|_| "Mesh identity invalid.")?),
             true,
         ))
+    }
+    /// The node bound to an authenticated host (`server` for the server itself), if it is enrolled.
+    pub async fn node_for_host(&self, host: &str) -> Option<NodeId> {
+        let id: i64 = sqlx::query_scalar("SELECT id FROM mesh_nodes WHERE dataplane_host=?")
+            .bind(host)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        u64::try_from(id).ok().map(NodeId)
     }
     /// Compile a consistent current configuration and persist every new allocation before delivery.
     /// # Errors
@@ -492,5 +608,34 @@ fn endpoint(kind: &str, value: &str) -> Result<Endpoint, crate::api::MeshApiErro
         ))),
         "tag" => Ok(Endpoint::Tag(value.to_owned())),
         _ => Err(storage_error("Mesh rule invalid.")),
+    }
+}
+#[cfg(test)]
+mod naming_tests {
+    use super::machine_name;
+    #[test]
+    fn an_address_or_hostname_gives_the_machines_name() {
+        assert_eq!(machine_name("root@minipc01").as_deref(), Some("minipc01"));
+        assert_eq!(
+            machine_name("kayg@MiniPC01.lan").as_deref(),
+            Some("minipc01")
+        );
+        assert_eq!(machine_name("minipc01:2222").as_deref(), Some("minipc01"));
+        assert_eq!(machine_name("monitor01").as_deref(), Some("monitor01"));
+    }
+    #[test]
+    fn a_numeric_or_invalid_address_gives_no_name() {
+        for source in [
+            "root@10.69.69.217",
+            "10.69.69.217:22",
+            "root@[fd00::1]:22",
+            "fd00::1",
+            "",
+            "root@",
+            "a_b",
+            "-x",
+        ] {
+            assert_eq!(machine_name(source), None, "{source}");
+        }
     }
 }
