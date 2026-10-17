@@ -205,10 +205,10 @@ test("a server close reason survives socket retirement and the next retry", () =
     connection.streamAttached(true, stream);
     const close = encodeMuxedFrame(0, { type: "Close", code: 1011, reason: "connection ended" });
     sockets[0]!.onmessage?.({ data: close.slice().buffer as ArrayBuffer });
-    expect(statuses.at(-1)).toBe("Connection closed: the server ended the connection.");
+    expect(statuses.at(-1)).toBe("The connection to the server ended.");
     retry?.();
     expect(statuses.at(-1)).toBe("Connection lost. Reconnecting…");
-    expect(statuses).toContain("Connection closed: the server ended the connection.");
+    expect(statuses).toContain("The connection to the server ended.");
   } finally {
     connection?.dispose();
     for (const key of ["window", "location", "WebSocket"] as const) {
@@ -250,10 +250,10 @@ test("a clean server socket close keeps its fallback reason through the next ret
     sockets[0]!.onmessage?.({ data: welcome.slice().buffer as ArrayBuffer });
     connection.streamAttached(true, stream);
     sockets[0]!.onclose?.({ code: 1005, reason: "" });
-    expect(statuses.at(-1)).toBe("Connection closed: the server ended the connection.");
+    expect(statuses.at(-1)).toBe("The connection to the server ended.");
     retry?.();
     expect(statuses.at(-1)).toBe("Connection lost. Reconnecting…");
-    expect(statuses).toContain("Connection closed: the server ended the connection.");
+    expect(statuses).toContain("The connection to the server ended.");
   } finally {
     connection?.dispose();
     for (const key of ["window", "location", "WebSocket"] as const) {

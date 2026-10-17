@@ -72,7 +72,7 @@ test("a retained unresponsive route loses readiness, resumes automatically and i
     advance(276);
     expect(disconnected).toBe(1);
     expect(connection.isWelcomed).toBe(false);
-    expect(statuses).toContain("Connection closed: the server did not respond in time.");
+    expect(statuses).toContain("The connection did not respond in time.");
     advance(10);
     expect(sockets).toHaveLength(2);
     sockets[1]!.onopen?.();

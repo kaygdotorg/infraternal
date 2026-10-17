@@ -608,7 +608,7 @@ export class MuxConnection {
         return;
       case "Close":
         this.forceClose();
-        this.status(plainCloseReason(frame.reason, "Connection closed: the server ended the connection."));
+        this.status(plainCloseReason(frame.reason, "The server closed the connection."));
         return;
       default:
         this.fail("server sent a terminal frame on the control stream");

@@ -19,8 +19,8 @@ function relay() {
 
 test("a lost server connection is an error toast, never a success tick", () => {
   const { shown, say } = relay();
-  say("Connection closed: the infraternal agent lost its connection to the server.");
-  expect(shown.map(({ message, tone, duration }) => ({ message, tone, duration }))).toEqual([{ message: "Connection closed: the infraternal agent lost its connection to the server.", tone: "error", duration: 0 }]);
+  say("The connection to the server ended.");
+  expect(shown.map(({ message, tone, duration }) => ({ message, tone, duration }))).toEqual([{ message: "The connection to the server ended.", tone: "error", duration: 0 }]);
 });
 
 test("routine connection states stay out of the toast", () => {
