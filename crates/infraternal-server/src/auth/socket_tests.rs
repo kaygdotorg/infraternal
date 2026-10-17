@@ -900,6 +900,8 @@ mod session_gone;
 mod authority_stall_soak;
 #[path = "socket_tests/restart_open_liveness_review.rs"]
 mod restart_open_liveness_review;
+#[path = "socket_tests/review_authority_retry.rs"]
+mod review_authority_retry;
 #[path = "socket_tests/review_input_credit.rs"]
 mod review_input_credit;
 #[path = "socket_tests/transient_authority_stall.rs"]
