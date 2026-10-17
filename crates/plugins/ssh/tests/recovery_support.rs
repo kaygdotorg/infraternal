@@ -512,3 +512,48 @@ fn live_session_socket_blocks_cleanup(home_suffix: Option<&str>) {
         cleanup.status.code()
     );
 }
+
+/// Review R11 (#230): a cached helper from before the `sessions` mode passes
+/// the version probe (`--bootstrap-runtime-version` exits 0), then refuses the
+/// unknown mode with 71. Only 76 makes the server refresh the cached helper, so
+/// 71 is shown as "ownership is not proven" on every Retry and the cache, the
+/// real cause, is never replaced. A helper that cannot run the session check
+/// must be reported as unavailable (76).
+#[test]
+fn review_cached_helper_without_session_mode_asks_for_a_refresh() {
+    let host = MinimalHost::new();
+    let payload = host
+        .base()
+        .with_file_name("infraternal.bootstrap-cache/payload");
+    // Same answers as the previous helper: the version probe succeeds, and the
+    // unknown mode is refused by the mode check with 71.
+    fs::write(
+        &payload,
+        "#!/bin/sh\n[ \"$1\" = --bootstrap-runtime-version ] && exit 0\ncase \"$4\" in inspect|retire) exit 0;; esac\nexit 71\n",
+    )
+    .unwrap();
+    fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
+    // A shim that died and left its endpoint behind.
+    drop(
+        UnixListener::bind(
+            host.base()
+                .join("sessions/55555555555555555555555555555555.sock"),
+        )
+        .unwrap(),
+    );
+    let (inspect, _) = recovery_scripts();
+    let output = Command::new("/bin/sh")
+        .args(["-c", &inspect.replace("$HOME", host.root.to_str().unwrap())])
+        .output()
+        .unwrap();
+    eprintln!(
+        "inspection={:?} stdout={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "an outdated cached helper is reported as an ownership failure and never refreshed"
+    );
+}
