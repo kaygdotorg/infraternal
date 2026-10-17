@@ -12,7 +12,7 @@ const SESSION: [u8; 16] = [9; 16];
 const STREAM: u32 = 42;
 
 /// Fixture host on one already-greeted Unix socket. It answers primary Pings
-/// while `answer` is set and Acks every AttachTerm; it never sends a replay
+/// while `answer` is set and Acks every `AttachTerm`; it never sends a replay
 /// fence on its own, so the test decides when a replacement replay ends.
 fn fixture_host(
     peer: UnixStream,
@@ -21,7 +21,7 @@ fn fixture_host(
     mpsc::UnboundedReceiver<u32>,
     tokio::sync::oneshot::Sender<Vec<u8>>,
 ) {
-    let (attached, attaches) = mpsc::unbounded_channel();
+    let (attach_seen, attach_log) = mpsc::unbounded_channel();
     let (fence, fence_rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
     tokio::spawn(async move {
         let (mut reader, mut writer) = peer.into_split();
@@ -35,22 +35,19 @@ fn fixture_host(
                     let Ok(count) = read else { return };
                     if count == 0 { return; }
                     buffer.extend_from_slice(&chunk[..count]);
-                    loop {
-                        let (reply, size) = match decode_muxed_frame(&buffer) {
-                            Ok(decoded) => {
+                    while let Ok(decoded) = decode_muxed_frame(&buffer) {
+                        let (reply, size) = {
                                 let reply = match decoded.frame {
                                     Frame::Ping { nonce, sent_us } if decoded.stream_id == 0 => answer
                                         .load(Ordering::SeqCst)
                                         .then_some((0, Frame::Pong { nonce, sent_us })),
                                     Frame::AttachTerm { .. } => {
-                                        let _ = attached.send(decoded.stream_id);
+                                        let _ = attach_seen.send(decoded.stream_id);
                                         Some((decoded.stream_id, Frame::Ack { in_seq_acked: 0 }))
                                     }
                                     _ => None,
                                 };
                                 (reply, decoded.wire_len)
-                            }
-                            Err(_) => break,
                         };
                         let _ = buffer.split_to(size);
                         if let Some((stream, frame)) = reply {
@@ -68,7 +65,7 @@ fn fixture_host(
             }
         }
     });
-    (attaches, fence)
+    (attach_log, fence)
 }
 
 /// Claim: "a reply → Recovered to exactly those windows" (D300, b01f1e326).
