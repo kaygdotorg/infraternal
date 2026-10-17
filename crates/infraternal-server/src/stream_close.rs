@@ -1,19 +1,37 @@
-//! Classifies and rate-limits terminal stream close records without touching stream payloads.
+//! Classifies terminal stream closes and writes a bounded, rate-limited log of them.
+//!
+//! Socket code never formats or writes a close line. `StreamCloseLog::record` copies
+//! the close into a bounded queue read by one logger thread and returns at once. When
+//! the queue is full the close is dropped and counted; the thread reports the count in
+//! one warning line per window. A slow log sink therefore never stalls a socket worker.
+//!
+//! The logger thread rate-limits per (account, reason category). The first close of a
+//! window is written at once; later ones are only counted and summarised in one line
+//! when the 60 s window ends. The key is chosen by the server, never by the client: a
+//! client can name any session id in an attach, but it cannot change the account that
+//! owns its socket.
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-use tokio::{
-    sync::Notify,
-    time::{Instant, sleep_until},
+    collections::{HashMap, VecDeque},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender},
+    },
+    time::{Duration, Instant},
 };
 
 const CLOSE_WINDOW: Duration = Duration::from_secs(60);
 const CLOSE_WINDOW_SECONDS: u64 = 60;
-// A closed-session storm can outlive its sockets; retain only one minute of bounded per-session state.
-const MAX_TRACKED_SESSIONS: usize = 8192;
+// Each live window costs about 250 bytes; this bounds the table near 2 MiB.
+const MAX_TRACKED_WINDOWS: usize = 8192;
+// Closes arrive at socket-event rate, not frame rate. 1,024 records (about 200 KiB,
+// allocated on the first close) absorb a mass disconnect while the thread writes;
+// beyond that a close is dropped and counted rather than waited for.
+const QUEUE_CAPACITY: usize = 1024;
+/// The session field of a close that names no session the account owns. Session ids
+/// are random 128-bit values, so the all-zero id is never a real one.
+pub(crate) const NO_SESSION: [u8; 16] = [0; 16];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CloseReason {
@@ -92,6 +110,14 @@ pub(crate) const ATTACH_REFUSED: CloseReason = CloseReason::new(
     "terminal_attach_refused",
     "the server refused the terminal attachment",
 );
+/// An attach naming a session this account has no record of. The line never carries
+/// the named id: it may be another account's session, and logging it would let a
+/// client write arbitrary ids into the log.
+pub(crate) const ATTACH_UNOWNED: CloseReason = CloseReason::new(
+    "auth_resume_refusal",
+    "unowned_session_attach",
+    "the account has no such terminal session",
+);
 pub(crate) const RESUME_REFUSED: CloseReason = CloseReason::new(
     "auth_resume_refusal",
     "connection_resume_refused",
@@ -137,9 +163,26 @@ impl CloseWho {
     }
 }
 
+/// Rate-limit key for the account that owns a socket. The server derives it from the
+/// authenticated user id, so a client cannot choose it. A hash keeps the key small and
+/// allocation-free; a collision only merges two accounts' windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CloseOwner(u64);
+
+impl CloseOwner {
+    pub(crate) fn of(user_id: &str) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        user_id.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+}
+
 /// The log contains only identifiers, close metadata, and existing stream cursors/credit.
-#[derive(Clone, Debug)]
+/// `owner` keys the rate limit and is never written.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct CloseRecord {
+    pub(crate) owner: CloseOwner,
     pub(crate) who: CloseWho,
     pub(crate) reason: CloseReason,
     pub(crate) host_id: Option<uuid::Uuid>,
@@ -160,6 +203,7 @@ pub(crate) struct CloseRecord {
 
 impl CloseRecord {
     pub(crate) fn new(
+        owner: CloseOwner,
         who: CloseWho,
         reason: CloseReason,
         host_id: Option<uuid::Uuid>,
@@ -167,6 +211,7 @@ impl CloseRecord {
         browser_stream_id: u32,
     ) -> Self {
         Self {
+            owner,
             who,
             reason,
             host_id,
@@ -187,209 +232,264 @@ impl CloseRecord {
     }
 }
 
+/// Shared close logger. The thread starts on the first close and ends when the last
+/// handle is dropped, after it has written every pending summary.
+#[derive(Clone)]
+pub(crate) struct StreamCloseLog(Arc<Inner>);
+
+struct Inner {
+    queue: OnceLock<Option<SyncSender<CloseRecord>>>,
+    dropped: Arc<AtomicU64>,
+}
+
+#[cfg(test)]
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl StreamCloseLog {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(Inner {
+            queue: OnceLock::new(),
+            dropped: Arc::default(),
+        }))
+    }
+
+    /// Queue one close for the logger thread. Never blocks and never formats.
+    pub(crate) fn record(&self, record: &CloseRecord) {
+        let queue = self
+            .0
+            .queue
+            .get_or_init(|| spawn_logger(self.0.dropped.clone()));
+        let Some(queue) = queue else {
+            self.0.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        #[cfg(test)]
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        if queue.try_send(*record).is_err() {
+            #[cfg(test)]
+            IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            self.0.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Block until every queued close has been written (tests only; bounded at 5 s). It
+/// may block a runtime thread: the logger thread needs none of the runtime's.
+#[cfg(test)]
+pub(crate) fn settled() {
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && Instant::now() < give_up {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// The thread writes through the subscriber that was current where the first close
+/// happened: the global one in the server, a captured one in tests.
+fn spawn_logger(dropped: Arc<AtomicU64>) -> Option<SyncSender<CloseRecord>> {
+    let (queue, closes) = std::sync::mpsc::sync_channel(QUEUE_CAPACITY);
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    std::thread::Builder::new()
+        .name("close-log".to_owned())
+        .stack_size(256 * 1024)
+        .spawn(move || tracing::dispatcher::with_default(&dispatch, || run(&closes, &dropped)))
+        .ok()?;
+    Some(queue)
+}
+
+fn run(closes: &Receiver<CloseRecord>, dropped: &AtomicU64) {
+    let mut limiter = Limiter::default();
+    let mut drops = DropReport::default();
+    loop {
+        let deadline = match (limiter.next_deadline(), drops.next_deadline(dropped)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let received = match deadline {
+            Some(deadline) => {
+                closes.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            }
+            None => closes.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let now = Instant::now();
+        match received {
+            Ok(record) => {
+                limiter.record(record, now, &mut emit);
+                #[cfg(test)]
+                IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            }
+            Err(RecvTimeoutError::Timeout) => limiter.expire(now, &mut emit),
+            Err(RecvTimeoutError::Disconnected) => {
+                limiter.finish(&mut emit);
+                drops.report(dropped, None);
+                return;
+            }
+        }
+        drops.report(dropped, Some(now));
+    }
+}
+
+/// Closes dropped on a full queue, reported as one warning at most once per window.
+#[derive(Default)]
+struct DropReport {
+    last: Option<Instant>,
+}
+
+impl DropReport {
+    fn next_deadline(&self, dropped: &AtomicU64) -> Option<Instant> {
+        (dropped.load(Ordering::Relaxed) > 0).then(|| {
+            self.last
+                .map_or_else(Instant::now, |last| last + CLOSE_WINDOW)
+        })
+    }
+
+    /// `now` is `None` at shutdown, which reports regardless of the window.
+    fn report(&mut self, dropped: &AtomicU64, now: Option<Instant>) {
+        if dropped.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if let (Some(now), Some(last)) = (now, self.last)
+            && now < last + CLOSE_WINDOW
+        {
+            return;
+        }
+        self.last = now;
+        let count = dropped.swap(0, Ordering::Relaxed);
+        tracing::warn!(
+            target: "infraternal::terminal_stream",
+            event = "terminal_stream_close_records_dropped",
+            dropped = count,
+            "terminal stream close records dropped because the log queue was full"
+        );
+    }
+}
+
+/// Whether a line's window is one account's, or the close was written untracked
+/// because the account table was full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Account,
+    Server,
+}
+
 struct Window {
-    started: Instant,
     closes: u64,
     last: CloseRecord,
 }
 
-#[derive(Default)]
-struct State {
-    sessions: HashMap<[u8; 16], Window>,
-    last_sweep: Option<Instant>,
-}
-
-struct Inner {
-    state: Mutex<State>,
-    changed: Arc<Notify>,
-    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        let worker = self
-            .worker
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(worker) = worker {
-            worker.abort();
+impl Window {
+    fn new(record: CloseRecord) -> Self {
+        Self {
+            closes: 1,
+            last: record,
         }
     }
-}
 
-/// Shared close logger; its timer parks unless a session has a close window to summarize.
-#[derive(Clone)]
-pub(crate) struct StreamCloseLog(Arc<Inner>);
-
-impl StreamCloseLog {
-    pub(crate) fn new() -> Self {
-        let changed = Arc::new(Notify::new());
-        let inner = Arc::new(Inner {
-            state: Mutex::new(State::default()),
-            changed: changed.clone(),
-            worker: Mutex::new(None),
-        });
-        let worker = tokio::spawn(run(Arc::downgrade(&inner), changed));
-        *inner
-            .worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
-        Self(inner)
-    }
-
-    /// Record the first close immediately and collapse later closes for the same session.
-    pub(crate) fn record(&self, record: &CloseRecord) {
-        self.record_at(record, Instant::now());
-    }
-
-    fn record_at(&self, record: &CloseRecord, now: Instant) {
-        let key = record.session_id;
-        let mut summary = None;
-        let mut summaries = Vec::new();
-        {
-            let mut state = self
-                .0
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(window) = state.sessions.get_mut(&key) {
-                if now < window.started + CLOSE_WINDOW {
-                    window.closes = window.closes.saturating_add(1);
-                    if window.last.reason != record.reason {
-                        window.last.reason = MIXED_REASON;
-                    }
-                    if window.last.who != record.who {
-                        window.last.who = CloseWho::Multiple;
-                    }
-                    window.last.host_id = record.host_id;
-                    window.last.browser_stream_id = record.browser_stream_id;
-                    window.last.agent_stream_id = record.agent_stream_id;
-                    window.last.out_seq = record.out_seq;
-                    window.last.input_acked = record.input_acked;
-                    window.last.input_sent = record.input_sent;
-                    window.last.output_credit_bytes = record.output_credit_bytes;
-                    window.last.agent_close_code = record.agent_close_code;
-                    window.last.agent_close_reason = record.agent_close_reason;
-                    window.last.browser_stream_close_code = record.browser_stream_close_code;
-                    window.last.browser_stream_close_reason = record.browser_stream_close_reason;
-                    window.last.websocket_code = record.websocket_code;
-                    window.last.websocket_reason = record.websocket_reason;
-                    return;
-                }
-                summary = state.sessions.remove(&key);
-            } else if state.sessions.len() >= MAX_TRACKED_SESSIONS {
-                // Full map: drop windows that already ended, at most once a second so a
-                // flood of distinct sessions pays an amortised, not a per-close, scan.
-                // If every window is still live, this close is logged but not tracked, so
-                // memory stays bounded and each distinct session still gets its first line.
-                if state
-                    .last_sweep
-                    .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1))
-                {
-                    state.last_sweep = Some(now);
-                    let expired = state
-                        .sessions
-                        .iter()
-                        .filter(|(_, window)| now >= window.started + CLOSE_WINDOW)
-                        .map(|(session, _)| *session)
-                        .collect::<Vec<_>>();
-                    for session in expired {
-                        if let Some(window) = state.sessions.remove(&session) {
-                            summaries.push(window);
-                        }
-                    }
-                }
-                if state.sessions.len() >= MAX_TRACKED_SESSIONS {
-                    drop(state);
-                    for window in &summaries {
-                        log_summary(window);
-                    }
-                    log_close(record);
-                    return;
-                }
-            }
-            state.sessions.insert(
-                key,
-                Window {
-                    started: now,
-                    closes: 1,
-                    last: record.clone(),
-                },
-            );
-        }
-        if let Some(window) = summary {
-            log_summary(&window);
-        }
-        for window in &summaries {
-            log_summary(window);
-        }
-        log_close(record);
-        self.0.changed.notify_one();
-    }
-
-    fn flush_expired(&self, now: Instant) {
-        let expired = {
-            let mut state = self
-                .0
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let keys = state
-                .sessions
-                .iter()
-                .filter(|(_, window)| now >= window.started + CLOSE_WINDOW)
-                .map(|(session, _)| *session)
-                .collect::<Vec<_>>();
-            keys.into_iter()
-                .filter_map(|session| state.sessions.remove(&session))
-                .collect::<Vec<_>>()
-        };
-        for window in expired {
-            log_summary(&window);
-        }
-    }
-}
-
-async fn run(inner: std::sync::Weak<Inner>, changed: Arc<Notify>) {
-    loop {
-        let Some(shared) = inner.upgrade() else {
-            return;
-        };
-        let next = shared
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .sessions
-            .values()
-            .map(|window| window.started + CLOSE_WINDOW)
-            .min();
-        drop(shared);
-        if let Some(deadline) = next {
-            tokio::select! {
-                () = sleep_until(deadline) => {
-                    let Some(shared) = inner.upgrade() else {
-                        return;
-                    };
-                    let logger = StreamCloseLog(shared);
-                    logger.flush_expired(Instant::now());
-                }
-                () = changed.notified() => {}
-            }
+    /// Keep the latest cursors; a window that saw different reasons or closers says so.
+    fn absorb(&mut self, record: CloseRecord) {
+        let reason = if self.last.reason == record.reason {
+            record.reason
         } else {
-            changed.notified().await;
+            MIXED_REASON
+        };
+        let who = if self.last.who == record.who {
+            record.who
+        } else {
+            CloseWho::Multiple
+        };
+        self.last = CloseRecord {
+            who,
+            reason,
+            ..record
+        };
+        self.closes = self.closes.saturating_add(1);
+    }
+}
+
+type WindowKey = (CloseOwner, &'static str);
+
+/// Owned by the logger thread alone, so it needs no lock.
+#[derive(Default)]
+struct Limiter {
+    accounts: HashMap<WindowKey, Window>,
+    /// Account windows in start order, one entry per live window. One thread stamps
+    /// `now` for every record, so starts never decrease and the front holds the
+    /// earliest deadline: finding and ending due windows costs O(1) per window.
+    order: VecDeque<(Instant, WindowKey)>,
+}
+
+impl Limiter {
+    fn record(
+        &mut self,
+        record: CloseRecord,
+        now: Instant,
+        out: &mut impl FnMut(&CloseRecord, u64, Scope),
+    ) {
+        // Ending due windows first means a key found below always has a live window.
+        self.expire(now, out);
+        let key = (record.owner, record.reason.category);
+        if let Some(window) = self.accounts.get_mut(&key) {
+            window.absorb(record);
+            return;
+        }
+        if self.accounts.len() < MAX_TRACKED_WINDOWS {
+            out(&record, 1, Scope::Account);
+            self.order.push_back((now, key));
+            self.accounts.insert(key, Window::new(record));
+            return;
+        }
+        // Full table: write the line without tracking it, so memory stays bounded.
+        out(&record, 1, Scope::Server);
+    }
+
+    fn expire(&mut self, now: Instant, out: &mut impl FnMut(&CloseRecord, u64, Scope)) {
+        while let Some(&(started, key)) = self.order.front() {
+            if now < started + CLOSE_WINDOW {
+                break;
+            }
+            self.order.pop_front();
+            if let Some(window) = self.accounts.remove(&key) {
+                summarize(&window, Scope::Account, out);
+            }
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.order
+            .front()
+            .map(|(started, _)| *started + CLOSE_WINDOW)
+    }
+
+    /// Shutdown: summarise every window that is still open.
+    fn finish(&mut self, out: &mut impl FnMut(&CloseRecord, u64, Scope)) {
+        self.order.clear();
+        for (_, window) in self.accounts.drain() {
+            summarize(&window, Scope::Account, out);
         }
     }
 }
 
-/// One call site for both lines keeps the binary small: `closes` is 1 for the
-/// first close and the repeat count for a window summary. The stream close pair is
-/// the peer's close of a browser stream or of the control stream, whichever ended.
-fn emit(record: &CloseRecord, closes: u64) {
-    let session_id = uuid::Uuid::from_bytes(record.session_id);
-    let host_id = record
-        .host_id
-        .map_or_else(|| "local".to_owned(), |id| id.to_string());
+fn summarize(window: &Window, scope: Scope, out: &mut impl FnMut(&CloseRecord, u64, Scope)) {
+    if window.closes >= 2 {
+        out(&window.last, window.closes, scope);
+    }
+}
+
+/// One call site for both lines keeps the binary small: `closes` is 1 for the first
+/// close of a window and the window's close count for its summary. The stream close
+/// pair is the peer's close of a browser stream or of the control stream, whichever
+/// ended. A close that names no owned session prints "none" for session and host.
+fn emit(record: &CloseRecord, closes: u64, scope: Scope) {
+    let named = record.session_id != NO_SESSION;
+    let session_id = if named {
+        uuid::Uuid::from_bytes(record.session_id).to_string()
+    } else {
+        "none".to_owned()
+    };
+    let host_id = match record.host_id {
+        _ if !named => "none".to_owned(),
+        Some(id) => id.to_string(),
+        None => "local".to_owned(),
+    };
     let summary = closes > 1;
     let message = if summary {
         format!(
@@ -403,6 +503,7 @@ fn emit(record: &CloseRecord, closes: u64) {
         target: "infraternal::terminal_stream",
         event = if summary { "terminal_stream_close_summary" } else { "terminal_stream_closed" },
         message = %message,
+        limit_scope = if scope == Scope::Account { "account" } else { "server" },
         who = record.who.as_str(),
         reason_category = record.reason.category,
         reason = record.reason.kind,
@@ -422,16 +523,6 @@ fn emit(record: &CloseRecord, closes: u64) {
         websocket_code = record.websocket_code.unwrap_or_default(),
         websocket_reason = record.websocket_reason.unwrap_or_default(),
     );
-}
-
-fn log_close(record: &CloseRecord) {
-    emit(record, 1);
-}
-
-fn log_summary(window: &Window) {
-    if window.closes >= 2 {
-        emit(&window.last, window.closes);
-    }
 }
 
 /// Browser close reasons are untrusted text; only known local strings can enter server logs.
@@ -491,7 +582,7 @@ pub(crate) fn classify_terminal_close(reason: &'static str) -> CloseReason {
 
 #[cfg(test)]
 mod tests {
-    //! Captures actual structured close lines and verifies session-level log bounds.
+    //! The limiter's bounds on synthetic time, and real close lines through the thread.
     use super::*;
     use std::{io::Write, sync::Mutex};
 
@@ -543,92 +634,140 @@ mod tests {
         }
     }
 
-    fn record(session_id: [u8; 16]) -> CloseRecord {
+    fn owner(n: u64) -> CloseOwner {
+        CloseOwner(n)
+    }
+
+    fn record(owner: CloseOwner, session_id: [u8; 16]) -> CloseRecord {
         CloseRecord {
-            who: CloseWho::InfraternalAgent,
-            reason: AGENT_STREAM_ENDED,
-            host_id: Some(uuid::Uuid::from_u128(0x1234)),
-            session_id,
-            browser_stream_id: 3,
             agent_stream_id: 2,
             out_seq: 2048,
             input_acked: 128,
             input_sent: 192,
             output_credit_bytes: 4096,
-            agent_close_code: None,
-            agent_close_reason: None,
-            browser_stream_close_code: None,
-            browser_stream_close_reason: None,
-            websocket_code: None,
-            websocket_reason: None,
+            ..CloseRecord::new(
+                owner,
+                CloseWho::InfraternalAgent,
+                AGENT_STREAM_ENDED,
+                Some(uuid::Uuid::from_u128(0x1234)),
+                session_id,
+                3,
+            )
         }
     }
 
-    /// Cost of the close path, run by hand in release mode (`--ignored --nocapture`).
-    /// A suppressed repeat (the storm case) must stay far below a frame's cost, and
-    /// frames themselves never call the logger, so the hot path adds nothing.
+    fn session(n: u64) -> [u8; 16] {
+        let mut id = [0xa5_u8; 16];
+        id[..8].copy_from_slice(&n.to_le_bytes());
+        id
+    }
+
+    /// Runs records through a limiter at the given offsets and returns (closes, scope) per line.
+    #[derive(Default)]
+    struct Lines(Vec<(u64, Scope)>);
+
+    impl Lines {
+        fn sink(&mut self) -> impl FnMut(&CloseRecord, u64, Scope) + '_ {
+            |_, closes, scope| self.0.push((closes, scope))
+        }
+    }
+
+    #[test]
+    fn one_close_line_and_one_summary_bound_an_account_storm() {
+        let mut limiter = Limiter::default();
+        let mut lines = Lines::default();
+        let start = Instant::now();
+        for i in 0..512 {
+            limiter.record(
+                record(owner(1), session(i % 3)),
+                start + Duration::from_millis(i),
+                &mut lines.sink(),
+            );
+        }
+        assert_eq!(lines.0, [(1, Scope::Account)]);
+        assert_eq!(limiter.next_deadline(), Some(start + CLOSE_WINDOW));
+        limiter.expire(start + CLOSE_WINDOW, &mut lines.sink());
+        assert_eq!(lines.0, [(1, Scope::Account), (512, Scope::Account)]);
+        assert_eq!(limiter.next_deadline(), None);
+    }
+
+    #[test]
+    fn different_accounts_and_reason_categories_each_get_their_first_line() {
+        let mut limiter = Limiter::default();
+        let mut lines = Lines::default();
+        let now = Instant::now();
+        limiter.record(record(owner(1), session(1)), now, &mut lines.sink());
+        limiter.record(record(owner(2), session(1)), now, &mut lines.sink());
+        let mut refused = record(owner(1), session(1));
+        refused.reason = ATTACH_REFUSED;
+        limiter.record(refused, now, &mut lines.sink());
+        assert_eq!(lines.0.len(), 3);
+    }
+
+    /// A client names any session id it likes; the key is its account, so naming
+    /// thousands of ids yields one line, not one per id (#227 review P1-1).
+    #[test]
+    fn client_chosen_session_ids_share_their_accounts_window() {
+        let mut limiter = Limiter::default();
+        let mut lines = Lines::default();
+        let now = Instant::now();
+        for i in 0..10_000 {
+            let mut unowned = record(owner(7), NO_SESSION);
+            unowned.reason = ATTACH_UNOWNED;
+            unowned.browser_stream_id = u32::try_from(i % 64).unwrap() * 2 + 1;
+            limiter.record(unowned, now, &mut lines.sink());
+        }
+        assert_eq!(lines.0, [(1, Scope::Account)]);
+        assert_eq!(limiter.accounts.len(), 1);
+    }
+
+    #[test]
+    fn mixed_reasons_and_closers_in_one_window_are_named_as_mixed() {
+        let mut limiter = Limiter::default();
+        let mut last = None;
+        let now = Instant::now();
+        let mut out = |record: &CloseRecord, closes: u64, _: Scope| {
+            if closes > 1 {
+                last = Some(*record);
+            }
+        };
+        limiter.record(record(owner(1), session(1)), now, &mut out);
+        let mut other = record(owner(1), session(2));
+        other.who = CloseWho::Server;
+        other.reason = INPUT_QUEUE_FULL;
+        other.reason.category = AGENT_STREAM_ENDED.category;
+        limiter.record(other, now, &mut out);
+        limiter.finish(&mut out);
+        let last = last.unwrap();
+        assert_eq!(last.reason, MIXED_REASON);
+        assert_eq!(last.who, CloseWho::Multiple);
+        assert_eq!(last.session_id, session(2));
+    }
+
+    /// Real lines through the thread: the first at once, the summary at shutdown.
     #[tokio::test]
-    #[ignore = "manual microbenchmark"]
-    async fn close_path_cost() {
-        let logger = StreamCloseLog::new();
-        let close = record([5; 16]);
-        logger.record(&close);
-        let n = 2_000_000u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            logger.record(std::hint::black_box(&close));
-        }
-        let per = t.elapsed().as_nanos() / u128::from(n);
-        println!("suppressed repeat: {per} ns/close");
-        let (capture, _guard) = Capture::start();
-        let n = 20_000u32;
-        let t = std::time::Instant::now();
-        for i in 0..n {
-            let mut id = [0u8; 16];
-            id[..4].copy_from_slice(&i.to_le_bytes());
-            logger.record(&record(id));
-        }
-        let per = t.elapsed().as_nanos() / u128::from(n);
-        println!("first close of a new session (formats and writes one line): {per} ns/close");
-        assert_eq!(capture.events("terminal_stream_closed").len(), n as usize);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_flood_of_distinct_sessions_keeps_memory_bounded_and_logs_each_first_close() {
+    async fn the_thread_writes_the_first_close_and_summarises_the_rest_on_shutdown() {
         let (capture, _guard) = Capture::start();
         let logger = StreamCloseLog::new();
-        let total = MAX_TRACKED_SESSIONS + 500;
-        for i in 0..total {
-            let mut id = [0u8; 16];
-            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
-            logger.record(&record(id));
+        for i in 0..512 {
+            logger.record(&record(owner(1), session(7)));
+            if i % 128 == 127 {
+                settled();
+            }
         }
-        assert_eq!(capture.events("terminal_stream_closed").len(), total);
-        assert!(logger.0.state.lock().unwrap().sessions.len() <= MAX_TRACKED_SESSIONS);
-        // After the windows end the sweep frees the map and tracking resumes.
-        tokio::time::advance(CLOSE_WINDOW + Duration::from_secs(2)).await;
-        tokio::task::yield_now().await;
-        logger.record(&record([0xee; 16]));
-        assert!(logger.0.state.lock().unwrap().sessions.len() < MAX_TRACKED_SESSIONS);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn one_close_line_and_one_summary_bound_a_session_storm() {
-        let (capture, _guard) = Capture::start();
-        let logger = StreamCloseLog::new();
-        let session = [7; 16];
-        for _ in 0..512 {
-            logger.record_at(&record(session), Instant::now());
-        }
+        settled();
         assert_eq!(capture.events("terminal_stream_closed").len(), 1);
         assert_eq!(capture.events("terminal_stream_close_summary").len(), 0);
-
-        tokio::time::advance(CLOSE_WINDOW).await;
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
+        drop(logger);
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while capture.events("terminal_stream_close_summary").is_empty() && Instant::now() < give_up
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         let summaries = capture.events("terminal_stream_close_summary");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0]["fields"]["closed_count"], 512);
+        assert_eq!(summaries[0]["fields"]["limit_scope"], "account");
         assert_eq!(
             summaries[0]["fields"]["message"],
             "closed 512 times in 60 s, reason terminal_stream_closed"
@@ -646,13 +785,14 @@ mod tests {
     async fn close_line_has_session_counters_and_never_copies_untrusted_close_text() {
         let (capture, _guard) = Capture::start();
         let logger = StreamCloseLog::new();
-        let mut close = record([9; 16]);
+        let mut close = record(owner(9), [9; 16]);
         close.who = CloseWho::Browser;
         close.reason = CLIENT_WENT_AWAY;
         close.websocket_code = Some(4000);
         close.websocket_reason = Some(safe_websocket_reason("connection unresponsive"));
         close.agent_close_reason = Some(safe_agent_close_reason("private terminal contents"));
         logger.record(&close);
+        settled();
 
         let events = capture.events("terminal_stream_closed");
         assert_eq!(events.len(), 1);
@@ -678,6 +818,51 @@ mod tests {
         assert!(!capture.text().contains("private terminal contents"));
     }
 
+    #[tokio::test]
+    async fn a_close_naming_no_owned_session_prints_none_for_session_and_host() {
+        let (capture, _guard) = Capture::start();
+        let logger = StreamCloseLog::new();
+        let mut unowned = record(owner(4), NO_SESSION);
+        unowned.reason = ATTACH_UNOWNED;
+        logger.record(&unowned);
+        settled();
+        let events = capture.events("terminal_stream_closed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["session_id"], "none");
+        assert_eq!(events[0]["fields"]["host_id"], "none");
+        assert_eq!(events[0]["fields"]["reason"], "unowned_session_attach");
+    }
+
+    /// A full queue never blocks the caller: the close is dropped and counted.
+    #[test]
+    fn a_full_queue_drops_and_counts_instead_of_blocking() {
+        let (queue, _closes) = std::sync::mpsc::sync_channel(1);
+        let logger = StreamCloseLog(Arc::new(Inner {
+            queue: OnceLock::from(Some(queue)),
+            dropped: Arc::default(),
+        }));
+        for _ in 0..3 {
+            logger.record(&record(owner(1), session(1)));
+        }
+        assert_eq!(logger.0.dropped.load(Ordering::Relaxed), 2);
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        let (capture, _guard) = Capture::start();
+        let mut report = DropReport::default();
+        let now = Instant::now();
+        report.report(&logger.0.dropped, Some(now));
+        logger.0.dropped.fetch_add(5, Ordering::Relaxed);
+        report.report(&logger.0.dropped, Some(now + Duration::from_secs(1)));
+        assert_eq!(
+            report.next_deadline(&logger.0.dropped),
+            Some(now + CLOSE_WINDOW)
+        );
+        report.report(&logger.0.dropped, Some(now + CLOSE_WINDOW));
+        let reports = capture.events("terminal_stream_close_records_dropped");
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0]["fields"]["dropped"], 2);
+        assert_eq!(reports[1]["fields"]["dropped"], 5);
+    }
+
     #[test]
     fn an_unavailable_agent_stream_is_reported_as_a_link_drop() {
         let reason = safe_agent_close_reason("remote stream unavailable");
@@ -695,114 +880,5 @@ mod tests {
         let route = classify_terminal_close("terminal route unresponsive");
         assert_eq!(route.category, "idle");
         assert_eq!(route.kind, "terminal_route_unresponsive");
-    }
-}
-
-#[cfg(test)]
-mod review_tests {
-    //! Break-it review of #227: the limiter must stay a limiter when its map is full.
-    use super::*;
-
-    fn close(session_id: [u8; 16]) -> CloseRecord {
-        CloseRecord::new(
-            CloseWho::InfraternalAgent,
-            AGENT_STREAM_ENDED,
-            None,
-            session_id,
-            1,
-        )
-    }
-
-    #[derive(Clone, Default)]
-    struct Count(Arc<std::sync::atomic::AtomicUsize>);
-
-    impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            let lines = bytes.iter().filter(|b| **b == b'\n').count();
-            self.0
-                .fetch_add(lines, std::sync::atomic::Ordering::Relaxed);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Count {
-        type Writer = Self;
-
-        fn make_writer(&'a self) -> Self {
-            self.clone()
-        }
-    }
-
-    /// 8,192 distinct session ids (one authenticated client can mint them with
-    /// AttachTerm for sessions it does not own) fill the map; from then on a real
-    /// session's close storm is logged once per close, not once per minute.
-    #[tokio::test(start_paused = true)]
-    async fn a_full_map_does_not_turn_off_rate_limiting_for_a_storming_session() {
-        let logger = StreamCloseLog::new();
-        for i in 0..MAX_TRACKED_SESSIONS {
-            let mut id = [0xa5_u8; 16];
-            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
-            logger.record(&close(id));
-        }
-        let count = Count::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .without_time()
-            .with_writer(count.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
-        let storm = [0x5a; 16];
-        for _ in 0..1000 {
-            logger.record(&close(storm));
-        }
-        let lines = count.0.load(std::sync::atomic::Ordering::Relaxed);
-        assert!(
-            lines <= 2,
-            "{lines} log lines for 1000 closes of one session within a minute while the map is full"
-        );
-    }
-
-    /// Hand-run (`--ignored --nocapture`, release): the summary worker wakes on every new
-    /// window and scans the whole map under the logger mutex. The shipped benchmark runs on
-    /// a current-thread runtime, where that worker never runs during the loop.
-    #[test]
-    #[ignore = "manual microbenchmark"]
-    fn first_close_cost_with_the_worker_running() {
-        for threads in [1_usize, 4] {
-            let runtime = if threads == 1 {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-            } else {
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(threads)
-                    .enable_all()
-                    .build()
-                    .unwrap()
-            };
-            runtime.block_on(async {
-                let logger = StreamCloseLog::new();
-                for i in 0..(MAX_TRACKED_SESSIONS - 4096) {
-                    let mut id = [1_u8; 16];
-                    id[..8].copy_from_slice(&(i as u64).to_le_bytes());
-                    logger.record(&close(id));
-                }
-                tokio::task::yield_now().await;
-                let n = 4000_u64;
-                let t = std::time::Instant::now();
-                for i in 0..n {
-                    let mut id = [2_u8; 16];
-                    id[..8].copy_from_slice(&i.to_le_bytes());
-                    logger.record(&close(id));
-                }
-                let per = t.elapsed().as_nanos() / u128::from(n);
-                println!("runtime threads {threads}: first close with ~4k-8k live windows: {per} ns/close");
-            });
-        }
     }
 }

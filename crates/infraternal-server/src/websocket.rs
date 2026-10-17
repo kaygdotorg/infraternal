@@ -9,9 +9,10 @@ use crate::{
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
-        CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL,
-        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE,
-        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
+        ATTACH_UNOWNED, CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseOwner, CloseReason, CloseRecord,
+        CloseWho, INPUT_QUEUE_FULL, NO_SESSION, PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog,
+        TERMINAL_ROUTE_IDLE, classify_terminal_close, safe_agent_close_reason,
+        safe_websocket_reason,
     },
 };
 use axum::{
@@ -445,6 +446,7 @@ async fn run_socket(
                 let stream_id =
                     u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
                 state.close_logs.record(&CloseRecord::new(
+                    CloseOwner::of(&user_id),
                     CloseWho::Server,
                     RESUME_REFUSED,
                     host_id,
@@ -1577,16 +1579,25 @@ where
             }
             let mut session = [0_u8; 16];
             session.copy_from_slice(session_id);
-            let Ok(host_id) = session_host_id(&state.pool, user_id, &session).await else {
+            // `None`: this account has no record of the session. The id is the client's
+            // choice and may be another account's, so no line ever names it (#227).
+            let Ok(owned_host) = session_host_id(&state.pool, user_id, &session).await else {
                 state.close_logs.record(&CloseRecord::new(
+                    CloseOwner::of(user_id),
                     CloseWho::Server,
                     PROTOCOL_ERROR,
                     None,
-                    session,
+                    NO_SESSION,
                     stream_id,
                 ));
                 return Err(());
             };
+            let logged_session = if owned_host.is_some() {
+                session
+            } else {
+                NO_SESSION
+            };
+            let host_id = owned_host.flatten();
             let Ok((input_acked, writer_stream)) = owned_writer(
                 &state.pool,
                 user_id,
@@ -1604,15 +1615,28 @@ where
                 if session_is_live(state, user_id, session_token).await
                     && session_gone(&state.pool, user_id, &session).await?
                 {
-                    let mut close = CloseRecord::new(
-                        CloseWho::Server,
-                        AGENT_STREAM_ENDED,
-                        host_id,
-                        session,
-                        stream_id,
-                    );
-                    close.out_seq = last_out_seq;
-                    close.input_sent = last_in_seq;
+                    let close = if owned_host.is_some() {
+                        let mut close = CloseRecord::new(
+                            CloseOwner::of(user_id),
+                            CloseWho::Server,
+                            AGENT_STREAM_ENDED,
+                            host_id,
+                            session,
+                            stream_id,
+                        );
+                        close.out_seq = last_out_seq;
+                        close.input_sent = last_in_seq;
+                        close
+                    } else {
+                        CloseRecord::new(
+                            CloseOwner::of(user_id),
+                            CloseWho::Browser,
+                            ATTACH_UNOWNED,
+                            None,
+                            NO_SESSION,
+                            stream_id,
+                        )
+                    };
                     state.close_logs.record(&close);
                     ended.insert(stream_id)?;
                     let gone = Frame::Close {
@@ -1622,10 +1646,11 @@ where
                     return send_frame(sink, stream_id, &gone, encode).await;
                 }
                 let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
                     CloseWho::Server,
                     ATTACH_REFUSED,
                     host_id,
-                    session,
+                    logged_session,
                     stream_id,
                 );
                 close.out_seq = last_out_seq;
@@ -1645,6 +1670,7 @@ where
             };
             if last_in_seq > input_acked {
                 let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
                     CloseWho::Server,
                     PROTOCOL_ERROR,
                     host_id,
@@ -1659,6 +1685,7 @@ where
             }
             if !session_is_live(state, user_id, session_token).await {
                 let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
                     CloseWho::Server,
                     ATTACH_REFUSED,
                     host_id,
@@ -1673,6 +1700,7 @@ where
             }
             let Ok(agent) = terminal_agent(state, user_id, host_id).await else {
                 let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
                     CloseWho::Server,
                     AGENT_CONNECTION_REFUSED,
                     host_id,
@@ -1702,6 +1730,7 @@ where
             .await
             else {
                 let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
                     CloseWho::InfraternalAgent,
                     AGENT_CONNECTION_REFUSED,
                     host_id,
@@ -1726,6 +1755,7 @@ where
             };
             if !session_is_live(state, user_id, session_token).await {
                 let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
                     CloseWho::Server,
                     ATTACH_REFUSED,
                     host_id,
@@ -1750,6 +1780,7 @@ where
                     handle,
                     session_id: session,
                     host_id,
+                    owner: CloseOwner::of(user_id),
                     last_out_seq,
                     last_in_acked: input_acked,
                     input_sent_end: input_acked,
@@ -2018,6 +2049,8 @@ struct ClientAttachment {
     input: crate::websocket_input::InputQueue,
     session_id: [u8; 16],
     host_id: Option<uuid::Uuid>,
+    /// Rate-limit key of the account that owns this socket, for close lines.
+    owner: CloseOwner,
     last_out_seq: u64,
     last_in_acked: u64,
     input_sent_end: u64,
@@ -2034,6 +2067,7 @@ impl ClientAttachment {
         reason: CloseReason,
     ) -> CloseRecord {
         let mut record = CloseRecord::new(
+            self.owner,
             who,
             reason,
             self.host_id,
@@ -2185,11 +2219,13 @@ async fn terminal_agent(
     state.remote_hosts.actor(host).await.ok_or(())
 }
 
+/// The session's host for this account: `None` when the account has no such session,
+/// `Some(None)` for a session on the server's own host.
 async fn session_host_id(
     pool: &SqlitePool,
     user: &str,
     session: &[u8; 16],
-) -> Result<Option<uuid::Uuid>, ()> {
+) -> Result<Option<Option<uuid::Uuid>>, ()> {
     let Some(row) =
         sqlx::query("SELECT remote_host_id FROM terminal_sessions WHERE id=? AND user_id=?")
             .bind(session.as_slice())
@@ -2205,6 +2241,7 @@ async fn session_host_id(
         .as_deref()
         .map(uuid::Uuid::from_slice)
         .transpose()
+        .map(Some)
         .map_err(|_| ())
 }
 

@@ -30,6 +30,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
 }
 
 fn closed_lines(capture: &Capture) -> Vec<serde_json::Value> {
+    crate::stream_close::settled();
     String::from_utf8(capture.0.lock().unwrap().clone())
         .unwrap()
         .lines()
@@ -39,7 +40,7 @@ fn closed_lines(capture: &Capture) -> Vec<serde_json::Value> {
 }
 
 /// One browser stream id is reused for attaches to session ids the account never
-/// owned. Each is answered with SESSION_GONE and the socket stays up, so the loop
+/// owned. Each is answered with `SESSION_GONE` and the socket stays up, so the loop
 /// is limited only by SQLite. Every attach writes a fresh first-close line because
 /// the rate limiter keys on the client-chosen session id.
 #[tokio::test]
@@ -94,6 +95,12 @@ async fn attaches_to_unowned_session_ids_cannot_flood_the_close_log() {
     }
     let lines = closed_lines(&capture);
     server.abort();
+    assert!(
+        lines
+            .iter()
+            .all(|line| line["fields"]["session_id"] == "none"),
+        "a line names a session id the account does not own"
+    );
     assert!(
         lines.len() <= 8,
         "{} terminal_stream_closed lines for {attempts} attach frames on one socket; \
