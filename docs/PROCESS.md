@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,093,520 bytes |
-  | `aarch64-unknown-linux-musl` | 19,319,768 bytes |
+  | `x86_64-unknown-linux-musl` | 21,091,504 bytes |
+  | `aarch64-unknown-linux-musl` | 19,318,840 bytes |
 
   These ceilings pin the normalized combined-source artifacts measured on #201
   and #229. Direct Cargo builds and packaging share `.cargo/rustc.sh`, which
