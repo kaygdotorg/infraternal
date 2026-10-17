@@ -754,7 +754,7 @@ impl Bootstrap {
                 || !state.failed
                 || failure.kind != crate::model::FailureKind::HostKey
                 || failure
-                    .host_key_challenge
+                    .host_key_challenge()
                     .is_none_or(|value| value.to_string() != challenge)
                 || !failure
                     .fingerprints

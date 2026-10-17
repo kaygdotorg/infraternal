@@ -366,6 +366,10 @@ are exact allowlisted public lines, including enrollment DNS and TLS failures;
 arbitrary stderr never becomes UI copy or log output. Re-adding a retained host
 (address or effective application SSH lookup) returns `already_added` before
 issuing another invitation, and the UI directs the person to its existing terminal.
+That failure may include optional `failure.host_id` with the matched UUID. The
+lookup retains the bootstrap owner's and non-revoked-host filters, so only the
+requester already admitted for that host's terminal receives its id. The field
+is omitted from every other failure, and existing clients may ignore it.
 
 ## Verified architecture payloads (#157, D220, D224, D225)
 
