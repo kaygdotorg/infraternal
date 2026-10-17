@@ -236,12 +236,14 @@ pub struct Failure {
     pub host_key_changed: bool,
     /// Only exhausted D183 authentication permits the UI to request another method.
     pub choose_method: bool,
-    /// A host-key challenge or existing-host id; the failure kind uses one at a time.
-    uuid_reference: Option<uuid::Uuid>,
+    /// Binds a host-key confirmation to the observation that produced it.
+    host_key_challenge: Option<uuid::Uuid>,
+    /// The owner's existing host that makes this an already-added failure. Its own field, so
+    /// it can never be read or sent as a challenge (or the reverse).
+    existing_host_id: Option<uuid::Uuid>,
 }
 
-/// Serialize the failure's single UUID reference under the key for its outcome.
-/// This keeps the frequently returned error value compact while preserving the wire fields.
+/// Serialize the failure's wire fields; each UUID has its own key and its own field.
 impl Serialize for Failure {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -277,11 +279,12 @@ impl Serialize for Failure {
         if self.choose_method {
             state.serialize_field("choose_method", &self.choose_method)?;
         }
-        if let Some(uuid) = self.uuid_reference {
+        if let Some(uuid) = self.host_key_challenge {
+            state.serialize_field("host_key_challenge", &uuid)?;
+        }
+        if let Some(uuid) = self.existing_host_id {
             if self.already_added {
                 state.serialize_field("host_id", &uuid)?;
-            } else {
-                state.serialize_field("host_key_challenge", &uuid)?;
             }
         }
         state.end()
@@ -303,7 +306,8 @@ impl Failure {
             host_key_type: None,
             host_key_changed: false,
             choose_method: false,
-            uuid_reference: None,
+            host_key_challenge: None,
+            existing_host_id: None,
         }
     }
     /// Return the public challenge only while this error represents a host-key refusal.
@@ -312,20 +316,20 @@ impl Failure {
         if self.already_added {
             None
         } else {
-            self.uuid_reference
+            self.host_key_challenge
         }
     }
 
     /// Record the challenge used to bind host-key confirmation to this observation.
     pub fn set_host_key_challenge(&mut self, challenge: Option<uuid::Uuid>) {
-        self.uuid_reference = challenge;
+        self.host_key_challenge = challenge;
     }
 
     /// Attach the owner's existing host id to the already-added failure.
     #[must_use]
     pub fn with_existing_host_id(mut self, host_id: uuid::Uuid) -> Self {
         self.already_added = true;
-        self.uuid_reference = Some(host_id);
+        self.existing_host_id = Some(host_id);
         self
     }
     /// Bounded diagnosis for server logs; authentication and trust always retain their categories.
