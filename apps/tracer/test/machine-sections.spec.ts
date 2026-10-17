@@ -1,6 +1,7 @@
 /**
- * The machine tab of the details popover (TASTE: no "More" tab). With "Extended machine info" off it lists only the
- * essentials; with it on, every fact sits under a titled section. No control labelled "More" exists either way.
+ * The machine tab of the details popover (TASTE: no "More" tab; D126, D156). The default facts (kernel, architecture,
+ * CPU, memory, disk, load, agent mode, engines...) show under titled sections with "Extended machine info" off; turning it
+ * on adds only init, virtualization, shell and locale. No control labelled "More" exists either way.
  * Also saves review screenshots in the external job evidence directory.
  */
 import { tracerEvidencePath } from "./evidence-path";
@@ -33,15 +34,13 @@ for (const [name, viewport, mobile] of SIZES) {
       await expect(popover(page).locator(".canvas-popover-title")).toHaveText(mobile ? "Ubuntu" : "NixOS");
       await expect(popover(page).getByText("More", { exact: true })).toHaveCount(0);
       await expect(popover(page).getByRole("button", { name: /more/i })).toHaveCount(0);
-      const titles = popover(page).locator(".ui-kv-group");
-      if (extended) {
-        await expect(titles).toHaveText(["System", "Resources", "Access"]);
-        await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Kernel" })).toBeVisible();
-        await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Locale" })).toBeVisible();
-      } else {
-        await expect(titles).toHaveCount(0);
-        await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Kernel" })).toHaveCount(0);
-      }
+      const key = (text: string) => popover(page).locator(".ui-kv-key").filter({ hasText: text });
+      await expect(popover(page).locator(".ui-kv-group")).toHaveText(["System", "Resources", "Access"]);
+      await expect(key("Kernel")).toBeVisible();
+      await expect(key("Memory")).toBeVisible();
+      await expect(key("Engines")).toBeVisible();
+      await expect(key("Locale")).toHaveCount(extended ? 1 : 0);
+      await expect(key("Shell")).toHaveCount(extended ? 1 : 0);
       await page.screenshot({ path: `${SHOTS}/${name}-ink-${extended ? "on" : "off"}.png` });
       await context.close();
     });
