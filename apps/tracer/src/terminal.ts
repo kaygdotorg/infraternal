@@ -49,7 +49,7 @@ interface GhosttyActivityControls {
     setTheme(theme: ITheme): void;
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
     renderCursor(x: number, y: number, line: unknown[] | null): void;
-    setHoveredLinkRange(range: { startX: number; startY: number; endX: number; endY: number } | null): void;
+    setHoveredLinkRanges(ranges: readonly { startX: number; startY: number; endX: number; endY: number }[] | null): void;
     naturalCellWidth?: number;
     ctx?: CanvasRenderingContext2D;
     devicePixelRatio?: number;
@@ -492,6 +492,7 @@ export class TerminalClient {
     renderCursorX: number;
     renderCursorY: number;
     renderCursorVisible: boolean;
+    rendererAccentColor: string;
     themeColorsMs: number;
     themeRenderMs: number;
     terminalColors?: { background: { r: number; g: number; b: number }; foreground: { r: number; g: number; b: number } };
@@ -523,6 +524,7 @@ export class TerminalClient {
       renderCursorX: cursor?.x ?? 0,
       renderCursorY: cursor?.y ?? 0,
       renderCursorVisible: Boolean(cursor?.visible),
+      rendererAccentColor: this.ghostty.renderer?.theme?.cursor ?? "",
       themeColorsMs: this.lastThemeColorsMs,
       themeRenderMs: this.lastThemeRenderMs,
       ...(colors ? { terminalColors: { background: colors.background, foreground: colors.foreground } } : {}),
@@ -1935,11 +1937,11 @@ export class TerminalClient {
         getVisibleRange: () => this.visibleLinkRange(),
         getRow: (y) => this.readLinkRow(y),
         getCellMetrics: () => this.cellMetrics(),
-        paint: (range) => {
+        paint: (ranges) => {
           const renderer = this.ghostty.renderer;
           const buffer = this.terminal.wasmTerm;
           if (!renderer || !buffer || this.suspended || this.closed) return;
-          renderer.setHoveredLinkRange(range);
+          renderer.setHoveredLinkRanges(ranges);
           renderer.render(buffer, false, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
           this.wakeTerminal();
         },

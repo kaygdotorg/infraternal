@@ -1,0 +1,205 @@
+# Role: paints temporary visible link underlines in the active theme without changing cell text.
+diff --git a/lib/renderer.ts b/lib/renderer.ts
+--- a/lib/renderer.ts
++++ b/lib/renderer.ts
+@@ -136,15 +136,9 @@
+   private hoveredHyperlinkId: number = 0;
+   private previousHoveredHyperlinkId: number = 0;
+ 
+-  // Regex link hover tracking (for links without hyperlink_id)
+-  private hoveredLinkRange: { startX: number; startY: number; endX: number; endY: number } | null =
+-    null;
+-  private previousHoveredLinkRange: {
+-    startX: number;
+-    startY: number;
+-    endX: number;
+-    endY: number;
+-  } | null = null;
++  // Temporary underline ranges stay separate from terminal text and colors.
++  private hoveredLinkRanges: readonly { startX: number; startY: number; endX: number; endY: number }[] | null = null;
++  private previousHoveredLinkRanges: readonly { startX: number; startY: number; endX: number; endY: number }[] | null = null;
+ 
+   constructor(canvas: HTMLCanvasElement, options: RendererOptions = {}) {
+     this.canvas = canvas;
+@@ -407,8 +401,7 @@
+     // Track rows with hyperlinks that need redraw when hover changes
+     const hyperlinkRows = new Set<number>();
+     const hyperlinkChanged = this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId;
+-    const linkRangeChanged =
+-      JSON.stringify(this.hoveredLinkRange) !== JSON.stringify(this.previousHoveredLinkRange);
++    const linkRangeChanged = this.hoveredLinkRanges !== this.previousHoveredLinkRanges;
+ 
+     if (hyperlinkChanged) {
+       // Find rows containing the old or new hovered hyperlink
+@@ -451,23 +444,14 @@
+ 
+     // Track rows affected by link range changes (for regex URLs)
+     if (linkRangeChanged) {
+-      // Add rows from old range
+-      if (this.previousHoveredLinkRange) {
+-        for (
+-          let y = this.previousHoveredLinkRange.startY;
+-          y <= this.previousHoveredLinkRange.endY;
+-          y++
+-        ) {
+-          hyperlinkRows.add(y);
+-        }
++      // Add rows covered by the old and new temporary underline sets.
++      for (const range of this.previousHoveredLinkRanges ?? []) {
++        for (let y = range.startY; y <= range.endY; y++) hyperlinkRows.add(y);
+       }
+-      // Add rows from new range
+-      if (this.hoveredLinkRange) {
+-        for (let y = this.hoveredLinkRange.startY; y <= this.hoveredLinkRange.endY; y++) {
+-          hyperlinkRows.add(y);
+-        }
++      for (const range of this.hoveredLinkRanges ?? []) {
++        for (let y = range.startY; y <= range.endY; y++) hyperlinkRows.add(y);
+       }
+-      this.previousHoveredLinkRange = this.hoveredLinkRange;
++      this.previousHoveredLinkRanges = this.hoveredLinkRanges;
+     }
+ 
+     // Track if anything was actually rendered
+@@ -547,7 +531,7 @@
+     // Selection highlighting is now integrated into renderCellBackground/renderCellText
+     // No separate overlay pass needed - this fixes z-order issues with complex glyphs
+ 
+-    // Link underlines are drawn during cell rendering (see renderCell)
++    // Underlines are painted with affected rows; there is no per-frame overlay pass.
+ 
+     // Render cursor (only if we're at the bottom, not scrolled)
+     if (viewportY === 0 && cursor.visible && this.cursorVisible) {
+@@ -622,6 +606,7 @@
+     // PASS 2: Draw all cell text and decorations
+     // Now text can safely extend beyond cell boundaries (for complex scripts)
+     this.renderAsciiRunsAndComplexCells(line, y, lineCellCount, lineOffset);
++    if (this.hoveredLinkRanges) this.renderHoveredLinkRangesForRow(y, cols, line, lineOffset);
+   }
+ 
+   /**
+@@ -633,20 +618,17 @@
+     this.ctx.font = `${this.fontSize}px ${this.fontFamily}`;
+     const textY = y * this.metrics.height + this.metrics.baseline;
+     const hasSelection = this.currentSelectionCoords !== null;
+-    const canBatchLine = this.hoveredLinkRange === null;
+     let lastTextX = cols - 1;
+-    if (this.hoveredLinkRange === null) {
+-      while (lastTextX >= 0) {
+-        const cell = line[lineOffset + lastTextX]!;
+-        const isPlainTrailingSpace =
+-          cell.width === 1 &&
+-          cell.flags === 0 &&
+-          cell.hyperlink_id === 0 &&
+-          cell.grapheme_len === 0 &&
+-          (cell.codepoint === 0 || cell.codepoint === 0x20);
+-        if (!isPlainTrailingSpace) break;
+-        lastTextX -= 1;
+-      }
++    while (lastTextX >= 0) {
++      const cell = line[lineOffset + lastTextX]!;
++      const isPlainTrailingSpace =
++        cell.width === 1 &&
++        cell.flags === 0 &&
++        cell.hyperlink_id === 0 &&
++        cell.grapheme_len === 0 &&
++        (cell.codepoint === 0 || cell.codepoint === 0x20);
++      if (!isPlainTrailingSpace) break;
++      lastTextX -= 1;
+     }
+ 
+     let runStart = 0;
+@@ -682,7 +664,6 @@
+       const cell = line[lineOffset + x]!;
+       if (cell.width === 0) continue;
+       const canBatchCell =
+-        canBatchLine &&
+         cell.width === 1 &&
+         cell.flags === 0 &&
+         cell.hyperlink_id === 0 &&
+@@ -856,7 +837,7 @@
+       // Only show underline when hovered (cleaner look)
+       if (isHovered) {
+         const underlineY = cellY + this.metrics.baseline + 2;
+-        this.ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
++        this.ctx.strokeStyle = this.theme.cursor;
+         this.ctx.lineWidth = 1;
+         this.ctx.beginPath();
+         this.ctx.moveTo(cellX, underlineY);
+@@ -865,25 +846,6 @@
+       }
+     }
+ 
+-    // Draw regex link underline (for plain text URLs)
+-    if (this.hoveredLinkRange) {
+-      const range = this.hoveredLinkRange;
+-      // Check if this cell is within the hovered link range
+-      const isInRange =
+-        (y === range.startY && x >= range.startX && (y < range.endY || x <= range.endX)) ||
+-        (y > range.startY && y < range.endY) ||
+-        (y === range.endY && x <= range.endX && (y > range.startY || x >= range.startX));
+-
+-      if (isInRange) {
+-        const underlineY = cellY + this.metrics.baseline + 2;
+-        this.ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
+-        this.ctx.lineWidth = 1;
+-        this.ctx.beginPath();
+-        this.ctx.moveTo(cellX, underlineY);
+-        this.ctx.lineTo(cellX + cellWidth, underlineY);
+-        this.ctx.stroke();
+-      }
+-    }
+   }
+ 
+   /**
+@@ -1125,10 +1087,7 @@
+     this.hoveredHyperlinkId = hyperlinkId;
+   }
+ 
+-  /**
+-   * Set the currently hovered link range for rendering underlines (for regex-detected URLs)
+-   * Pass null to clear the hover state
+-   */
++  /** Retains the singular range adapter for renderer consumers while callers migrate to range sets. */
+   public setHoveredLinkRange(
+     range: {
+       startX: number;
+@@ -1137,7 +1096,37 @@
+       endY: number;
+     } | null
+   ): void {
+-    this.hoveredLinkRange = range;
++    this.setHoveredLinkRanges(range ? [range] : null);
++  }
++
++  /** Stores caller-owned ranges; callers replace them rather than mutating them. */
++  public setHoveredLinkRanges(
++    ranges: readonly { startX: number; startY: number; endX: number; endY: number }[] | null
++  ): void {
++    this.hoveredLinkRanges = ranges?.length ? ranges : null;
++  }
++
++  private renderHoveredLinkRangesForRow(row: number, cols: number, line: GhosttyCell[], lineOffset: number): void {
++    const ranges = this.hoveredLinkRanges;
++    if (!ranges) return;
++    this.ctx.save();
++    this.ctx.globalAlpha = 1;
++    this.ctx.strokeStyle = this.theme.cursor;
++    this.ctx.lineWidth = 1;
++    for (const range of ranges) {
++      if (row < range.startY || row > range.endY) continue;
++      const firstColumn = Math.max(0, row === range.startY ? range.startX : 0);
++      const lastColumn = Math.min(cols - 1, row === range.endY ? range.endX : cols - 1);
++      if (lastColumn < firstColumn) continue;
++      // Ghostty stores a wide glyph's width on its lead cell; the continuation cell has width zero.
++      const endColumn = Math.min(cols, lastColumn + (line[lineOffset + lastColumn]!.width || 1));
++      const underlineY = row * this.metrics.height + this.metrics.baseline + 2;
++      this.ctx.beginPath();
++      this.ctx.moveTo(firstColumn * this.metrics.width, underlineY);
++      this.ctx.lineTo(endColumn * this.metrics.width, underlineY);
++      this.ctx.stroke();
++    }
++    this.ctx.restore();
+   }
+ 
+   /**

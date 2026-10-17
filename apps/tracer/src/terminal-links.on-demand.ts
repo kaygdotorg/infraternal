@@ -1,6 +1,14 @@
 /** Finds and opens links in the visible terminal buffer; callers feed changed rows only after paint. */
 import { hideTipAt as hideSharedTipAt, hoverTipAt, peekTipAt } from "../../../packages/ui/src/tooltip";
 import { formatLinkTooltipText, linkTooltipLineCount } from "../../../packages/ui/src/tooltip-link-text";
+import { isMacPlatform } from "../../../packages/ui/src/platform";
+
+interface TerminalLinkUnderlineRange {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
 
 export interface TerminalLinkRange {
   start: { x: number; y: number };
@@ -180,7 +188,7 @@ interface LinkIndexOptions {
   getVisibleRange(): { first: number; last: number };
   getRow(y: number): TerminalLinkRow | undefined;
   getCellMetrics(): { width: number; height: number };
-  paint(range: { startX: number; startY: number; endX: number; endY: number } | null): void;
+  paint(ranges: readonly TerminalLinkUnderlineRange[] | null): void;
   open(link: TerminalLink): void;
 }
 
@@ -201,12 +209,15 @@ export interface TerminalLinkController {
 
 /** Creates the terminal-local link cache; no timer or scan runs until output or scrolling queues rows. */
 export function createTerminalLinkController(options: LinkIndexOptions): TerminalLinkController {
+  const macPlatform = isMacPlatform();
   const rowCache = new Map<string, { wrapped: boolean; fingerprint: string }>();
   const links = new Map<string, TerminalLink>();
   const pendingRows = new Set<number>();
   const forcedRows = new Set<number>();
   let idleHandle = 0;
   let focusedLink: TerminalLink | undefined;
+  let openLinkModifierHeld = false;
+  let paintedRanges: readonly TerminalLinkUnderlineRange[] | null = null;
   let refreshHover = false;
   let lastPoint: { x: number; y: number } | undefined;
   let down: { x: number; y: number; key?: string; dragged: boolean } | undefined;
@@ -263,6 +274,47 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
 
   const hideLinkTip = (): void => {
     hideSharedTipAt(options.host);
+  };
+
+  const paintHighlights = (): void => {
+    const visible = options.getVisibleRange();
+    const candidates = openLinkModifierHeld
+      ? [...links.values()].filter((link) =>
+        link.range.end.y >= visible.first && link.range.start.y <= visible.last && !touchesRows(link, pendingRows))
+        .sort((left, right) => left.range.start.y - right.range.start.y || left.range.start.x - right.range.start.x)
+      : focusedLink && focusedLink.range.end.y >= visible.first && focusedLink.range.start.y <= visible.last &&
+        !touchesRows(focusedLink, pendingRows) ? [focusedLink] : [];
+    const ranges = candidates.map((link) => ({
+      startX: link.range.start.x,
+      startY: Math.max(0, link.range.start.y - visible.first),
+      endX: link.range.end.x,
+      endY: Math.min(visible.last - visible.first, link.range.end.y - visible.first),
+    }));
+    const nextRanges = ranges.length > 0 ? ranges : null;
+    if (sameUnderlineRanges(paintedRanges, nextRanges)) return;
+    paintedRanges = nextRanges;
+    options.paint(nextRanges);
+  };
+
+  const clearRevealedHighlights = (): void => {
+    if (!focusedLink && !openLinkModifierHeld && paintedRanges === null) return;
+    const hadFocus = focusedLink !== undefined;
+    focusedLink = undefined;
+    refreshHover = lastPoint !== undefined;
+    if (hadFocus) {
+      hideLinkTip();
+      options.canvas.style.cursor = "text";
+    }
+    if (paintedRanges !== null) {
+      paintedRanges = null;
+      options.paint(null);
+    }
+  };
+
+  const setOpenLinkModifierHeld = (held: boolean): void => {
+    if (held === openLinkModifierHeld) return;
+    openLinkModifierHeld = held;
+    paintHighlights();
   };
 
   const rowsAt = (y: number, scannedRows: Map<number, TerminalLinkRow>, changedRows?: Set<number>): TerminalLinkRow | undefined => {
@@ -322,16 +374,8 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
   const repaintHover = (link: TerminalLink | undefined, point?: { x: number; y: number }): void => {
     if (link === focusedLink) return;
     focusedLink = link;
-    const visible = options.getVisibleRange();
     if (link) {
-      const startY = link.range.start.y - visible.first;
-      const endY = link.range.end.y - visible.first;
-      options.paint({
-        startX: link.range.start.x,
-        startY: Math.max(0, startY),
-        endX: link.range.end.x,
-        endY: Math.min(visible.last - visible.first, endY),
-      });
+      if (!openLinkModifierHeld) paintHighlights();
       options.canvas.style.cursor = link.openable ? "pointer" : "text";
       if (shouldShowLinkTarget(link) && point) {
         const label = formatTarget(link.target);
@@ -339,7 +383,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       }
       else hideLinkTip();
     } else {
-      options.paint(null);
+      if (!openLinkModifierHeld) paintHighlights();
       options.canvas.style.cursor = "text";
       hideLinkTip();
     }
@@ -410,6 +454,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       refreshHover = false;
       repaintHover(hitTest(lastPoint.x, lastPoint.y), lastPoint);
     }
+    if (openLinkModifierHeld || focusedLink) paintHighlights();
   };
 
   const requestScan = (): void => {
@@ -420,6 +465,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
   };
 
   const onPointerMove = (event: PointerEvent): void => {
+    setOpenLinkModifierHeld(macPlatform ? event.metaKey : event.ctrlKey);
     lastPoint = { x: event.clientX, y: event.clientY };
     if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) > 6) {
       down.dragged = true;
@@ -481,17 +527,28 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
     repaintHover(undefined);
   };
 
+  const onModifierKey = (event: KeyboardEvent): void => {
+    const modifierName = macPlatform ? "Meta" : "Control";
+    const held = event.key === modifierName ? event.type === "keydown" : macPlatform ? event.metaKey : event.ctrlKey;
+    setOpenLinkModifierHeld(held);
+  };
+  const onWindowBlur = (): void => setOpenLinkModifierHeld(false);
+
   options.host.addEventListener("pointermove", onPointerMove, { passive: true });
   options.host.addEventListener("pointerdown", onPointerDown, { capture: true, passive: true });
   options.host.addEventListener("pointerup", onPointerUp, { capture: true, passive: true });
   options.host.addEventListener("click", onClick, { capture: true });
   options.host.addEventListener("pointerleave", onPointerLeave);
+  window.addEventListener("keydown", onModifierKey, { capture: true });
+  window.addEventListener("keyup", onModifierKey, { capture: true });
+  window.addEventListener("blur", onWindowBlur);
 
   return {
     updateRows(changedRows, force = true) {
       if (disposed) return;
       const dirtyRows = [...new Set(changedRows)];
       if (dirtyRows.length > 0) {
+        let invalidatedFocus = false;
         for (const y of dirtyRows) pendingRows.add(y);
         if (force) for (const y of dirtyRows) forcedRows.add(y);
         const touchesDirtyGroup = (link: TerminalLink): boolean => dirtyRows.some((y) =>
@@ -504,13 +561,19 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
         }
         if (focusedLink && touchesDirtyGroup(focusedLink)) {
           hideLinkTip();
+          focusedLink = undefined;
           refreshHover = true;
+          invalidatedFocus = true;
+          options.canvas.style.cursor = "text";
         }
+        if (openLinkModifierHeld || invalidatedFocus) paintHighlights();
       }
       requestScan();
     },
     updateVisibleRows() {
       if (disposed) return;
+      // The terminal has already moved or repainted these screen-relative rows; remove old ink now.
+      clearRevealedHighlights();
       const visible = options.getVisibleRange();
       const rows: number[] = [];
       for (let y = visible.first; y <= visible.last; y += 1) rows.push(y);
@@ -522,6 +585,7 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       pendingRows.clear();
       forcedRows.clear();
       repaintHover(undefined);
+      if (openLinkModifierHeld) paintHighlights();
       this.updateVisibleRows();
     },
     linksOnScreen() {
@@ -550,7 +614,12 @@ export function createTerminalLinkController(options: LinkIndexOptions): Termina
       options.host.removeEventListener("pointerup", onPointerUp, true);
       options.host.removeEventListener("click", onClick, true);
       options.host.removeEventListener("pointerleave", onPointerLeave);
+      window.removeEventListener("keydown", onModifierKey, true);
+      window.removeEventListener("keyup", onModifierKey, true);
+      window.removeEventListener("blur", onWindowBlur);
+      openLinkModifierHeld = false;
       repaintHover(undefined);
+      paintHighlights();
       rowCache.clear();
       links.clear();
       pendingRows.clear();
@@ -564,6 +633,20 @@ function touchesRows(link: TerminalLink, rows: ReadonlySet<number>): boolean {
     if (row >= link.range.start.y - 1 && row <= link.range.end.y + 1) return true;
   }
   return false;
+}
+
+/** Avoids terminal repaints when pointer and modifier events leave the visible underline set unchanged. */
+function sameUnderlineRanges(
+  left: readonly TerminalLinkUnderlineRange[] | null,
+  right: readonly TerminalLinkUnderlineRange[] | null,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((range, index) => {
+    const other = right[index];
+    return other !== undefined && range.startX === other.startX && range.startY === other.startY &&
+      range.endX === other.endX && range.endY === other.endY;
+  });
 }
 
 function rowFingerprint(row: TerminalLinkRow): string {

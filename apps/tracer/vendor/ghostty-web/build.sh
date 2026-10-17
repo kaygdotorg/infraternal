@@ -63,6 +63,8 @@ fi
 git -C "$source_dir" apply "$vendor_dir/local-theme-api.patch"
 # Apply font geometry after the theme renderer changes so both fixes build together.
 git -C "$source_dir" apply "$vendor_dir/cell-metrics.patch"
+# Link underlines use the active accent and render only while revealed.
+git -C "$source_dir" apply "$vendor_dir/link-underline.patch"
 
 git -C "$source_dir" submodule update --quiet --init --recursive --depth=1
 if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then

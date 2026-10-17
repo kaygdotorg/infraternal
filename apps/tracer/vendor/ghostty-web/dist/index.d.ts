@@ -21,8 +21,8 @@ export declare class CanvasRenderer {
     private currentSelectionCoords;
     private hoveredHyperlinkId;
     private previousHoveredHyperlinkId;
-    private hoveredLinkRange;
-    private previousHoveredLinkRange;
+    private hoveredLinkRanges;
+    private previousHoveredLinkRanges;
     constructor(canvas: HTMLCanvasElement, options?: RendererOptions);
     private measureFont;
     /**
@@ -124,16 +124,21 @@ export declare class CanvasRenderer {
      * Set the currently hovered hyperlink ID for rendering underlines
      */
     setHoveredHyperlinkId(hyperlinkId: number): void;
-    /**
-     * Set the currently hovered link range for rendering underlines (for regex-detected URLs)
-     * Pass null to clear the hover state
-     */
+    /** Retains the singular range adapter for renderer consumers while callers migrate to range sets. */
     setHoveredLinkRange(range: {
         startX: number;
         startY: number;
         endX: number;
         endY: number;
     } | null): void;
+    /** Stores caller-owned ranges; callers replace them rather than mutating them. */
+    setHoveredLinkRanges(ranges: readonly {
+        startX: number;
+        startY: number;
+        endX: number;
+        endY: number;
+    }[] | null): void;
+    private renderHoveredLinkRangesForRow;
     /**
      * Get character cell width (for coordinate conversion)
      */
