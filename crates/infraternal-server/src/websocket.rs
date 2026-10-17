@@ -62,6 +62,8 @@ const BUSY_AUTHORITY_INTERVAL: Duration = Duration::from_millis(25);
 // Authority/storage stalls fail closed; shutdown cannot inherit the normal one-second writer wait.
 const AUTHORITY_READ_TIMEOUT: Duration = Duration::from_millis(25);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
+/// Bounds the lookup that names a refused resume's sessions in the close log.
+const REFUSAL_LOG_TIMEOUT: Duration = Duration::from_millis(250);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
 // Reject further AttachTerm requests on a socket at this bound.
@@ -427,34 +429,6 @@ async fn run_socket(
     )
     .await;
     let Ok(Ok((connection_id, proof_authority))) = handshake else {
-        if let Some(connection_id) = resume_attempt {
-            let rows = sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
-                .bind(connection_id.as_slice())
-                .bind(&user_id)
-                .fetch_all(&state.pool)
-                .await
-                .unwrap_or_default();
-            for row in rows {
-                let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice())
-                else {
-                    continue;
-                };
-                let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
-                let host_id = host_bytes
-                    .as_deref()
-                    .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
-                let stream_id =
-                    u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
-                state.close_logs.record(&CloseRecord::new(
-                    CloseOwner::of(&user_id),
-                    CloseWho::Server,
-                    RESUME_REFUSED,
-                    host_id,
-                    session_id,
-                    stream_id,
-                ));
-            }
-        }
         let reason = if resume_attempt.is_some() {
             RESUME_REFUSED
         } else {
@@ -477,6 +451,41 @@ async fn run_socket(
             .await;
         drop(sink);
         drop(source);
+        if let Some(connection_id) = resume_attempt {
+            // After the socket is closed, so a busy database never delays the refusal;
+            // bounded, so it never holds the task either. A timeout only loses lines.
+            let rows = tokio::time::timeout(
+                REFUSAL_LOG_TIMEOUT,
+                sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
+                    .bind(connection_id.as_slice())
+                    .bind(&user_id)
+                    .fetch_all(&state.pool),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+            for row in rows {
+                let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice())
+                else {
+                    continue;
+                };
+                let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
+                let host_id = host_bytes
+                    .as_deref()
+                    .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
+                let stream_id =
+                    u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
+                state.close_logs.record(&CloseRecord::new(
+                    CloseOwner::of(&user_id),
+                    CloseWho::Server,
+                    RESUME_REFUSED,
+                    host_id,
+                    session_id,
+                    stream_id,
+                ));
+            }
+        }
         if let Some(welcome) = pending_welcome.take() {
             rollback_connection(&state.pool, &user_id, &welcome).await;
         }

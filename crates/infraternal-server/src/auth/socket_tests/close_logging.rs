@@ -554,11 +554,21 @@ async fn failed_client_resume_attempt_logs_each_retained_session() {
         ),
         "unexpected refusal frame: {refusal:?}"
     );
-    let events = capture.events("terminal_stream_closed");
-    let resumed = events
-        .iter()
-        .find(|event| event["fields"]["reason"] == "connection_resume_refused")
-        .unwrap();
+    // The server names the refused sessions after it has closed the socket.
+    let resumed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(event) = capture
+                .events("terminal_stream_closed")
+                .into_iter()
+                .find(|event| event["fields"]["reason"] == "connection_resume_refused")
+            {
+                break event;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(resumed["fields"]["who"], "server");
     assert_eq!(resumed["fields"]["reason_category"], "auth_resume_refusal");
     assert_eq!(
