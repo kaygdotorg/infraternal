@@ -32,6 +32,39 @@ impl SshSession for Compound {
         self.0.run(script, input)
     }
 }
+impl Local {
+    /// Fixture-only rewrites of a generated program before the real shell runs it.
+    fn fixture_script(&self, script: &str, input: &Input<'_>) -> String {
+        // Map the remote user's home to isolated fixture storage without
+        // changing the process's HOME or touching a real user's installation.
+        let script = script.replace("$HOME", self.root.to_str().unwrap());
+        // Model a lease child that has forked but has not yet been scheduled
+        // to close its inherited parent lock; this exercises a real fd race.
+        let script = if self.root.join("delay-lease-exec").exists() {
+            script.replace("(exec 9<&-; if", "(sleep 1; exec 9<&-; if")
+        } else {
+            script
+        };
+        // A test-only public marker proves that the real shell has reached
+        // its blocking admission read; yielding alone would not prove overlap.
+        let script = if matches!(input, Input::Signal(_)) {
+            script.replace(
+                "read -r approved",
+                &format!(
+                    ": > {}\nread -r approved",
+                    infraternal_plugin_ssh::transport::shell_quote(
+                        self.root.join("commit-admitted").to_str().unwrap()
+                    )
+                ),
+            )
+        } else {
+            script
+        };
+        // Retain the shell parent through the reply. An interrupted final
+        // command must never target the test runner through exec optimization.
+        format!("{script}\nbootstrap_test_status=$?\nexit \"$bootstrap_test_status\"")
+    }
+}
 impl SshSession for Local {
     fn stream<'a>(
         &'a self,
@@ -47,34 +80,7 @@ impl SshSession for Local {
 
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
-            // Map the remote user's home to isolated fixture storage without
-            // changing the process's HOME or touching a real user's installation.
-            let script = script.replace("$HOME", self.root.to_str().unwrap());
-            // Model a lease child that has forked but has not yet been scheduled
-            // to close its inherited parent lock; this exercises a real fd race.
-            let script = if self.root.join("delay-lease-exec").exists() {
-                script.replace(
-                    "(exec 9<&-; exec sleep 180)",
-                    "(sleep 1; exec 9<&-; exec sleep 180)",
-                )
-            } else {
-                script
-            };
-            // A test-only public marker proves that the real shell has reached
-            // its blocking admission read; yielding alone would not prove overlap.
-            let script = if matches!(&input, Input::Signal(_)) {
-                script.replace(
-                    "read -r approved",
-                    &format!(
-                        ": > {}\nread -r approved",
-                        infraternal_plugin_ssh::transport::shell_quote(
-                            self.root.join("commit-admitted").to_str().unwrap()
-                        )
-                    ),
-                )
-            } else {
-                script
-            };
+            let script = self.fixture_script(script, &input);
             if matches!(&input, Input::Negotiated { .. }) {
                 let mut command = Command::new("/bin/sh");
                 command.args(["-c", &script]).env(
@@ -165,7 +171,18 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = common::scratch().join(format!("ssh-install-{}", uuid::Uuid::new_v4().simple()));
+        // Keep real control socket paths within sun_path. Exclusive creation
+        // preserves isolation even if a shortened random fixture id collides.
+        let scratch = common::scratch();
+        let root = loop {
+            let id = uuid::Uuid::new_v4().simple().to_string();
+            let candidate = scratch.join(format!("i{}", &id[..12]));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("fixture directory: {error}"),
+            }
+        };
         std::fs::create_dir_all(root.join("tools")).unwrap();
         executable(
             &root.join("tools/loginctl"),
@@ -187,10 +204,17 @@ impl Fixture {
                 root.join("refuse-start").display()
             ),
         );
+        executable(
+            &root.join("tools/runtime-helper"),
+            &format!(
+                "#!/bin/sh\nexec '{}' \"$@\"\n",
+                common::runtime_helper().display()
+            ),
+        );
         let binary = root.join("payload");
         executable(
             &binary,
-            "#!/bin/sh\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\n[ \"$4\" = join ] && [ \"$6\" = --enroll-only ] || exit 1\nmkdir -p \"$state\"\nprintf 'public-fixture-state\\n' > \"$state/proof\"\ncat >/dev/null\n",
+            "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\n# Synthetic CLI contract, not an infraternal daemon.\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\n[ \"$4\" = join ] && [ \"$6\" = --enroll-only ] || exit 1\nmkdir -p \"$state\"\nprintf 'public-fixture-state\\n' > \"$state/proof\"\ncat >/dev/null\n",
         );
         Self {
             root,
@@ -307,7 +331,10 @@ async fn framed_upload_keeps_invitation_after_verified_raw_and_compressed_payloa
 #[tokio::test]
 async fn framed_join_refusal_keeps_status_separate_from_upload() {
     let fixture = Fixture::new();
-    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    executable(
+        &fixture.binary,
+        "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\nexit 71\n",
+    );
     let install = Installation::new(
         Arc::new(Compound(Local {
             root: fixture.root.clone(),
@@ -590,6 +617,19 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
             }) => { result.unwrap(); }
         }
         assert!(stage.join("activating").exists());
+        // A starting agent takes a shared lock on the installation's parent
+        // before it binds; admission waiting for proof must not block it (#230).
+        let parent = fixture.base().parent().unwrap().to_owned();
+        assert!(
+            std::process::Command::new("flock")
+                .args(["-s", "-n"])
+                .arg(&parent)
+                .arg("true")
+                .status()
+                .unwrap()
+                .success(),
+            "commit admission holds the setup guard while waiting for proof"
+        );
         if permit {
             release.send(()).unwrap();
             pending.await.unwrap();
@@ -658,7 +698,10 @@ async fn compound_activation_and_start_failures_keep_exact_step_and_rollback() {
 #[tokio::test]
 async fn compound_join_failure_preserves_the_original_status_and_boundary() {
     let fixture = Fixture::new();
-    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    executable(
+        &fixture.binary,
+        "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\nexit 71\n",
+    );
     let session = Arc::new(Compound(Local {
         root: fixture.root.clone(),
     }));
@@ -977,11 +1020,14 @@ async fn fresh_runtime_symlink_never_removes_foreign_empty_directories() {
     transaction.stage(&fixture.binary).await.unwrap();
     let foreign = fixture.root.join("foreign/sessions");
     std::fs::create_dir_all(&foreign).unwrap();
+    let retained_runtime = fixture.root.join("retained-runtime");
+    std::fs::rename(fixture.base().join("sessions"), &retained_runtime).unwrap();
     symlink(foreign.parent().unwrap(), fixture.base().join("sessions")).unwrap();
     assert!(transaction.rollback().await.is_err());
     assert!(foreign.exists());
     assert!(fixture.base().join(".bootstrap-owner").exists());
     std::fs::remove_file(fixture.base().join("sessions")).unwrap();
+    std::fs::rename(retained_runtime, fixture.base().join("sessions")).unwrap();
     transaction.rollback().await.unwrap();
 }
 
@@ -1661,13 +1707,16 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
         .unwrap_err();
     assert_eq!(serde_json::to_value(&failure).unwrap()["exit_status"], 71);
     assert!(failure.message.contains("~/.local/share/infraternal"));
-    assert!(failure.message.contains("Move it aside"));
+    assert!(failure.message.contains("ownership"));
 }
 
 #[tokio::test]
 async fn enrollment_process_exit_71_is_not_reported_as_directory_refusal() {
     let fixture = Fixture::new();
-    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    executable(
+        &fixture.binary,
+        "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\nexit 71\n",
+    );
     let transaction = fixture.transaction();
     transaction.stage(&fixture.binary).await.unwrap();
 
@@ -1833,12 +1882,27 @@ fn earlier_attempt_classification_preserves_status_boundary_and_authentication()
 
 #[tokio::test]
 async fn start_fresh_resumes_the_same_attempt_after_owner_confirmation() {
-    exercise_start_fresh(false).await;
+    exercise_start_fresh(false, false, CachedHelper::Current).await;
 }
 
 #[tokio::test]
 async fn turning_off_paused_host_provisioning_preserves_earlier_leftovers() {
-    exercise_start_fresh(true).await;
+    exercise_start_fresh(true, false, CachedHelper::Current).await;
+}
+
+#[tokio::test]
+async fn known_failed_setup_finishes_without_a_second_confirmation() {
+    exercise_start_fresh(false, true, CachedHelper::Current).await;
+}
+
+#[tokio::test]
+async fn earlier_binary_cache_is_refreshed_before_owned_recovery() {
+    exercise_start_fresh(false, true, CachedHelper::Earlier).await;
+}
+#[derive(Clone, Copy)]
+enum CachedHelper {
+    Current,
+    Earlier,
 }
 
 // Reuse one real-filesystem fixture for completion and component cancellation.
@@ -1846,7 +1910,7 @@ async fn turning_off_paused_host_provisioning_preserves_earlier_leftovers() {
     clippy::too_many_lines,
     reason = "Keep the real shell fixture and same-attempt admission assertions together."
 )]
-async fn exercise_start_fresh(turn_off: bool) {
+async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHelper) {
     use infraternal_plugin_api::{ComponentPlugin, PluginState};
     use infraternal_plugin_ssh::{
         bootstrap::{Authority, Backend, Bootstrap, Resolved},
@@ -1861,6 +1925,7 @@ async fn exercise_start_fresh(turn_off: bool) {
     };
     struct Ready {
         host: uuid::Uuid,
+        automatic: bool,
         invitations: AtomicUsize,
         recoveries: Mutex<Vec<&'static str>>,
     }
@@ -1878,6 +1943,16 @@ async fn exercise_start_fresh(turn_off: bool) {
                     mesh: MeshEvidence::default(),
                 })
             })
+        }
+        fn owns_failed_setup<'a>(
+            &'a self,
+            _: &'a Authority,
+            _: &'a Target,
+            _: &'a Check,
+            host: uuid::Uuid,
+            _: Option<String>,
+        ) -> Operation<'a, bool> {
+            Box::pin(async move { Ok(self.automatic && host == self.host) })
         }
         fn invitation<'a>(
             &'a self,
@@ -1938,8 +2013,25 @@ async fn exercise_start_fresh(turn_off: bool) {
     std::fs::write(&foreign, "foreign data").unwrap();
     assert!(old.rollback().await.is_err());
     std::fs::remove_file(&foreign).unwrap();
+    if matches!(helper, CachedHelper::Earlier) {
+        let runtime = fixture.base().join("sessions");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(runtime.join("plugins.sock")).unwrap());
+        // A cache from before the internal command must be replaced by the
+        // trusted matching executable before recovery can inspect the socket.
+        std::fs::write(
+            fixture
+                .base()
+                .with_file_name("infraternal.bootstrap-cache")
+                .join("payload"),
+            b"#!/bin/sh\nexit 2\n",
+        )
+        .unwrap();
+    }
     let backend = Arc::new(Ready {
         host: fixture.join.host,
+        automatic,
         invitations: AtomicUsize::new(0),
         recoveries: Mutex::new(Vec::new()),
     });
@@ -1957,63 +2049,71 @@ async fn exercise_start_fresh(turn_off: bool) {
         .start("owner".into(), vec![fixture.target.clone()], None)
         .unwrap();
     let mut changes = batch.subscribe();
-    let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        loop {
-            let (_, events) = batch.events(0);
-            if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
-                assert_eq!(event.attempt, 1);
-                assert!(event.host_id.is_none(), "pause must precede enrollment");
-                return event.leftovers.as_ref().unwrap().challenge;
+    if !automatic {
+        let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let (_, events) = batch.events(0);
+                if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
+                    assert_eq!(event.attempt, 1);
+                    assert!(event.host_id.is_none(), "pause must precede enrollment");
+                    return event.leftovers.as_ref().unwrap().challenge;
+                }
+                changes.changed().await.unwrap();
             }
-            changes.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
-    assert!(backend.recoveries.lock().unwrap().is_empty());
-    if turn_off {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            runner.set_enabled(false),
-        )
+        })
         .await
-        .unwrap()
         .unwrap();
-        assert_eq!(runner.status().state, PluginState::Off);
-        assert_eq!(runner.status().active_work, 0);
-        assert!(fixture.receipt().exists());
-        assert!(fixture.base().join(".bootstrap-owner").exists());
-        assert!(backend.recoveries.lock().unwrap().is_empty());
         assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+        assert!(backend.recoveries.lock().unwrap().is_empty());
+        if turn_off {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                runner.set_enabled(false),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(runner.status().state, PluginState::Off);
+            assert_eq!(runner.status().active_work, 0);
+            assert!(fixture.receipt().exists());
+            assert!(fixture.base().join(".bootstrap-owner").exists());
+            assert!(backend.recoveries.lock().unwrap().is_empty());
+            assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
+            assert!(
+                runner
+                    .start_fresh(&batch, "owner", "one", challenge)
+                    .is_err()
+            );
+            return;
+        }
+        assert!(
+            runner
+                .start_fresh(&batch, "other-owner", "one", challenge)
+                .is_err()
+        );
+        assert!(
+            runner
+                .start_fresh(&batch, "owner", "one", uuid::Uuid::new_v4())
+                .is_err()
+        );
+        runner
+            .start_fresh(&batch, "owner", "one", challenge)
+            .unwrap();
         assert!(
             runner
                 .start_fresh(&batch, "owner", "one", challenge)
                 .is_err()
         );
-        return;
     }
-    assert!(
-        runner
-            .start_fresh(&batch, "other-owner", "one", challenge)
-            .is_err()
-    );
-    assert!(
-        runner
-            .start_fresh(&batch, "owner", "one", uuid::Uuid::new_v4())
-            .is_err()
-    );
-    runner
-        .start_fresh(&batch, "owner", "one", challenge)
-        .unwrap();
-    assert!(
-        runner
-            .start_fresh(&batch, "owner", "one", challenge)
-            .is_err()
-    );
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let (_, events) = batch.events(0);
+            if automatic {
+                assert!(
+                    events.iter().all(|event| event.leftovers.is_none()),
+                    "a known failed setup unexpectedly required another confirmation"
+                );
+            }
             if let Some(event) = events
                 .iter()
                 .find(|event| matches!(event.step, Step::Done | Step::Failed))
@@ -2100,7 +2200,7 @@ async fn live_setup_retry_preserves_the_bridge_and_host_identity_state() {
         let original = std::fs::read_to_string(&f.binary).unwrap();
         let refuse = f.root.join("refuse-join");
         let payload = format!(
-            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nif [ -f {} ]; then rm {}; mkdir -p \"$3\"; printf 'public-fixture-state\\n' > \"$3/proof\"; exit 1; fi\n{original}",
+            "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nif [ -f {} ]; then rm {}; mkdir -p \"$3\"; printf 'public-fixture-state\\n' > \"$3/proof\"; exit 1; fi\n{original}",
             infraternal_plugin_ssh::transport::shell_quote(refuse.to_str().unwrap()),
             infraternal_plugin_ssh::transport::shell_quote(refuse.to_str().unwrap())
         );
@@ -2118,7 +2218,10 @@ async fn live_setup_retry_preserves_the_bridge_and_host_identity_state() {
             std::fs::remove_file(f.root.join("refuse-start")).unwrap();
         }
         // A live session's rendezvous and unrelated files cannot be rollback targets.
-        std::fs::create_dir_all(f.base().join("sessions/sessions")).unwrap();
+        // The shim keeps its rendezvous private (0700), as runtime cleanup requires.
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(f.base().join("sessions/sessions"))
+            .unwrap();
         let sentinel = f.base().join("sessions/sessions/live-marker");
         std::fs::write(&sentinel, b"original live session").unwrap();
         let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&sentinel).unwrap());
@@ -2204,7 +2307,7 @@ async fn one_command_channel_carries_check_verified_upload_and_bridge_bytes() {
     executable(
         &f.binary,
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
+            "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
             "x".repeat(100_000)
         ),
     );
@@ -2278,7 +2381,7 @@ async fn negotiated_transfer_delivers_the_invitation_after_a_buffering_head() {
         let fixture = Fixture::new();
         executable(
             &fixture.binary,
-            "#!/bin/sh\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\nmkdir -p \"$state\"\ncat > \"$state/invitation\"\n",
+            "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\nmkdir -p \"$state\"\ncat > \"$state/invitation\"\n",
         );
         if buffered {
             // Reads whole stdio-sized blocks like getc/fread-based head
@@ -2388,7 +2491,7 @@ fn large_fixture_binary(f: &Fixture, id: uuid::Uuid) {
     executable(
         &f.binary,
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
+            "#!/bin/sh\ncase \"$1\" in --bootstrap-runtime*) exec runtime-helper \"$@\";; esac\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
             "x".repeat(100_000)
         ),
     );
@@ -2823,4 +2926,681 @@ async fn partial_full_upload_rebridges_from_a_verified_image() {
     assert!(!executed.exists(), "changed cache bytes must never execute");
     drop(original);
     transaction.rollback().await.unwrap();
+}
+
+/// Bind a canonical fixture path so parallel listeners cannot share a relative basename.
+async fn control_listener(runtime: &std::path::Path) -> tokio::process::Child {
+    control_listener_at(runtime, &runtime.join("plugins.sock")).await
+}
+
+/// Preserve the kernel's bind spelling to check liveness through relative paths too.
+async fn control_listener_at(
+    runtime: &std::path::Path,
+    binding: &std::path::Path,
+) -> tokio::process::Child {
+    use tokio::io::AsyncReadExt;
+    let mut child = Command::new("python3")
+        .args(["-u", "-c", "import socket,os,sys,fcntl; lock=os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])),'.lifetime-lock'); held=open(lock,'rb') if os.path.exists(lock) else None; fcntl.flock(held,fcntl.LOCK_EX) if held else None; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); os.chmod(sys.argv[1],0o600); s.listen(); os.chdir('/'); print('ready',flush=True); sys.stdin.read()"])
+        .arg(binding)
+        .current_dir(runtime)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true).spawn().unwrap();
+    let mut ready = [0; 6];
+    child
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .await
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    child
+}
+
+/// The daemon binds its local control socket before attempting its server connection.
+#[tokio::test]
+async fn facts_timeout_retires_stale_plugin_control_socket_before_retry() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(runtime.join("sessions")).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut listener = control_listener(&runtime).await;
+    listener.kill().await.unwrap(); // Service-manager SIGTERM also leaves the socket inode.
+    transaction.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.enroll_and_start(&fixture.join).await.unwrap();
+    retry.commit().await.unwrap();
+}
+
+/// An interrupted cleanup retains exact coordinates; another transaction cannot use them.
+#[tokio::test]
+async fn interrupted_control_cleanup_is_resumed_only_by_its_original_attempt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = runtime.join("plugins.sock");
+    let mut listener = control_listener(&runtime).await;
+    assert!(
+        transaction.rollback().await.is_err(),
+        "live control listener must survive"
+    );
+    assert!(socket.exists());
+    assert!(fixture.transaction().stage(&fixture.binary).await.is_err());
+    let foreign = Installation::new(
+        Arc::new(Local {
+            root: fixture.root.clone(),
+        }),
+        &fixture.target,
+        &JoinMaterial {
+            host: uuid::Uuid::new_v4(),
+            url: fixture.join.url.clone(),
+            stdin: Secret::new(Vec::new()),
+        },
+    )
+    .unwrap();
+    assert!(foreign.rollback().await.is_err());
+    assert!(socket.exists());
+    listener.kill().await.unwrap();
+    let cleanup = Installation::resume_cleanup(
+        Arc::new(Local {
+            root: fixture.root.clone(),
+        }),
+        &fixture.target,
+        transaction.cleanup_coordinates(),
+    )
+    .unwrap();
+    cleanup.rollback().await.unwrap();
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn control_cleanup_never_follows_a_socket_symlink_or_removes_regular_data() {
+    use std::os::unix::fs::symlink;
+    for linked in [false, true] {
+        let fixture = Fixture::new();
+        let transaction = fixture.transaction();
+        transaction.stage(&fixture.binary).await.unwrap();
+        let runtime = fixture.base().join("sessions");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = runtime.join("plugins.sock");
+        let foreign = fixture.root.join("preserved");
+        std::fs::write(&foreign, b"preserve").unwrap();
+        if linked {
+            symlink(&foreign, &socket).unwrap();
+        } else {
+            std::fs::write(&socket, b"preserve").unwrap();
+        }
+        assert!(transaction.rollback().await.is_err());
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"preserve");
+        assert_eq!(std::fs::read(&socket).unwrap(), b"preserve");
+    }
+}
+
+/// Concurrent commands must leave exactly one original journal and reject the loser.
+#[tokio::test]
+async fn concurrent_attempts_cannot_replace_or_clean_each_others_transaction() {
+    let fixture = Fixture::new();
+    let first = fixture.transaction();
+    let second = fixture.transaction();
+    let (one, two) = tokio::join!(first.stage(&fixture.binary), second.stage(&fixture.binary));
+    assert_ne!(one.is_ok(), two.is_ok());
+    let (winner, loser) = if one.is_ok() {
+        (&first, &second)
+    } else {
+        (&second, &first)
+    };
+    let original = std::fs::read(fixture.base().join(".bootstrap-lock/transaction")).unwrap();
+    let lease = std::fs::read_to_string(fixture.base().join(".bootstrap-lock/lease")).unwrap();
+    let pid = lease.split_whitespace().next().unwrap();
+    let descriptor = PathBuf::from(format!("/proc/{pid}/fd/7"));
+    assert!(loser.rollback().await.is_err());
+    assert_eq!(
+        std::fs::read_link(&descriptor).unwrap(),
+        fixture.base().join(".bootstrap-lock"),
+        "the losing attempt retired the winner's setup lease"
+    );
+    assert_eq!(
+        std::fs::read(fixture.base().join(".bootstrap-lock/transaction")).unwrap(),
+        original
+    );
+    winner.rollback().await.unwrap();
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+/// A lost start reply after activation must retire the stopped service's control socket.
+#[tokio::test]
+async fn crash_mid_install_can_roll_back_and_retry() {
+    use infraternal_plugin_ssh::model::InstallStep;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let manager = fixture.root.join("tools/systemctl");
+    let original_manager = std::fs::read_to_string(&manager).unwrap();
+    let runtime = fixture.base().join("sessions");
+    executable(
+        &manager,
+        &format!(
+            r#"#!/bin/sh
+case "$*" in
+*is-enabled*|*is-active*) exit 1;;
+*enable*--now*)
+    python3 -c 'import os,socket,sys; os.makedirs(sys.argv[1],mode=0o700,exist_ok=True); os.umask(0o022); s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]+"/plugins.sock")' {}
+    kill -TERM "$PPID";;
+*) exit 0;;
+esac
+"#,
+            infraternal_plugin_ssh::transport::shell_quote(runtime.to_str().unwrap())
+        ),
+    );
+    let failure = transaction
+        .enroll_and_start(&fixture.join)
+        .await
+        .unwrap_err();
+    assert!(matches!(failure.failed_step, Some(InstallStep::Start)));
+    assert!(runtime.join("plugins.sock").exists());
+    executable(&manager, &original_manager);
+    transaction.rollback().await.unwrap();
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.enroll_and_start(&fixture.join).await.unwrap();
+    retry.commit().await.unwrap();
+}
+
+/// Service-manager umasks determine socket mode; the private parent protects access.
+#[tokio::test]
+async fn stopped_control_socket_modes_from_service_manager_are_recoverable() {
+    for mode in [0o600, 0o700, 0o755, 0o775] {
+        let fixture = Fixture::new();
+        let transaction = fixture.transaction();
+        transaction.stage(&fixture.binary).await.unwrap();
+        transaction.enroll_and_start(&fixture.join).await.unwrap();
+        let runtime = fixture.base().join("sessions");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut listener = control_listener(&runtime).await;
+        std::fs::set_permissions(
+            runtime.join("plugins.sock"),
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+        listener.kill().await.unwrap();
+        transaction.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+    }
+}
+
+/// An older failed run has only a fresh receipt; confirmed recovery uses the same guarded cleanup.
+#[tokio::test]
+async fn earlier_control_socket_receipt_recovers_before_a_new_setup() {
+    let fixture = Fixture::new();
+    let first = fixture.transaction();
+    first.stage(&fixture.binary).await.unwrap();
+    first.enroll_and_start(&fixture.join).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"preserve until observed").unwrap();
+    assert!(first.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    std::fs::remove_file(keep).unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut listener = control_listener(&runtime).await;
+    std::fs::set_permissions(
+        runtime.join("plugins.sock"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    listener.kill().await.unwrap();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let output = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await
+        .unwrap();
+    let (_, previous) =
+        infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout).unwrap();
+    previous
+        .unwrap()
+        .start_fresh(&session, &fixture.target)
+        .await
+        .unwrap();
+    assert!(!receipt.exists());
+    assert!(!fixture.base().exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.enroll_and_start(&fixture.join).await.unwrap();
+    retry.commit().await.unwrap();
+}
+
+/// After process restart, the outside receipt must survive every cleanup boundary as usable proof.
+async fn restart_after_cleanup_boundary(boundary: &str) {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let (tool, retired, argument) = if boundary == "owner" {
+        ("rm", fixture.base().join(".bootstrap-owner"), "${2-}")
+    } else {
+        ("rmdir", fixture.base(), "${1-}")
+    };
+    // Stop the remote command immediately after the real mutation, before
+    // it can retire its outside receipt. A restarted server has no Cleanup.
+    executable(
+        &fixture.root.join("tools").join(tool),
+        &format!(
+            "#!/bin/sh\n/usr/bin/{tool} \"$@\" || exit $?\n[ \"{argument}\" != '{}' ] || exit 1\n",
+            retired.display()
+        ),
+    );
+    assert!(transaction.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    assert!(!retired.exists());
+    std::fs::remove_file(fixture.root.join("tools").join(tool)).unwrap();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let inspected = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await;
+    assert!(
+        inspected.is_ok(),
+        "restart inspection refused after {boundary} retirement: {:?}",
+        inspected.as_ref().err()
+    );
+    let (_, previous) =
+        infraternal_plugin_ssh::previous_attempt::parse_check(&inspected.unwrap().stdout).unwrap();
+    previous
+        .unwrap()
+        .start_fresh(&session, &fixture.target)
+        .await
+        .unwrap();
+    assert!(!receipt.exists());
+    let retry = fixture.transaction();
+    retry.stage(&fixture.binary).await.unwrap();
+    retry.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn review_restart_recovers_cleanup_after_owner_retirement() {
+    restart_after_cleanup_boundary("owner").await;
+}
+
+#[tokio::test]
+async fn review_restart_recovers_cleanup_after_base_retirement() {
+    restart_after_cleanup_boundary("base").await;
+}
+
+/// A live control socket must survive inspection and rollback for every legal bind spelling.
+#[tokio::test]
+async fn review_live_relative_control_socket_preserves_its_receipt() {
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"preserve until observed").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    std::fs::remove_file(keep).unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut listener = control_listener_at(
+        &fixture.base(),
+        std::path::Path::new("sessions/plugins.sock"),
+    )
+    .await;
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let inspected = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await;
+    let cleanup = transaction.rollback().await;
+    let preserved = runtime.join("plugins.sock").exists() && receipt.exists();
+    // Retire only this fixture's child before checking either result, including
+    // the incorrect-success case where cleanup unlinks a still-live listener.
+    listener.kill().await.unwrap();
+    assert!(
+        inspected
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.exit_status == Some(73))
+            && cleanup.is_err()
+            && preserved,
+        "live relative socket was accepted or removed: inspection_status={:?}, cleanup_status={:?}, socket_and_receipt_preserved={preserved}",
+        inspected.as_ref().err().and_then(|error| error.exit_status),
+        cleanup.as_ref().err().and_then(|error| error.exit_status),
+    );
+}
+
+/// Final receipt authority must survive partial retirement of the staging journal too.
+#[tokio::test]
+async fn restart_recovers_partial_stage_retirement() {
+    for retired in ["transaction", "kind", "both"] {
+        let fixture = Fixture::new();
+        let transaction = fixture.transaction();
+        transaction.stage(&fixture.binary).await.unwrap();
+        // Include an unfinished enrollment directory: retirement must validate
+        // its private tree without reading identity contents or following links.
+        let staged = fixture.base().join(".bootstrap-lock/state");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(staged.join("proof"), b"private fixture state").unwrap();
+        std::fs::set_permissions(staged.join("proof"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let stage = fixture.base().join(".bootstrap-lock");
+        let names = if retired == "both" {
+            "transaction kind"
+        } else {
+            retired
+        };
+        executable(
+            &fixture.root.join("tools/rm"),
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in '-rf {}') for name in {names}; do /usr/bin/rm -f \"{}/$name\"; done; exit 1;; esac\nexec /usr/bin/rm \"$@\"\n",
+                stage.display(),
+                stage.display()
+            ),
+        );
+        assert!(transaction.rollback().await.is_err());
+        let receipt = fixture.receipt();
+        std::fs::remove_file(fixture.root.join("tools/rm")).unwrap();
+        let session = Local {
+            root: fixture.root.clone(),
+        };
+        let output = session
+            .run(
+                &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+                Input::Empty,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{retired}: {error:?}"));
+        let (_, previous) =
+            infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout).unwrap();
+        previous
+            .unwrap()
+            .start_fresh(&session, &fixture.target)
+            .await
+            .unwrap();
+        assert!(!receipt.exists());
+        assert!(!fixture.base().exists());
+        let retry = fixture.transaction();
+        retry.stage(&fixture.binary).await.unwrap();
+        retry.rollback().await.unwrap();
+    }
+}
+
+/// Bind and replace on one CPU so real inode reuse is independent of allocator locality.
+async fn inode_reuse_listener(base: &std::path::Path) -> tokio::process::Child {
+    use tokio::io::AsyncReadExt;
+    // One pinned fixture process performs both allocations. This avoids
+    // allocator locality changes between unrelated subprocesses; no inode
+    // value or kernel diagnostic is mocked. Keep nonmatching allocations until
+    // reuse: otherwise a lower inode freed by staging retirement is repeatedly
+    // selected instead of the original socket. EOF retires only this listener.
+    let mut listener = Command::new("python3")
+        .args([
+            "-u",
+            "-c",
+            r"
+import os,socket,sys,time
+os.sched_setaffinity(0,{min(os.sched_getaffinity(0))})
+path='sessions/plugins.sock'
+s=socket.socket(socket.AF_UNIX); s.bind(path); s.close()
+identity=os.stat(path).st_ino
+print('ready',flush=True)
+sys.stdin.readline()
+os.unlink(path)
+time.sleep(0.1)
+samples=[]
+retained=[]
+for attempt in range(256):
+    s=socket.socket(socket.AF_UNIX); s.bind(path)
+    if attempt<8: samples.append(os.stat(path).st_ino)
+    if os.stat(path).st_ino == identity: break
+    s.close()
+    saved='../retained-%d'%attempt
+    os.rename(path,saved); retained.append(saved); time.sleep(0.01)
+else:
+    print('original',identity,'samples',samples,file=sys.stderr)
+    print('absent',flush=True); sys.exit(1)
+for saved in retained: os.unlink(saved)
+s.listen(); os.chdir('/')
+print('reused',flush=True)
+sys.stdin.read()
+",
+        ])
+        .current_dir(base)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 6];
+    listener
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .await
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    listener
+}
+
+/// Reusing a retired filesystem inode cannot authorize unlinking a replacement live socket.
+#[tokio::test]
+async fn review_inode_reuse_after_diagnostics_preserves_live_replacement() {
+    use tokio::io::AsyncReadExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"retained until observed").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    std::fs::remove_file(keep).unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let control = runtime.join("plugins.sock");
+    let mut listener = inode_reuse_listener(&fixture.base()).await;
+    let snapshot = fixture.root.join("snapshot");
+    let observed = fixture.root.join("observed");
+    let replaced = fixture.root.join("replaced");
+    // Capture real diagnostics, then pause before the direct probe. The snapshot
+    // remains stale across a real inode reuse; it cannot authorize removal.
+    executable(
+        &fixture.root.join("tools/runtime-helper"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = --bootstrap-runtime ]; then /usr/bin/ss -x -a -n -e -p -H > '{}' || exit $?; : > '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; fi\nexec '{}' \"$@\"\n",
+            snapshot.display(),
+            observed.display(),
+            replaced.display(),
+            common::runtime_helper().display(),
+        ),
+    );
+    let cleanup = tokio::spawn(async move { transaction.rollback().await });
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !observed.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    listener
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"replace\n")
+        .await
+        .unwrap();
+    let mut reused = [0; 7];
+    listener
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut reused)
+        .await
+        .unwrap();
+    std::fs::write(&replaced, b"ready").unwrap();
+    let result = cleanup.await.unwrap();
+    let socket_preserved = control.exists();
+    let receipt_retained = std::fs::read_dir(fixture.base().parent().unwrap())
+        .unwrap()
+        .any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("infraternal.bootstrap-rollback-")
+        });
+    drop(listener.stdin.take());
+    let exited = listener.wait().await.unwrap();
+    assert_eq!(
+        &reused, b"reused\n",
+        "fixture could not reproduce inode reuse in 256 allocations"
+    );
+    assert!(exited.success());
+    assert!(
+        result.is_err() && socket_preserved && receipt_retained,
+        "live replacement accepted after inode reuse: status={:?}, socket_preserved={socket_preserved}, receipt_retained={receipt_retained}",
+        result.as_ref().err().and_then(|error| error.exit_status)
+    );
+}
+
+/// A different Unix user's fixed basename is not liveness proof for this installation.
+#[tokio::test]
+#[ignore = "requires sudo -n to create an isolated listener as uid 65534"]
+async fn review_unrelated_user_relative_socket_does_not_block_stale_cleanup() {
+    use std::os::unix::fs::MetadataExt;
+    use tokio::io::AsyncReadExt;
+    let fixture = Fixture::new();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let keep = fixture.base().join("keep");
+    std::fs::write(&keep, b"retain receipt for restart inspection").unwrap();
+    assert!(transaction.rollback().await.is_err());
+    let receipt = fixture.receipt();
+    std::fs::remove_file(keep).unwrap();
+    let runtime = fixture.base().join("sessions");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stale = std::os::unix::net::UnixListener::bind(runtime.join("plugins.sock")).unwrap();
+    drop(stale);
+    let unrelated = fixture.root.join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o777)).unwrap();
+    // Inherit the isolated cwd before dropping uid, so no home-directory
+    // permissions change is needed. EOF retires only this fixture's listener.
+    let mut listener = Command::new("sudo")
+        .args(["-n", "python3", "-u", "-c", "import os,socket,sys; os.setgroups([]); os.setgid(65534); os.setuid(65534); s=socket.socket(socket.AF_UNIX); s.bind('plugins.sock'); s.listen(); os.chdir('/'); print('ready',flush=True); sys.stdin.read()"])
+        .current_dir(&unrelated)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn().unwrap();
+    let mut ready = [0; 6];
+    listener
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .await
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    assert_eq!(
+        std::fs::metadata(unrelated.join("plugins.sock"))
+            .unwrap()
+            .uid(),
+        65534
+    );
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let inspected = session
+        .run(
+            &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
+            Input::Empty,
+        )
+        .await;
+    let cleanup = transaction.rollback().await;
+    let unrelated_preserved = unrelated.join("plugins.sock").exists();
+    drop(listener.stdin.take());
+    assert!(listener.wait().await.unwrap().success());
+    assert!(unrelated_preserved);
+    assert!(
+        inspected.is_ok() && cleanup.is_ok() && !receipt.exists(),
+        "unrelated user socket blocks stale cleanup: inspection={:?}, cleanup={:?}, receipt_retained={}",
+        inspected.as_ref().err().and_then(|error| error.exit_status),
+        cleanup.as_ref().err().and_then(|error| error.exit_status),
+        receipt.exists(),
+    );
+}
+
+/// Records generated command lengths; every exec fails at once.
+struct LengthRecorder(std::sync::Mutex<Vec<usize>>);
+impl SshSession for LengthRecorder {
+    fn setup_steps(&self) -> bool {
+        true
+    }
+    fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+        // The session executes `sh -c <quoted script>` as one argument.
+        let argument = format!(
+            "sh -c {}",
+            infraternal_plugin_ssh::transport::shell_quote(script)
+        );
+        self.0.lock().unwrap().push(argument.len());
+        Box::pin(async { Err(Failure::install("recorded")) })
+    }
+}
+
+#[tokio::test]
+async fn every_setup_command_fits_one_kernel_argument_in_both_modes() {
+    // The remote shell receives each program as one `sh -c` argument, which
+    // Linux bounds at 128 KiB (MAX_ARG_STRLEN). Root restaging nests its
+    // cleanup inside the privileged upload step (#230).
+    let f = Fixture::new();
+    for mode in [InstallMode::Rootless, InstallMode::Root] {
+        let recorder = Arc::new(LengthRecorder(std::sync::Mutex::new(Vec::new())));
+        let target = Target {
+            mode,
+            root_consent: mode == InstallMode::Root,
+            ..f.target.clone()
+        };
+        let install = Installation::new(recorder.clone(), &target, &f.join).unwrap();
+        let _ = install.restart_setup_with(&f.binary, &f.join, None).await;
+        let _ = install.stage_and_setup(&f.binary, &f.join).await;
+        let _ = install.rollback().await;
+        let lengths = recorder.0.lock().unwrap().clone();
+        assert_eq!(lengths.len(), 3, "{mode:?}: {lengths:?}");
+        println!("{mode:?} command lengths {lengths:?}");
+        assert!(
+            lengths.iter().all(|length| *length < 131_072),
+            "{mode:?} command lengths {lengths:?}"
+        );
+    }
 }

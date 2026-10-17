@@ -68,6 +68,8 @@ pub const UNINSTALL: ActionDef = ActionDef {
     opens: None,
 };
 #[cfg(feature = "agent")]
+pub mod runtime_lock;
+#[cfg(feature = "agent")]
 pub mod uninstall;
 
 /// Enroll one node; this action cannot create a server.

@@ -315,6 +315,12 @@ impl Backend for ObservedBackend {
     fn setup_cancelled(&self, h: Uuid) -> Operation<'_, ()> { self.0.setup_cancelled(h) }
     fn reissue_invitation<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, JoinMaterial> { self.0.reissue_invitation(a,h) }
     fn stop(&self) -> Operation<'_, ()> { self.0.stop() }
+    fn owns_failed_setup<'a>(
+        &'a self, a: &'a Authority, t: &'a Target, c: &'a Check,
+        host: Uuid, lookup: Option<String>,
+    ) -> Operation<'a, bool> {
+        self.0.owns_failed_setup(a, t, c, host, lookup)
+    }
 
     fn record_failure(&self, t: &Target, h: Option<Uuid>, p: Step, f: &Failure) {
         self.0.record_failure(t, h, p, f);
@@ -533,8 +539,10 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         .unwrap();
     assert!(private.len() <= 24576);
     let (_directory, mut f) = live_fixture(&scratch).await;
+    let server_name = std::env::var("BREAKIT2_SERVER_NAME")
+        .unwrap_or_else(|_| "addhost-breakit2.test".into());
     let (identity, material) =
-        crate::remote_runtime::tests::server_material_for_name("addhost-breakit2.test");
+        crate::remote_runtime::tests::server_material_for_name(&server_name);
     let source: Arc<dyn CaKeySource> = Arc::new(Signer(Some(material.clone())));
     let hosts = RemoteHosts::from_source(Some(source.clone()));
     let store = f.backend.issuer.store().clone();
@@ -550,12 +558,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let endpoint = EnrollmentEndpoint {
         ca_der: material.issuer().to_der().unwrap(),
         endpoint: listeners.local_addr().unwrap(),
-        server_name: "addhost-breakit2.test".into(),
+        server_name: server_name.clone(),
     };
     let auth = Auth::new(
         f.pool.clone(),
-        "addhost-breakit2.test",
-        "https://addhost-breakit2.test:4929",
+        &server_name,
+        &format!("https://{server_name}:4929"),
     )
     .await
     .unwrap();
@@ -585,7 +593,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         attempts: Mutex::default(),
         sessions_changed: Mutex::default(),
     });
-    let retry_private = std::env::var_os("BREAKIT2_RETRY").map(|_| private.clone());
+    let timeout_retry = std::env::var_os("BREAKIT2_TIMEOUT_RETRY").is_some();
+    let retry_private = (timeout_retry || std::env::var_os("BREAKIT2_RETRY").is_some())
+        .then(|| private.clone());
     let transport = Arc::new(FixtureTransport {
         transport: Arc::new(TimedTransport {
             adapter: OpenSsh {
@@ -676,6 +686,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let mut changed = batch.subscribe();
     let mut retry_private = retry_private;
     let mut selected_attempt = 1;
+    let mut published_retry = false;
     let result = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
@@ -686,6 +697,14 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                     && selected_attempt == 1
                     && let Some(private) = retry_private.take()
                 {
+                    if timeout_retry {
+                        assert_eq!(event.step, Step::Failed);
+                        assert!(events.iter().any(|phase| phase.step == Step::Facts));
+                        assert!(std::process::Command::new("nft")
+                            .args(["delete", "table", "inet", "addhost_retry_230"])
+                            .status().unwrap().success());
+                        println!("RETRY timeout=facts network_restored=true");
+                    }
                     *transport.private.lock().unwrap() = Some(Secret::new(private));
                     println!(
                         "RETRY breakit2 first_failure_step={:?}",
@@ -725,12 +744,31 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                     drop(batch);
                     let status = runner.setup_status();
                     let mut setup_changed = status.subscribe("owner", host).unwrap();
+                    // A published setup that fails after the network kill retries
+                    // through the same owner path the browser uses (#230).
+                    let mut retried_attempt = None;
                     loop {
                         let events = status.events("owner", host, 0).unwrap().1;
-                        if let Some(failure) = events.iter().find(|event| event.state == infraternal_plugin_ssh::setup::State::Failed) {
-                            panic!("published setup failed at {:?}", failure.stage);
+                        let current = |event: &&infraternal_plugin_ssh::setup::Event| retried_attempt.is_none_or(|attempt| event.attempt > attempt);
+                        if let Some(failure) = events.iter().filter(current).find(|event| event.state == infraternal_plugin_ssh::setup::State::Failed) {
+                            if timeout_retry && retried_attempt.is_none() {
+                                assert!(std::process::Command::new("nft")
+                                    .args(["delete", "table", "inet", "addhost_retry_230"])
+                                    .status().unwrap().success());
+                                println!("RETRY timeout=published_setup stage={:?} failed_step={:?} network_restored=true", failure.stage, failure.failed_step);
+                                retried_attempt = Some(failure.attempt);
+                                published_retry = true;
+                                // A retry re-authenticates when its saved route is gone;
+                                // hand the fixture key over again, as the batch retry does.
+                                if let Some(private) = retry_private.take() {
+                                    *transport.private.lock().unwrap() = Some(Secret::new(private));
+                                }
+                                runner.retry_setup("owner".into(), Secret::new(f.cookie.as_bytes().to_vec()), host).unwrap();
+                                continue;
+                            }
+                            panic!("published setup failed at {:?}: step={:?} message={:?}", failure.stage, failure.failed_step, failure.message);
                         }
-                        if events.iter().any(|event| event.stage == infraternal_plugin_ssh::setup::Stage::Ready && event.state == infraternal_plugin_ssh::setup::State::Done) { break; }
+                        if events.iter().filter(current).any(|event| event.stage == infraternal_plugin_ssh::setup::Stage::Ready && event.state == infraternal_plugin_ssh::setup::State::Done) { break; }
                         setup_changed.changed().await.unwrap();
                     }
                     let joined = FULLY_JOINED.lock().unwrap().unwrap();
@@ -748,6 +786,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     })
     .await
     .unwrap();
+    if timeout_retry {
+        assert!(
+            selected_attempt == 2 || published_retry,
+            "a network timeout must precede the retry"
+        );
+    }
     let active: i64 =
         sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
             .fetch_one(&f.pool)

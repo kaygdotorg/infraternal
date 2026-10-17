@@ -15,7 +15,8 @@ use std::{
 mod setup_scripts;
 
 // Mutating commands need both the parent guard and transaction lease; the
-// read-only ownership check carries only the guard it actually executes.
+// read-only ownership check and cache refresh carry only the guard they execute.
+pub(crate) const SETUP_GUARD: &str = include_str!("setup_guard.sh");
 pub(crate) const SETUP_LOCK: &str = concat!(
     include_str!("setup_guard.sh"),
     include_str!("setup_lock.sh")
@@ -424,7 +425,11 @@ impl Installation {
         if let Some(cleanup) = cleanup {
             // Observe the child status explicitly: conditional function calls
             // would disable errexit inside the journal recovery program.
-            let guarded_cleanup = Self::script_for(
+            // The upload step already runs privileged in root mode, so the
+            // child takes only the prelude. A second root wrapper would quote
+            // the cleanup four levels deep and push the root restage command
+            // past the kernel's 128 KiB limit for one argument (#230).
+            let guarded_cleanup = Self::unprivileged_script(
                 self.mode,
                 self.host,
                 self.transaction,
@@ -446,6 +451,9 @@ impl Installation {
         } else {
             upload.push_str(&transfer.body);
         }
+        // Only the full image carries the runtime-lock helper; the early
+        // session image is staged without it and owns no lifetime lock.
+        upload.push_str(RUNTIME_HANDOFF);
         let script = self.setup_script(join, Some(&upload))?;
         let input = transfer.input(binary, join.stdin.expose(), declared);
         let output = self
@@ -724,7 +732,7 @@ impl Installation {
         };
         let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
         let body = format!(
-            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}",
+            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{RUNTIME_HANDOFF}",
             shell_quote(&digest)
         );
         Ok(PreparedPayload {
@@ -735,12 +743,95 @@ impl Installation {
         })
     }
 
+    /// Publish only the trusted executable cache when legacy recovery needs a newer helper.
+    /// # Errors
+    /// Refuses unsafe cache/parent ownership or a partial/mismatched transfer.
+    #[cold]
+    #[inline(never)]
+    pub fn prepare_recovery<'a>(
+        session: &'a dyn SshSession,
+        target: &'a Target,
+        binary: &'a Path,
+    ) -> crate::transport::Operation<'a, ()> {
+        // Share the recovery poller through the existing operation boundary.
+        // Its temporary allocation is confined to migration of an earlier cache [243].
+        Box::pin(async move {
+            target.validate()?;
+            let digest = crate::payload::digest(binary).await?;
+            let body = format!(
+                r#"{SETUP_GUARD}
+setup_guard
+{PAYLOAD_CACHE}
+validate_cache
+prepared="$cache.recovery-$transaction"
+mkdir "$prepared"
+trap 'rm -f "$prepared/payload" "$prepared/owner"; rmdir "$prepared" 2>/dev/null || :' EXIT
+cat > "$prepared/payload"
+printf '%s  %s\n' {} "$prepared/payload" | sha256sum -c - >/dev/null
+chmod 700 "$prepared/payload"
+printf 'INFRATERNAL_PAYLOAD_CACHE_V1\n' > "$prepared/owner"
+if [ -e "$cache" ]; then
+    mv -Tf "$prepared/payload" "$cache/payload"
+else
+    mv -Tn "$prepared" "$cache"
+    [ ! -e "$prepared" ] || exit 71
+fi
+"#,
+                shell_quote(&digest),
+            );
+            session
+                .run(
+                    &Self::script_for(target.mode, uuid::Uuid::nil(), uuid::Uuid::new_v4(), &body),
+                    Input::File(binary),
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    #[cold]
+    #[inline(never)]
     fn script(&self, body: &str) -> String {
+        // setup_guard.sh / setup_lock.sh proof notes [17][243]:
+        // Every new installer command takes this same directory lock. It leaves
+        // no lock file and serializes admission, recovery and journal mutation.
+        // A bounded lease holds the transaction directory across SSH command gaps. Its
+        // public PID/start-time receipt is not authority by itself: retirement also
+        // requires the process's inherited descriptor to refer to this exact directory.
+        // Also detect a holder whose creation was interrupted before PID journaling.
+        // Such an unrecorded lease expires at the same bounded setup deadline.
         let guarded = format!("{SETUP_LOCK}\nsetup_guard\n{body}");
         Self::script_for(self.mode, self.host, self.transaction, &guarded)
     }
 
+    #[cold]
+    #[inline(never)]
     pub(crate) fn script_for(
+        mode: InstallMode,
+        host: uuid::Uuid,
+        transaction: uuid::Uuid,
+        body: &str,
+    ) -> String {
+        let script = Self::unprivileged_script(mode, host, transaction, body);
+        if mode == InstallMode::Root {
+            // Bind the program once: both branches execute the same bytes, and
+            // a second quoted copy would double every root command, which
+            // nests inside restaging and must fit one kernel argument (#230).
+            format!(
+                "program={}\nif [ \"$(id -u)\" = 0 ]; then exec sh -c \"$program\"; else exec sudo -n sh -c \"$program\"; fi",
+                shell_quote(&script)
+            )
+        } else {
+            script
+        }
+    }
+
+    /// The mode's installation variables and ownership prelude, without the
+    /// root privilege wrapper. Only a program already running inside a
+    /// wrapped root step may use it directly (#230).
+    #[cold]
+    #[inline(never)]
+    fn unprivileged_script(
         mode: InstallMode,
         host: uuid::Uuid,
         transaction: uuid::Uuid,
@@ -766,21 +857,13 @@ impl Installation {
         } else {
             "default.target"
         };
-        let script = format!(
-            "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\n# Existing data must be private to the execution uid before any read or write.\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
+        // Existing data must be private to the execution uid before any read or write.
+        format!(
+            "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
-        );
-        if mode == InstallMode::Root {
-            format!(
-                "if [ \"$(id -u)\" = 0 ]; then exec sh -c {}; else exec sudo -n sh -c {}; fi",
-                shell_quote(&script),
-                shell_quote(&script)
-            )
-        } else {
-            script
-        }
+        )
     }
 
     /// Join into staged state on private stdin; previous enrolled state remains untouched.
@@ -942,16 +1025,27 @@ rm -rf "$stage"
             })?;
             return self.commit().await;
         }
-        let script = self.script(
-            r#"stage="$base/.bootstrap-lock"
+        // The parent-directory guard is taken only after approval. The new
+        // agent takes a shared lock on that directory before it binds (#230);
+        // holding the exclusive guard across the proof wait would keep the
+        // agent from connecting, and so the proof from ever arriving.
+        let script = Self::script_for(
+            self.mode,
+            self.host,
+            self.transaction,
+            &format!(
+                r#"{SETUP_LOCK}
+stage="$base/.bootstrap-lock"
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 # No journal or artifact changes occur before the caller proves the terminal.
 read -r approved || exit 1
 [ -z "$approved" ] || exit 1
+setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 retire_setup_lease
 rm -rf "$stage"
-"#,
+"#
+            ),
         );
         self.session
             .run(&script, Input::Signal(release))
@@ -1058,9 +1152,10 @@ if [ -d "$stage" ] && [ ! -L "$stage" ]; then
     if [ -d "$stage/state" ] && [ ! -e "$base/state" ]; then mv "$stage/state" "$base/state"; fi
 fi
 "#;
-        let cleanup = format!(
-            "{FRESH_CLEANUP}\n{retain}\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}"
-        );
+        // As in rollback, the lease is retired inside ROLLBACK_TRANSACTION
+        // only after this transaction's ownership is validated (#230).
+        let cleanup =
+            format!("{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\n{retain}\n{ROLLBACK_TRANSACTION}");
         if self.session.setup_steps() {
             // Recover only this journal before selecting the full payload.
             // The early shim keeps its open executable and private rendezvous;
@@ -1078,14 +1173,23 @@ fi
     /// Restore the previous installation, or remove only this host-bound fresh installation.
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
-    pub async fn rollback(&self) -> Result<(), Failure> {
-        self.session
-            .run(
-                &self.script(&format!("{FRESH_CLEANUP}\npreserve_session=no\nstage=\"$base/.bootstrap-lock\"\nretire_setup_lease\n{ROLLBACK_TRANSACTION}")),
-                Input::Empty,
-            )
-            .await?;
-        Ok(())
+    pub fn rollback(&self) -> crate::transport::Operation<'_, ()> {
+        // Failure and earlier-attempt recovery share one teardown poller [243].
+        // The temporary allocation is confined to cleanup, outside the happy path.
+        // ROLLBACK_TRANSACTION retires the lease only after validating that
+        // this exact transaction owns it (#230).
+        Box::pin(async move {
+            self.session
+                .run(
+                    &self.script(&format!(
+                        "{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\npreserve_session=no\n{ROLLBACK_TRANSACTION}"
+                    )),
+                    Input::Empty,
+                )
+                .await
+                .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+            Ok(())
+        })
     }
 }
 
@@ -1159,6 +1263,12 @@ pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
     result.err().filter(|failure| failure.exit_status.is_some())
 }
 
+// The staged binary validates and takes the inherited runtime lock on fd 6.
+// The shell keeps the same open description until all receipt cleanup ends.
+// Legacy runtimes without that file use the binary's conservative socket probe.
+// A private parent-directory setup guard fences startup during final lock unlink.
+pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
+
 // Cache records contain only public executable content. Every lookup repeats
 // ownership, link, private-parent and fixed-marker checks before any content read.
 const PAYLOAD_CACHE: &str = r#"
@@ -1181,17 +1291,19 @@ validate_cache() {
 
 // Setup retains its existing attempt lock and ownership proof irrespective of
 // whether the payload arrives through stdin or a verified cache hard link.
+// Admission and cleanup share the same private-parent rule. Refuse a parent
+// that cannot protect a rollback receipt before creating any installation data.
+// A retired fresh transaction still owns final cleanup outside the base.
+// Admit no replacement until its receipt is removed after successful cleanup.
+// The private acquisition journal precedes mkdir. It proves this attempt's
+// empty lock if the command stops before the lock's ordinary receipts exist.
 const STAGE_TRANSACTION: &str = r#"
-# Admission and cleanup share the same private-parent rule. Refuse a parent
-# that cannot protect a rollback receipt before creating any installation data.
 parent=$(dirname "$base")
 if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
 [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
 parent_mode=$(stat -c '%a' "$parent")
 [ "$((0$parent_mode & 022))" -eq 0 ] || exit 71
 setup_guard
-# A retired fresh transaction still owns final cleanup outside the base.
-# Admit no replacement until its receipt is removed after successful cleanup.
 for receipt in "$base".bootstrap-rollback-*; do
     [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
 done
@@ -1210,8 +1322,6 @@ if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
 else
     kind=fresh
 fi
-# The private acquisition journal precedes mkdir. It proves this attempt's
-# empty lock if the command stops before the lock's ordinary receipts exist.
 printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
 mkdir "$stage" || exit 72
 printf '%s\n' "$transaction" > "$stage/transaction"
@@ -1219,6 +1329,13 @@ printf '%s\n' "$kind" > "$stage/kind"
 rm -f "$base/.bootstrap-acquiring"
 start_setup_lease
 "#;
+
+// A fresh full-image stage takes the runtime lifetime lock before any
+// service can bind, and its lease keeps it across SSH command gaps (#230).
+// Only the full image implements the runtime-lock helper; the early session
+// image is never passed here.
+const RUNTIME_HANDOFF: &str =
+    "\nif [ \"$kind\" = fresh ]; then handoff_setup_lease \"$stage/payload\" yes; fi\n";
 
 // Publish at most one payload, after the staged hash has passed. Cache creation
 // is a prepared-directory rename that cannot adopt an existing foreign path.
@@ -1237,13 +1354,39 @@ fi
 
 // The rollback journal is a fixed shell program. Keeping it outside the Rust
 // adapter makes its ownership and interruption invariants reviewable together.
+// Shell proof notes (kept out of the transmitted program [243]):
+// This receipt means service rollback is complete. Do not repeat service
+// changes after a stop inside stage retirement, even if its markers are gone.
+// Creation can succeed before the receipt's bytes fit on disk. Only
+// the exact acquisition journal owns this private, empty lock; never
+// treat a different nonempty transaction as an interrupted write.
+// Only the pre-mkdir journal authorizes an empty, uninitialized lock.
+// Refused stop retains both installation and policy receipts for cleanup retry.
+// Only the validated original transaction may retire its cross-command lease.
+// A losing installer must not stop another attempt's lease before refusing it.
+// Only a journaled final replacement belongs to this attempt. Temporary
+// files stay in stage; unrelated suffix files are never cleanup targets.
+// Retire replacement markers before restoring backups: a retry must never
+// delete an original already restored by an interrupted rollback. Backups
+// still present remain sufficient evidence to retry interrupted restoration.
+// Restoration can stop between moving the backup and recreating links.
+// The original-presence marker survives both operations and makes retry safe.
+// No replacement began, but a lost stop reply may have stopped the old service.
+// An acknowledged refusal is staging-only cleanup and must not restart it.
+// An incomplete upload is owned by this transaction. Reclaim it before
+// allocating the outside receipt, including when the home filesystem is full.
 pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
-    if [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
-        finish_fresh
-        exit 0
+    validate_control_socket
+    stage="$base/.bootstrap-lock"
+    if [ -e "$stage" ] || [ -L "$stage" ]; then
+        validate_retired_stage "$transaction" "$host"
+        retire_setup_lease
+        rm -rf "$stage"
     fi
+    finish_fresh
+    exit 0
 fi
 if [ ! -e "$base" ] && [ ! -L "$base" ]; then exit 0; fi
 [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
@@ -1276,28 +1419,28 @@ fi
 if [ -e "$stage/transaction" ] || [ -L "$stage/transaction" ]; then
     [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] || exit 72
     if [ "$(cat "$stage/transaction")" != "$transaction" ]; then
-        # Creation can succeed before the receipt's bytes fit on disk. Only
-        # the exact acquisition journal owns this private, empty lock; never
-        # treat a different nonempty transaction as an interrupted write.
         [ "$acquired" = yes ] && [ -O "$stage" ] && [ "$(stat -c '%a' "$stage")" = 700 ] || exit 72
         [ -O "$stage/transaction" ] && [ "$(stat -c '%a:%s:%h' "$stage/transaction")" = 600:0:1 ] || exit 72
         rm "$stage/transaction"
         rmdir "$stage" || exit 72
     fi
 else
-    # Only the pre-mkdir journal authorizes an empty, uninitialized lock.
     [ "$acquired" = yes ] || exit 72
     rmdir "$stage" || exit 72
 fi
-# Refused stop retains both installation and policy receipts for cleanup retry.
 if [ -f "$stage/kind" ] && [ ! -L "$stage/kind" ]; then kind=$(cat "$stage/kind"); else [ "$acquired" = yes ] || exit 72; fi
 case "$kind" in
     fresh) validate_parent;;
     upgrade) :;;
     *) exit 71;;
 esac
+retire_setup_lease
 if [ -f "$stage/activating" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
+fi
+if [ "$kind" = fresh ]; then
+    identity=$(stat -c '%d:%i' "$base")
+    validate_control_socket
 fi
 if [ -f "$stage/linger-requested" ]; then
     uid=$(id -u)
@@ -1312,19 +1455,12 @@ if [ -f "$stage/activating" ]; then
     if [ "${preserve_session:-no}" != yes ] || [ "$kind" != fresh ]; then
         if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
     fi
-    # Only a journaled final replacement belongs to this attempt. Temporary
-    # files stay in stage; unrelated suffix files are never cleanup targets.
     if [ -f "$stage/replacing-launcher" ] && [ ! -f "$stage/had-launcher" ]; then rm -f "$launcher"; fi
     [ ! -f "$stage/replacing-unit" ] || rm -f "$unit"
-    # Retire replacement markers before restoring backups: a retry must never
-    # delete an original already restored by an interrupted rollback. Backups
-    # still present remain sufficient evidence to retry interrupted restoration.
     rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit" "$stage/replacing-launcher"
     if [ -f "$stage/previous-binary" ]; then
         mv "$stage/previous-binary" "$base/bin/live"
     fi
-    # Restoration can stop between moving the backup and recreating links.
-    # The original-presence marker survives both operations and makes retry safe.
     if [ -f "$stage/had-binary" ]; then
         [ -L "$base/bin/current" ] || ln -s "$base/bin/live" "$base/bin/current"
         [ -L "$launcher" ] || ln -s "$base/bin/current" "$launcher"
@@ -1335,14 +1471,10 @@ if [ -f "$stage/activating" ]; then
     [ ! -f "$stage/was-enabled" ] || $manager enable infraternal-agent.service
     [ ! -f "$stage/was-active" ] || $manager start infraternal-agent.service
 fi
-# No replacement began, but a lost stop reply may have stopped the old service.
-# An acknowledged refusal is staging-only cleanup and must not restart it.
 if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ]; then
     $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then
-    # An incomplete upload is owned by this transaction. Reclaim it before
-    # allocating the outside receipt, including when the home filesystem is full.
     rm -f "$stage/payload"
     if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
         printf '%s %s fresh %s\n' "$host" "$transaction" "$(stat -c '%d:%i' "$base")" > "$receipt"
@@ -1360,6 +1492,16 @@ fi
 // owner marker and base. Noclobber creation, bounded reads, uid/mode and directory
 // identity checks preserve exact binding
 // prevent stale or foreign cleanup from being mistaken for this fresh attempt.
+// Shell proof notes (kept out of the transmitted program [243]):
+// The outside receipt can outlive an interrupted retirement of the acquisition
+// journal. Remove only its exact fresh binding, after validating the base owner.
+// Never recursively delete unjournaled contents. Unexpected data keeps
+// the receipt and makes cleanup fail rather than claiming success.
+// The service creates these rendezvous directories before its first PTY.
+// Remove only empty owned directories; never follow a parent link or
+// remove retained shim/session data merely because installation failed.
+// Preserve the owner marker alongside the receipt if unknown data keeps
+// the root nonempty. Another attempt cannot claim this unfinished root.
 pub(crate) const FRESH_CLEANUP: &str = r#"
 receipt="$base.bootstrap-rollback-$transaction"
 validate_parent() {
@@ -1382,8 +1524,6 @@ validate_receipt() {
         [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || exit 71
     fi
 }
-# The outside receipt can outlive an interrupted retirement of the acquisition
-# journal. Remove only its exact fresh binding, after validating the base owner.
 retire_fresh_acquisition() {
     acquiring="$base/.bootstrap-acquiring"
     if [ -e "$acquiring" ] || [ -L "$acquiring" ]; then
@@ -1401,21 +1541,16 @@ finish_fresh() {
             [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
         fi
         retire_fresh_acquisition
-        # Never recursively delete unjournaled contents. Unexpected data keeps
-        # the receipt and makes cleanup fail rather than claiming success.
         rm -f "$base/.bootstrap-ready"
+        retire_control_socket
         rmdir "$base/bin" 2>/dev/null || :
-        # The service creates these rendezvous directories before its first PTY.
-        # Remove only empty owned directories; never follow a parent link or
-        # remove retained shim/session data merely because installation failed.
         if [ -d "$base/sessions" ] && [ ! -L "$base/sessions" ] && [ -O "$base/sessions" ]; then
             if [ ! -L "$base/sessions/sessions" ] && [ -O "$base/sessions/sessions" ]; then
                 rmdir "$base/sessions/sessions" 2>/dev/null || :
             fi
+            if [ -e "$base/sessions/.lifetime-lock" ]; then rm -- "$base/sessions/.lifetime-lock"; fi
             rmdir "$base/sessions" 2>/dev/null || :
         fi
-        # Preserve the owner marker alongside the receipt if unknown data keeps
-        # the root nonempty. Another attempt cannot claim this unfinished root.
         for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
             [ "$entry" = "$base/.bootstrap-owner" ] || { [ ! -e "$entry" ] && [ ! -L "$entry" ]; } || exit 72
         done
@@ -1630,6 +1765,8 @@ mod tests {
         for source in [
             crate::probe::CHECK_SCRIPT,
             crate::previous_attempt::INSPECT,
+            SETUP_GUARD,
+            RUNTIME_CLEANUP,
             PAYLOAD_CACHE,
             STAGE_TRANSACTION,
             PUBLISH_PAYLOAD_CACHE,

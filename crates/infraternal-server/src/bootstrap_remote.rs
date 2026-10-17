@@ -91,6 +91,42 @@ impl RemoteBackend {
             )
         })
     }
+    /// Match immutable failed-bootstrap coordinates before automatic remote cleanup.
+    async fn owns_failed_setup_record(
+        &self,
+        owner: &str,
+        target: &Target,
+        check: &Check,
+        host: Uuid,
+        lookup: Option<&str>,
+    ) -> Result<bool, Failure> {
+        target.validate()?;
+        check.authorize_mode(target.mode)?;
+        let infraternal_plugin_ssh::model::TargetAddress::Manual(address) = &target.address else {
+            return Ok(false);
+        };
+        let (mode, uid) = match target.mode {
+            InstallMode::Rootless => ("rootless", check.uid),
+            InstallMode::Root => ("rootful", 0),
+        };
+        // A recorded authenticated SSH lookup must match the current lookup.
+        // Only legacy rows without either lookup may use an exact destination.
+        // Retired rows survive process restart, but cannot authorize cleanup for
+        // another server's UUID, owner, execution account or privilege mode.
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts h JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NOT NULL AND h.mode=? AND h.execution_uid=? AND ((b.trust_lookup=? AND ? IS NOT NULL) OR (b.trust_lookup IS NULL AND ? IS NULL AND b.address=?)))")
+            .bind(host.as_bytes().as_slice())
+            .bind(owner)
+            .bind(mode)
+            .bind(i64::from(uid))
+            .bind(lookup)
+            .bind(lookup)
+            .bind(lookup)
+            .bind(address)
+            .fetch_one(&self.issuer.store().0)
+            .await
+            .map_err(|_| unavailable())
+    }
+
     fn completed_record(&self, authority: &Authority, host: Uuid) -> Result<(), Failure> {
         self.uid(authority, host)?;
         self.attempts
@@ -330,6 +366,21 @@ impl Backend for RemoteBackend {
             self.authorize(authority).await
         })
     }
+    fn owns_failed_setup<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        host: Uuid,
+        lookup: Option<String>,
+    ) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.owns_failed_setup_record(&authority.owner, target, check, host, lookup.as_deref())
+                .await
+        })
+    }
+
     fn resolve<'a>(
         &'a self,
         authority: &'a Authority,
@@ -1212,6 +1263,126 @@ mod tests {
         .await
         .unwrap()
     }
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep every durable ownership dimension in one ledger fixture."
+    )]
+    async fn automatic_cleanup_requires_the_exact_failed_server_host_binding() {
+        let f = fixture(true).await;
+        let target = Target {
+            id: "one".into(),
+            address: TargetAddress::Manual("user@fixture".into()),
+            credential: None,
+            mode: InstallMode::Rootless,
+            root_consent: false,
+        };
+        let check =
+            Check::parse(b"INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n")
+                .unwrap();
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture','observed-host')")
+            .bind(f.prior.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        assert!(
+            !f.backend
+                .owns_failed_setup_record("owner", &target, &check, f.prior, Some("observed-host"))
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE remote_hosts SET revoked_at=created_at WHERE id=?")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            f.backend
+                .owns_failed_setup_record("owner", &target, &check, f.prior, Some("observed-host"))
+                .await
+                .unwrap()
+        );
+        for (owner, host, lookup) in [
+            ("stranger", f.prior, Some("observed-host")),
+            ("owner", Uuid::new_v4(), Some("observed-host")),
+            ("owner", f.prior, Some("different-host")),
+            ("owner", f.prior, None),
+        ] {
+            assert!(
+                !f.backend
+                    .owns_failed_setup_record(owner, &target, &check, host, lookup)
+                    .await
+                    .unwrap()
+            );
+        }
+        let mut alias = target.clone();
+        alias.address = TargetAddress::Manual("user@alias".into());
+        assert!(
+            f.backend
+                .owns_failed_setup_record("owner", &alias, &check, f.prior, Some("observed-host"))
+                .await
+                .unwrap()
+        );
+        let mut other_account = check.clone();
+        other_account.uid = 1003;
+        assert!(
+            !f.backend
+                .owns_failed_setup_record(
+                    "owner",
+                    &target,
+                    &other_account,
+                    f.prior,
+                    Some("observed-host")
+                )
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE remote_hosts SET mode='rootful',execution_uid=0 WHERE id=?")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            !f.backend
+                .owns_failed_setup_record("owner", &target, &check, f.prior, Some("observed-host"))
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE remote_hosts SET mode='rootless',execution_uid=1002 WHERE id=?")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE remote_host_bootstrap SET trust_lookup=NULL WHERE host_id=?")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            f.backend
+                .owns_failed_setup_record("owner", &target, &check, f.prior, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !f.backend
+                .owns_failed_setup_record("owner", &alias, &check, f.prior, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !f.backend
+                .owns_failed_setup_record("owner", &target, &check, f.prior, Some("observed-host"))
+                .await
+                .unwrap()
+        );
+        let mut unconfirmed = target.clone();
+        unconfirmed.mode = InstallMode::Root;
+        assert!(
+            f.backend
+                .owns_failed_setup_record("owner", &unconfirmed, &check, f.prior, None)
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn cold_ca_refuses_before_invitation_or_upload() {
         let f = fixture(false).await;

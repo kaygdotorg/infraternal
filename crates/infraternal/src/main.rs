@@ -96,6 +96,12 @@ fn run_invocation() -> ExitCode {
         return ExitCode::FAILURE;
     }
     #[cfg(feature = "remote")]
+    if let Some(result) =
+        infraternal_plugin_remote::runtime_lock::command(&mut std::env::args_os().skip(1))
+    {
+        return ExitCode::from(result);
+    }
+    #[cfg(feature = "remote")]
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }

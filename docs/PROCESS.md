@@ -143,18 +143,29 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,300,016 bytes |
-  | `aarch64-unknown-linux-musl` | 19,500,376 bytes |
+  | `x86_64-unknown-linux-musl` | 21,080,848 bytes |
+  | `aarch64-unknown-linux-musl` | 19,316,360 bytes |
 
-  These ceilings pin the normalized combined-source artifacts measured on #201
-  and #229. Direct Cargo builds and packaging share `.cargo/rustc.sh`, which
-  remaps repository, build and dependency source roots once. The native wrapper
-  normalizes generated compiler metadata and only build-owned module defaults;
-  explicit runtime paths remain intact.
-  The recipe retains the approved native AES-GCM fallback and size optimization
-  for release and host-facts plugins; terminal, mesh and cryptographic
-  dependencies retain speed optimization (D243, D264, D272). Combined-source
-  size and runtime validation are tracked on both issues.
+  These are the release-retry measurements (#230 merged into the #189
+  production line, 3048580c1): the production line measured 21,090,448 /
+  19,316,264 bytes; the merge is 9,920 / 160 bytes smaller. Taking the
+  commit guard only after terminal proof adds back 256 / 128 bytes, and
+  keeping the root restage command within one kernel argument another
+  128 / 128 bytes; binding the root program once removes 64 / 0 (#230). Lifetime-safe
+  retry adds its runtime-lock helper, kernel endpoint checks and helper
+  refresh; its SSH management crate moves from s to z (#230), which more than
+  offsets that code on x86_64. The faster add-host path (#189) keeps its
+  session image and its own size work. Combined-source artifacts use
+  `.cargo/rustc.sh`, which remaps repository, build and dependency source
+  roots once; the native wrapper normalizes generated compiler metadata.
+  The earlier #198 reductions remain: unused native APIs, duplicated action
+  metadata construction, OpenSSL's unused VAES/AVX-512 AES-GCM dispatch, and
+  unused Axum extractor features were cut (D243, D264, #198). The x86_64 build
+  retains AES-NI and generic AES-GCM dispatch, checked against a NIST vector
+  using the shipping static crypto archive.
+  The release, host-facts, SSH and host-orchestration crates use size
+  optimization; terminal, mesh and cryptographic data paths retain speed
+  optimization (D243, D264, D272).
   The obsolete #57 ceilings were below every shipping build and obscured growth.
   Larger images fail. Smaller images also fail until that target's ceiling is
   ratcheted down to its new measured size; a cut cannot leave slack for later
