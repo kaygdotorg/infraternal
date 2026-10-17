@@ -2075,8 +2075,8 @@ fn record_control_close(
     let close_reason = safe_websocket_reason(reason);
     for (stream_id, attachment) in attachments {
         let mut record = attachment.close_record(*stream_id, CloseWho::Browser, CLIENT_WENT_AWAY);
-        record.control_stream_close_code = Some(code);
-        record.control_stream_close_reason = Some(close_reason);
+        record.browser_stream_close_code = Some(code);
+        record.browser_stream_close_reason = Some(close_reason);
         state.close_logs.record(&record);
     }
 }

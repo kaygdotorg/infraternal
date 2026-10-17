@@ -154,8 +154,6 @@ pub(crate) struct CloseRecord {
     pub(crate) agent_close_reason: Option<&'static str>,
     pub(crate) browser_stream_close_code: Option<u16>,
     pub(crate) browser_stream_close_reason: Option<&'static str>,
-    pub(crate) control_stream_close_code: Option<u16>,
-    pub(crate) control_stream_close_reason: Option<&'static str>,
     pub(crate) websocket_code: Option<u16>,
     pub(crate) websocket_reason: Option<&'static str>,
 }
@@ -183,8 +181,6 @@ impl CloseRecord {
             agent_close_reason: None,
             browser_stream_close_code: None,
             browser_stream_close_reason: None,
-            control_stream_close_code: None,
-            control_stream_close_reason: None,
             websocket_code: None,
             websocket_reason: None,
         }
@@ -277,8 +273,6 @@ impl StreamCloseLog {
                     window.last.agent_close_reason = record.agent_close_reason;
                     window.last.browser_stream_close_code = record.browser_stream_close_code;
                     window.last.browser_stream_close_reason = record.browser_stream_close_reason;
-                    window.last.control_stream_close_code = record.control_stream_close_code;
-                    window.last.control_stream_close_reason = record.control_stream_close_reason;
                     window.last.websocket_code = record.websocket_code;
                     window.last.websocket_reason = record.websocket_reason;
                     return;
@@ -388,17 +382,31 @@ async fn run(inner: std::sync::Weak<Inner>, changed: Arc<Notify>) {
     }
 }
 
-fn log_close(record: &CloseRecord) {
+/// One call site for both lines keeps the binary small: `closes` is 1 for the
+/// first close and the repeat count for a window summary. The stream close pair is
+/// the peer's close of a browser stream or of the control stream, whichever ended.
+fn emit(record: &CloseRecord, closes: u64) {
     let session_id = uuid::Uuid::from_bytes(record.session_id);
     let host_id = record
         .host_id
         .map_or_else(|| "local".to_owned(), |id| id.to_string());
+    let summary = closes > 1;
+    let message = if summary {
+        format!(
+            "closed {closes} times in {CLOSE_WINDOW_SECONDS} s, reason {}",
+            record.reason.kind
+        )
+    } else {
+        "terminal stream closed".to_owned()
+    };
     tracing::info!(
         target: "infraternal::terminal_stream",
-        event = "terminal_stream_closed",
+        event = if summary { "terminal_stream_close_summary" } else { "terminal_stream_closed" },
+        message = %message,
         who = record.who.as_str(),
         reason_category = record.reason.category,
         reason = record.reason.kind,
+        closed_count = closes,
         host_id = %host_id,
         session_id = %session_id,
         browser_stream_id = record.browser_stream_id,
@@ -409,53 +417,21 @@ fn log_close(record: &CloseRecord) {
         output_credit_bytes = record.output_credit_bytes,
         agent_close_code = record.agent_close_code.unwrap_or_default(),
         agent_close_reason = record.agent_close_reason.unwrap_or_default(),
-        browser_stream_close_code = record.browser_stream_close_code.unwrap_or_default(),
-        browser_stream_close_reason = record.browser_stream_close_reason.unwrap_or_default(),
-        control_stream_close_code = record.control_stream_close_code.unwrap_or_default(),
-        control_stream_close_reason = record.control_stream_close_reason.unwrap_or_default(),
+        stream_close_code = record.browser_stream_close_code.unwrap_or_default(),
+        stream_close_reason = record.browser_stream_close_reason.unwrap_or_default(),
         websocket_code = record.websocket_code.unwrap_or_default(),
         websocket_reason = record.websocket_reason.unwrap_or_default(),
     );
 }
 
+fn log_close(record: &CloseRecord) {
+    emit(record, 1);
+}
+
 fn log_summary(window: &Window) {
-    if window.closes < 2 {
-        return;
+    if window.closes >= 2 {
+        emit(&window.last, window.closes);
     }
-    let session_id = uuid::Uuid::from_bytes(window.last.session_id);
-    let host_id = window
-        .last
-        .host_id
-        .map_or_else(|| "local".to_owned(), |id| id.to_string());
-    tracing::info!(
-        target: "infraternal::terminal_stream",
-        event = "terminal_stream_close_summary",
-        message = %format!(
-            "closed {} times in {} s, reason {}",
-            window.closes, CLOSE_WINDOW_SECONDS, window.last.reason.kind
-        ),
-        who = window.last.who.as_str(),
-        reason_category = window.last.reason.category,
-        reason = window.last.reason.kind,
-        closed_count = window.closes,
-        window_seconds = CLOSE_WINDOW_SECONDS,
-        host_id = %host_id,
-        session_id = %session_id,
-        browser_stream_id = window.last.browser_stream_id,
-        agent_stream_id = window.last.agent_stream_id,
-        out_seq = window.last.out_seq,
-        input_acked = window.last.input_acked,
-        input_sent = window.last.input_sent,
-        output_credit_bytes = window.last.output_credit_bytes,
-        agent_close_code = window.last.agent_close_code.unwrap_or_default(),
-        agent_close_reason = window.last.agent_close_reason.unwrap_or_default(),
-        browser_stream_close_code = window.last.browser_stream_close_code.unwrap_or_default(),
-        browser_stream_close_reason = window.last.browser_stream_close_reason.unwrap_or_default(),
-        control_stream_close_code = window.last.control_stream_close_code.unwrap_or_default(),
-        control_stream_close_reason = window.last.control_stream_close_reason.unwrap_or_default(),
-        websocket_code = window.last.websocket_code.unwrap_or_default(),
-        websocket_reason = window.last.websocket_reason.unwrap_or_default(),
-    );
 }
 
 /// Browser close reasons are untrusted text; only known local strings can enter server logs.
@@ -583,8 +559,6 @@ mod tests {
             agent_close_reason: None,
             browser_stream_close_code: None,
             browser_stream_close_reason: None,
-            control_stream_close_code: None,
-            control_stream_close_reason: None,
             websocket_code: None,
             websocket_reason: None,
         }
@@ -655,7 +629,6 @@ mod tests {
         let summaries = capture.events("terminal_stream_close_summary");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0]["fields"]["closed_count"], 512);
-        assert_eq!(summaries[0]["fields"]["window_seconds"], 60);
         assert_eq!(
             summaries[0]["fields"]["message"],
             "closed 512 times in 60 s, reason terminal_stream_closed"
