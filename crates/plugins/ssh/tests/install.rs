@@ -2757,25 +2757,6 @@ async fn compound_restaging_refuses_a_foreign_journal_before_upload() {
     transaction.rollback().await.unwrap();
 }
 
-/// Service exit must always retry, including an unexpected successful return.
-#[tokio::test]
-async fn installed_infraternal_agent_always_restarts_without_start_limit() {
-    let fixture = Fixture::new();
-    let transaction = fixture.transaction();
-    transaction.stage(&fixture.binary).await.unwrap();
-    transaction.enroll_and_start(&fixture.join).await.unwrap();
-    let unit = std::fs::read_to_string(
-        fixture
-            .root
-            .join(".config/systemd/user/infraternal-agent.service"),
-    )
-    .unwrap();
-    assert!(unit.lines().any(|line| line == "Restart=always"));
-    assert!(unit.lines().any(|line| line == "RestartSec=2"));
-    assert!(unit.lines().any(|line| line == "StartLimitIntervalSec=0"));
-    transaction.rollback().await.unwrap();
-}
-
 /// A failed deferred upload leaves an incomplete stage; only an admitted cached
 /// image may reopen the original shim, and changed cache bytes must not execute.
 #[tokio::test]

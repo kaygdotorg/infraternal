@@ -38,9 +38,10 @@ async fn installed_admission_waits_for_the_active_route() {
     // is visible while the same actor still owns its old SSH route. No session
     // may be opened merely because that metadata has become visible.
     hosts
-        .admit(
+        .admit_observed(
             guard.clone(),
             ssh_bridge::pipe_link(&directory.0.join("pid")).await,
+            None,
         )
         .await
         .unwrap();
@@ -81,13 +82,15 @@ async fn installed_admission_waits_for_the_active_route() {
             );
         }
     });
-    let connection = remote_tls::accept(listener.accept().await.unwrap().0, &server_config)
-        .await
-        .unwrap();
+    let (stream, peer_address) = listener.accept().await.unwrap();
+    let connection = remote_tls::accept(stream, &server_config).await.unwrap();
     let link = crate::remote_link::RemoteLink::tcp(connection.channel)
         .await
         .unwrap();
-    hosts.admit(guard, link).await.unwrap();
+    hosts
+        .admit_observed(guard, link, Some(peer_address.ip()))
+        .await
+        .unwrap();
     let actor = tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
         .unwrap();

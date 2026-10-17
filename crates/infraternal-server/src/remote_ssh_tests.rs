@@ -266,6 +266,7 @@ async fn writer_frame(output: &mut tokio::sync::mpsc::Receiver<TerminalOutput>) 
     .await
     .unwrap()
 }
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep admission, reattachment and retirement ordered in the real peer lifecycle."
@@ -292,11 +293,12 @@ async fn replacement(refuse: bool, component_off: bool) {
     let hosts = RemoteHosts::default();
     let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     hosts
-        .admit(
+        .admit_observed(
             guard,
             RemoteLink::ssh(channel, Arc::new(Master(retired.clone())))
                 .await
                 .unwrap(),
+            None,
         )
         .await
         .unwrap();
@@ -387,13 +389,11 @@ async fn replacement(refuse: bool, component_off: bool) {
         );
     }
     release.send(()).unwrap();
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(5), output.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        TerminalOutput::Ack { in_seq_acked: 0 }
-    ));
+    let frame = writer_frame(&mut output).await;
+    assert!(
+        matches!(&frame, TerminalOutput::Ack { in_seq_acked: 0 }),
+        "unexpected frame before SSH Ack: {frame:?}"
+    );
     if refuse {
         assert!(!actor.installed_route().await.unwrap());
         assert!(

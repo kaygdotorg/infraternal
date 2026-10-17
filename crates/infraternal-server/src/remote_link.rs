@@ -514,6 +514,8 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => !link.incoming.lock().await.control.is_empty(),
             LinkTransport::Tcp { .. } => false,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => false,
         }
     }
     /// Observe bounded native ownership without waiting on an actor-held lock.
@@ -573,6 +575,8 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.remote_address()),
             LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
         }
     }
 
@@ -582,6 +586,8 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.stats().frame_rx.stop_sending),
             LinkTransport::Tcp { .. } => None,
+            #[cfg(feature = "ssh")]
+            LinkTransport::Ssh { .. } => None,
         }
     }
 
