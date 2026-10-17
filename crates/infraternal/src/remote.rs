@@ -450,15 +450,25 @@ pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let mut report = Vec::new();
         infraternal_agent::block_on_io(
             &runtime,
-            Box::pin(infraternal_plugin_remote::uninstall::cleanup(
-                &plan,
-                &home,
-                nix::unistd::Uid::effective().as_raw(),
-                infraternal_agent::plugins::retire_kernel_state,
-            )),
-        )
+            Box::pin(async {
+                report = infraternal_plugin_remote::uninstall::cleanup(
+                    &plan,
+                    &home,
+                    nix::unistd::Uid::effective().as_raw(),
+                    infraternal_agent::plugins::KERNEL,
+                )
+                .await?;
+                Ok(())
+            }),
+        )?;
+        // The helper's output goes to its unit's journal: name what stayed.
+        for line in report {
+            println!("{line}");
+        }
+        Ok(())
     };
     Some(if execute().is_ok() {
         std::process::ExitCode::SUCCESS

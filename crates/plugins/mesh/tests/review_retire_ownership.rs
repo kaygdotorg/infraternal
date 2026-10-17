@@ -172,3 +172,44 @@ fn retire_leaves_another_installations_interface_and_filter() {
         "link {link}, table {table}: another installation's mesh was removed"
     );
 }
+
+/// With a recorded interface, an unmarked link that replaced it is still not
+/// ours: uninstall leaves it, names it, and does not fail (#235).
+#[test]
+#[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
+fn retire_with_a_record_leaves_a_foreign_interface_and_names_it() {
+    let state = fresh_state("retire-record-foreign");
+    Node::restore(&state).unwrap().up().unwrap();
+    assert!(ip(&["link", "delete", "infraternal0"]));
+    assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
+    let result = Node::retire(&state);
+    let survived = link_present();
+    cleanup(&state);
+    assert_eq!(result.unwrap(), ["infraternal0"]);
+    assert!(survived, "retire deleted an unmarked interface");
+}
+
+/// Our interface next to a foreign table of the filter's name: every object is
+/// decided first, ours goes, the foreign table stays and is named (#235).
+#[test]
+#[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
+fn retire_decides_every_object_and_leaves_a_foreign_table() {
+    let state = fresh_state("retire-record-table");
+    Node::restore(&state).unwrap().up().unwrap();
+    assert!(
+        Command::new("nft")
+            .args(["add", "table", "inet", "infraternal_mesh"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let planned = Node::plan_retirement(&state).map(|plan| plan.left().to_vec());
+    let planned_kept = link_present() && table_present();
+    let result = Node::retire(&state);
+    let (link, table) = (link_present(), table_present());
+    cleanup(&state);
+    assert_eq!(planned.unwrap(), ["infraternal_mesh"]);
+    assert!(planned_kept, "planning changed the kernel");
+    assert_eq!(result.unwrap(), ["infraternal_mesh"]);
+    assert!(!link && table, "link {link}, table {table}");
+}

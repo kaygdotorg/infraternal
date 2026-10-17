@@ -7,7 +7,7 @@
 use super::outcome;
 
 fn manual(mode: &str) -> String {
-    outcome("unreachable", mode, "host.example").1.unwrap()
+    outcome("unreachable", mode, "host.example", &[]).1.unwrap()
 }
 
 /// The server machine joins its own mesh (D239) with the same interface name;
@@ -50,4 +50,16 @@ fn review_manual_commands_stop_only_this_installations_sessions() {
             "{mode}: stops every infraternal session on the machine: {commands}"
         );
     }
+}
+
+/// A kernel object the host's installation did not create is named in the
+/// message, so the owner knows it stayed on purpose (#235).
+#[test]
+fn accepted_uninstall_names_the_objects_it_leaves() {
+    let (message, manual) = outcome("requested", "rootful", "host.example", &["infraternal0"]);
+    assert_eq!(
+        message,
+        "host.example was removed. Its infraternal agent is uninstalling itself. Left infraternal0 because infraternal didn't create it here."
+    );
+    assert!(manual.is_none());
 }

@@ -767,8 +767,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         })
         .await
         .expect("the harness did not release removal");
-        let cleanup = crate::remote_removal::request_uninstall(&f.backend.hosts, host).await;
-        println!("REMOVAL breakit2 host_cleanup={cleanup}");
+        let (cleanup, left) =
+            crate::remote_removal::request_uninstall(&f.backend.hosts, host).await;
+        println!("REMOVAL breakit2 host_cleanup={cleanup} left={left:?}");
         assert_eq!(cleanup, "requested", "the joined host did not accept its uninstall");
         f.backend
             .issuer

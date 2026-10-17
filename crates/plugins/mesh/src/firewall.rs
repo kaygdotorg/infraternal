@@ -74,6 +74,20 @@ impl Firewall {
             }
         });
     }
+    /// How host uninstall names this filter when it leaves it in place (#235).
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        if self.is_fallback() {
+            "the IFM_* iptables chains"
+        } else {
+            TABLE
+        }
+    }
+    /// Whether the last `adopt` found our marked filter installed.
+    #[must_use]
+    pub fn installed(&self) -> bool {
+        self.installed
+    }
     fn is_fallback(&self) -> bool {
         matches!(self.backend, Some(Backend::NfTables))
     }

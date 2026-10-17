@@ -150,11 +150,38 @@ fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) 
     Ok(())
 }
 
+/// Kernel objects an installation leaves outside its files (the mesh
+/// interface and packet filter), handled by the build that owns them (#235).
+///
+/// Both functions take the installation's public state directory and return
+/// the names of objects with our name that this installation did not create:
+/// those are left in place and reported, never a reason to fail.
+#[derive(Clone, Copy)]
+pub struct Kernel {
+    /// Decide ownership of every object, changing nothing.
+    pub inspect: fn(&Path) -> io::Result<Vec<&'static str>>,
+    /// Delete the objects this installation created.
+    pub retire: fn(&Path) -> io::Result<Vec<&'static str>>,
+}
+impl Kernel {
+    /// A build or account that never creates kernel objects.
+    pub const NONE: Self = Self {
+        inspect: |_| Ok(Vec::new()),
+        retire: |_| Ok(Vec::new()),
+    };
+}
+/// Report line for a kernel object uninstall leaves in place.
+#[must_use]
+pub fn left_line(name: &str) -> String {
+    format!("Left {name} because infraternal didn't create it here.")
+}
+
 /// Enabled only for a checked managed remote installation, without an idle task.
 pub struct UninstallPlugin {
     context: Context,
     home: PathBuf,
     uid: u32,
+    kernel: Kernel,
     // The service manager's transient-unit launcher. Tests substitute an inert
     // program so a handoff never starts a real unit on the build host.
     launcher: &'static str,
@@ -162,7 +189,7 @@ pub struct UninstallPlugin {
 impl UninstallPlugin {
     /// # Errors
     /// Refuses a foreground or unrelated installation before registering its handler.
-    pub fn new(context: Context, home: PathBuf, uid: u32) -> io::Result<Self> {
+    pub fn new(context: Context, home: PathBuf, uid: u32, kernel: Kernel) -> io::Result<Self> {
         // The service starts while bootstrap still holds its publication lock.
         // Register the owned handler now; every call and cleanup rechecks the
         // lock, so installation must finish before any removal is accepted.
@@ -171,6 +198,7 @@ impl UninstallPlugin {
             context,
             home,
             uid,
+            kernel,
             launcher: "systemd-run",
         })
     }
@@ -215,9 +243,16 @@ impl AgentPlugin for UninstallPlugin {
             return Err(PluginError::Rejected);
         }
         validate(&self.context, &self.home, self.uid).map_err(|_| PluginError::Rejected)?;
+        // Decide every kernel object before accepting, so the server can say
+        // which ones stay, and a failed query refuses with nothing changed.
+        let left =
+            (self.kernel.inspect)(&self.context.sessions).map_err(|_| PluginError::Rejected)?;
         if request.dry_run {
             return Ok(ActionReply {
-                json: br#"{"state":"ready","owned":true}"#.to_vec(),
+                json: serde_json::to_vec(
+                    &serde_json::json!({"state":"ready","owned":true,"left":left}),
+                )
+                .map_err(|_| PluginError::Rejected)?,
                 after_write: None,
             });
         }
@@ -246,7 +281,10 @@ impl AgentPlugin for UninstallPlugin {
             plan: path,
         };
         Ok(ActionReply {
-            json: br#"{"state":"accepted","cleanup":"pending"}"#.to_vec(),
+            json: serde_json::to_vec(
+                &serde_json::json!({"state":"accepted","cleanup":"pending","left":left}),
+            )
+            .map_err(|_| PluginError::Rejected)?,
             after_write: Some(Box::new(move || handoff.start())),
         })
     }
@@ -385,6 +423,11 @@ async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
     }
 }
 async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
+    // Unit tests build complete fixture installations under the build
+    // account; they must never reach that account's real service manager.
+    if cfg!(test) {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
     let mut command = Command::new("systemctl");
     infraternal_shim::prepare_child(command.as_std_mut());
     if paths.user {
@@ -404,20 +447,23 @@ async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
 }
 /// Execute the private plan only in the independent helper, revalidating ownership.
 ///
-/// `retire_kernel` runs once the service is stopped and before any file is
-/// removed, with the public state directory. It removes kernel objects that
-/// outlive the daemon process (the mesh interface and packet filter), which this
-/// crate does not own. A failure there stops cleanup with the files intact.
+/// Order (#235): ownership of every file and kernel object is decided before
+/// anything is stopped, so a refusal leaves a working installation. Kernel
+/// objects outlive the daemon process, so they are removed once the service
+/// has stopped and before any file goes. An object with our name that this
+/// installation did not create stays and is reported, never a failure.
+/// Returns one report line per object left in place.
 /// # Errors
 /// Leaves unrelated artifacts untouched and refuses incomplete shell retirement, manager or kernel failure.
 pub async fn cleanup(
     context: &Context,
     home: &Path,
     uid: u32,
-    retire_kernel: impl FnOnce(&Path) -> io::Result<()>,
-) -> io::Result<()> {
+    kernel: Kernel,
+) -> io::Result<Vec<String>> {
     validate(context, home, uid)?;
     let paths = layout(context, home, uid)?;
+    (kernel.inspect)(&context.sessions)?;
     let sockets = context.sessions.join("sessions");
     if sockets.exists() {
         let metadata = std::fs::symlink_metadata(&sockets)?;
@@ -440,12 +486,15 @@ pub async fn cleanup(
     manager(&paths, &["disable", "--now", "infraternal-agent.service"]).await?;
     // Recheck after manager calls; never unlink a replacement made during stop.
     validate(context, home, uid)?;
-    retire_kernel(&context.sessions)?;
+    let report = (kernel.retire)(&context.sessions)?
+        .into_iter()
+        .map(left_line)
+        .collect();
     std::fs::remove_file(&paths.unit)?;
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;
     std::fs::remove_dir_all(&paths.base)?;
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -496,7 +545,7 @@ mod tests {
             return;
         };
         let base = context.data.parent().unwrap().to_owned();
-        let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid);
+        let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid, Kernel::NONE);
         let registered = plugin.is_ok();
         if let Ok(plugin) = &mut plugin {
             let input =
@@ -521,7 +570,8 @@ mod tests {
         let Some((home, context, uid)) = installation("h", false) else {
             return;
         };
-        let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid).unwrap();
+        let mut plugin =
+            UninstallPlugin::new(context.clone(), home.clone(), uid, Kernel::NONE).unwrap();
         plugin.launcher = "true";
         let input =
             serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":false})).unwrap();
@@ -544,7 +594,10 @@ mod tests {
         let consumed = !plan.exists();
         std::fs::remove_dir_all(home).unwrap();
         let json = worker.expect("the uninstall handoff panicked off the async runtime");
-        assert_eq!(json, br#"{"state":"accepted","cleanup":"pending"}"#);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({"state":"accepted","cleanup":"pending","left":[]})
+        );
         // The helper finds exactly the plan for this installation, once.
         assert_eq!(taken.unwrap().host, context.host);
         assert!(consumed);
@@ -580,7 +633,8 @@ mod tests {
         let Some((home, context, uid)) = installation("f", false) else {
             return;
         };
-        let mut plugin = UninstallPlugin::new(context.clone(), home.clone(), uid).unwrap();
+        let mut plugin =
+            UninstallPlugin::new(context.clone(), home.clone(), uid, Kernel::NONE).unwrap();
         plugin.launcher = "false";
         let input =
             serde_json::to_vec(&serde_json::json!({"host":context.host,"dry_run":false})).unwrap();
@@ -591,6 +645,29 @@ mod tests {
         let left = plan_path(&home, uid).exists();
         std::fs::remove_dir_all(&home).unwrap();
         assert!(!left, "a failed launcher left its uninstall plan behind");
+    }
+    /// #235: kernel ownership is decided before the service is stopped; a
+    /// failed check leaves a working installation, not a stopped one.
+    #[tokio::test]
+    async fn a_failed_kernel_check_stops_cleanup_before_the_service() {
+        let Some((home, context, uid)) = installation("k", false) else {
+            return;
+        };
+        let refused = Kernel {
+            inspect: |_| Err(io::ErrorKind::ConnectionRefused.into()),
+            retire: |_| Ok(Vec::new()),
+        };
+        let checked = cleanup(&context, &home, uid, refused).await;
+        // With the check passing, cleanup goes on to the service manager.
+        let reached = cleanup(&context, &home, uid, Kernel::NONE).await;
+        let intact = validate(&context, &home, uid).is_ok();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(
+            checked.unwrap_err().kind(),
+            io::ErrorKind::ConnectionRefused
+        );
+        assert_eq!(reached.unwrap_err().kind(), io::ErrorKind::Unsupported);
+        assert!(intact, "a refused check changed the installation");
     }
     #[tokio::test]
     async fn retirement_signals_the_shell_after_its_foreground_job_exits() {

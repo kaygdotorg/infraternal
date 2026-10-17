@@ -170,10 +170,10 @@ impl Removal {
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
             .bind(entry.host.as_bytes().as_slice()).bind(&entry.user).bind(live).bind(entry.uninstall).execute(&mut *tx).await?;
-        let cleanup = if entry.uninstall {
+        let (cleanup, left) = if entry.uninstall {
             request_uninstall(&self.hosts, entry.host).await
         } else {
-            "retained"
+            ("retained", Vec::new())
         };
         sqlx::query(
             "UPDATE remote_host_removals SET host_cleanup=?,completed_at=? WHERE host_id=?",
@@ -216,21 +216,26 @@ impl Removal {
             .commit_revocation(tx, entry.host)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let (message, manual) = outcome(cleanup, &mode, display_name(&name));
+        let (message, manual) = outcome(cleanup, &mode, display_name(&name), &left);
         Ok(
             json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual}),
         )
     }
 }
 /// What removal tells the person, and the commands for a leftover install.
-fn outcome(cleanup: &str, mode: &str, name: &str) -> (String, Option<String>) {
+fn outcome(cleanup: &str, mode: &str, name: &str, left: &[&str]) -> (String, Option<String>) {
     match cleanup {
-        "requested" => (
-            format!(
-                "{name} was removed. Its infraternal agent accepted the uninstall and is removing itself."
-            ),
-            None,
-        ),
+        "requested" => {
+            let mut message =
+                format!("{name} was removed. Its infraternal agent is uninstalling itself.");
+            // Kernel objects with our name that the host's installation did
+            // not create stay; say which, so nobody removes them by hand (#235).
+            for object in left {
+                message.push(' ');
+                message.push_str(&infraternal_plugin_remote::uninstall::left_line(object));
+            }
+            (message, None)
+        }
         "retained" => (
             format!("{name} was removed here. Its infraternal agent stays installed on it."),
             None,
@@ -258,25 +263,42 @@ fn outcome(cleanup: &str, mode: &str, name: &str) -> (String, Option<String>) {
 /// `requested` only when the host accepted the exact action; any refusal, error
 /// or absent connection is `unreachable`, which the caller reports as a leftover
 /// installation. The real-binary removal check calls this same path (#235).
-pub(crate) async fn request_uninstall(hosts: &RemoteHosts, host: Uuid) -> &'static str {
+///
+/// With `requested` come the kernel objects the host will leave because its
+/// installation did not create them. Only names this server knows are kept:
+/// a host never puts its own text into the owner's message.
+pub(crate) async fn request_uninstall(
+    hosts: &RemoteHosts,
+    host: Uuid,
+) -> (&'static str, Vec<&'static str>) {
+    const KNOWN: [&str; 3] = [
+        "infraternal0",
+        "infraternal_mesh",
+        "the IFM_* iptables chains",
+    ];
     let Some(actor) = hosts.actor(host).await else {
-        return "unreachable";
+        return ("unreachable", Vec::new());
     };
     let Ok(input) = serde_json::to_vec(&json!({"host":host.simple().to_string(),"dry_run":false}))
     else {
-        return "unreachable";
+        return ("unreachable", Vec::new());
     };
-    match actor
+    let reply = actor
         .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
         .await
-    {
-        Ok(bytes)
-            if serde_json::from_slice::<Value>(&bytes)
-                .is_ok_and(|reply| reply["state"] == "accepted") =>
-        {
-            "requested"
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    match reply {
+        Some(reply) if reply["state"] == "accepted" => {
+            let left = reply["left"].as_array().map_or_else(Vec::new, |left| {
+                KNOWN
+                    .into_iter()
+                    .filter(|known| left.iter().any(|name| name == known))
+                    .collect()
+            });
+            ("requested", left)
         }
-        _ => "unreachable",
+        _ => ("unreachable", Vec::new()),
     }
 }
 /// The machine part of a stored `account@machine` address, as people name the host.

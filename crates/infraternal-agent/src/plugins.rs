@@ -89,6 +89,7 @@ pub(crate) fn registry_at(
             context.clone(),
             home,
             nix::unistd::Uid::effective().as_raw(),
+            KERNEL,
         ) {
             registry.register(Box::new(plugin))?;
         }
@@ -105,21 +106,37 @@ pub(crate) fn registry_at(
     Ok(registry)
 }
 
-/// Remove kernel objects a stopped infraternal agent leaves behind, for host uninstall (D273, #235).
+/// Kernel objects an installation leaves outside its files, for host uninstall (D273, #235).
 ///
 /// The mesh interface and its packet filter belong to the kernel, not to the
 /// daemon process, so stopping the service keeps them (by design across
 /// restarts). Only the root infraternal agent can create them; a rootless
-/// installation has none to remove.
-/// # Errors
-/// Reports a kernel cleanup failure, or an interface or table with our name that we do not own.
-pub fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<()> {
+/// installation has none. Ownership is this installation's mesh state record,
+/// never the shared name or marker: see `Node::plan_retirement`.
+#[cfg(feature = "remote")]
+pub const KERNEL: infraternal_plugin_remote::uninstall::Kernel =
+    infraternal_plugin_remote::uninstall::Kernel {
+        inspect: inspect_kernel_state,
+        retire: retire_kernel_state,
+    };
+#[cfg(feature = "remote")]
+fn inspect_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static str>> {
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    if nix::unistd::Uid::effective().is_root() {
+        return infraternal_plugin_mesh::node::Node::plan_retirement(state)
+            .map(|plan| plan.left().to_vec());
+    }
+    let _ = state;
+    Ok(Vec::new())
+}
+#[cfg(feature = "remote")]
+fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static str>> {
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     if nix::unistd::Uid::effective().is_root() {
         return infraternal_plugin_mesh::node::Node::retire(state);
     }
     let _ = state;
-    Ok(())
+    Ok(Vec::new())
 }
 
 /// Exact private handoff decoder shared with parser fuzzing; parsing grants no authority.

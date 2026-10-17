@@ -39,7 +39,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
               action: { label: "Copy commands", onSelect: () => { void navigator.clipboard.writeText(manual).then(() => core.toast.show({ message: `Commands copied. Run them on ${name}.`, duration: 5000 }), () => core.toast.show({ message: result.message, tone: "error", dismissible: true })); } },
             });
           } else {
-            core.toast.show({ message: result.host_cleanup === "requested" ? `${name} was removed. Its infraternal agent is uninstalling itself.` : result.message, duration: 5000 });
+            core.toast.show({ message: result.message, duration: 5000 });
           }
         })().catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "Host removal failed. Try again.", tone: "error", duration: 6000 })).finally(() => { busy = false; });
       } });
