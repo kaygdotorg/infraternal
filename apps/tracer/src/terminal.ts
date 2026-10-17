@@ -1,7 +1,7 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
-import { plainCloseReason } from "./close-reasons";
+import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -871,9 +871,7 @@ export class TerminalClient {
             this.connectionIsResume = true;
             this.replayResponseFence = undefined;
             this.suppressReplayResponses = true;
-            this.setStatus(typeof notice.reason === "string"
-              ? plainCloseReason(notice.reason)
-              : "Catching up…");
+            this.setStatus(recoveringReason(typeof notice.reason === "string" ? notice.reason : undefined));
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
             this.setStatus("Reconnected. The screen may be slightly out of date.");
           } else if (notice.type === "terminal.snapshot_unavailable") {
@@ -915,7 +913,8 @@ export class TerminalClient {
         return;
       case "Close":
         if (frame.code === CLOSE_SESSION_GONE) { this.endSession(); return; }
-        this.setStatus(plainCloseReason(frame.reason));
+        // Every other stream close reattaches by itself, so its status never reads as an ending.
+        this.setStatus(reattachReason(frame.reason));
         if (this.ownsConnection) this.conn.forceClose(frame.code, frame.reason);
         else this.retryStream();
         return;

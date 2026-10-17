@@ -1,6 +1,6 @@
 /** Keep socket close reasons readable while retries retain the specific cause. */
 import { expect, test } from "bun:test";
-import { CloseNotes, plainCloseReason } from "./close-reasons";
+import { CloseNotes, plainCloseReason, reattachReason, recoveringReason } from "./close-reasons";
 
 test("a missed connection response keeps a plain and stable reason", () => {
   expect(plainCloseReason("connection unresponsive")).toBe("The connection did not respond in time.");
@@ -29,6 +29,20 @@ test("server and host close reasons identify why a terminal reconnects, in plain
 
 test("routine detach and connection rotation reasons stay neutral", () => {
   expect(plainCloseReason("tracer connection rotation")).toBe("The connection is being refreshed.");
+});
+
+test("a stream close that reattaches never says the terminal ended", () => {
+  for (const reason of ["session ended", "detached", "attachment ended", "", undefined, "something new"]) {
+    expect(reattachReason(reason)).toBe("Reconnecting to the terminal…");
+  }
+  expect(reattachReason("the host could not accept the terminal attachment")).toBe("The host could not open this terminal right now.");
+});
+
+test("a recovering server link names its cause as routine status, never as a failure", () => {
+  const text = recoveringReason("the infraternal agent lost its connection to the server");
+  expect(text).toBe("The infraternal agent on the host lost its connection to the server. Reconnecting…");
+  expect(text.endsWith("…")).toBe(true);
+  expect(recoveringReason("secret")).toBe("Catching up…");
 });
 
 test("unknown close text is discarded instead of reaching the person or console", () => {

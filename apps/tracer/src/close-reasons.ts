@@ -50,6 +50,25 @@ export function plainCloseReason(reason: string | undefined, fallback = "The ter
   return known((reason ?? "").trim()) ?? fallback;
 }
 
+/** Closes after which the window reattaches by itself, so none of them may read as an ending. */
+const REATTACHING = new Set(["detached", "attachment ended", "session ended"]);
+const REATTACH_STATUS = "Reconnecting to the terminal…";
+
+/**
+ * The status for a terminal stream close that is not final: the window reattaches by itself. A known problem keeps
+ * its sentence; a routine detach, an ended attachment or an unknown reason says only that it is reconnecting.
+ */
+export function reattachReason(reason: string | undefined): string {
+  const key = (reason ?? "").trim();
+  return REATTACHING.has(key) ? REATTACH_STATUS : known(key) ?? REATTACH_STATUS;
+}
+
+/** The status while the infraternal agent's server link recovers: the cause, then that it recovers by itself. */
+export function recoveringReason(reason: string | undefined): string {
+  const sentence = known((reason ?? "").trim());
+  return sentence ? `${sentence} Reconnecting…` : "Catching up…";
+}
+
 const CLOSE_NOTE_WINDOW_MS = 60_000;
 
 /**
