@@ -143,8 +143,8 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,318,096 bytes |
-  | `aarch64-unknown-linux-musl` | 19,520,232 bytes |
+  | `x86_64-unknown-linux-musl` | 21,320,784 bytes |
+  | `aarch64-unknown-linux-musl` | 19,522,920 bytes |
 
   These are the #230 measurements of the full-feature release recipe after
   sharing the SSH setup-lock literal, optimizing its management crate for size,
@@ -159,7 +159,9 @@ Reviews and fixes run at the same time as the next lane's build.
   Shared descriptor/argument paths and compact legacy inspection outcomes
   reduce them by a further 6,944 / 544 bytes (#230). Reading legacy control
   endpoints from one kernel socket dump instead of the text socket table
-  removes another 3,904 / 3,328 bytes, to the table values (#230).
+  removes another 3,904 / 3,328 bytes (#230). Checking live session
+  endpoints through the same dump instead of socket names adds back 2,688
+  bytes on both targets, to the table values (#230 R10).
   The earlier #198 reductions remain: unused native APIs, duplicated action
   metadata construction, OpenSSL's
   unused VAES/AVX-512 AES-GCM dispatch, and unused Axum extractor features were
