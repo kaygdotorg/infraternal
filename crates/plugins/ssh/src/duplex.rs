@@ -1,6 +1,9 @@
 //! Owns a full-duplex SSH command channel and its cancellation-safe child group for D255.
 
-use crate::{model::Failure, process::Group};
+use crate::{
+    model::{Failure, FailureKind},
+    process::Group,
+};
 use std::{os::unix::process::CommandExt, process::Stdio};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -59,14 +62,19 @@ impl Duplex {
 
     /// Read a bounded canonical setup receipt without consuming protocol bytes.
     /// # Errors
-    /// Refuses EOF or an oversized receipt without exposing remote output.
+    /// Classifies a closed command channel as unreachable and refuses oversized receipts.
     pub async fn line(&self, limit: usize) -> Result<Vec<u8>, Failure> {
         let mut line = Vec::new();
         let mut reader = self.read.lock().await;
         while line.len() < limit {
             let mut byte = [0];
-            if reader.read(&mut byte).await.map_err(|_| unavailable())? != 1 {
-                return Err(unavailable());
+            if reader.read(&mut byte).await.map_err(|_| unavailable())? == 0 {
+                // EOF means this command channel closed before it could return a receipt. The
+                // explicit retry path may then authenticate a new transport and recheck ownership.
+                return Err(Failure::new(
+                    FailureKind::Unreachable,
+                    "The SSH command channel closed before its receipt.",
+                ));
             }
             line.push(byte[0]);
             if byte[0] == b'\n' {
@@ -117,5 +125,16 @@ mod tests {
             received += channel.read(&mut actual[received..]).await.unwrap();
         }
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn closed_receipt_channel_is_reported_as_unreachable() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 255"]);
+        let channel = Duplex::spawn(&mut command).unwrap();
+        let Err(failure) = channel.line(64).await else {
+            panic!("a child that exits without a receipt must close its command channel");
+        };
+        assert_eq!(failure.kind, FailureKind::Unreachable);
     }
 }

@@ -303,6 +303,13 @@ impl SshSession for RecoverableSession {
         &'a self,
         script: &'a str,
     ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        if self.generation == 0 && self.disconnected.load(std::sync::atomic::Ordering::SeqCst) {
+            return Box::pin(async {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command.args(["-c", "exit 255"]);
+                infraternal_plugin_ssh::duplex::Duplex::spawn(&mut command)
+            });
+        }
         if !self.available() {
             return Box::pin(async {
                 Err(infraternal_plugin_ssh::model::Failure::new(
