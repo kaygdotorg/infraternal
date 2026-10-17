@@ -225,37 +225,44 @@ fn review_stale_receipt_recovers_without_host_python() {
 /// A process still owns its bound control socket during the bind-to-listen gap.
 #[test]
 fn review_bound_control_socket_before_listen_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(false, None, false);
+    bound_legacy_control_socket_retains_receipt(false, None, false, false);
 }
 
 /// Restricted descriptor inspection cannot prove a bound legacy endpoint stale.
 #[test]
 fn private_legacy_control_socket_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(true, None, false);
+    bound_legacy_control_socket_retains_receipt(true, None, false, false);
 }
 
 /// The kernel's socket name includes the full home path, including spaces.
 #[test]
 fn legacy_control_socket_in_spaced_home_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(false, Some(" space"), false);
+    bound_legacy_control_socket_retains_receipt(false, Some(" space"), false, false);
 }
 
 /// Another directory's same-user endpoint is not runtime ownership of this file.
 #[test]
 fn unrelated_same_user_relative_socket_does_not_block_cleanup() {
-    bound_legacy_control_socket_retains_receipt(false, None, true);
+    bound_legacy_control_socket_retains_receipt(false, None, true, false);
 }
 
 /// A kernel socket name can contain a newline without ending runtime ownership.
 #[test]
 fn legacy_control_socket_in_newline_home_preserves_receipt() {
-    bound_legacy_control_socket_retains_receipt(false, Some("\nname"), false);
+    bound_legacy_control_socket_retains_receipt(false, Some("\nname"), false, false);
+}
+
+/// An absolute alias still names the same owned control endpoint.
+#[test]
+fn legacy_control_socket_through_absolute_alias_preserves_receipt() {
+    bound_legacy_control_socket_retains_receipt(false, None, false, true);
 }
 
 fn bound_legacy_control_socket_retains_receipt(
     private: bool,
     home_suffix: Option<&str>,
     unrelated: bool,
+    aliased: bool,
 ) {
     let mut host = MinimalHost::new();
     if let Some(suffix) = home_suffix {
@@ -275,7 +282,11 @@ fn bound_legacy_control_socket_retains_receipt(
         fs::remove_file(&control).unwrap();
         host.base()
     };
-    let endpoint = if unrelated {
+    let endpoint = if aliased {
+        let alias = host.root.join("alias");
+        std::os::unix::fs::symlink(host.base(), &alias).unwrap();
+        alias.join("sessions/plugins.sock")
+    } else if unrelated {
         bind_directory.join("plugins.sock")
     } else {
         control.clone()
@@ -287,7 +298,7 @@ fn bound_legacy_control_socket_retains_receipt(
     } else {
         ""
     };
-    let address = if home_suffix.is_some() {
+    let address = if home_suffix.is_some() || aliased {
         "sys.argv[1]"
     } else if unrelated {
         "'plugins.sock'"
