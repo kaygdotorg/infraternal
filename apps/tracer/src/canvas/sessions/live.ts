@@ -329,7 +329,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       const local = !explicit && (embeddedTarget || hostName === host.name && matches.length === 0);
       return {
         id: `t-${crypto.randomUUID()}`, kind: "terminal", host: remote?.name ?? (local ? host.name : hostName),
-        ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local && host.user ? { user: host.user, ...(host.os ? { os: host.os } : {}) } : { noAccess: !local }),
+        ...(remote ? { hostId: remote.id, ...(remote.user ? { user: remote.user } : {}), ...(remote.os ? { os: remote.os } : {}), ...(remote.address ? { address: remote.address } : {}) } : local ? { ...(host.user ? { user: host.user } : {}), ...(host.os ? { os: host.os } : {}) } : { noAccess: true }),
         ...(opts?.from ? { splitOf: opts.from.id } : {}),
         ...(opts?.session ? { sessionId: opts.session } : {}),
       };
@@ -349,7 +349,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       return removed;
     },
     forgetHost(id) { remotes.delete(id); for (const listener of listeners) listener(); },
-    hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}) }, ...remotes.values()]; },
+    hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}), ...(host.os ? { os: host.os } : {}) }, ...remotes.values()]; },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     activeClient: () => active?.client,
     markGone(host, sessionId, status) { for (const binding of bindings) binding.markGone(host, sessionId, status); },

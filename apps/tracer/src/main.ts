@@ -418,7 +418,7 @@ async function showTerminal(knownSession?: Awaited<ReturnType<typeof checkSessio
     try {
       const { mountProductCanvas } = await import("./canvas/product");
       productCanvas = await mountProductCanvas(screen, {
-        host: { name: hostName, ...(identity?.username ? { user: identity.username } : {}) },
+        host: { name: hostName },
         accountId: activeUserId ?? "account",
         predictiveEcho,
         ...(productTestMode ? { onFirstClient: (client: TerminalClient) => {

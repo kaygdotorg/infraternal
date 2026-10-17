@@ -84,3 +84,12 @@ test("the embedded inventory identity still opens locally beside an equally name
   expect(sessions.open(id).hostId).toBe(id);
   sessions.dispose();
 });
+test("the embedded host's mark does not wait for an account name, and no account is invented", () => {
+  const sessions = createLiveSessions({ core: {} as CoreScreen, connection: {} as MuxConnection, host: { name: "server", os: "nixos" } });
+  const model = sessions.open("server");
+  expect(model.os).toBe("nixos");
+  expect(model.user).toBeUndefined();
+  expect(model.noAccess).toBeUndefined();
+  expect(sessions.open("missing").noAccess).toBe(true);
+  sessions.dispose();
+});
