@@ -46,6 +46,15 @@ const INTERACTIVE_READ_BYTES: usize = 4096;
 const BULK_READ_BYTES: usize = 16 * 1024;
 // Aggregate history is bounded at scale rather than multiplying defaults by 1000.
 const HOST_HISTORY_BYTES: usize = 64 * 1024 * 1024;
+/// Native VT bytes shared above the per-session floors [D270, #205]: the
+/// history shares with their page headers, plus one full screen reservation
+/// so a single large geometry fits. All sessions together stay under
+/// `sessions * SESSION_SCREEN_BYTES + HOST_NATIVE_POOL_BYTES`.
+const HOST_NATIVE_POOL_BYTES: usize = HOST_HISTORY_BYTES + HOST_HISTORY_BYTES / 8 + 8 * 1024 * 1024;
+/// Native bytes each session owns outright: an idle 80x24 terminal and a few
+/// history pages to recycle, so output never fails when the pool is empty.
+const SESSION_SCREEN_BYTES: usize = 256 * 1024;
+const MAX_SESSIONS: usize = 1000;
 const PEER_BYTES: usize = 4 * 1024 * 1024;
 const SESSION_BYTES: usize = 16 * 1024 * 1024;
 
@@ -55,6 +64,8 @@ struct LazyTerminal {
     cols: u16,
     rows: u16,
     history: usize,
+    /// The host-wide native ceiling this terminal charges once materialized.
+    host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
 }
 struct LazyState {
     terminal: Option<Box<Terminal>>,
@@ -80,15 +91,17 @@ impl LazyTerminal {
             cols,
             rows,
             history,
+            host: None,
         }
     }
     fn materialize(&self) -> io::Result<()> {
         let mut state = self.state.borrow_mut();
         if state.terminal.is_none() {
-            let mut terminal = Box::new(Terminal::with_history_budget(
+            let mut terminal = Box::new(Terminal::with_host_budget(
                 state.origin.0,
                 state.origin.1,
                 self.history,
+                self.host.clone(),
             )?);
             let mut start = 0;
             for &(end, cols, rows) in &state.resizes {
@@ -827,7 +840,7 @@ pub fn run_host_accounted(
     accounting: Option<std::fs::File>,
 ) -> io::Result<()> {
     if configs.is_empty()
-        || configs.len() > 1000
+        || configs.len() > MAX_SESSIONS
         || configs.iter().enumerate().any(|(i, c)| {
             c.uid != Uid::effective().as_raw()
                 || c.cols == 0
@@ -875,9 +888,15 @@ pub fn run_host_accounted(
     for config in &mut configs {
         config.ring_capacity = config.ring_capacity.min(ring_budget);
     }
+    let native =
+        crate::terminal_memory::HostBudget::new(HOST_NATIVE_POOL_BYTES, SESSION_SCREEN_BYTES);
     let sessions = configs
         .into_iter()
-        .map(|config| Session::new(config, history))
+        .map(|config| {
+            let mut session = Session::new(config, history)?;
+            session.terminal.host = Some(native.clone());
+            Ok(session)
+        })
         .collect::<io::Result<Vec<_>>>()?;
     reactor::run(sessions, &signals, accounting)
 }

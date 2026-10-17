@@ -213,8 +213,15 @@ of its requested ring capacity and the host share; VT history is capped at
 allocator overhead and shell/kernel memory are additional. These history
 shares are retention limits, not a total host RSS budget. At 1,000 sessions each history share is 67,108 bytes. This is a
 retention trade-off, not a free process-sharing win; a smaller ring triggers
-more snapshots and provides less replay history. A production adoption still needs a dynamic whole-host byte pool and admission
-limits against the machine budget, including shell and kernel PTY memory.
+more snapshots and provides less replay history. Native VT memory of all
+sessions together is bounded by one host budget: each session owns its first
+256 KiB (an idle 80x24 terminal measures 60,574 B), and bytes above that come
+from one shared pool of 64 MiB of history, an eighth for page headers and one
+8 MiB screen reservation. At 1,000 sessions the ceiling is 330 MiB. With
+the pool empty, history growth recycles the session's own oldest page, which
+keeps state exact; other native requests are refused as at a full
+per-session reservation. A production adoption still needs admission limits
+against the machine budget, including rings, peers, shell and kernel PTY memory.
 
 The opt-in native page quantum is 80 columns by 32 rows, with one preheated
 pool item. Larger geometries still use the existing capacity/reflow algorithm.
@@ -467,8 +474,9 @@ ownership headers and mapping prefixes, so every share the host hands out
 (up to 17 MiB) fits. Screen-pool items are separate allocations with a reserve
 of two free items; pages released by erased history, a reset or a smaller
 geometry return to the allocator at once. Growth asks the allocator whether
-another item fits and otherwise recycles its oldest history page, so the
-reservation never makes ordinary output refuse an allocation. Ordinary native
+another item fits and otherwise recycles its oldest history page, so neither
+the per-terminal reservation nor the host budget makes ordinary output refuse
+an allocation. Ordinary native
 payload/metadata allocations share a **256 KiB** ceiling; explicitly tagged
 page-pool allocations use the remaining reservation. Size/alignment alone
 cannot identify a page request. Native page backing is zero-filled anonymous

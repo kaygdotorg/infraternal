@@ -4,18 +4,76 @@
 //! Retiring a nontransactional resize releases allocations directly without
 //! walking the potentially damaged native graph. Callbacks run synchronously
 //! on the reactor thread; the boxed ABI and context never move while borrowed.
+//! Terminals of one host may also share a [`HostBudget`], so the sum of their
+//! reservations cannot exceed the host's native byte budget.
 #![allow(unsafe_code)]
 use nix::libc;
 use std::{
     alloc::{Layout, alloc, dealloc},
     ffi::c_void,
     ptr::{self, NonNull},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 /// Resize-callback tag for a fit query on one more screen-pool item. The C
 /// allocator ABI has no query entry; native growth asks before allocating so
 /// it can recycle its oldest history page instead of being refused.
 const FIT_QUERY: usize = usize::MAX - 2;
+
+/// Native bytes shared by every terminal of one host [D270, #205].
+///
+/// Each terminal keeps its own reservation, and its first `floor` bytes are
+/// its own: admitted with the session, never taken by a neighbour, enough
+/// for an ordinary screen to keep recycling history. Bytes above the floor
+/// come from one shared pool of `limit` bytes, so all terminals together
+/// stay under `sessions * floor + limit`. When the pool is empty, history
+/// growth recycles the terminal's own oldest page (exact); other requests
+/// are refused like a full per-terminal reservation. The reactor is
+/// single-threaded; the atomic only keeps terminals `Send` without a lock.
+pub(crate) struct HostBudget {
+    used: AtomicUsize,
+    limit: usize,
+    floor: usize,
+}
+impl HostBudget {
+    pub(crate) fn new(limit: usize, floor: usize) -> Arc<Self> {
+        Arc::new(Self {
+            used: AtomicUsize::new(0),
+            limit,
+            floor,
+        })
+    }
+    /// Pool bytes a terminal at `used` needs to grow by `bytes`.
+    fn excess(&self, used: usize, bytes: usize) -> usize {
+        used.saturating_add(bytes).saturating_sub(self.floor) - used.saturating_sub(self.floor)
+    }
+    /// Pool bytes charged now; never above the limit, which `charge` enforces.
+    #[cfg(test)]
+    pub(crate) fn used(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+    fn fits(&self, used: usize, bytes: usize) -> bool {
+        self.excess(used, bytes) <= self.limit.saturating_sub(self.used.load(Ordering::Relaxed))
+    }
+    fn charge(&self, used: usize, bytes: usize) -> bool {
+        let bytes = self.excess(used, bytes);
+        bytes == 0
+            || self
+                .used
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |pool| {
+                    pool.checked_add(bytes).filter(|total| *total <= self.limit)
+                })
+                .is_ok()
+    }
+    /// `used` is the terminal's charge after `bytes` were released.
+    fn release(&self, used: usize, bytes: usize) {
+        self.used
+            .fetch_sub(self.excess(used, bytes), Ordering::Relaxed);
+    }
+}
 
 #[repr(C)]
 struct Vtable {
@@ -55,17 +113,27 @@ struct State {
     encoded_used: usize,
     encoded_limit: usize,
     page_size: usize,
+    host: Option<Arc<HostBudget>>,
 }
 impl Memory {
     // Native allocator pointers borrow the ABI and context, so constructing
     // the final stable box here is required rather than moving a stack value.
     #[allow(clippy::unnecessary_box_returns)]
-    #[cfg(any(test, not(feature = "compact-history")))]
+    #[cfg(test)]
     pub(super) fn new(limit: usize) -> Box<Self> {
-        Self::with_history(limit, 0)
+        Self::with_host(limit, 0, None)
     }
     #[allow(clippy::unnecessary_box_returns)]
+    #[cfg(all(test, feature = "compact-history"))]
     pub(super) fn with_history(limit: usize, encoded_limit: usize) -> Box<Self> {
+        Self::with_host(limit, encoded_limit, None)
+    }
+    #[allow(clippy::unnecessary_box_returns)]
+    pub(super) fn with_host(
+        limit: usize,
+        encoded_limit: usize,
+        host: Option<Arc<HostBudget>>,
+    ) -> Box<Self> {
         let mut memory = Box::new(Self {
             abi: Abi {
                 context: ptr::null_mut(),
@@ -81,6 +149,7 @@ impl Memory {
                 encoded_used: 0,
                 encoded_limit,
                 page_size: page_size(),
+                host,
             }),
         });
         memory.abi.context = memory.state.get().cast();
@@ -238,6 +307,11 @@ unsafe extern "C" fn allocate(
         || (!mapped && !encoded && layout.size() > (256 * 1024_usize).saturating_sub(ordinary))
         || (encoded && layout.size() > memory.encoded_limit.saturating_sub(memory.encoded_used))
         || (mapped && align > memory.page_size)
+        // Charged last: the host pool takes bytes only for an admitted request.
+        || memory
+            .host
+            .as_ref()
+            .is_some_and(|host| !host.charge(memory.used, layout.size()))
     {
         // Encoded history is an optional copy of still-resident exact state.
         // Refusing that optimization leaves the source page unchanged and
@@ -274,6 +348,9 @@ unsafe extern "C" fn allocate(
         unsafe { alloc(layout) }
     };
     let Some(base) = NonNull::new(base) else {
+        if let Some(host) = &memory.host {
+            host.release(memory.used, layout.size());
+        }
         if !encoded {
             memory.refused = true;
         }
@@ -337,6 +414,10 @@ unsafe extern "C" fn resize(
         return false;
     };
     size <= memory.limit.saturating_sub(memory.used)
+        && memory
+            .host
+            .as_ref()
+            .is_none_or(|host| host.fits(memory.used, size))
 }
 unsafe extern "C" fn remap(
     _: *mut c_void,
@@ -373,6 +454,9 @@ unsafe extern "C" fn release(ctx: *mut c_void, payload: *mut c_void, _: usize, _
         }
     }
     memory.used -= block.layout.size();
+    if let Some(host) = &memory.host {
+        host.release(memory.used, block.layout.size());
+    }
     if block.encoded {
         memory.encoded_used -= block.layout.size();
     }

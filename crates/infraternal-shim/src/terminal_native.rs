@@ -78,9 +78,14 @@ impl Engine {
     /// share: the share itself, one header page per screen-pool item, and a
     /// fixed allowance for the visible screens, parser state and the
     /// transient pages of a reflow. A history share therefore always fits,
-    /// whatever share the host hands out.
+    /// whatever share the host hands out. `host` adds the host-wide ceiling.
     #[cfg(feature = "process-per-user")]
-    pub fn bounded(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
+    pub fn bounded(
+        cols: u16,
+        rows: u16,
+        bytes: usize,
+        host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+    ) -> io::Result<Self> {
         #[cfg(not(feature = "compact-history"))]
         let limit = SCREEN_RESERVATION
             .saturating_add(bytes)
@@ -89,7 +94,7 @@ impl Engine {
         // Their encoded allocations still obey the configured history share.
         #[cfg(feature = "compact-history")]
         let limit = SCREEN_RESERVATION + bytes.saturating_mul(2);
-        Self::build(cols, rows, bytes, limit)
+        Self::build(cols, rows, bytes, limit, host)
     }
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
         Self::build(
@@ -97,16 +102,26 @@ impl Engine {
             rows,
             bytes,
             8 * 1024 * 1024 + bytes.saturating_mul(2) + usize::from(cols) * usize::from(rows) * 32,
+            #[cfg(feature = "process-per-user")]
+            None,
         )
     }
-    fn build(cols: u16, rows: u16, bytes: usize, limit: usize) -> io::Result<Self> {
+    fn build(
+        cols: u16,
+        rows: u16,
+        bytes: usize,
+        limit: usize,
+        #[cfg(feature = "process-per-user")] host: Option<
+            std::sync::Arc<crate::terminal_memory::HostBudget>,
+        >,
+    ) -> io::Result<Self> {
         #[cfg(not(feature = "process-per-user"))]
         let _ = limit;
         let mut raw = std::ptr::null_mut();
         #[cfg(all(feature = "process-per-user", not(feature = "compact-history")))]
-        let memory = crate::terminal_memory::Memory::new(limit);
+        let memory = crate::terminal_memory::Memory::with_host(limit, 0, host);
         #[cfg(feature = "compact-history")]
-        let memory = crate::terminal_memory::Memory::with_history(limit, bytes);
+        let memory = crate::terminal_memory::Memory::with_host(limit, bytes, host);
         #[cfg(not(feature = "process-per-user"))]
         let allocator = std::ptr::null();
         #[cfg(feature = "process-per-user")]

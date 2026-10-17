@@ -46,6 +46,8 @@ pub struct Terminal {
     #[cfg(feature = "process-per-user")]
     bounded: bool,
     #[cfg(feature = "process-per-user")]
+    host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+    #[cfg(feature = "process-per-user")]
     limits: crate::terminal_limits::Limits,
     observer: Observer,
     parser: vte::Parser,
@@ -79,17 +81,44 @@ impl Terminal {
     }
 
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
-        Self::build(cols, rows, SCROLLBACK_BYTES, false)
+        Self::build(
+            cols,
+            rows,
+            SCROLLBACK_BYTES,
+            false,
+            #[cfg(feature = "process-per-user")]
+            None,
+        )
     }
     /// Reuse the selected VT engine with an explicit research retention budget.
-    #[cfg(feature = "process-per-user")]
+    #[cfg(all(test, feature = "process-per-user"))]
     pub(super) fn with_history_budget(cols: u16, rows: u16, history: usize) -> io::Result<Self> {
-        Self::build(cols, rows, history, true)
+        Self::with_host_budget(cols, rows, history, None)
     }
-    fn build(cols: u16, rows: u16, history: usize, bounded: bool) -> io::Result<Self> {
+    /// A bounded terminal that also charges the host-wide native budget.
+    #[cfg(feature = "process-per-user")]
+    pub(super) fn with_host_budget(
+        cols: u16,
+        rows: u16,
+        history: usize,
+        host: Option<std::sync::Arc<crate::terminal_memory::HostBudget>>,
+    ) -> io::Result<Self> {
+        let mut terminal = Self::build(cols, rows, history, true, host.clone())?;
+        terminal.host = host;
+        Ok(terminal)
+    }
+    fn build(
+        cols: u16,
+        rows: u16,
+        history: usize,
+        bounded: bool,
+        #[cfg(feature = "process-per-user")] host: Option<
+            std::sync::Arc<crate::terminal_memory::HostBudget>,
+        >,
+    ) -> io::Result<Self> {
         #[cfg(feature = "process-per-user")]
         let engine = if bounded {
-            Engine::bounded(cols, rows, history)?
+            Engine::bounded(cols, rows, history, host)?
         } else {
             Engine::new(cols, rows, history)?
         };
@@ -104,6 +133,8 @@ impl Terminal {
             history_budget: history,
             #[cfg(feature = "process-per-user")]
             bounded,
+            #[cfg(feature = "process-per-user")]
+            host: None,
             #[cfg(feature = "process-per-user")]
             limits: crate::terminal_limits::Limits::default(),
             observer: Observer::default(),
@@ -230,7 +261,9 @@ impl Terminal {
             self.dimensions.1,
             self.history_budget,
             self.bounded,
+            self.host.clone(),
         )?;
+        restored.host = self.host.take();
         #[cfg(not(feature = "process-per-user"))]
         let mut restored = Self::new(self.dimensions.0, self.dimensions.1)?;
         let complete = ring.filter(|ring| ring.start() == 0 && self.recovery == Recovery::Exact);
