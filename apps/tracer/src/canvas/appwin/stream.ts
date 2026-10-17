@@ -38,6 +38,13 @@ const CONTROL_RETRY_MS = 15_000;
 /** The status poll while control is in use, and how long after the last input it keeps asking (an idle window asks nothing). */
 const STATUS_EVERY_MS = 500;
 const STATUS_WHILE_MS = 4000;
+/**
+ * How often a live, visible window asks the machine for its window's shape when nobody is typing (the status poll above
+ * reports it too while control is in use). The machine's own window follower runs once a second; this matches it.
+ */
+const SHAPE_EVERY_MS = 1000;
+/** A shape change smaller than this (relative) is rounding, not a new shape. */
+const SHAPE_EPSILON = 0.005;
 
 export interface StreamEvents {
   state(state: StreamState): void;
@@ -46,6 +53,8 @@ export interface StreamEvents {
   picture(size: { width: number; height: number }): void;
   /** The surface to show: made when the stream starts and when it comes back after being released; `undefined` when released. */
   surface(canvas: HTMLCanvasElement | undefined): void;
+  /** The machine's window (or screen) shape, width / height of what it captures: on the first report and on each change. */
+  shape(aspect: number): void;
 }
 
 export interface StreamOptions {
@@ -67,6 +76,11 @@ export interface MachineStatus {
   permission?: "Screen Recording" | "Accessibility";
   /** Remote input waits this long because someone is using the machine. */
   inputPausedMs?: number;
+  /**
+   * Width / height of what the machine captures (its window with its menus, or the screen), from `capture_rect`, when
+   * that shape is the machine's own: a screen, or a window that does not follow the canvas window's size.
+   */
+  shape?: number;
 }
 
 /**
@@ -83,6 +97,12 @@ export function parseStatus(value: unknown): MachineStatus {
   const input = v.input && typeof v.input === "object" ? v.input as Record<string, unknown> : undefined;
   const wait = input?.pause_remaining_ms;
   if (typeof wait === "number" && Number.isFinite(wait) && wait > 0 && wait <= 60_000) out.inputPausedMs = wait;
+  const rect = v.capture_rect && typeof v.capture_rect === "object" ? v.capture_rect as Record<string, unknown> : undefined;
+  const w = rect?.width, h = rect?.height;
+  // A window that follows the canvas window's size (reason "following") takes the canvas shape, so it reports none:
+  // shaping the canvas window to it would undo the person's own resize before the machine catches up.
+  const follows = v.reason === "following";
+  if (!follows && typeof w === "number" && typeof h === "number" && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) out.shape = w / h;
   return out;
 }
 
@@ -121,6 +141,9 @@ export class AppStream {
    * the server; this remembers the intent so the next welcome asks again by itself (no click needed).
    */
   private keepControl = false;
+  private shapeTimer = 0;
+  private shapeBusy = false;
+  private lastShape: number | undefined;
   private lastInputAt = -Infinity;
   private pausedTimer = 0;
   private statsWaiters: Array<(stats: WorkerStats) => void> = [];
@@ -271,6 +294,8 @@ export class AppStream {
     window.clearTimeout(this.statusTimer);
     this.statusTimer = 0;
     window.clearTimeout(this.pausedTimer);
+    window.clearTimeout(this.shapeTimer);
+    this.shapeTimer = 0;
   }
 
   private frame(frame: WireFrame): void {
@@ -328,6 +353,7 @@ export class AppStream {
         this.hadPicture = true;
         this.o.events.picture({ width: m.width, height: m.height });
         if (this.visible) this.setState({ kind: "live" });
+        this.pollShape();
         return;
       case "size": this.o.events.picture({ width: m.width, height: m.height }); return;
       case "repair":
@@ -370,14 +396,18 @@ export class AppStream {
     if (this.session && this.streamId === undefined && (this.state.kind === "paused" || this.state.kind === "connecting" || this.state.kind === "reconnecting")) this.attach();
   }
 
-  /** The window body's layout size changed: the machine's window follows it (A2). */
-  resize(css: { width: number; height: number; density: number }): void {
+  /**
+   * The window body's layout size changed: the machine's window follows it (A2). `byHand` is a resize by the person,
+   * an explicit control action; a change that only took the machine's own shape sends its size if control is already
+   * held and otherwise waits for it.
+   */
+  resize(css: { width: number; height: number; density: number }, byHand = true): void {
     const next = chooseSize(css.width, css.height, css.density);
     if (!sizeChanged(this.size, next)) return;
     this.size = next;
-    // Resizing is an explicit control action; merely attaching uses Start's size.
+    // Merely attaching uses Start's size; taking control sends the latest size.
     if (this.control.kind === "controlled" || this.control.kind === "paused") this.pushSize();
-    else void this.takeControl();
+    else if (byHand) void this.takeControl();
   }
 
   private pushSize(): void {
@@ -440,6 +470,36 @@ export class AppStream {
   /** Whether the person may try to control again (the view-only state shows until the retry window passes). */
   clearViewOnly(): void { if (this.control.kind === "view-only") this.setControl({ kind: "none" }); }
 
+  private noteShape(shape: number | undefined): void {
+    if (shape === undefined || this.disposed) return;
+    if (this.lastShape !== undefined && Math.abs(shape / this.lastShape - 1) < SHAPE_EPSILON) return;
+    this.lastShape = shape;
+    this.o.events.shape(shape);
+  }
+
+  /**
+   * Follows the machine's window shape while the picture is live and on screen, so the canvas window can take that shape
+   * (TASTE "A remote window takes its own shape"). One small call a second per visible window; none while hidden.
+   */
+  private pollShape(): void {
+    window.clearTimeout(this.shapeTimer);
+    this.shapeTimer = 0;
+    const session = this.session;
+    if (!session || !this.visible || !this.attached || this.disposed || this.shapeBusy) return;
+    const streamId = this.streamId;
+    const current = (): boolean => !this.disposed && this.session === session && this.streamId === streamId && this.visible;
+    const again = (): void => { if (current()) this.shapeTimer = window.setTimeout(() => this.pollShape(), SHAPE_EVERY_MS); };
+    // While the person is typing, the status poll already asks twice a second and reports the shape.
+    if (this.statusTimer) { again(); return; }
+    this.shapeBusy = true;
+    this.o.connection.call("desktop.session.clock", { session_id: session.id }).then((reply) => {
+      this.shapeBusy = false;
+      if (!current()) return;
+      this.noteShape(parseStatus(reply).shape);
+      again();
+    }, () => { this.shapeBusy = false; again(); });
+  }
+
   private pollStatus(): void {
     window.clearTimeout(this.statusTimer);
     this.statusTimer = 0;
@@ -454,6 +514,7 @@ export class AppStream {
       this.statusBusy = false;
       if (!current()) return;
       const status = parseStatus(reply);
+      this.noteShape(status.shape);
       if (status.gone) { this.setState({ kind: "closed" }); return; }
       if (status.permission) { this.setState({ kind: "permission", what: status.permission }); return; }
       window.clearTimeout(this.pausedTimer);

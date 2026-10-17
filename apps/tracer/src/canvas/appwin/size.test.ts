@@ -1,6 +1,6 @@
 /** The size a stream asks the machine for always passes the wire's checks (contracts/wire.md section 9, the helper's Size.validate). */
 import { expect, test } from "bun:test";
-import { chooseSize, densityMilli, sizeChanged } from "./size";
+import { chooseSize, densityMilli, shapeFor, sizeChanged } from "./size";
 
 /** The machine's own check, written out. */
 function acceptable(s: ReturnType<typeof chooseSize>): boolean {
@@ -33,4 +33,23 @@ test("rounding noise is not a resize", () => {
   expect(sizeChanged(a, chooseSize(461.4, 771.2, 2))).toBe(false);
   expect(sizeChanged(a, chooseSize(470, 771, 2))).toBe(true);
   expect(sizeChanged(undefined, a)).toBe(true);
+});
+
+const box = { width: 900, height: 700, chromeWidth: 2, chromeHeight: 40, minWidth: 300, maxWidth: 1800, minHeight: 160, maxHeight: 900 };
+
+test("a remote shape keeps the window's height and gives the picture area that aspect", () => {
+  const shaped = shapeFor(box, 2502 / 1378);
+  expect(shaped.height).toBe(700);
+  expect((shaped.width - box.chromeWidth) / (shaped.height - box.chromeHeight)).toBeCloseTo(2502 / 1378, 2);
+});
+
+test("a shape wider than the width limit keeps the limit and lowers the height instead", () => {
+  const shaped = shapeFor(box, 4);
+  expect(shaped.width).toBe(1800);
+  expect((shaped.width - box.chromeWidth) / (shaped.height - box.chromeHeight)).toBeCloseTo(4, 2);
+});
+
+test("a window that already has the remote shape is left alone", () => {
+  const aspect = (900 - 2) / (700 - 40);
+  expect(shapeFor(box, aspect)).toEqual({ width: 900, height: 700 });
 });

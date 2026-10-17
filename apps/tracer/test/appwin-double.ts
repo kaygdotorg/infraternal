@@ -58,6 +58,11 @@ const config = {
   windowsDelayMs: 0,
   /** The answer to `desktop.session.start` is delayed by this long (the connecting state). */
   startDelayMs: 0,
+  /**
+   * The machine's window keeps its own size (a window manager owns it, or it refuses a size): status replies report this
+   * capture rectangle with reason "managed". Unset, they report no rectangle, as before.
+   */
+  windowShape: undefined as { width: number; height: number } | undefined,
 };
 
 interface Session { id: string; target: { type: "window"; window_id: number; owner_pid: number } | { type: "screen"; display_id: number }; app: string; width: number; height: number; density: number; controller?: { socket: WebSocket; stream: number }; viewers: Set<Viewer>; startedAt: number }
@@ -185,7 +190,8 @@ export function appwinCall(socket: WebSocket, callId: number, action: string, in
       const s = sessions.get(String(input.session_id));
       if (!s) { reply(socket, callId, false, { error: "unavailable" }); return true; }
       const wait = config.inputPauseMs;
-      reply(socket, callId, true, { state: "capturing", ...(wait ? { input: { pause_remaining_ms: wait } } : {}) });
+      const shape = config.windowShape ? { reason: "managed", capture_rect: { x: 40, y: 60, ...config.windowShape } } : {};
+      reply(socket, callId, true, { state: "capturing", ...shape, ...(wait ? { input: { pause_remaining_ms: wait } } : {}) });
       return true;
     }
     case "desktop.session.control": {
@@ -256,8 +262,8 @@ export async function appwinHttp(request: IncomingMessage, response: ServerRespo
     // A reset is a new test source: prior pages may leave server-held sessions
     // intentionally alive, so retire their timers and registrations as well.
     if (body.reset) { for (const session of sessions.values()) for (const viewer of [...session.viewers]) detach(viewer); sessions.clear(); }
-    if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0 }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
-    for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
+    if (body.reset) { Object.assign(config, { fps: 60, windows: defaults(), screenRecording: true, accessibility: true, viewOnly: false, controlContract: true, inputPauseMs: 0, refuseNextStart: false, windowsDelayMs: 0, startDelayMs: 0, windowShape: undefined }); inputs.length = 0; sizes.length = 0; starts.length = 0; attaches = 0; repairs = 0; }
+    for (const key of ["controlContract", "fps", "screenRecording", "accessibility", "viewOnly", "inputPauseMs", "refuseNextStart", "windowsDelayMs", "startDelayMs", "windowShape"] as const) if (key in body) (config as Record<string, unknown>)[key] = body[key];
     if (Array.isArray(body.windows)) config.windows = body.windows as Win[];
     sendJson(response, 200, { ok: true });
     return true;

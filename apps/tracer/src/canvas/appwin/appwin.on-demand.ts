@@ -76,14 +76,21 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
     return undefined;
   };
 
+  /** The shape the machine listed for a window (points) or a screen (pixels), if it said. */
+  const listedAspect = (entry: Entry): number | undefined => {
+    const size = entry.kind === "window" ? entry.size : entry.pixels;
+    return size && size.width > 0 && size.height > 0 ? size.width / size.height : undefined;
+  };
+
   const open = (machine: HostEntry, entry: Entry): void => {
     const there = existing(machine, entry);
     if (there) { cx.win.setActive(there); cx.nav.focusWindow(there); cx.win.pulse(there); return; }
+    const aspect = listedAspect(entry);
     const model: WindowModel = {
       id: `a-${crypto.randomUUID()}`, kind: entry.kind === "screen" ? "screen" : "app", host: machine.name, hostId: machine.id,
       ...(machine.user ? { user: machine.user } : {}), ...(machine.os ? { os: machine.os } : {}),
       session: streamLabel(entry),
-      stream: { target: entry.target, appName: entry.kind === "screen" ? entry.name : entry.appName, title: entry.kind === "screen" ? "" : entry.title, ...(entry.kind === "window" && entry.bundleId ? { bundleId: entry.bundleId } : {}) },
+      stream: { target: entry.target, appName: entry.kind === "screen" ? entry.name : entry.appName, title: entry.kind === "screen" ? "" : entry.title, ...(entry.kind === "window" && entry.bundleId ? { bundleId: entry.bundleId } : {}), ...(aspect !== undefined ? { aspect } : {}) },
     };
     cx.win.openModel(model);
   };
@@ -120,7 +127,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
     bindingFor(rec) {
       const m = rec.model;
       if (!m.stream || !m.hostId) return undefined;
-      return new AppBinding(cx, rec, { connection: adapter.connection, hostId: m.hostId, target: m.stream.target, machine: m.host, app: m.stream.appName });
+      return new AppBinding(cx, rec, { connection: adapter.connection, hostId: m.hostId, target: m.stream.target, machine: m.host, app: m.stream.appName, ...(m.stream.aspect ? { aspect: m.stream.aspect } : {}) });
     },
     async report() {
       const out: Array<{ id: string; state: string; control: string; stats: unknown }> = [];

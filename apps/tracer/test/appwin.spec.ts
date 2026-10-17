@@ -129,6 +129,27 @@ test("an app window goes live in a worker, names itself, and the machine's windo
   expect(report[0]!.stats.painted).toBeGreaterThan(10);
 });
 
+test("a window the machine keeps at its own size gives the canvas window its shape, and follows when it changes", async ({ page }) => {
+  await openCanvas(page, "&appwin=1", { windowShape: { width: 1600, height: 900 } });
+  await openEditor(page);
+  const aspect = async (): Promise<number> => {
+    const stage = (await appWindow(page).locator(".aw-stage").boundingBox())!;
+    return stage.width / stage.height;
+  };
+  await expect.poll(aspect, { timeout: 5000 }).toBeGreaterThan(1600 / 900 * 0.98);
+  expect(await aspect()).toBeLessThan(1600 / 900 * 1.02);
+  // Taking the machine's shape is looking: it never takes control or moves anything there.
+  await page.waitForTimeout(800);
+  expect((await machineState(page)).sessions.every((session) => !session.controller)).toBe(true);
+  await expect(appWindow(page).locator(".aw-control:not([data-leaving])")).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("shape-wide.png") });
+  // The person (or the window manager) makes the machine's window tall: the canvas window follows.
+  await config(page, { windowShape: { width: 900, height: 1100 } });
+  await expect.poll(aspect, { timeout: 5000 }).toBeLessThan(900 / 1100 * 1.02);
+  expect(await aspect()).toBeGreaterThan(900 / 1100 * 0.98);
+  await page.screenshot({ path: test.info().outputPath("shape-tall.png") });
+});
+
 test("looking never moves the machine: the activating press and a hover send nothing, then a click takes control", async ({ page }) => {
   await openCanvas(page);
   await openEditor(page);

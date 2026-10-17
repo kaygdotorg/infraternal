@@ -50,7 +50,11 @@ export interface WindowModel {
    * An `app` or `screen` window: what the machine streams into it (D208). The machine's window identity lives only as long
    * as the window does, so these windows are not part of the saved layout.
    */
-  stream?: { target: import("../appwin/inventory").AppTarget; appName: string; title: string; bundleId?: string };
+  stream?: {
+    target: import("../appwin/inventory").AppTarget; appName: string; title: string; bundleId?: string;
+    /** The machine's window or screen shape (width / height) when it was listed: the window opens in that shape. */
+    aspect?: number;
+  };
 }
 
 /** A column. `half` names the two halves of one split (D212): closing one returns its width to the other. Runtime only. */

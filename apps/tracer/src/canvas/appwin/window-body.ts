@@ -40,7 +40,12 @@ export interface AppBodyOptions {
   /** The machine's name, for the words a state uses. */
   machine: string;
   app: string;
+  /** The machine's window shape (width / height) as listed: the window takes it before the stream starts. */
+  aspect?: number;
 }
+
+/** A box change this soon after the window took the machine's shape came from that, not from the person's hand. */
+const SHAPE_SETTLE_MS = 600;
 
 /** Icons of the state cards, from the shared set. */
 const CARD_ICON: Record<NonNullable<StateView["card"]>["mark"], string | undefined> = {
@@ -68,6 +73,10 @@ export class AppBinding implements SessionBinding {
   private lastState: StreamState = { kind: "idle" };
   private lastControl: ControlState = { kind: "none" };
   private picture = { width: 0, height: 0 };
+  /** The machine's own window or screen shape (width / height), once it has reported one. */
+  private remoteShape: number | undefined;
+  private shapedAt = -Infinity;
+  private listedShapeTried = false;
   private resizeTimer = 0;
   private opened = false;
   private disposed = false;
@@ -90,6 +99,7 @@ export class AppBinding implements SessionBinding {
         state: (s) => this.paintState(s),
         control: (c) => this.paintControl(c),
         picture: (size) => { this.picture = size; },
+        shape: (aspect) => { this.remoteShape = aspect; this.applyShape(aspect, true); },
         surface: (canvas) => this.setSurface(canvas),
       },
     });
@@ -126,13 +136,19 @@ export class AppBinding implements SessionBinding {
     const size = this.css();
     if (size.width < 2 || size.height < 2) return;
     if (!this.opened) {
+      // Open in the shape the machine listed: the first size the stream asks for is then already the right one. Tried
+      // once; later shapes come only from the machine's own reports while it streams.
+      const tried = this.listedShapeTried;
+      this.listedShapeTried = true;
+      if (!tried && this.applyShape(this.o.aspect, true)) return;
       this.opened = true;
       this.stream.setVisible(this.visible);
       void this.stream.open(size);
       return;
     }
     window.clearTimeout(this.resizeTimer);
-    this.resizeTimer = window.setTimeout(() => this.stream.resize(this.css()), first ? 0 : 120);
+    // Only a resize by hand takes control; taking the machine's shape is looking, which never moves anything (D208 A3).
+    this.resizeTimer = window.setTimeout(() => this.stream.resize(this.css(), performance.now() - this.shapedAt > SHAPE_SETTLE_MS), first ? 0 : 120);
   }
 
   private setSurface(canvas: HTMLCanvasElement | undefined): void {
@@ -444,7 +460,16 @@ export class AppBinding implements SessionBinding {
     if (!visible) this.stopInput();
   }
 
-  refit(): void { this.measure(false); }
+  /** The canvas window takes the machine's shape (TASTE "A remote window takes its own shape"); a no-op once it has it. */
+  /** `looking` marks the change as the window following the machine, so the size it causes never takes control. */
+  private applyShape(aspect: number | undefined, looking: boolean): boolean {
+    if (aspect === undefined || this.disposed || !this.rec.shape?.(this.stage, aspect)) return false;
+    if (looking) this.shapedAt = performance.now();
+    return true;
+  }
+
+  // A resize by hand ends here too: the window settles back into the machine's shape, keeping the height it was given.
+  refit(): void { this.applyShape(this.remoteShape, false); this.measure(false); }
 
   dispose(): void {
     if (this.disposed) return;

@@ -63,6 +63,11 @@ export interface WinRec {
   binding?: SessionBinding;
   /** Releases what the body holds (a settings panel). */
   cleanup?: () => void;
+  /**
+   * Gives a streamed window the remote window's shape: the picture area `inner` gets `aspect` (width / height). Set by
+   * the frame for a window it can resize on its own; returns whether the frame changed.
+   */
+  shape?: (inner: HTMLElement, aspect: number) => boolean;
 }
 
 /** One view on the canvas: the elements that draw it, its position springs and its windows. */

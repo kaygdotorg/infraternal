@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { StreamHandler } from "../../connection";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
-import { AppStream, type StreamOptions } from "./stream";
+import { AppStream, parseStatus, type StreamOptions } from "./stream";
 
 const originals = new Map<string, PropertyDescriptor | undefined>();
 beforeAll(() => {
@@ -22,6 +22,7 @@ afterAll(() => {
 });
 
 async function fixture(deferControl = false) {
+  const shapes: number[] = [];
   let controlReply: ((allowed: boolean) => void) | undefined;
   let next = 1;
   let controller: number | undefined;
@@ -48,12 +49,12 @@ async function fixture(deferControl = false) {
     send(id, frame) { frames.push({ id, frame }); return true; },
   };
   const stream = new AppStream({ connection, hostId: "host", target: { type: "screen", displayId: 1 }, coarse: false,
-    events: { state() {}, control() {}, picture() {}, surface() {} },
+    events: { state() {}, control() {}, picture() {}, surface() {}, shape(aspect) { shapes.push(aspect); } },
     makeWorker: () => worker as unknown as Worker });
   await stream.open({ width: 800, height: 600, density: 1 });
   stream.setVisible(true);
   await Promise.resolve();
-  return { stream, frames, actions, closed, handlers, worker, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
+  return { stream, shapes, frames, actions, closed, handlers, worker, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
 }
 
 test("retry after a decoder failure stops the previous native session", async () => {
@@ -206,5 +207,27 @@ test("control given back by the person is not taken again on reconnect", async (
     await new Promise<void>(resolve => setImmediate(resolve));
     expect(f.actions.filter(action => action === "desktop.session.control")).toHaveLength(1);
     expect(f.stream.controlState.kind).toBe("none");
+  } finally { f.stream.dispose(); }
+});
+
+test("the machine's window shape is read from its capture rectangle", () => {
+  expect(parseStatus({ capture_rect: { x: 41, y: 46, width: 2502, height: 1378 } }).shape).toBeCloseTo(2502 / 1378, 6);
+  expect(parseStatus({ capture_rect: { width: 0, height: 10 } }).shape).toBeUndefined();
+  expect(parseStatus({ capture_rect: { width: "wide", height: 10 } }).shape).toBeUndefined();
+  expect(parseStatus({}).shape).toBeUndefined();
+  // A window that follows the canvas window's size has no shape of its own to impose.
+  expect(parseStatus({ reason: "following", capture_rect: { width: 1600, height: 900 } }).shape).toBeUndefined();
+});
+
+test("a live picture learns the remote window's shape without control, and again when it changes", async () => {
+  const f = await fixture();
+  try {
+    const worker = f.worker as unknown as { onmessage: (event: { data: unknown }) => void };
+    worker.onmessage({ data: { t: "first", width: 800, height: 600 } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions).toContain("desktop.session.clock");
+    f.reply({ state: "on", capture_rect: { x: 0, y: 0, width: 1600, height: 900 } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.shapes).toEqual([1600 / 900]);
   } finally { f.stream.dispose(); }
 });

@@ -70,7 +70,7 @@ for (const keepTerminal of [true, false]) test(`retry retains Stop across repeat
     const seed: StreamHandler = { onSocketOpen() {}, onWelcome() {}, onFrame() {}, onDisconnected() {}, hasSession: () => false, onStatus() {} };
     if (keepTerminal) { connection.openStream(seed); sockets[0]!.welcome(); }
     stream = new AppStream({ connection, hostId: "host", target: { type: "screen", displayId: 1 }, coarse: false,
-      events: { state() {}, control() {}, picture() {}, surface() {} }, makeWorker: () => worker as unknown as Worker });
+      events: { state() {}, control() {}, picture() {}, surface() {}, shape() {} }, makeWorker: () => worker as unknown as Worker });
     const css = { width: 800, height: 600, density: 1 };
     const opening = stream.open(css);
     if (!keepTerminal) { expect(sockets).toHaveLength(1); sockets[0]!.welcome(); }
