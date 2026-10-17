@@ -904,3 +904,7 @@ mod review_input_credit;
 #[cfg(feature = "remote")]
 #[path = "socket_tests/close_logging.rs"]
 mod close_logging;
+
+#[cfg(feature = "remote")]
+#[path = "socket_tests/review_close_log.rs"]
+mod review_close_log;

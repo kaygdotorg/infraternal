@@ -697,3 +697,112 @@ mod tests {
         assert_eq!(route.kind, "terminal_route_unresponsive");
     }
 }
+
+#[cfg(test)]
+mod review_tests {
+    //! Break-it review of #227: the limiter must stay a limiter when its map is full.
+    use super::*;
+
+    fn close(session_id: [u8; 16]) -> CloseRecord {
+        CloseRecord::new(
+            CloseWho::InfraternalAgent,
+            AGENT_STREAM_ENDED,
+            None,
+            session_id,
+            1,
+        )
+    }
+
+    #[derive(Clone, Default)]
+    struct Count(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let lines = bytes.iter().filter(|b| **b == b'\n').count();
+            self.0
+                .fetch_add(lines, std::sync::atomic::Ordering::Relaxed);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Count {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+
+    /// 8,192 distinct session ids (one authenticated client can mint them with
+    /// AttachTerm for sessions it does not own) fill the map; from then on a real
+    /// session's close storm is logged once per close, not once per minute.
+    #[tokio::test(start_paused = true)]
+    async fn a_full_map_does_not_turn_off_rate_limiting_for_a_storming_session() {
+        let logger = StreamCloseLog::new();
+        for i in 0..MAX_TRACKED_SESSIONS {
+            let mut id = [0xa5_u8; 16];
+            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            logger.record(&close(id));
+        }
+        let count = Count::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(count.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let storm = [0x5a; 16];
+        for _ in 0..1000 {
+            logger.record(&close(storm));
+        }
+        let lines = count.0.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            lines <= 2,
+            "{lines} log lines for 1000 closes of one session within a minute while the map is full"
+        );
+    }
+
+    /// Hand-run (`--ignored --nocapture`, release): the summary worker wakes on every new
+    /// window and scans the whole map under the logger mutex. The shipped benchmark runs on
+    /// a current-thread runtime, where that worker never runs during the loop.
+    #[test]
+    #[ignore = "manual microbenchmark"]
+    fn first_close_cost_with_the_worker_running() {
+        for threads in [1_usize, 4] {
+            let runtime = if threads == 1 {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+            } else {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(threads)
+                    .enable_all()
+                    .build()
+                    .unwrap()
+            };
+            runtime.block_on(async {
+                let logger = StreamCloseLog::new();
+                for i in 0..(MAX_TRACKED_SESSIONS - 4096) {
+                    let mut id = [1_u8; 16];
+                    id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    logger.record(&close(id));
+                }
+                tokio::task::yield_now().await;
+                let n = 4000_u64;
+                let t = std::time::Instant::now();
+                for i in 0..n {
+                    let mut id = [2_u8; 16];
+                    id[..8].copy_from_slice(&i.to_le_bytes());
+                    logger.record(&close(id));
+                }
+                let per = t.elapsed().as_nanos() / u128::from(n);
+                println!("runtime threads {threads}: first close with ~4k-8k live windows: {per} ns/close");
+            });
+        }
+    }
+}
