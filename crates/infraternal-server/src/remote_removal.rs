@@ -216,38 +216,41 @@ impl Removal {
             .commit_revocation(tx, entry.host)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let name = display_name(&name);
-        let (message, manual) = match cleanup {
-            "requested" => (
-                format!(
-                    "{name} was removed. Its infraternal agent accepted the uninstall and is removing itself."
-                ),
-                None,
-            ),
-            "retained" => (
-                format!("{name} was removed here. Its infraternal agent stays installed on it."),
-                None,
-            ),
-            // Say plainly that the machine still runs it, and how to remove it
-            // there; the record is gone, so nothing here can retry (#235).
-            _ => {
-                let commands = manual_uninstall(&mode);
-                let account = if mode == "rootful" {
-                    "as root"
-                } else {
-                    "as the account it was added with"
-                };
-                (
-                    format!(
-                        "{name} was removed here, but infraternal is still installed on it. Remove it there {account} with: {commands}"
-                    ),
-                    Some(commands),
-                )
-            }
-        };
+        let (message, manual) = outcome(cleanup, &mode, display_name(&name));
         Ok(
             json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual}),
         )
+    }
+}
+/// What removal tells the person, and the commands for a leftover install.
+fn outcome(cleanup: &str, mode: &str, name: &str) -> (String, Option<String>) {
+    match cleanup {
+        "requested" => (
+            format!(
+                "{name} was removed. Its infraternal agent accepted the uninstall and is removing itself."
+            ),
+            None,
+        ),
+        "retained" => (
+            format!("{name} was removed here. Its infraternal agent stays installed on it."),
+            None,
+        ),
+        // Say plainly that the machine still runs it, and how to remove it
+        // there; the record is gone, so nothing here can retry (#235).
+        _ => {
+            let commands = manual_uninstall(mode);
+            let account = if mode == "rootful" {
+                "as root"
+            } else {
+                "as the account it was added with"
+            };
+            (
+                format!(
+                    "{name} was removed here, but infraternal is still installed on it. Remove it there {account} with: {commands}"
+                ),
+                Some(commands),
+            )
+        }
     }
 }
 /// Ask a connected host's infraternal agent to uninstall itself (D273).
