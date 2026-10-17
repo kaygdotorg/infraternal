@@ -76,7 +76,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             infraternal_plugin_remote::REMOVE.id,
             "Host removal was refused.",
             "Use a live owner session and a fresh removal passkey proof on standard input.",
-            1,
+            Exit::NotAllowed,
         ),
     }
 }

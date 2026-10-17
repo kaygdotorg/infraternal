@@ -42,7 +42,7 @@ pub(crate) fn report(json: bool, action: &str, state: &str, message: &str, next:
 }
 
 /// Static refusals do not reflect a path, invitation, proof or private identity.
-pub(crate) fn refuse(json: bool, action: &str, message: &str, next: &str, exit: u8) -> ExitCode {
+pub(crate) fn refuse(json: bool, action: &str, message: &str, next: &str, exit: Exit) -> ExitCode {
     let mut result = CommandResult::new(
         command_for(action),
         CommandState::Refused,
@@ -52,13 +52,5 @@ pub(crate) fn refuse(json: bool, action: &str, message: &str, next: &str, exit: 
     if !next.is_empty() {
         result = result.with_next_step(next);
     }
-    emit(
-        result,
-        json,
-        if exit == Exit::Usage.code() {
-            Exit::Usage
-        } else {
-            Exit::Failed
-        },
-    )
+    emit(result, json, exit)
 }

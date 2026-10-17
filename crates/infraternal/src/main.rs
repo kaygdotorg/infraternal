@@ -297,7 +297,7 @@ fn run_key_memory_check(json_output: bool) -> ExitCode {
             "internal.key-memory-check",
             "Key memory refused",
             "Raise the memlock limit to at least 8 MiB and run the check again.",
-            1,
+            Exit::Failed,
         )
     }
 }
@@ -365,17 +365,35 @@ fn status_result(
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
-    let (result, _) = status_result(registry, "status");
-    emit(result, json_output, Exit::Ok)
+    let (result, down) = status_result(registry, "status");
+    finish_status(result, down, json_output)
+}
+
+/// `status` exits 5 when something that should run is down, so `infraternal status || alert`
+/// works in a script (D303). The report itself is information, so it stays on standard output.
+fn finish_status(
+    result: CommandResult<serde_json::Value>,
+    down: usize,
+    json_output: bool,
+) -> ExitCode {
+    if down == 0 {
+        return emit(result, json_output, Exit::Ok);
+    }
+    cli::output::emit_to(
+        result.with_error_code("component_down"),
+        json_output,
+        Exit::Unreachable,
+        false,
+    )
 }
 
 /// Bare `infraternal`: the status overview, or how to join when this machine is not set up (D299).
 fn run_overview(registry: &ActionRegistry, json_output: bool) -> ExitCode {
-    let (result, _) = status_result(registry, "infraternal");
-    emit(
+    let (result, down) = status_result(registry, "infraternal");
+    finish_status(
         result.with_next_step("infraternal --help"),
+        down,
         json_output,
-        Exit::Ok,
     )
 }
 
@@ -939,7 +957,7 @@ fn run_server_foreground(
                     action_id,
                     &error.to_string(),
                     "Check configuration and retained public server trust.",
-                    1,
+                    Exit::Failed,
                 );
             }
             #[cfg(not(feature = "remote"))]
@@ -1363,7 +1381,7 @@ fn run_remote_agent(
             operation,
             "These infraternal agent options cannot be used together.",
             "infraternal agent --help",
-            2,
+            Exit::Usage,
         );
     }
     let Ok(data) = data.map_or_else(remote::default_data, Ok) else {
@@ -1372,7 +1390,7 @@ fn run_remote_agent(
             operation,
             "The infraternal agent has no private directory for its identity.",
             "Pass --data with a directory only this account can read.",
-            1,
+            Exit::Failed,
         );
     };
     output::report(
@@ -1434,7 +1452,16 @@ fn run_remote_agent(
                 remote::public_error,
             ),
             "Check the server address and that this machine is still enrolled, then run the command again.",
-            1,
+            result.as_ref().err().map_or(Exit::Failed, |error| {
+                let text = remote::public_error(error);
+                if text.contains("TLS verification") {
+                    Exit::NotAllowed
+                } else if text.contains("DNS") || text.contains("connection failed") {
+                    Exit::Unreachable
+                } else {
+                    Exit::Failed
+                }
+            }),
         )
     }
 }

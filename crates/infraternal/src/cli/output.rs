@@ -109,6 +109,17 @@ impl<T> CommandResult<T> {
         self
     }
 
+    /// Give the failure its own stable code, finer than the exit code (for example `component_down`).
+    #[must_use]
+    pub fn with_error_code(mut self, code: &str) -> Self {
+        self.error = Some(ErrorInfo {
+            code: code.to_owned(),
+            argument: None,
+            detail: Some(self.details.clone().unwrap_or_else(|| self.message.clone())),
+        });
+        self
+    }
+
     /// Name the argument at fault in a usage error; the value is never recorded.
     #[must_use]
     pub fn with_argument(mut self, code: &str, argument: Option<String>) -> Self {
@@ -177,8 +188,11 @@ impl CommandState {
     }
 }
 
-/// How a command ended. The code is what a shell sees; `error_code` is what the envelope says.
-/// The full table of exit codes is decided in D303.
+/// How a command ended (D303). The code is what a shell sees; `error_code` is what the envelope says.
+///
+/// 0 done · 1 failed · 2 the command line is wrong · 3 not allowed · 4 not found ·
+/// 5 off or unreachable · 6 partly done · 130 interrupted. A process killed by
+/// Ctrl-C reports 130 through the shell; `Interrupted` is for commands that catch it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Exit {
     /// Done, or the state that was asked about was found.
@@ -187,6 +201,20 @@ pub enum Exit {
     Failed,
     /// The command line is wrong.
     Usage,
+    /// The request was understood and refused: wrong account, missing proof.
+    NotAllowed,
+    /// What the command was asked about does not exist.
+    NotFound,
+    /// A component or the thing to talk to is off or does not answer.
+    Unreachable,
+    /// Some of the work was done and some was not.
+    #[allow(dead_code)]
+    // D303 fixes the code now; the first batch command that needs it is not built yet.
+    Partial,
+    /// Stopped by the person (Ctrl-C).
+    #[allow(dead_code)]
+    // The shell reports 130 for an uncaught Ctrl-C; commands that catch it will use this.
+    Interrupted,
 }
 
 impl Exit {
@@ -197,6 +225,11 @@ impl Exit {
             Self::Ok => 0,
             Self::Failed => 1,
             Self::Usage => 2,
+            Self::NotAllowed => 3,
+            Self::NotFound => 4,
+            Self::Unreachable => 5,
+            Self::Partial => 6,
+            Self::Interrupted => 130,
         }
     }
 
@@ -207,6 +240,11 @@ impl Exit {
             Self::Ok => "ok",
             Self::Failed => "failed",
             Self::Usage => "usage",
+            Self::NotAllowed => "not_allowed",
+            Self::NotFound => "not_found",
+            Self::Unreachable => "unreachable",
+            Self::Partial => "partial",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -696,6 +734,27 @@ mod tests {
                 "\"next_step\":\"infraternal skill mesh up\",\"data\":{\"ssh\":false}}\n"
             )
         );
+    }
+
+    #[test]
+    fn exit_codes_follow_d303() {
+        use super::Exit::{
+            Failed, Interrupted, NotAllowed, NotFound, Ok, Partial, Unreachable, Usage,
+        };
+        let codes: Vec<u8> = [
+            Ok,
+            Failed,
+            Usage,
+            NotAllowed,
+            NotFound,
+            Unreachable,
+            Partial,
+            Interrupted,
+        ]
+        .iter()
+        .map(|exit| exit.code())
+        .collect();
+        assert_eq!(codes, [0, 1, 2, 3, 4, 5, 6, 130]);
     }
 
     #[test]

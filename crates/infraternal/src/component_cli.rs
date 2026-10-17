@@ -79,31 +79,36 @@ pub(crate) fn run_action(
 
 /// Say which of the possible causes it was, and the one thing to do about it.
 fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
-    let (message, why, next) = match error.kind() {
+    let (message, why, next, exit) = match error.kind() {
         io::ErrorKind::NotFound => (
             "The infraternal agent on this machine is not running.",
             "No agent socket was found in its runtime directory.",
             "infraternal status",
+            Exit::Unreachable,
         ),
         io::ErrorKind::ConnectionRefused => (
             "The infraternal agent on this machine is not running.",
             "Its socket is there, but nothing answers on it.",
             "infraternal status",
+            Exit::Unreachable,
         ),
         io::ErrorKind::PermissionDenied => (
             "This account is not allowed to use the infraternal agent here.",
             "The agent answers only the account that runs it.",
             "Run this command as the account that runs the infraternal agent.",
+            Exit::NotAllowed,
         ),
         io::ErrorKind::TimedOut => (
             "The infraternal agent did not answer in time.",
             "There was no reply within 5 seconds.",
             "infraternal status",
+            Exit::Unreachable,
         ),
         _ => (
             "The infraternal agent could not complete this request.",
             "It sent a reply this command does not understand.",
             "infraternal status",
+            Exit::Failed,
         ),
     };
     emit(
@@ -111,7 +116,7 @@ fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
             .with_details(why)
             .with_next_step(next),
         json_output,
-        Exit::Failed,
+        exit,
     )
 }
 async fn call(state: &std::path::Path, action: &str, input: &Value) -> io::Result<Vec<u8>> {

@@ -190,8 +190,10 @@ fn component_commands_fail_in_the_envelope_when_the_agent_is_not_there() {
         let args = [command[0], command[1], "--json", "--state", state];
         let label = args.join(" ");
         let output = run(&args);
-        assert_eq!(output.status.code(), Some(1), "{label}");
+        // D303: the infraternal agent is off or unreachable, exit 5.
+        assert_eq!(output.status.code(), Some(5), "{label}");
         let found = envelopes(&label, &output);
+        assert_eq!(found[0]["error"]["code"], "unreachable", "{label}");
         assert_eq!(found[0]["ok"], false, "{label}");
         assert_eq!(
             found[0]["command"],
@@ -222,4 +224,84 @@ fn bare_infraternal_is_the_overview_and_points_to_help() {
             .unwrap()
             .contains("infraternal --help")
     );
+}
+
+/// A machine whose home holds only the units the test writes.
+fn status_in(home: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(args)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the real CLI")
+}
+
+#[test]
+fn status_exits_5_when_something_that_should_run_is_down() {
+    let home = std::env::temp_dir().join(format!("cli-status-exit-{}", std::process::id()));
+    let units = home.join("config/systemd/user");
+    std::fs::create_dir_all(&units).unwrap();
+    // A unit file that no service manager here has loaded is never active (a unique name, so a
+    // real infraternal agent on the machine running the test cannot answer for it).
+    std::fs::write(
+        units.join(format!("infraternal-test-{}.service", std::process::id())),
+        "[Service]\nExecStart=/usr/bin/infraternal agent run\n",
+    )
+    .unwrap();
+    for args in [vec!["status", "--json"], vec!["--json"]] {
+        let output = status_in(&home, &args);
+        assert_eq!(output.status.code(), Some(5), "{args:?}");
+        let found = envelopes("status down", &output);
+        assert_eq!(found[0]["ok"], false);
+        assert_eq!(found[0]["error"]["code"], "component_down");
+        assert!(output.stderr.is_empty());
+    }
+    // Text mode: the report is information, so it is on standard output even though the exit is 5.
+    let text = status_in(&home, &["status"]);
+    assert_eq!(text.status.code(), Some(5));
+    assert!(!text.stdout.is_empty() && text.stderr.is_empty());
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn status_exits_0_on_a_machine_with_nothing_installed() {
+    let home = std::env::temp_dir().join(format!("cli-status-none-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let system_units = std::fs::read_dir("/etc/systemd/system").map_or(false, |entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("infraternal")
+        })
+    });
+    // The probe also reads the system's own unit directory and data directory.
+    if !system_units && !std::path::Path::new("/var/lib/infraternal/infraternal.sqlite").exists() {
+        let output = status_in(&home, &["status", "--json"]);
+        assert_eq!(output.status.code(), Some(0));
+        let found = envelopes("status none", &output);
+        assert_eq!(found[0]["ok"], true);
+        assert_eq!(found[0]["data"]["role"], "none");
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(feature = "release")]
+#[test]
+fn a_missing_server_is_not_found_exit_4() {
+    let missing = std::env::temp_dir().join(format!("cli-no-server-{}", std::process::id()));
+    assert!(!missing.exists());
+    let output = run(&[
+        "server",
+        "release",
+        "latest",
+        "--json",
+        "--data",
+        missing.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(4));
+    let found = envelopes("server release latest", &output);
+    assert_eq!(found[0]["error"]["code"], "not_found");
 }

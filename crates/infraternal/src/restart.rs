@@ -1,5 +1,6 @@
 //! Implements local-owner restart requests and same-PID exec without transporting the CA over a named socket [168][217], #154.
 
+use crate::cli::output::Exit;
 use std::{
     ffi::CString,
     io,
@@ -382,7 +383,7 @@ pub(crate) fn run(
             infraternal_plugin_remote::RESTART.id,
             "Server replacement refused",
             "Run this as the account that runs the server, with its --data directory and an executable --binary.",
-            1,
+            Exit::NotAllowed,
         ),
     }
 }
