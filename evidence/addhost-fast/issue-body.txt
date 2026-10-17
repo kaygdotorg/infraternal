@@ -1,6 +1,0 @@
-<!-- Tracks the approved host provisioning performance work and its safety gates. -->
-Parent: #169.
-
-Make Check → Done under 1.5 s on LAN and under 4 s at 150 ms RTT. Measure before/after per setup step, p50/p95 over ten fresh targets on the pinned perf VM, 75 ms netem each direction, release static payload/controller. Preserve rounds 1–3 and start-fresh safety, verified-payload reuse, ownership journal/rollback, classified failures and terminal proof. Profile authentication, hashing, transfer and command orchestration; make measured atomic changes, run existing Rust/browser/review tests, push each commit. No deployment.
-
-Approved worktree/branch: addhost-fast; supplied base b14a7146003a0d81399b55ef0972e970c258f882 (production plus latest start-fresh), as explicitly specified rather than rebasing this job onto origin/dev.

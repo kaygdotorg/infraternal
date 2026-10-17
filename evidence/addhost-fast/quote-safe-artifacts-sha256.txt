@@ -1,2 +1,0 @@
-2c21f12941b1ba2ace17791420bbcca8ffe760f399ff56ff9fbc503af0cf19fd  /home/kayg/.cache/codex-scratch/addhost-fast/artifacts/quote-safe/controller
-de72ce219f0b33369e7c74c01129a6759c954375323e570ddf9650c65499f99e  /home/kayg/.cache/codex-scratch/addhost-fast/artifacts/quote-safe/infraternal

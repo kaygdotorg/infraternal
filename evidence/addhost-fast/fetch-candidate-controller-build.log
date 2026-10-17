@@ -1,3 +1,0 @@
-   Compiling infraternal-server v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-server)
-    Finished `release` profile [optimized] target(s) in 15m 58s
-  Executable unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fast/target/x86_64-unknown-linux-musl/release/deps/infraternal_server-5851510810ab1bf9)

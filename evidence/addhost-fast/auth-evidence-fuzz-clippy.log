@@ -1,2 +1,0 @@
-error: the package 'infraternal-fuzz' does not contain these features: remote, ssh
-help: packages with the missing features: infraternal-agent, infraternal-server, infraternal

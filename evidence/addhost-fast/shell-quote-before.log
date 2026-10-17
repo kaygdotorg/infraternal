@@ -1,2 +1,0 @@
-OCI runtime exec failed: exec failed: unable to start container process: exec: "/run/addhost-fast-quote-test": stat /run/addhost-fast-quote-test: no such file or directory
-QUOTE_EXIT=127

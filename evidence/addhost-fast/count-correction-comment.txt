@@ -1,2 +1,0 @@
-<!-- Corrects the SSH suite count from the exact test summaries. -->
-Correction: the complete SSH suite totals 104 passed and 8 ignored, not 114 passed. Authentication 7/7 and queued-private-output 1/1 remain correct; no gate failure. Source heads unchanged.

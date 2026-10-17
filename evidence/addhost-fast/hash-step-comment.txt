@@ -1,6 +1,0 @@
-<!-- Records the bounded hash cache commit and locked-VM scale evidence. -->
-Completed 4fa85f00 (pushed): two-entry opened-file hash cache, concurrent misses serialized, no worker/timer, target SHA256 verification retained. Four new functional regressions pass; complete SSH suite 108 passed/9 ignored; fmt and strict all-target SSH clippy pass.
-
-Locked perf VM scale (4 cores, load 5.87/4.07/2.08): 10 misses p50/p95 137.571/170.799 ms; 1,600 cache hits 0.055/0.175 ms. One digest allocation is shared; entry 72 bytes, vector capacity 4 and maximum 2 entries, at most 128 digest bytes per server regardless of 1,600 hosts; temporary hash buffer is 64 KiB for one serialized miss. Raw: evidence/addhost-fast/hash-cache-scale.log. This is hash-path evidence, not 1,600 installed daemons.
-
-Cold-controller diagnostic replay: LAN 10/10, p50/p95 1208.5/1420 ms; 150 ms RTT 10/10, 9445/9505 ms. Each sample launches a controller, so each hashes cold; no workflow speedup is attributed to cache. The initial and cache end-to-end tables are diagnostics pending fixture correction: bootstrap_breakit2_tests.rs used default OpenSSL socket admission, whereas runtime.rs uses server_tls::acceptor with TCP_NODELAY. Reuse the production acceptor and rerun acceptance. Regression against the actual fixture acceptor is compiling.

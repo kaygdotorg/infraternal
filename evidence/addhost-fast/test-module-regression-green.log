@@ -1,9 +1,0 @@
-   Compiling infraternal-agent v0.1.0 (/home/kayg/Developer/infraternal/.worktrees/addhost-fast/crates/infraternal-agent)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.47s
-     Running unittests src/lib.rs (/home/kayg/.cache/codex-scratch/addhost-fast/native/debug/deps/infraternal_agent-528d1ce50bf6cb6b)
-
-running 1 test
-test daemon::readiness_exit_tests::ownership_eof_does_not_discard_private_terminal_output ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.07s
-

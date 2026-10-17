@@ -116,7 +116,7 @@ def main():
     if os.environ.get("ADDHOST_FAST_STEP_PROFILE") == "1":
         # Target-owned diagnostics contain fixed names/status/numbers only. The
         # wrapper delegates untouched stdin and output to the actual shell.
-        wrapper_script = (ROOT / "evidence/addhost-fast/step-shell.sh").read_bytes()
+        wrapper_script = (ROOT / "docs/verification/addhost-breakit2/step-shell.sh").read_bytes()
         docker("exec", "-i", TARGET, "/bin/sh", "-c",
                "cat > /usr/local/bin/sh; chmod 755 /usr/local/bin/sh; : > /run/addhost-fast-step-times; chmod 666 /run/addhost-fast-step-times",
                input=wrapper_script)
@@ -154,7 +154,7 @@ def main():
         if os.environ.get("BREAKIT2_FDPASS_CANDIDATE") == "1":
             # This experimental connector changes only the first owned master,
             # never config inspection, later mux commands or trust admission.
-            candidate = ROOT / "evidence/addhost-fast/fdpass-candidate.py"
+            candidate = ROOT / "docs/verification/addhost-breakit2/fdpass-candidate.py"
             fdpass = (
                 'for argument; do\n'
                 '    if [ "$argument" = -M ]; then\n'
