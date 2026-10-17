@@ -55,6 +55,9 @@ plugin-host-facts = ["plugin-agent", "dep:infraternal-plugin-host-facts", "infra
 plugin-relay = ["dep:infraternal-plugin-relay"]
 plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "dep:tokio"]
 plugin-ssh = ["dep:infraternal-plugin-ssh"]
+# Also compile the hidden commands of components that are not built yet (D299 C5); the
+# D16 one-source tests need them. Off by default: their text costs binary size (D243).
+placeholders = ["infraternal-plugin-api/placeholders"]
 
 [lints]
 workspace = true

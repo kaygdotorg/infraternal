@@ -1132,8 +1132,9 @@ mod failure_data_tests {
 
     #[test]
     fn unavailable_results_keep_registered_data_shapes() {
+        #[cfg(feature = "placeholders")]
         assert_eq!(failure_data("up"), json!({"started": []}));
-        #[cfg(feature = "plugin-server")]
+        #[cfg(all(feature = "plugin-server", feature = "placeholders"))]
         assert_eq!(failure_data("server features"), json!({"features": []}));
     }
 

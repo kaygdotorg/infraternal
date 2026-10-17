@@ -2,7 +2,7 @@
 
 use infraternal_plugin_api::{
     ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, CliHandler,
-    JsonSchema, PluginDefinition, SafetyNotes,
+    JsonSchema, PluginDefinition, SafetyNotes, placeholders,
 };
 
 /// Stable plugin owner used to materialize only the requested CLI definitions.
@@ -11,7 +11,7 @@ pub const ID: &str = "agent";
 /// Register the agent component actions exposed by this plugin.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
-    let plugin = PluginDefinition::new(
+    let mut plugin = PluginDefinition::new(
         ID,
         "Connect this machine to a server.",
         [
@@ -40,66 +40,9 @@ pub fn plugin() -> PluginDefinition {
             )
             .with_cli_handler(CliHandler::EmbeddedAgent)
             .hidden(),
-            ActionDefinition::new(
-                ["agent", "up"],
-                "Start and connect the infraternal agent component on this node.",
-                "Use this command when this node should join a server as a managed node.",
-                ["The infraternal agent component command is not available yet."],
-                JsonSchema::empty_object(),
-                JsonSchema::command_result(),
-                ActionContract::new(
-                    ActionTarget::Global,
-                    ActionEffect::Write,
-                    "agent.up",
-                    DryRun::Unsupported,
-                ),
-            )
-            .not_available_yet()
-            .with_example("agent up", "Request agent setup for this node."),
-            ActionDefinition::new(
-                ["agent", "down"],
-                "Stop the infraternal agent component on this node.",
-                "Use this command when this node should leave its managed-node role.",
-                ["The agent component command is not available yet."],
-                JsonSchema::empty_object(),
-                JsonSchema::command_result(),
-                ActionContract::new(
-                    ActionTarget::Global,
-                    ActionEffect::Write,
-                    "agent.down",
-                    DryRun::Unsupported,
-                ),
-            )
-            .not_available_yet()
-            .with_safety(SafetyNotes {
-                destructive: false,
-                dry_run_first: false,
-                notes: vec![
-                    "Stopping the infraternal agent disconnects this node from its server."
-                        .to_owned(),
-                ],
-            })
-            .with_example("agent down", "Stop the agent component on this node."),
-            ActionDefinition::new(
-                ["agent", "status"],
-                "Show the infraternal agent component state.",
-                "Use this command to check whether this node is connected to a server.",
-                ["The agent component command is not available yet."],
-                JsonSchema::empty_object(),
-                JsonSchema::command_result(),
-                ActionContract::new(
-                    ActionTarget::Global,
-                    ActionEffect::Read,
-                    "agent.status",
-                    DryRun::Unsupported,
-                ),
-            )
-            .not_available_yet()
-            .with_example("agent status", "Check the agent component state."),
         ],
     );
-    #[cfg(feature = "remote")]
-    let mut plugin = plugin;
+    plugin.actions.extend(placeholders(unbuilt));
     #[cfg(feature = "remote")]
     {
         plugin.actions[0].input_schema.properties.insert(
@@ -113,6 +56,67 @@ pub fn plugin() -> PluginDefinition {
     plugin
 }
 
+/// Lifecycle commands for the agent component that is not built yet.
+fn unbuilt() -> [ActionDefinition; 3] {
+    [
+        ActionDefinition::new(
+            ["agent", "up"],
+            "Start and connect the infraternal agent component on this node.",
+            "Use this command when this node should join a server as a managed node.",
+            ["The infraternal agent component command is not available yet."],
+            JsonSchema::empty_object(),
+            JsonSchema::command_result(),
+            ActionContract::new(
+                ActionTarget::Global,
+                ActionEffect::Write,
+                "agent.up",
+                DryRun::Unsupported,
+            ),
+        )
+        .not_available_yet()
+        .with_example("agent up", "Request agent setup for this node."),
+        ActionDefinition::new(
+            ["agent", "down"],
+            "Stop the infraternal agent component on this node.",
+            "Use this command when this node should leave its managed-node role.",
+            ["The agent component command is not available yet."],
+            JsonSchema::empty_object(),
+            JsonSchema::command_result(),
+            ActionContract::new(
+                ActionTarget::Global,
+                ActionEffect::Write,
+                "agent.down",
+                DryRun::Unsupported,
+            ),
+        )
+        .not_available_yet()
+        .with_safety(SafetyNotes {
+            destructive: false,
+            dry_run_first: false,
+            notes: vec![
+                "Stopping the infraternal agent disconnects this node from its server.".to_owned(),
+            ],
+        })
+        .with_example("agent down", "Stop the agent component on this node."),
+        ActionDefinition::new(
+            ["agent", "status"],
+            "Show the infraternal agent component state.",
+            "Use this command to check whether this node is connected to a server.",
+            ["The agent component command is not available yet."],
+            JsonSchema::empty_object(),
+            JsonSchema::command_result(),
+            ActionContract::new(
+                ActionTarget::Global,
+                ActionEffect::Read,
+                "agent.status",
+                DryRun::Unsupported,
+            ),
+        )
+        .not_available_yet()
+        .with_example("agent status", "Check the agent component state."),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     //! Verifies agent actions have complete metadata and honest availability.
@@ -124,10 +128,13 @@ mod tests {
     fn agent_actions_are_complete_and_unavailable_until_lifecycle_exists() {
         let plugin = plugin();
         assert_eq!(plugin.id, "agent");
-        assert_eq!(
-            plugin.actions.len(),
-            if cfg!(feature = "remote") { 6 } else { 4 }
-        );
+        let remote = if cfg!(feature = "remote") { 2 } else { 0 };
+        let unbuilt = if infraternal_plugin_api::PLACEHOLDERS {
+            3
+        } else {
+            0
+        };
+        assert_eq!(plugin.actions.len(), 1 + unbuilt + remote);
         assert_eq!(plugin.actions[0].command, ["agent"]);
         assert!(!plugin.actions[0].visible);
         for action in plugin.actions.iter().skip(1).take(3) {

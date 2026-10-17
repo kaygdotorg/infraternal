@@ -137,6 +137,12 @@ rust_check_cli_plugin_compile_out() {
 
     printf 'disabled CLI plugin dependencies: absent from normal dependency graph\n'
     cargo test --locked --package infraternal --bin infraternal --no-default-features
+    # The hidden commands of unbuilt components are compiled out of default builds (D243);
+    # the one-source tests for them (D16) run in the build that keeps them (D299 C5).
+    cargo test --locked --package infraternal --bin infraternal --features placeholders
+    cargo test --locked --package infraternal-agent --package infraternal-mesh \
+        --package infraternal-plugin-backup --package infraternal-plugin-relay \
+        --package infraternal-plugin-ssh --lib --features infraternal-plugin-api/placeholders cli
 }
 
 # D244/#154 checks the shipping provider, never a GNU test executable or C probe.

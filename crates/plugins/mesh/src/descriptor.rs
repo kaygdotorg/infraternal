@@ -306,7 +306,11 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
     use infraternal_plugin_api::ActionTarget;
     #[cfg(all(feature = "agent", target_os = "linux"))]
     use infraternal_plugin_api::JsonSchema;
-    let mut plugin = DESCRIPTOR.cli_plugin(ActionTarget::Global);
+    let mut plugin = if infraternal_plugin_api::PLACEHOLDERS {
+        DESCRIPTOR.cli_plugin(ActionTarget::Global)
+    } else {
+        infraternal_plugin_api::PluginDefinition::new(DESCRIPTOR.id, "", [])
+    };
     "Connect your machines privately and see how they reach each other."
         .clone_into(&mut plugin.description);
     #[cfg(all(feature = "agent", target_os = "linux"))]
@@ -339,10 +343,9 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
         if action.command == ["mesh", "up"] {
             // Preserve the declared SSH request flag; unsupported node inputs
             // remain refused by the component rather than claiming SSH is live.
-            let declaration = crate::policy::cli::plugin();
             action.input_schema.properties.insert(
                 "ssh".to_owned(),
-                declaration.actions[0].input_schema.properties["ssh"].clone(),
+                JsonSchema::boolean("Also turn on SSH access over the mesh."),
             );
         }
         plugin.actions.push(action);

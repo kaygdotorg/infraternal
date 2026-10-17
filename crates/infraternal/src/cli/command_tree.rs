@@ -392,6 +392,8 @@ mod tests {
                 "{command:?}"
             );
         }
+        // The builds that keep the declarations (feature `placeholders`) still hide them.
+        #[cfg(feature = "placeholders")]
         assert!(
             registry
                 .actions()

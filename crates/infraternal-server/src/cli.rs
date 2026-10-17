@@ -2,7 +2,7 @@
 
 use infraternal_plugin_api::{
     ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, CliHandler,
-    JsonSchema, PluginDefinition, SafetyNotes,
+    JsonSchema, PluginDefinition, SafetyNotes, placeholders,
 };
 
 /// Stable plugin owner used to materialize only the requested CLI definitions.
@@ -17,7 +17,6 @@ pub fn plugin() -> PluginDefinition {
         [
             server_run_action(),
             server_init_action(),
-            server_features_action(),
             server_install_compat_action(),
             server_setup_token_action(),
         ],
@@ -29,6 +28,9 @@ pub fn plugin() -> PluginDefinition {
             .extend(infraternal_plugin_release::descriptor::server_cli_actions());
         plugin = plugin.with_group("server release", "Look at the server's releases.");
     }
+    plugin
+        .actions
+        .extend(placeholders(|| [server_features_action()]));
     for action in &mut plugin.actions {
         if action.input_schema.properties.contains_key("remote_ca_dir") {
             action

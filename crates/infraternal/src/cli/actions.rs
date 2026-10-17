@@ -97,27 +97,34 @@ fn build_registry(root: Option<&str>) -> Result<ActionRegistry, RegistryError> {
 
 #[cfg(feature = "plugin-host-facts")]
 fn host_plugin() -> PluginDefinition {
-    infraternal_plugin_host_facts::DESCRIPTOR.cli_plugin(ActionTarget::Host)
+    let descriptor = &infraternal_plugin_host_facts::DESCRIPTOR;
+    if infraternal_plugin_api::PLACEHOLDERS {
+        descriptor.cli_plugin(ActionTarget::Host)
+    } else {
+        PluginDefinition::new(descriptor.id, "Read facts about a host.", [])
+    }
 }
 
 #[cfg(feature = "release")]
 fn release_plugin() -> PluginDefinition {
-    infraternal_plugin_release::descriptor::DESCRIPTOR.cli_plugin(ActionTarget::Global)
+    let descriptor = &infraternal_plugin_release::descriptor::DESCRIPTOR;
+    if infraternal_plugin_api::PLACEHOLDERS {
+        descriptor.cli_plugin(ActionTarget::Global)
+    } else {
+        PluginDefinition::new(descriptor.id, "Look at the server's releases.", [])
+    }
 }
 
 fn cli_plugin() -> PluginDefinition {
     let plugin = PluginDefinition::new(
         "cli",
         "Run and manage infraternal on this machine.",
-        [
-            status_action(),
-            up_action(),
-            skill_action(),
-            session_shim_action(),
-        ],
+        [status_action(), skill_action(), session_shim_action()],
     );
-    #[cfg(any(feature = "remote", feature = "ssh"))]
     let mut plugin = plugin;
+    plugin
+        .actions
+        .extend(infraternal_plugin_api::placeholders(|| [up_action()]));
     #[cfg(feature = "remote")]
     plugin
         .actions
@@ -506,7 +513,12 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "plugin-mesh", feature = "plugin-host-facts"))]
+#[cfg(all(
+    test,
+    feature = "placeholders",
+    feature = "plugin-mesh",
+    feature = "plugin-host-facts"
+))]
 mod hosted_tests {
     //! Ensures every production descriptor is discoverable with its original authority.
     use super::registry;
@@ -586,7 +598,10 @@ mod factory_tests {
         assert!(internal.find(&["mesh", "list"]).is_none());
         for root in [None, Some("status"), Some("skill")] {
             let registry = registry_for(root).expect("discovery registry");
-            assert!(registry.find(&["mesh", "list"]).is_some());
+            assert_eq!(
+                registry.find(&["mesh", "list"]).is_some(),
+                cfg!(feature = "placeholders")
+            );
         }
     }
 }
@@ -631,7 +646,9 @@ mod release_tests {
             let skill = crate::cli::skills::render_action(action).expect("operator skill");
             assert!(skill.contains("signature") || skill.contains("unreviewed"));
         }
+        #[cfg(feature = "placeholders")]
         let full = registry().expect("full registry");
+        #[cfg(feature = "placeholders")]
         for source in infraternal_plugin_release::descriptor::DESCRIPTOR.actions {
             let path = source.id.split('.').collect::<Vec<_>>();
             assert_eq!(
@@ -690,5 +707,27 @@ mod key_memory_registry_tests {
         }
         #[cfg(not(feature = "remote"))]
         assert!(registered.is_none());
+    }
+}
+
+#[cfg(all(test, not(feature = "placeholders")))]
+mod default_build_tests {
+    //! A default build carries no declaration of a component that is not built yet (D243).
+    use super::registry;
+
+    #[test]
+    fn default_build_registers_no_unbuilt_command() {
+        let registry = registry().expect("registry");
+        assert!(registry.actions().all(|a| a.action.availability
+            != infraternal_plugin_api::ActionAvailability::NotAvailableYet),);
+        let commands: [&[&str]; 4] = [
+            &["up"],
+            &["relay", "up"],
+            &["mesh", "list"],
+            &["host", "facts", "read"],
+        ];
+        for command in commands {
+            assert!(registry.find(command).is_none(), "{command:?}");
+        }
     }
 }

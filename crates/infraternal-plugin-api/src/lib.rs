@@ -781,6 +781,23 @@ pub enum PluginError {
 #[cfg(test)]
 mod tests;
 
+/// Whether commands for components that are not built yet are compiled in (feature `placeholders`).
+/// Default builds leave them out: they are hidden anyway (D299), and their text costs binary size (D243).
+pub const PLACEHOLDERS: bool = cfg!(feature = "placeholders");
+
+/// The placeholder actions `build` makes, or none in a default build. The closure is never
+/// called then, so its strings and schemas are not linked into the binary.
+#[must_use]
+pub fn placeholders<I: IntoIterator<Item = ActionDefinition>>(
+    build: impl FnOnce() -> I,
+) -> Vec<ActionDefinition> {
+    if PLACEHOLDERS {
+        build().into_iter().collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Adapt hosted action metadata into the shared CLI registry without duplicating routes.
 ///
 /// Hosted actions require the server's authenticated transport. The CLI currently
