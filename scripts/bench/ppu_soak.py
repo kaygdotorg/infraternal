@@ -716,15 +716,41 @@ async def memory_pressure(host, record):
     limit = working + max(16 * 1024 * 1024, working // 20)
     events_before = (group / 'memory.events').read_text()
     record.write('memory-cap', working_set_bytes=working, limit_bytes=limit, events_before=events_before)
+    victim = None
     try:
         (group / 'memory.max').write_text(str(limit))
-        await host.peers[0].echo(b'memory-victim-finished',
-            b"printf '\\033]0;'; head -c 33554432 /dev/zero | tr '\\000' x; printf '\\007\\030\\033c'; ")
+        before = host.peers[0].bytes
+        victim = asyncio.create_task(host.peers[0].echo(b'memory-victim-finished',
+            b"printf '\\033]0;'; head -c 33554432 /dev/zero | tr '\\000' x; "
+            b"read -r ppu_resume; printf '\\007\\030\\033c'; "))
+        # Drain the complete payload, then keep its native parser state open
+        # until siblings have accepted input. The explicit stdin release avoids
+        # a machine-speed-dependent race against the string's terminator.
+        until = clock_now() + 30
+        while host.peers[0].bytes - before < 33554436:
+            if victim.done():
+                await victim
+                raise AssertionError('control-string source ended before the held phase')
+            assert clock_now() < until, 'control-string source did not drain'
+            await asyncio.sleep(.001)
+        if victim.done():
+            await victim
+            raise AssertionError('control string was not held open')
+        held_echoes = await asyncio.gather(*(peer.echo(f'memory-open-sibling-{i}'.encode())
+                                            for i, peer in enumerate(host.peers[1:], 1)))
+        if victim.done():
+            await victim
+            raise AssertionError('control string ended before sibling confirmation')
+        record.write('memory-open-string', input_bytes=33554432,
+                     responsive_siblings=len(held_echoes), terminator_released=False)
+        await host.peers[0].send(0x10, b'resume\n')
+        await victim
         echoes = await asyncio.gather(*(peer.echo(f'memory-sibling-{i}'.encode())
                                        for i, peer in enumerate(host.peers)))
         assert host.child.poll() is None
         record.write('outcome', scenario='memory-pressure', expected=expected, passed=True,
             responsive_sessions=len(echoes), working_set_bytes=working, limit_bytes=limit,
+            open_string_responsive_siblings=len(held_echoes),
             peak_bytes=int((group / 'memory.peak').read_text()),
             events_after=(group / 'memory.events').read_text())
         return True
@@ -734,6 +760,11 @@ async def memory_pressure(host, record):
             events_after=(group / 'memory.events').read_text() if group.exists() else 'scope exited')
         return False
     finally:
+        if victim is not None:
+            if not victim.done():
+                victim.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await victim
         if group.exists():
             (group / 'memory.max').write_text(original)
 

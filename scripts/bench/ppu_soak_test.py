@@ -141,6 +141,46 @@ class ReceiptClock(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(samples[0]['echo_ms'], [1.0])
 
 
+class MemoryPhases(unittest.IsolatedAsyncioTestCase):
+    """Sibling input must complete while the oversized string is still open."""
+    async def test_open_string_is_held_until_every_sibling_echoes(self):
+        release = asyncio.Event()
+        held = []
+        class Peer:
+            bytes = 0
+            def __init__(self, index):
+                self.index = index
+            async def echo(self, marker, command=b''):
+                if marker == b'memory-victim-finished':
+                    self.bytes = 33554436
+                    await release.wait()
+                elif marker.startswith(b'memory-open-sibling-'):
+                    self_assert_false(release.is_set())
+                    held.append(self.index)
+                return 1.0
+            async def send(self, kind, payload):
+                self_assert_equal(set(held), set(range(1, 20)))
+                release.set()
+        self_assert_equal = self.assertEqual
+        self_assert_false = self.assertFalse
+        host = SimpleNamespace(scope='ppu-soak-memory-fixture', pid=42,
+            peers=[Peer(i) for i in range(20)], child=SimpleNamespace(poll=lambda: None))
+        contents = {'memory.max': 'max', 'memory.current': '10000000',
+                    'memory.events': 'oom 0\n', 'memory.peak': '10010000',
+                    'cgroup.procs': '42\n'}
+        records = []
+        recorder = SimpleNamespace(write=lambda kind, **fields: records.append((kind, fields)))
+        with patch.object(ppu.subprocess, 'check_output', return_value='/owned/ppu-soak-memory-fixture.scope\n'), \
+             patch.object(ppu.Path, 'read_text', lambda path: contents[path.name]), \
+             patch.object(ppu.Path, 'write_text', lambda path, value: contents.update({path.name: value})), \
+             patch.object(ppu.Path, 'exists', return_value=True):
+            self.assertTrue(await asyncio.wait_for(ppu.memory_pressure(host, recorder), 3))
+        self.assertEqual(contents['memory.max'], 'max')
+        outcome = next(fields for kind, fields in records if kind == 'outcome')
+        self.assertEqual(outcome['open_string_responsive_siblings'], 19)
+        self.assertEqual(outcome['responsive_sessions'], 20)
+
+
 class Framing(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_or_zero_frame_rejected_before_payload(self):
         for length in (0, ppu.MAX_FRAME + 1):
