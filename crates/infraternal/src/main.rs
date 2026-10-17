@@ -8,6 +8,7 @@ mod component_cli;
 mod embedded_cli;
 #[cfg(feature = "remote")]
 mod host_remove;
+mod node_status;
 #[cfg(feature = "release")]
 mod release_cli;
 
@@ -34,7 +35,7 @@ mod install;
 use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
+    process::ExitCode,
 };
 
 #[cfg(feature = "plugin-server")]
@@ -312,45 +313,55 @@ fn run_key_memory_check(json_output: bool) -> ExitCode {
 }
 
 fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
-    let server_active = systemd_server_state();
-    let role = match server_active {
-        Some(true) => "server",
-        Some(false) => "node",
-        None => "unknown",
-    };
-    let mut components = Vec::new();
-    for plugin in registry.plugins().filter(|plugin| plugin.id != "cli") {
-        let state = match (plugin.id.as_str(), server_active) {
-            ("server", Some(true)) => "Running",
-            ("server", Some(false)) => "Stopped",
-            ("server", None) => "Unknown",
-            _ => "Not available yet",
-        };
-        components.push(json!({"name": plugin.id, "state": state}));
-    }
-
-    let (state, message, next_step) = match server_active {
-        Some(true) => (
-            CommandState::Running,
-            "An infraternal server service is running on this node.",
-            "No action is needed while the server service is running.",
-        ),
-        Some(false) => (
+    use node_status::{Activity, Role};
+    let ids: Vec<String> = registry
+        .plugins()
+        .filter(|plugin| plugin.id != "cli")
+        .map(|plugin| plugin.id.clone())
+        .collect();
+    let node = node_status::probe(
+        &node_status::Roots::detect(),
+        &ids,
+        &node_status::manager_activity,
+    );
+    let (state, message, next_step) = match (node.role, node.overall()) {
+        (Role::None, _) => (
             CommandState::Stopped,
-            "No infraternal server service is running on this node.",
+            "No infraternal server or agent is installed on this node.",
             "Run `infraternal server init` to create a server on this node.",
         ),
-        None => (
+        (_, Activity::Active) => (
+            CommandState::Running,
+            match node.role {
+                Role::Both => {
+                    "An infraternal server and an infraternal agent are installed on this node, and at least one is running."
+                }
+                Role::Host => "The infraternal agent is running on this node.",
+                _ => "The infraternal server is running on this node.",
+            },
+            "No action is needed while the service is running.",
+        ),
+        (_, Activity::Failed) => (
+            CommandState::Failed,
+            "An infraternal service on this node has failed.",
+            "Run `journalctl -u <unit>` (add `--user` for a user unit) to see why it stopped.",
+        ),
+        (_, Activity::Unknown) => (
             CommandState::Unknown,
-            "The infraternal server service state could not be read.",
-            "Check the user and system service managers for the infraternal server unit.",
+            "The service manager did not answer for the infraternal units on this node.",
+            "Check that the user or system service manager is running for this account.",
+        ),
+        (_, Activity::Inactive) => (
+            CommandState::Stopped,
+            "The infraternal services on this node are installed and not running.",
+            "Start the unit shown in the components table with `systemctl start`.",
         ),
     };
     let result = CommandResult::new(
         "status",
         state,
         message,
-        json!({"role": role, "components": components}),
+        json!({"role": node.role.id(), "components": node.component_rows()}),
     )
     .with_next_step(next_step);
     print_result(&result, json_output, false);
@@ -490,88 +501,6 @@ fn run_skill_group(
     );
     print_result(&result, json_output, false);
     Some(ExitCode::SUCCESS)
-}
-
-fn systemd_server_state() -> Option<bool> {
-    let scopes: [&[&str]; 2] = [&["--user"], &[]];
-    let mut every_manager_responded = true;
-    for scope in scopes {
-        let output = Command::new("systemctl")
-            .args(scope)
-            .args([
-                "list-units",
-                "--type=service",
-                "--all",
-                "--no-legend",
-                "--no-pager",
-                "--plain",
-                "--full",
-            ])
-            .env("LC_ALL", "C")
-            .env("COLUMNS", "4096")
-            .env("SYSTEMD_COLORS", "0")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            every_manager_responded = false;
-            continue;
-        }
-        if server_state_from_units(&String::from_utf8_lossy(&output.stdout)) == Some(true) {
-            return Some(true);
-        }
-    }
-    every_manager_responded.then_some(false)
-}
-
-fn server_state_from_units(units: &str) -> Option<bool> {
-    let mut found = false;
-    for line in units.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(unit), Some(_load), Some(active), Some(_sub)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        if !unit.ends_with(".service") {
-            continue;
-        }
-        let description = fields.collect::<Vec<_>>().join(" ");
-        if description.starts_with("infraternal server (") && description.ends_with(')') {
-            found = true;
-            if active == "active" {
-                return Some(true);
-            }
-        }
-    }
-    found.then_some(false)
-}
-
-#[cfg(test)]
-mod status_tests {
-    //! Verifies status recognizes server services independently of their chosen unit name.
-
-    use super::server_state_from_units;
-
-    #[test]
-    fn custom_named_server_service_is_reported_as_running() {
-        let units = "infraternal-edge.service loaded active running infraternal server (infraternal-edge)\n";
-        assert_eq!(server_state_from_units(units), Some(true));
-    }
-
-    #[test]
-    fn custom_named_stopped_server_service_is_reported_as_stopped() {
-        let units =
-            "infraternal-edge.service loaded inactive dead infraternal server (infraternal-edge)\n";
-        assert_eq!(server_state_from_units(units), Some(false));
-    }
-
-    #[test]
-    fn unrelated_services_do_not_appear_as_infraternal_servers() {
-        let units = "infraternal-edge.service loaded active running infraternal mesh component\n";
-        assert_eq!(server_state_from_units(units), None);
-    }
 }
 
 fn run_unavailable(action: &ActionDefinition, json_output: bool) -> ExitCode {

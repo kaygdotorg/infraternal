@@ -137,6 +137,10 @@ fn status_action() -> ActionDefinition {
                 "state".to_owned(),
                 JsonSchema::string("Current component state."),
             ),
+            (
+                "detail".to_owned(),
+                JsonSchema::string("Extra fact for this component, such as the mesh peer count."),
+            ),
         ],
         ["name".to_owned(), "state".to_owned()],
     );
@@ -155,7 +159,7 @@ fn status_action() -> ActionDefinition {
         "Show this node's role and running components.",
         "Use this command to check which infraternal services are running on this node.",
         [
-            "Inspect the local infraternal server service.",
+            "Read the local infraternal service units and data directories.",
             "Review the role and component states in the result.",
         ],
         JsonSchema::empty_object(),

@@ -295,6 +295,13 @@ fn object_rows(items: &[serde_json::Value]) -> Option<Vec<Vec<String>>> {
     if columns.is_empty() {
         return None;
     }
+    // Identity first: a table reads "name, state, then the facts about it".
+    let mut columns = columns.into_iter().collect::<Vec<_>>();
+    columns.sort_by_key(|key| match key.as_str() {
+        "name" => 0,
+        "state" => 1,
+        _ => 2,
+    });
     let mut rows = Vec::with_capacity(visible_rows.len() + 1);
     rows.push(columns.iter().map(|key| humanize(key)).collect());
     for fields in visible_rows {
@@ -317,18 +324,32 @@ fn render_table(output: &mut String, rows: &[Vec<String>], indent: usize, width:
     let available = width
         .saturating_sub(indent + gap * (column_count - 1))
         .max(column_count);
-    let column_width = (available / column_count).max(1);
-    let widths = (0..column_count)
+    let mut widths = (0..column_count)
         .map(|column| {
             rows.iter()
                 .filter_map(|row| row.get(column))
                 .map(|cell| cell.chars().count())
                 .max()
                 .unwrap_or(1)
-                .min(column_width)
                 .max(1)
         })
         .collect::<Vec<_>>();
+    // Only when the table is too wide, narrow the widest column first, so
+    // short columns never wrap and the long text takes the slack.
+    while widths.iter().sum::<usize>() > available {
+        let Some(widest) = widths
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, width)| **width)
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        if widths[widest] <= 1 {
+            break;
+        }
+        widths[widest] -= 1;
+    }
     for row in rows {
         let wrapped = row
             .iter()
