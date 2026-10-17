@@ -24,7 +24,7 @@ test.beforeAll(() => {
 });
 
 const config = (page: Page, data: Record<string, unknown>) => page.request.post("/__mock/appwin/config", { data });
-const machineState = async (page: Page) => (await page.request.get("/__mock/appwin/state")).json() as Promise<{ sessions: Array<{ id: string; width: number; height: number; controller: boolean }>; inputs: Array<{ input: { kind: string; state?: number; scalar?: number; keycode?: number; down?: boolean; modifiers?: number } }>; sizes: Array<{ width: number; height: number }>; attaches: number }>;
+const machineState = async (page: Page) => (await page.request.get("/__mock/appwin/state")).json() as Promise<{ sessions: Array<{ id: string; width: number; height: number; controller: boolean }>; inputs: Array<{ input: { kind: string; state?: number; scalar?: number; x?: number; y?: number; keycode?: number; down?: boolean; modifiers?: number } }>; sizes: Array<{ width: number; height: number }>; attaches: number }>;
 
 async function openCanvas(page: Page, query = "&appwin=1", before: Record<string, unknown> = {}, fresh = true): Promise<void> {
   await page.request.post("/__mock/reset");
@@ -250,4 +250,42 @@ test("layout text and a shortcut release reach the source without physical text 
   });
   await expect.poll(async () => (await machineState(page)).inputs.filter(i => i.input.kind === "text").map(i => i.input.scalar)).toEqual([97, 233, 128008]);
   await expect.poll(async () => (await machineState(page)).inputs.filter(i => i.input.kind === "key").map(i => [i.input.keycode, i.input.down])).toEqual([[8, true], [8, false]]);
+});
+
+
+test("CSS letterbox rejects new input and still releases a drag that leaves the picture", async ({ page }) => {
+  await openCanvas(page); await openEditor(page);
+  const handle = (await appWindow(page).locator('.ui-window-resize[data-edge="e"]').boundingBox())!;
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 230, handle.y + handle.height / 2, { steps: 8 });
+  await page.mouse.up();
+  const stage = appWindow(page).locator(".aw-stage");
+  // The resize explicitly acquires control. Wait for that handover before
+  // testing picture hit bounds; pending handover is a separate input state.
+  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
+  await stage.click();
+  await expect.poll(async () => (await machineState(page)).inputs.filter(i => i.input.kind === "mouse" && i.input.state === 2).length).toBe(1);
+  const geometry = await stage.evaluate(el => {
+    const canvas = el.querySelector("canvas")!;
+    const bounds = el.getBoundingClientRect();
+    const ratio = canvas.width / canvas.height;
+    const width = Math.min(bounds.width, bounds.height * ratio), height = width / ratio;
+    const x = (bounds.width - width) / 2, y = (bounds.height - height) / 2;
+    if (Math.max(x, y) < 8) throw new Error("fixture must have a visible CSS band");
+    return { left: bounds.left, top: bounds.top, inside: { x: bounds.width / 2, y: bounds.height / 2 }, band: x > y ? { x: x / 2, y: bounds.height / 2 } : { x: bounds.width / 2, y: y / 2 } };
+  });
+  const before = (await machineState(page)).inputs.length;
+  await stage.click({ position: geometry.band });
+  await stage.press("a");
+  // The text is a same-route processing fence after the band click.
+  await expect.poll(async () => (await machineState(page)).inputs.slice(before).map(i => i.input.kind)).toEqual(["text"]);
+  await page.mouse.move(geometry.left + geometry.inside.x, geometry.top + geometry.inside.y);
+  await page.mouse.down();
+  await page.mouse.move(geometry.left + geometry.band.x, geometry.top + geometry.band.y);
+  await page.mouse.up();
+  await expect.poll(async () => (await machineState(page)).inputs.slice(before).filter(i => i.input.kind === "mouse" && i.input.state !== 0).map(i => i.input.state)).toEqual([1, 2]);
+  const [down, up] = (await machineState(page)).inputs.slice(before).filter(i => i.input.kind === "mouse" && i.input.state !== 0);
+  expect(down!.input).toMatchObject({ x: expect.any(Number), y: expect.any(Number) });
+  expect(up!.input).toMatchObject({ x: down!.input.x, y: down!.input.y });
 });

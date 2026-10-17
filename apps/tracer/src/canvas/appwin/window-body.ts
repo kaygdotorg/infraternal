@@ -268,7 +268,7 @@ export class AppBinding implements SessionBinding {
     this.touch = undefined;
   }
 
-  private point(e: { clientX: number; clientY: number }): { x: number; y: number } {
+  private point(e: { clientX: number; clientY: number }): { x: number; y: number; inside: boolean } {
     const r = this.stage.getBoundingClientRect();
     // The box is laid out at its natural size and scaled by the camera: dividing by the scale gives layout pixels.
     const k = r.width / (this.stage.clientWidth || 1) || 1;
@@ -295,12 +295,13 @@ export class AppBinding implements SessionBinding {
       if (e.pointerType === "touch") { this.touchDown(e); return; }
       const button = wireButton(e.button);
       if (button === undefined || !this.armed()) return;
+      const p = this.point(e);
+      if (!p.inside) return;
       e.preventDefault();
       this.typing = true;
       s.focus({ preventScroll: true });
       s.setPointerCapture(e.pointerId);
       this.buttons |= 1 << button;
-      const p = this.point(e);
       this.lastSent = p;
       this.send({ kind: "mouse", x: p.x, y: p.y, button, state: 1, modifiers: modifierBits(e) });
     });
@@ -308,7 +309,9 @@ export class AppBinding implements SessionBinding {
       if (e.pointerType === "touch") { this.touchMove(e); return; }
       // Looking never moves anything on the machine: a hover is sent only once control is held.
       if (!this.armed() || this.stream.controlState.kind !== "controlled") return;
-      this.move = { ...this.point(e) };
+      const p = this.point(e);
+      if (!p.inside) return;
+      this.move = p;
       if (!this.moveFrame) this.moveFrame = requestAnimationFrame(() => this.flushMove());
     });
     const up = (e: PointerEvent): void => {
@@ -316,8 +319,12 @@ export class AppBinding implements SessionBinding {
       const button = wireButton(e.button);
       if (button === undefined || !(this.buttons & (1 << button))) return;
       this.buttons &= ~(1 << button);
-      const p = this.point(e);
-      this.send({ kind: "mouse", x: p.x, y: p.y, button, state: 2, modifiers: modifierBits(e) });
+      const point = this.point(e);
+      // A captured pointer can leave the picture before its up. Release at the
+      // last valid position; dropping it or mapping a CSS band can stick a drag.
+      const p = point.inside ? point : this.lastSent;
+      if (p) this.send({ kind: "mouse", x: p.x, y: p.y, button, state: 2, modifiers: modifierBits(e) });
+      else this.send({ kind: "release" });
     };
     on("pointerup", up);
     on("pointercancel", (e) => { if (e.pointerType === "touch") this.touchUp(e); else up(e); });
@@ -326,9 +333,10 @@ export class AppBinding implements SessionBinding {
     on("wheel", (e) => {
       // The wheel reaches the machine only under the input lock; elsewhere it belongs to the canvas (D177).
       if (this.cx.inputLock.state?.win !== this.rec || !this.armed() || e.ctrlKey) return;
+      const p = this.point(e);
+      if (!p.inside) return;
       e.preventDefault();
       e.stopPropagation();
-      const p = this.point(e);
       const d = scrollDelta(e);
       if (d.dx || d.dy) this.send({ kind: "scroll", x: p.x, y: p.y, dx: d.dx, dy: d.dy, modifiers: modifierBits(e) });
     }, { passive: false });
@@ -348,14 +356,15 @@ export class AppBinding implements SessionBinding {
 
   // Touch: a tap clicks, a drag scrolls, a press and hold then drag is a mouse drag. (Trackpad mode, D200 V4, is a later round.)
   private touchDown(e: PointerEvent): void {
-    if (!this.armed() || this.touch) return;
+    if (!this.armed() || this.touch || !this.point(e).inside) return;
     e.preventDefault();
     this.stage.setPointerCapture(e.pointerId);
     const t = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), mode: "tap" as "tap" | "scroll" | "drag", timer: 0 };
     t.timer = window.setTimeout(() => {
       if (this.touch !== t || t.mode !== "tap") return;
-      t.mode = "drag";
       const p = this.point(e);
+      if (!p.inside) return;
+      t.mode = "drag";
       this.lastSent = p;
       this.send({ kind: "mouse", x: p.x, y: p.y, button: 0, state: 1, modifiers: 0 });
     }, 380);
@@ -367,13 +376,14 @@ export class AppBinding implements SessionBinding {
     if (!t || t.id !== e.pointerId || !this.armed()) return;
     const dx = e.clientX - t.x, dy = e.clientY - t.y;
     if (t.mode === "tap" && Math.hypot(dx, dy) > 8) { t.mode = "scroll"; window.clearTimeout(t.timer); }
+    const p = this.point(e);
+    if (!p.inside) { t.x = e.clientX; t.y = e.clientY; return; }
     if (t.mode === "scroll") {
       // The finger moves the content: a finger going down moves the content down, which is scrolling up on the machine.
-      const p = this.point(e);
       this.send({ kind: "scroll", x: p.x, y: p.y, dx: Math.round(dx), dy: Math.round(dy), modifiers: 0 });
       t.x = e.clientX; t.y = e.clientY;
     } else if (t.mode === "drag") {
-      this.move = { ...this.point(e) };
+      this.move = p;
       if (!this.moveFrame) this.moveFrame = requestAnimationFrame(() => this.flushMove());
     }
   }
@@ -384,7 +394,9 @@ export class AppBinding implements SessionBinding {
     window.clearTimeout(t.timer);
     this.touch = undefined;
     if (!this.armed()) return;
-    const p = this.point(e);
+    const point = this.point(e);
+    const p = point.inside ? point : t.mode === "drag" ? this.lastSent : undefined;
+    if (!p) { if (t.mode === "drag") this.send({ kind: "release" }); return; }
     if (t.mode === "tap") {
       this.send({ kind: "mouse", x: p.x, y: p.y, button: 0, state: 1, modifiers: 0 });
       this.send({ kind: "mouse", x: p.x, y: p.y, button: 0, state: 2, modifiers: 0 });
