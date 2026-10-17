@@ -8,8 +8,9 @@
  * - the stream table: odd stream ids are the client's, one per terminal, allocated by `openStream`; frames are
  *   dispatched to the stream's handler by id, so the hot path (decode, then hand the frame over) does not change;
  * - reconnecting with a bounded, jittered exponential backoff, forced drops for the resume probe, and protocol
- *   failures. The backoff starts over only once a socket has stayed up for a while, so a socket that is welcomed
- *   and then dropped at once (a request the server keeps refusing) backs off instead of reconnecting every 50 ms.
+ *   failures. A previously attached session gets one quick retry; repeated short-lived resumes then use backoff
+ *   until a socket stays up long enough to prove recovery. Local probe expiry records its reason before retiring
+ *   the route, because its close event arrives after the socket has already been replaced.
  *
  * A terminal (`TerminalClient`) keeps its own cursors (output, input, acknowledged input) and re-attaches itself
  * with them on every welcome, so a reconnect restores every stream independently. Closing a stream detaches it
@@ -143,14 +144,17 @@ export class MuxConnection {
   private lastPingAt = -Infinity;
   private retryTimer = 0;
   private retryAttempt = 0;
-  /** A confirmed terminal gets a short recovery window; persistent/refused connections retain backoff. */
-  private fastRecoveryUntil = 0;
+  /** A confirmed terminal gets one quick retry; repeated short-lived resumes retain backoff [D259]. */
+  private fastRecovery = false;
   /** When the current socket was welcomed (`performance.now()`), for the backoff's reset. */
   private welcomedAt = 0;
+  /** Retry hints stay installed from a reconnect timer until the next Welcome. */
+  private retryHintListeners = false;
+  private readonly onNetworkAvailable = (): void => this.retryNow();
+  private readonly onPageVisible = (): void => { if (document.visibilityState === "visible") this.retryNow(); };
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
-  private greeted = false;
   private resumeSent = false;
   private attachedCount = 0;
   /** Streams that attached on this server-side connection: the server keeps a writer row for each, up to its cap. */
@@ -363,7 +367,8 @@ export class MuxConnection {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
-    window.clearTimeout(this.retryTimer);
+    this.clearRetryTimer();
+    this.stopRetryHintListeners();
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection closed"));
     this.calls.clear();
@@ -380,6 +385,7 @@ export class MuxConnection {
 
   private connect(): void {
     if (this.closed) return;
+    this.clearRetryTimer();
     const resuming = [...this.streams.values()].some((s) => s.hasSession());
     this.status(resuming ? "Connection lost. Reconnecting…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -389,7 +395,6 @@ export class MuxConnection {
     this.socket = socket;
     this.decoder = new WebSocketFrameDecoder();
     this.welcomed = false;
-    this.greeted = false;
 
     socket.onopen = () => {
       if (this.socket !== socket || this.closed) return;
@@ -426,15 +431,30 @@ export class MuxConnection {
       this.disconnect(socket);
       socket.close();
     };
-    socket.onclose = () => this.disconnect(socket);
+    socket.onclose = (event) => {
+      if (this.socket !== socket || this.closed) return;
+      const internalRotation = event?.code === 4001 && event.reason === "tracer connection rotation";
+      this.disconnect(socket);
+      if (!internalRotation) this.status(plainCloseReason(event?.reason || "connection ended"));
+    };
   }
 
   /** Retire the route synchronously; closing a half-open socket need not produce an event. */
   private disconnect(socket: WebSocket): void {
     if (this.socket !== socket || this.closed) return;
-    const lived = this.welcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
-    if (this.welcomed && this.attachedCount > 0) this.fastRecoveryUntil = performance.now() + STABLE_CONNECTION_MS;
-    else if (this.greeted || this.welcomed) this.fastRecoveryUntil = 0;
+    const wasWelcomed = this.welcomed;
+    const lived = wasWelcomed && performance.now() - this.welcomedAt >= STABLE_CONNECTION_MS;
+    const forced = this.forcedDrop;
+    if (wasWelcomed) {
+      this.fastRecovery = [...this.streams.values()].some((stream) => stream.hasSession());
+      if (lived || forced) this.retryAttempt = 0;
+    } else {
+      // Keep the prompt path checks while the browser reports the network down.
+      // Once it reports online, a failed handshake consumes the quick recovery
+      // and retains its count so another refused route uses growing backoff.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) this.retryAttempt = 0;
+      else this.fastRecovery = false;
+    }
     // The server retains a live writer indefinitely; its grace starts on disconnect
     // (or startup recovery), not Welcome. Failed retries must never renew that grace.
     if (this.welcomed && this.credentials) this.credentials.deadline = Date.now() + this.credentials.windowMs;
@@ -446,10 +466,7 @@ export class MuxConnection {
     this.resetPings();
     for (const call of this.calls.values()) call.reject(new Error("connection lost"));
     this.calls.clear();
-    const forced = this.forcedDrop;
     this.forcedDrop = false;
-    // A drop we asked for, or the end of a socket that worked for a while, is not a repeat failure.
-    if (lived || forced) this.retryAttempt = 0;
     for (const s of [...this.streams.values()]) s.onDisconnected(forced);
     this.status("Connection lost. Reconnecting…");
     // With no stream left there is nothing to restore; the next `openStream` connects again.
@@ -496,6 +513,7 @@ export class MuxConnection {
     const socket = this.socket;
     if (!socket) return;
     this.disconnect(socket);
+    this.status(plainCloseReason("connection unresponsive"));
     socket.close(4000, "connection unresponsive");
   }
 
@@ -518,10 +536,10 @@ export class MuxConnection {
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
-        this.greeted = true;
         if (frame.version !== VERSION) this.fail("server uses an unsupported wire version");
         return;
       case "Welcome":
+        this.stopRetryHintListeners();
         this.send(CONTROL_STREAM, { type: "Subscribe", subId: RECOVERY_SUBSCRIPTION, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
         this.credentials?.connectionId.fill(0);
         this.credentials?.resumeToken.fill(0);
@@ -581,8 +599,8 @@ export class MuxConnection {
         this.acceptPong(frame.nonce, frame.sentUs);
         return;
       case "Close":
-        this.status(plainCloseReason(frame.reason, "The server closed the connection."));
         this.forceClose();
+        this.status(plainCloseReason(frame.reason, "The server closed the connection."));
         return;
       default:
         this.fail("server sent a terminal frame on the control stream");
@@ -591,13 +609,54 @@ export class MuxConnection {
 
   private scheduleReconnect(): void {
     if (this.closed || this.retryTimer !== 0) return;
+    // Only welcomed sockets that close before the stable window add to this loop.
+    // Unwelcomed route failures restart their recovery schedule in disconnect().
     // Positive jitter spreads retries across pages; first opens retain the ordinary backoff.
     // An ordinary restart must regain typing within RTT + 50 ms [D259]. Once
     // a terminal really worked, check promptly during that bounded recovery
     // window, leaving one frame for paint. Refused or prolonged outages back off.
-    const delay = performance.now() < this.fastRecoveryUntil ? 5 + Math.random() * 5 : reconnectDelay(this.retryAttempt);
+    // The first recovery can be quick; later short-lived failures use the exponential counter.
+    const delay = this.fastRecovery && this.retryAttempt === 0 ? 5 + Math.random() * 5 : reconnectDelay(this.retryAttempt);
     this.retryAttempt += 1;
     this.retryTimer = window.setTimeout(() => { this.retryTimer = 0; this.connect(); }, delay);
+    this.startRetryHintListeners();
+  }
+
+  /** Online and foreground hints reset retry state while an in-flight handshake remains the active attempt. */
+  private retryNow(): void {
+    if (this.closed) return;
+    const socket = this.socket;
+    const retryPending = this.retryTimer !== 0;
+    const handshakePending = socket !== undefined && !this.welcomed;
+    if (!retryPending && !handshakePending) return;
+    this.clearRetryTimer();
+    this.retryAttempt = 0;
+    this.fastRecovery = this.streams.size > 0;
+    // A WebSocket already opening across the outage is itself the immediate retry. Closing it here
+    // discards a handshake the browser can resume when its network returns.
+    if (socket && socket.readyState !== WebSocket.CLOSED) return;
+    if (socket) this.socket = undefined;
+    this.connect();
+  }
+
+  private startRetryHintListeners(): void {
+    if (this.retryHintListeners || typeof window.addEventListener !== "function") return;
+    window.addEventListener("online", this.onNetworkAvailable);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onPageVisible);
+    this.retryHintListeners = true;
+  }
+
+  private stopRetryHintListeners(): void {
+    if (!this.retryHintListeners) return;
+    window.removeEventListener("online", this.onNetworkAvailable);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onPageVisible);
+    this.retryHintListeners = false;
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer === 0) return;
+    window.clearTimeout(this.retryTimer);
+    this.retryTimer = 0;
   }
 
   private resetPings(): void {
