@@ -40,11 +40,17 @@ argument at fault and never its value. `next_step` repeats the first entry of
 
 ## Command shape
 
-`infraternal status` reports the observed node role and registered component
-states. `infraternal up` and component `up`, `down`, and `status` commands are
-present where their plugins are enabled; handlers that are not built yet say
-so plainly. `infraternal server features` follows the same rule for
-runtime-switchable server capabilities (D198, D201).
+Bare `infraternal` is the same overview as `infraternal status`, plus one line
+pointing to `--help` (a machine with nothing installed is told how to join or
+to run a server). A group typed alone, such as `infraternal mesh`, lists its
+commands. `status` exits 5 when an installed service is not running.
+
+Exit codes (D303): 0 done, 1 failed, 2 wrong command line, 3 not allowed,
+4 not found, 5 off or unreachable, 6 partly done, 130 interrupted.
+
+A command that is not built yet is hidden: it is absent from `--help`, from
+`infraternal skill` and from the written skill files, and typing it is an
+unknown command (D299). It appears again when it works.
 
 Only `infraternal server init` creates a persistent server service. It prints
 the installation plan with `--dry-run`. Applying setup asks for confirmation
@@ -54,7 +60,7 @@ migration guidance; it does not create or change a service.
 
 ## Generated skills
 
-`infraternal skill` lists visible actions registered in this build.
+`infraternal skill` lists the public, working actions registered in this build.
 `infraternal skill <command...>` prints one Markdown skill containing front
 matter, usage, ordered steps, inputs, the full output JSON Schema, examples,
 and safety notes for AI agents. `infraternal skill --write DIR` writes one
@@ -71,9 +77,9 @@ and instructions. Skills include the original wire schema references and exact
 permission alternatives; destructive actions retain required dry-run guidance.
 The `mesh` Cargo feature remains an alias for `plugin-mesh`.
 
-The authenticated CLI device-session transport is not implemented yet. Hosted
-action routes return the shared unavailable result and direct users to the server
-UI; they cannot bypass authorization or change a temporary local collector.
+The authenticated CLI device-session transport is not implemented yet, so
+hosted actions that need it are hidden placeholders (see above); they cannot
+bypass authorization or change a temporary local collector.
 Their real server handlers, durable switches and subscription topics continue to
 run through the generic plugin host. `infraternal server init` remains the only
 CLI service-creation path.
