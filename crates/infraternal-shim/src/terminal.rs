@@ -423,3 +423,11 @@ mod review_r2;
 #[cfg(all(test, feature = "process-per-user"))]
 #[path = "../tests/unit/ppu_host_budget.rs"]
 mod host_budget;
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/review_r3.rs"]
+mod review_r3;
+
+#[cfg(test)]
+#[path = "../tests/unit/review_r3_default.rs"]
+mod review_r3_default;
