@@ -949,4 +949,90 @@ mod tests {
         assert_eq!(route.category, "idle");
         assert_eq!(route.kind, "terminal_route_unresponsive");
     }
+
+    /// Hand-run in release (`--ignored --nocapture`) on a multi-threaded runtime, with
+    /// lines formatted as JSON into a discarding writer. Reports (a) what a socket worker
+    /// pays per close below the queue bound, (b) what the logger thread pays per written
+    /// line and per counted close, and (c) a flood far past the bound from four workers:
+    /// the caller still never waits, the excess is dropped and counted.
+    #[test]
+    #[ignore = "manual microbenchmark"]
+    fn close_path_cost() {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::io::sink)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let logger = StreamCloseLog::new();
+            // The first close starts the thread under this subscriber; then warm the
+            // table to 4,096 live windows, the review's worst case.
+            for i in 0..4096 {
+                logger.record(&record(owner(i), session(i)));
+                if i % 512 == 511 {
+                    settled();
+                }
+            }
+            settled();
+            // Spin, not settled()'s 1 ms sleep, so the drain time is the thread's own.
+            let drain = || {
+                while IN_FLIGHT.load(Ordering::SeqCst) > 0 {
+                    std::hint::spin_loop();
+                }
+            };
+            let batch = 512_u64;
+            for (label, distinct) in [("first close of a new account", true), ("storm of one account", false)] {
+                // 8 rounds of new accounts fill the table to its 8,192 bound, never past it.
+                let rounds = if distinct { 8_u64 } else { 40 };
+                let mut caller = Duration::ZERO;
+                let mut drained = Duration::ZERO;
+                for round in 0..rounds {
+                    let start = Instant::now();
+                    for i in 0..batch {
+                        let id = if distinct { 1_000_000 + round * batch + i } else { 1 << 50 };
+                        logger.record(std::hint::black_box(&record(owner(id), session(i))));
+                    }
+                    caller += start.elapsed();
+                    drain();
+                    drained += start.elapsed();
+                }
+                let n = u32::try_from(batch * rounds).unwrap();
+                println!(
+                    "{label}: caller {} ns/close, logger thread {} ns/close (incl. JSON line when written)",
+                    (caller / n).as_nanos(),
+                    (drained / n).as_nanos()
+                );
+            }
+            let dropped_before = logger.0.dropped.load(Ordering::Relaxed);
+            let tasks = 4_u64;
+            let per_task = 50_000_u64;
+            let mut handles = Vec::new();
+            for t in 0..tasks {
+                let logger = logger.clone();
+                handles.push(tokio::spawn(async move {
+                    let start = Instant::now();
+                    for i in 0..per_task {
+                        logger.record(std::hint::black_box(&record(owner((t << 32) + i + (1 << 40)), session(i))));
+                    }
+                    start.elapsed() / u32::try_from(per_task).unwrap()
+                }));
+            }
+            let mut per = Duration::ZERO;
+            for handle in handles {
+                per += handle.await.unwrap();
+            }
+            settled();
+            println!(
+                "flood from {tasks} workers: caller {} ns/close, {} of {} closes dropped and counted",
+                (per / u32::try_from(tasks).unwrap()).as_nanos(),
+                logger.0.dropped.load(Ordering::Relaxed) - dropped_before,
+                tasks * per_task
+            );
+        });
+    }
 }
