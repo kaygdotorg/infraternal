@@ -686,6 +686,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let mut changed = batch.subscribe();
     let mut retry_private = retry_private;
     let mut selected_attempt = 1;
+    let mut published_retry = false;
     let result = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
@@ -743,12 +744,26 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                     drop(batch);
                     let status = runner.setup_status();
                     let mut setup_changed = status.subscribe("owner", host).unwrap();
+                    // A published setup that fails after the network kill retries
+                    // through the same owner path the browser uses (#230).
+                    let mut retried_attempt = None;
                     loop {
                         let events = status.events("owner", host, 0).unwrap().1;
-                        if let Some(failure) = events.iter().find(|event| event.state == infraternal_plugin_ssh::setup::State::Failed) {
+                        let current = |event: &&infraternal_plugin_ssh::setup::Event| retried_attempt.is_none_or(|attempt| event.attempt > attempt);
+                        if let Some(failure) = events.iter().filter(current).find(|event| event.state == infraternal_plugin_ssh::setup::State::Failed) {
+                            if timeout_retry && retried_attempt.is_none() {
+                                assert!(std::process::Command::new("nft")
+                                    .args(["delete", "table", "inet", "addhost_retry_230"])
+                                    .status().unwrap().success());
+                                println!("RETRY timeout=published_setup stage={:?} failed_step={:?} network_restored=true", failure.stage, failure.failed_step);
+                                retried_attempt = Some(failure.attempt);
+                                published_retry = true;
+                                runner.retry_setup("owner".into(), Secret::new(f.cookie.as_bytes().to_vec()), host).unwrap();
+                                continue;
+                            }
                             panic!("published setup failed at {:?}", failure.stage);
                         }
-                        if events.iter().any(|event| event.stage == infraternal_plugin_ssh::setup::Stage::Ready && event.state == infraternal_plugin_ssh::setup::State::Done) { break; }
+                        if events.iter().filter(current).any(|event| event.stage == infraternal_plugin_ssh::setup::Stage::Ready && event.state == infraternal_plugin_ssh::setup::State::Done) { break; }
                         setup_changed.changed().await.unwrap();
                     }
                     let joined = FULLY_JOINED.lock().unwrap().unwrap();
@@ -767,7 +782,10 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     .await
     .unwrap();
     if timeout_retry {
-        assert_eq!(selected_attempt, 2, "a network timeout must precede the retry");
+        assert!(
+            selected_attempt == 2 || published_retry,
+            "a network timeout must precede the retry"
+        );
     }
     let active: i64 =
         sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE revoked_at IS NULL")
