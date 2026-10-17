@@ -481,6 +481,15 @@ existing terminal Ack before its correlated Pong, including when output is
 parked. Unchanged fences remain Pong-only: they do not add repeated Ack frames
 or storage work. Merely accepted input is never acknowledged as written.
 
+Local send-queue pressure alone never retires a connection or terminal for a
+liveness probe (#234). Skip a scheduled Ping before issuing its correlation
+when the bounded FIFO has no room; skipping never starts or renews a reply
+deadline. A best-effort Pong or terminal-command Ping may likewise be omitted
+at capacity. Outstanding correlated replies retain the timeout below. Reliable
+control replies defer their producers until bounded FIFO capacity returns,
+preserving ordering, including the census-before-open-result fence. Actual
+transport errors and closed writers still retire their connections.
+
 Probe replies echo nonce and timestamp. Only a new correlated reply renews a
 route deadline; ordinary traffic, unsolicited replies and stale sockets do not.
 Startup, pending input and recent link doubt keep browser probes pipelined
