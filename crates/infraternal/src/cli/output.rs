@@ -390,7 +390,7 @@ fn render_data(data: &serde_json::Value, options: RenderOptions) -> Vec<String> 
 }
 
 /// Terminal tint for a state word in a table column.
-fn state_tint(text: &str) -> Option<&'static str> {
+pub fn state_tint(text: &str) -> Option<&'static str> {
     match text.to_ascii_lowercase().as_str() {
         "running" | "ready" | "on" | "active" => Some("\u{1b}[32m"),
         "failed" | "refused" => Some("\u{1b}[31m"),

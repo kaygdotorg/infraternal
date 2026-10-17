@@ -144,8 +144,12 @@ fn dispatch_selected_action(
     json_output: bool,
 ) -> ExitCode {
     let path = selected.path.iter().map(String::as_str).collect::<Vec<_>>();
+    if path.is_empty() {
+        return run_overview(registry, json_output);
+    }
     let Some(registered) = registry.find(&path) else {
-        return missing_action(json_output);
+        return run_group(registry, &path, json_output)
+            .unwrap_or_else(|| missing_action(json_output));
     };
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
@@ -298,7 +302,11 @@ fn run_key_memory_check(json_output: bool) -> ExitCode {
     }
 }
 
-fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
+/// What this machine runs, as the shared result; the second value is how many installed services are not running.
+fn status_result(
+    registry: &ActionRegistry,
+    command: &str,
+) -> (CommandResult<serde_json::Value>, usize) {
     use infraternal_status::Activity;
     let ids: Vec<String> = registry
         .plugins()
@@ -310,16 +318,106 @@ fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
         &ids,
         &infraternal_status::manager_activity,
     );
-    let (activity, message, next_step) = node.headline();
+    let (activity, message, next) = node.headline();
     let state = match activity {
         Activity::Active => CommandState::Running,
         Activity::Inactive => CommandState::Stopped,
         Activity::Failed => CommandState::Failed,
         Activity::Unknown => CommandState::Unknown,
     };
-    let result =
-        CommandResult::new("status", state, message, json!({"role": node.role.id(), "components": node.components.iter().map(|c| json!({"name": c.name, "state": c.state, "state_detail": c.detail})).collect::<Vec<_>>()})).with_next_step(next_step);
+    // A component without a runtime yet is not something this machine has.
+    let components: Vec<_> = node
+        .components
+        .iter()
+        .filter(|c| c.state != "Not available yet")
+        .map(|c| json!({"name": c.name, "state": c.state, "state_detail": c.detail}))
+        .collect();
+    // People get the components table; the role id is a scripting detail.
+    let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    let rows: Vec<Vec<String>> = node
+        .components
+        .iter()
+        .filter(|c| c.state != "Not available yet")
+        .map(|c| vec![c.name.clone(), c.state.clone(), c.detail.clone()])
+        .collect();
+    let tint = |column: usize, text: &str| {
+        (options.color && column == 1)
+            .then(|| cli::output::state_tint(text))
+            .flatten()
+    };
+    let mut result = CommandResult::new(
+        command,
+        state,
+        message,
+        json!({"role": node.role.id(), "components": components}),
+    )
+    .with_body(infraternal_plugin_api::present::table(
+        &["Component", "State", "Detail"],
+        &rows,
+        0,
+        options.usable_width(),
+        Some(&tint),
+    ));
+    for step in next {
+        result = result.with_next_step(step);
+    }
+    (result, node.down().len())
+}
+
+fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
+    let (result, _) = status_result(registry, "status");
     emit(result, json_output, Exit::Ok)
+}
+
+/// Bare `infraternal`: the status overview, or how to join when this machine is not set up (D299).
+fn run_overview(registry: &ActionRegistry, json_output: bool) -> ExitCode {
+    let (result, _) = status_result(registry, "infraternal");
+    emit(
+        result.with_next_step("infraternal --help"),
+        json_output,
+        Exit::Ok,
+    )
+}
+
+/// A group typed alone (`infraternal mesh`) lists what it can do.
+fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Option<ExitCode> {
+    let commands: Vec<_> = cli::skills::commands(registry)
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .command
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .starts_with(path)
+        })
+        .collect();
+    if commands.is_empty() {
+        return None;
+    }
+    let rows: Vec<Vec<String>> = commands
+        .iter()
+        .map(|entry| vec![entry.command.clone(), entry.description.clone()])
+        .collect();
+    let body = infraternal_plugin_api::present::table(
+        &["Command", "What it does"],
+        &rows,
+        0,
+        cli::output::RenderOptions::detect(false).usable_width(),
+        None,
+    );
+    let name = path.join(" ");
+    Some(emit(
+        CommandResult::new(
+            name.clone(),
+            CommandState::Ready,
+            format!("infraternal {name} has {} commands.", commands.len()),
+            json!({"commands": commands}),
+        )
+        .with_body(body)
+        .with_next_step(format!("infraternal {name} <command> --help")),
+        json_output,
+        Exit::Ok,
+    ))
 }
 
 fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {

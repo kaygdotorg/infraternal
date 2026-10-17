@@ -238,3 +238,27 @@ fn snapshot_scan_counts_peers_through_nesting_strings_and_spacing() {
     // A truncated file is "unknown", never a guess.
     assert_eq!(peer_count(br#"{"config":{"peers":{"3":{"#), None);
 }
+
+#[test]
+fn the_headline_says_how_to_join_when_nothing_is_installed() {
+    let fixture = Fixture::new();
+    let (activity, message, next) = fixture.status(&[]).headline();
+    assert_eq!(activity, Activity::Inactive);
+    assert_eq!(message, "This machine is not set up yet.");
+    assert_eq!(next[0], "infraternal agent join <server-url>");
+}
+
+#[test]
+fn the_headline_names_what_is_down_and_how_to_look() {
+    let fixture = Fixture::new();
+    production_server(&fixture);
+    let running = fixture.status(&[(Scope::System, "infraternal-server.service")]);
+    let (_, message, next) = running.headline();
+    assert_eq!(message, "The server is running on this machine.");
+    assert!(next.is_empty() && running.down().is_empty());
+    let stopped = fixture.status(&[]);
+    let (_, message, next) = stopped.headline();
+    assert_eq!(message, "The server is not running on this machine.");
+    assert_eq!(next, ["systemctl status infraternal-server.service"]);
+    assert_eq!(stopped.down().len(), 1);
+}

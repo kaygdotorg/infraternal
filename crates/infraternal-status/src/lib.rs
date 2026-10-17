@@ -485,35 +485,66 @@ pub fn manager_activity(scope: Scope, unit: &str) -> Activity {
 }
 
 impl NodeStatus {
-    /// Overall activity, one sentence and the next step. A node with nothing
-    /// installed reports `Inactive` with the install hint.
+    /// Units that are installed here and not running: what a script should be told about.
+    #[must_use]
+    pub fn down(&self) -> Vec<&Unit> {
+        self.units
+            .iter()
+            .filter(|(_, state)| *state != Activity::Active)
+            .map(|(unit, _)| unit)
+            .collect()
+    }
+
+    /// Overall activity, one plain sentence, and the follow-ups that are true now.
+    /// A machine with nothing installed is not joined: it reports `Inactive` with how to join.
     #[must_use]
     #[inline(never)]
-    pub fn headline(&self) -> (Activity, String, &'static str) {
-        let overall = self.overall();
-        let word = match overall {
-            Activity::Active => "running",
-            Activity::Failed => "failed",
-            Activity::Unknown => "not answering",
-            Activity::Inactive => "not running",
-        };
+    pub fn headline(&self) -> (Activity, String, Vec<String>) {
         if self.role == Role::None {
             return (
                 Activity::Inactive,
-                "No infraternal server or agent is installed on this node.".to_owned(),
-                "Run `infraternal server init` to create a server on this node.",
+                "This machine is not set up yet.".to_owned(),
+                vec![
+                    "infraternal agent join <server-url>".to_owned(),
+                    "infraternal server init".to_owned(),
+                ],
             );
         }
-        let next = if overall == Activity::Active {
-            "No action is needed while the service is running."
-        } else {
-            "Run `systemctl status` (add `--user` for a user unit) on the unit in the table."
+        let overall = self.overall();
+        let down = self.down();
+        let who = match self.role {
+            Role::Server => "The server",
+            Role::Host | Role::None => "The infraternal agent",
+            Role::Both => "The server and the infraternal agent",
         };
-        (
-            overall,
-            format!("Infraternal {}: {word} on this node.", self.role.label()),
-            next,
-        )
+        let plural = self.role == Role::Both;
+        let message = if down.is_empty() {
+            format!(
+                "{who} {} running on this machine.",
+                if plural { "are" } else { "is" }
+            )
+        } else if overall == Activity::Active {
+            "Part of this machine's setup is not running.".to_owned()
+        } else {
+            let state = match (overall, plural) {
+                (Activity::Failed, false) => "has failed",
+                (Activity::Failed, true) => "have failed",
+                (Activity::Unknown, false) => "is not answering",
+                (Activity::Unknown, true) => "are not answering",
+                (_, false) => "is not running",
+                (_, true) => "are not running",
+            };
+            format!("{who} {state} on this machine.")
+        };
+        let next = down
+            .iter()
+            .take(3)
+            .map(|unit| match unit.scope {
+                Scope::System => format!("systemctl status {}", unit.name),
+                Scope::User => format!("systemctl --user status {}", unit.name),
+            })
+            .collect();
+        (overall, message, next)
     }
 
     /// Overall activity: any running unit means the node is up.

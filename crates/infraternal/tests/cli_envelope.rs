@@ -155,6 +155,8 @@ fn read_only_commands_answer_in_the_envelope() {
         vec!["--json", "skill"],
         vec!["skill", "status", "--json"],
         vec!["skill", "mesh", "--json"],
+        vec!["--json"],
+        vec!["server", "--json"],
     ] {
         let label = args.join(" ");
         let output = run(&args);
@@ -198,4 +200,26 @@ fn component_commands_fail_in_the_envelope_when_the_agent_is_not_there() {
         );
         assert!(output.stderr.is_empty(), "{label}");
     }
+}
+
+#[test]
+fn bare_infraternal_is_the_overview_and_points_to_help() {
+    let output = run(&["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let found = envelopes("bare", &output);
+    assert_eq!(found[0]["ok"], true);
+    assert!(found[0]["data"]["role"].is_string());
+    let next = found[0]["next"].as_array().unwrap();
+    assert!(
+        next.iter().any(|entry| entry == "infraternal --help"),
+        "{next:?}"
+    );
+    // Text mode is the same answer, on standard output.
+    let text = run(&[]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(
+        String::from_utf8(text.stdout)
+            .unwrap()
+            .contains("infraternal --help")
+    );
 }
