@@ -986,9 +986,12 @@ async fn run_actor(
                 let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
                 // One miss may be a single lost packet held behind retransmission:
                 // the windows show reconnecting and the link stays [D300].
-                let doubt_ok = !liveness.doubt_started()
-                    || notify_doubt(false, &mut doubted, link, &mut attachments, &mut routes, &mut pending).await;
-                if (liveness.retired() || !probe_ok || !doubt_ok
+                if liveness.doubt_started() {
+                    notify_doubt(false, &mut doubted, &attachments);
+                } else if !liveness.doubtful() && !doubted.is_empty() {
+                    notify_doubt(true, &mut doubted, &attachments);
+                }
+                if (liveness.retired() || !probe_ok
                     || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
@@ -1099,23 +1102,21 @@ async fn run_actor(
                     && serde_json::from_slice::<serde_json::Value>(event_json).is_ok_and(|value|value["type"]=="plugin.event" || value["type"]=="plugins.resync") {
                     changes.send_replace(());continue;
                 }
-                let ok = if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
+                if let Incoming::Pong { stream_id: 0, nonce, sent_us } = incoming {
                     // The reply that clears doubt confirms the same windows on the same link.
                     let doubtful = liveness.doubtful();
-                    if !liveness.pong(nonce, sent_us) || !doubtful
-                        || notify_doubt(true, &mut doubted, link, &mut attachments, &mut routes, &mut pending).await {
-                        continue;
+                    if liveness.pong(nonce, sent_us) && doubtful {
+                        notify_doubt(true, &mut doubted, &attachments);
                     }
-                    false
-                } else if let Incoming::SessionInventory(ids) = incoming {
+                    continue;
+                }
+                if let Incoming::SessionInventory(ids) = incoming {
                     session_inventory
                         .send_replace(SessionInventoryState::Available(Arc::from(ids)));
                     retire_fallback(&attachments, &mut fallback).await;
                     continue;
-                } else {
-                    process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await
-                };
-                if !ok {
+                }
+                if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
                     let link = connection.take();
                     if let Some(link) = link {
                         #[cfg(feature = "remote")]
@@ -2623,55 +2624,30 @@ fn connection_lost(
 /// Tells settled windows that the shared host link is doubtful, or that it
 /// answered again [D300]. Doubt never changes the link, and recovery confirms
 /// only the windows that doubt reached; replays and rebinds own their fences.
-/// A consumer too far behind for an ordered notice is retired, as for any
-/// other notice, so no window waits for a confirmation it cannot receive.
-async fn notify_doubt(
+/// A window whose queue is full keeps its place: it is told on a later tick,
+/// so none waits for a confirmation it never receives and none is retired.
+fn notify_doubt(
     recovered: bool,
     doubted: &mut Vec<u64>,
-    connection: &mut AgentConnection,
-    attachments: &mut HashMap<u64, AttachmentState>,
-    routes: &mut HashMap<u32, u64>,
-    pending: &mut HashMap<u32, PendingCall>,
-) -> bool {
-    let ids: Vec<u64> = if recovered {
-        std::mem::take(doubted)
+    attachments: &HashMap<u64, AttachmentState>,
+) {
+    let settled = |a: &AttachmentState| !a.awaiting_ack && !a.proof_rebind_pending;
+    if recovered {
+        doubted.retain(|id| {
+            attachments.get(id).is_some_and(|a| {
+                settled(a) && a.output.try_send(TerminalOutput::Recovered).is_err()
+            })
+        });
     } else {
-        doubted.clear();
-        attachments.keys().copied().collect()
-    };
-    let mut behind = Vec::new();
-    for id in ids {
-        let Some(a) = attachments.get(&id) else {
-            continue;
-        };
-        if a.awaiting_ack || a.proof_rebind_pending {
-            continue;
-        }
-        let notice = if recovered {
-            TerminalOutput::Recovered
-        } else {
-            TerminalOutput::Reconnecting
-        };
-        if a.output.try_send(notice).is_err() {
-            behind.push(id);
-        } else if !recovered {
-            doubted.push(id);
+        for (&id, a) in attachments {
+            if settled(a)
+                && !doubted.contains(&id)
+                && a.output.try_send(TerminalOutput::Reconnecting).is_ok()
+            {
+                doubted.push(id);
+            }
         }
     }
-    for attachment_id in behind {
-        if !process_command(
-            Command::Detach { attachment_id },
-            connection,
-            attachments,
-            routes,
-            pending,
-        )
-        .await
-        {
-            return false;
-        }
-    }
-    true
 }
 
 /// A stalled host does not retire its surviving PTYs. A full consumer still
