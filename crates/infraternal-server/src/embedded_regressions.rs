@@ -1450,3 +1450,68 @@ async fn recovered_route_ignores_stale_browser_rebind() {
             .is_err()
     );
 }
+
+/// Control replies may be skipped when the bounded FIFO is full; the peer's
+/// correlated reply deadline, rather than local admission, decides liveness.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn saturated_control_pong_does_not_retire_connection() {
+    let (mut link, _peer) = connection();
+    let (sender, mut receiver) = mpsc::channel(1);
+    sender.try_send(Bytes::from_static(b"queued")).unwrap();
+    link.owned_control = Some(sender);
+    assert!(
+        process_incoming(
+            Incoming::Ping {
+                nonce: 7,
+                sent_us: 9
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await,
+        "Pong admission must not retire the primary"
+    );
+    assert_eq!(
+        receiver.recv().await.unwrap(),
+        Bytes::from_static(b"queued")
+    );
+    assert!(
+        process_incoming(
+            Incoming::Ping {
+                nonce: 8,
+                sent_us: 10
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+    );
+    let encoded = receiver.recv().await.unwrap();
+    assert_eq!(
+        infraternal_protocol::decode_frame(&encoded).unwrap().frame,
+        Frame::Pong {
+            nonce: 8,
+            sent_us: 10
+        }
+    );
+    drop(receiver);
+    assert!(
+        !process_incoming(
+            Incoming::Ping {
+                nonce: 9,
+                sent_us: 11
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await,
+        "a closed writer remains a connection failure"
+    );
+}

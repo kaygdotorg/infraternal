@@ -972,9 +972,14 @@ async fn run_actor(
                 match event {}
             }
             _ = ticks.tick(), if !attachments.is_empty() => {
-                let (nonce, sent_us) = liveness.ping();
+                // Local FIFO pressure says nothing about peer health. A skipped
+                // probe starts no reply lease; outstanding leases still expire.
+                let probe_ok = !control_ready || {
+                    let (nonce, sent_us) = liveness.ping();
+                    write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
+                };
                 let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
-                if (liveness.expired() || !write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
+                if (liveness.expired() || !probe_ok
                     || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
@@ -2551,8 +2556,14 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
         {
             return false;
         }
-        // Admission is guarded by queue readiness in the single actor turn.
-        return sender.try_send(Bytes::from(encoded)).is_ok();
+        // Reliable control admission is guarded by readiness in the single
+        // actor turn. A best-effort Pong may lose that slot to queued work;
+        // let the peer's reply deadline decide health instead of retiring here.
+        return match sender.try_send(Bytes::from(encoded)) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => matches!(frame, Frame::Pong { .. }),
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        };
     }
     let (peer, encode) = (&mut connection.peer, &mut connection.encode);
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
