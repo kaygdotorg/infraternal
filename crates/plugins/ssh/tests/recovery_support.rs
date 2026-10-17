@@ -557,3 +557,16 @@ fn review_cached_helper_without_session_mode_asks_for_a_refresh() {
         "an outdated cached helper is reported as an ownership failure and never refreshed"
     );
 }
+
+/// R11 (#230): the cleanup script compares the helper's capability level with
+/// the one it was written for; both sides must name the same level.
+#[test]
+fn cleanup_script_requires_the_shipped_helper_level() {
+    let level = std::str::from_utf8(infraternal_plugin_remote::runtime_lock::LEVEL)
+        .unwrap()
+        .trim();
+    assert!(
+        include_str!("../src/runtime_cleanup.sh").contains(&format!("[ \"$level\" = {level} ]")),
+        "runtime_cleanup.sh and runtime_lock::LEVEL disagree"
+    );
+}

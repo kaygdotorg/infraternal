@@ -15,6 +15,12 @@ use std::{
 /// One fixed file in the private runtime state; never replace it while the runtime is live.
 pub const LOCK: &str = ".lifetime-lock";
 
+/// Capability level printed by `--bootstrap-runtime-version`; raise it with every new mode.
+/// The cleanup script compares it with the level it needs, so a cached helper that predates
+/// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
+/// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`.
+pub const LEVEL: &[u8] = b"2\n";
+
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
@@ -412,7 +418,13 @@ fn lock_status(error: &std::fs::TryLockError) -> u8 {
 pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Option<u8> {
     let first = arguments.next()?;
     if first == "--bootstrap-runtime-version" {
-        return arguments.next().is_none().then_some(0);
+        if arguments.next().is_some() {
+            return None;
+        }
+        // An unwritable stdout leaves the level unread, and the script then refreshes.
+        return Some(u8::from(
+            io::Write::write_all(&mut io::stdout(), LEVEL).is_err(),
+        ));
     }
     if first != "--bootstrap-runtime" {
         return None;

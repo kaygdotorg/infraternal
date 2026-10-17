@@ -3,7 +3,9 @@ runtime_helper() {
  helper="$base.bootstrap-cache/payload"
  [ -d "$base.bootstrap-cache" ] && [ ! -L "$base.bootstrap-cache" ] && [ -O "$base.bootstrap-cache" ] && [ "$(stat -c '%a' "$base.bootstrap-cache")" = 700 ] || exit 76
  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -O "$helper" ] && [ "$(stat -c '%a' "$helper")" = 700 ] || exit 76
- "$helper" --bootstrap-runtime-version >/dev/null 2>&1 || exit 76
+ # Capability level (runtime_lock::LEVEL); a cache at another level may lack a mode used here.
+ level=$("$helper" --bootstrap-runtime-version 2>/dev/null) || exit 76
+ [ "$level" = 2 ] || exit 76
 }
 control_socket() {
  [ -e "$base/sessions" ] || [ -L "$base/sessions" ] || return 0
