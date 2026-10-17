@@ -1518,3 +1518,6 @@ async fn saturated_control_pong_does_not_retire_connection() {
         "a closed writer remains a connection failure"
     );
 }
+
+#[path = "liveness_doubt_breakit_r2_tests.rs"]
+mod liveness_doubt_breakit_r2_tests;

@@ -421,3 +421,65 @@ async fn a_saturated_census_queue_cannot_establish_the_open_fence() {
         Message::Event(0, _)
     ));
 }
+
+/// Break-it #234 r2: why `uninstall_handoff_runs_only_after_a_successful_real_socket_write`
+/// flakes. Its unhealthy case assumes `drop(reader)` closes the peer, so the
+/// write must fail. That holds only while no other descriptor refers to the
+/// reader's socket. Every child forked by a concurrently running test holds a
+/// copy of every fd from fork until exec (CLOEXEC acts only at exec), so the
+/// socket stays open and the write succeeds into its buffer. `Socket` never
+/// closes its fd (transport.rs), so this test is not a double close. A copy
+/// held the way a fork holds it reproduces the failure deterministically.
+#[tokio::test]
+async fn a_dropped_peer_still_accepts_the_write_while_a_forked_copy_holds_it() {
+    use std::os::fd::AsRawFd;
+    let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    let socket = Socket::inherited(writer.as_raw_fd()).unwrap();
+    // What a child between fork and exec holds: another reference to the file.
+    let forked_copy = reader.try_clone().unwrap();
+    drop(reader);
+    let reply = infraternal_plugin_api::ActionReply { json: b"{}".to_vec(), after_write: None };
+    let result = deferred_reply(&mut Transmit::default(), &socket, 0, 1, reply).await;
+    drop(forked_copy);
+    assert!(
+        result.is_err(),
+        "the shipped test's unhealthy case assumes this write fails"
+    );
+}
+
+/// The same race without a hand-made copy: the shipped unhealthy pattern while
+/// another thread spawns short children, as the parallel test binary does.
+#[tokio::test]
+async fn the_unhealthy_handoff_case_races_concurrent_spawns() {
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::AtomicBool;
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let spawner = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut spawned = 0u32;
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(mut child) = std::process::Command::new("true").spawn() {
+                    let _ = child.wait();
+                    spawned += 1;
+                }
+            }
+            spawned
+        })
+    };
+    let mut unexpected = 0;
+    let rounds = 20_000;
+    for _ in 0..rounds {
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let socket = Socket::inherited(writer.as_raw_fd()).unwrap();
+        drop(reader);
+        let reply = infraternal_plugin_api::ActionReply { json: b"{}".to_vec(), after_write: None };
+        if deferred_reply(&mut Transmit::default(), &socket, 0, 1, reply).await.is_ok() {
+            unexpected += 1;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let spawned = spawner.join().unwrap();
+    println!("unhealthy_handoff_race rounds={rounds} spawned={spawned} write_succeeded={unexpected}");
+    assert_eq!(unexpected, 0, "a dropped peer accepted {unexpected} of {rounds} writes");
+}
