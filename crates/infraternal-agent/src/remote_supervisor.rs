@@ -6,50 +6,86 @@ const OFFLINE_LIMIT: Duration = Duration::from_mins(5);
 pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Rate limit for repeated server-link close lines: the first line of a window
-/// prints at once, later ones are only counted and summarised in the next
-/// window's first line. Runs once per link end (never per frame), so the cost is
-/// one clock read per reconnect, which is already bounded by the retry backoff.
-pub(super) struct LinkNotes {
-    window_start: Option<tokio::time::Instant>,
+/// prints at once, later ones are only counted. Their count prints when the window
+/// ends, from a timer, so a burst followed by a stable link is still reported. Runs
+/// once per link end (never per frame): one clock read per reconnect, and at most
+/// one timer task per window.
+pub(super) struct LinkNotes(std::sync::Arc<std::sync::Mutex<NoteWindow>>);
+
+struct NoteWindow {
+    start: Option<tokio::time::Instant>,
     suppressed: u64,
+    armed: bool,
 }
 
 pub(super) const LINK_NOTE_WINDOW: Duration = Duration::from_secs(60);
 
-impl LinkNotes {
-    pub(super) const fn new() -> Self {
-        Self {
-            window_start: None,
-            suppressed: 0,
+impl NoteWindow {
+    /// The count of closes since the last printed line, once their window has ended.
+    fn flush(&mut self, now: tokio::time::Instant) -> Option<String> {
+        let ended = self
+            .start
+            .is_none_or(|start| now.duration_since(start) >= LINK_NOTE_WINDOW);
+        if !ended || self.suppressed == 0 {
+            return None;
         }
+        let repeats = std::mem::take(&mut self.suppressed);
+        Some(format!(
+            "Infraternal agent server link: {repeats} more closes or refusals since the previous line"
+        ))
+    }
+}
+
+impl LinkNotes {
+    pub(super) fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(NoteWindow {
+            start: None,
+            suppressed: 0,
+            armed: false,
+        })))
     }
 
     /// Returns the line to print, if this event is not suppressed. `line` is only
     /// built for printed events.
     pub(super) fn note(
-        &mut self,
+        &self,
         now: tokio::time::Instant,
         line: impl FnOnce() -> String,
     ) -> Option<String> {
-        match self.window_start {
-            Some(start) if now.duration_since(start) < LINK_NOTE_WINDOW => {
-                self.suppressed = self.suppressed.saturating_add(1);
-                None
+        let mut window = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(start) = window.start
+            && now.duration_since(start) < LINK_NOTE_WINDOW
+        {
+            window.suppressed = window.suppressed.saturating_add(1);
+            if !window.armed {
+                window.armed = true;
+                let due = start + LINK_NOTE_WINDOW;
+                let shared = self.0.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep_until(due).await;
+                    let mut window = shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    window.armed = false;
+                    if let Some(line) = window.flush(tokio::time::Instant::now()) {
+                        drop(window);
+                        eprintln!("{line}");
+                    }
+                });
             }
-            _ => {
-                let repeats = std::mem::take(&mut self.suppressed);
-                self.window_start = Some(now);
-                let line = line();
-                Some(if repeats > 0 {
-                    format!(
-                        "{line}; {repeats} more link closes in the previous {} s",
-                        LINK_NOTE_WINDOW.as_secs()
-                    )
-                } else {
-                    line
-                })
-            }
+            return None;
         }
+        let summary = window.flush(now);
+        window.start = Some(now);
+        drop(window);
+        let line = line();
+        Some(match summary {
+            Some(summary) => format!("{summary}; {line}"),
+            None => line,
+        })
     }
 }
 
@@ -143,7 +179,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn link_close_notes_print_once_per_window_and_summarise_repeats() {
-        let mut notes = LinkNotes::new();
+        let notes = LinkNotes::new();
         let start = tokio::time::Instant::now();
         let mut printed = 0;
         for i in 0..500 {
@@ -156,7 +192,33 @@ mod tests {
         let next = notes
             .note(start + LINK_NOTE_WINDOW, || "closed".to_owned())
             .unwrap();
-        assert_eq!(next, "closed; 499 more link closes in the previous 60 s");
+        assert_eq!(
+            next,
+            "Infraternal agent server link: 499 more closes or refusals since the previous line; closed"
+        );
+    }
+
+    /// A burst followed by a stable link is still counted, by the window's timer,
+    /// and the count never claims a span it did not cover (#227 review P3-1, P3-2).
+    #[tokio::test(start_paused = true)]
+    async fn a_burst_then_a_stable_link_is_summarised_by_the_timer() {
+        let notes = LinkNotes::new();
+        let start = tokio::time::Instant::now();
+        assert!(notes.note(start, || "closed".to_owned()).is_some());
+        assert!(notes.note(start, || "closed".to_owned()).is_none());
+        assert!(notes.note(start, || "closed".to_owned()).is_none());
+        assert!(notes.0.lock().unwrap().armed);
+        tokio::time::sleep(LINK_NOTE_WINDOW).await;
+        tokio::task::yield_now().await;
+        let window = notes.0.lock().unwrap();
+        assert_eq!(window.suppressed, 0, "the timer reported the two closes");
+        assert!(!window.armed);
+        drop(window);
+        let hours_later = start + Duration::from_hours(3);
+        assert_eq!(
+            notes.note(hours_later, || "closed".to_owned()).as_deref(),
+            Some("closed")
+        );
     }
 
     #[tokio::test(start_paused = true)]

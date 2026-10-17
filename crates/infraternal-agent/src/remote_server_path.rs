@@ -731,7 +731,7 @@ pub(super) async fn run(
     let mut backoff = Duration::from_millis(200);
     let mut cooling = false;
     // One line per minute at most, so a flapping link cannot flood the agent log.
-    let mut notes = LinkNotes::new();
+    let notes = LinkNotes::new();
     loop {
         let attempt_started = tokio::time::Instant::now();
         // Reconnection itself never waits for a failed mesh probe. Once the
