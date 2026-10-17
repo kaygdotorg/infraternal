@@ -19,7 +19,7 @@ fn identity(packet: &[u8]) -> Option<[u8; 16]> {
 }
 static DEFINITION: WireStreamDef = WireStreamDef {
     browser_capability: None,
-    capability: 64,
+    capability: 256,
     opening_tag: 0x40,
     opening_identity: None,
     requests: &[0x40, 0x42, 0x43, 0x44],

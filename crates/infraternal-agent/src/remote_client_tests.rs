@@ -767,7 +767,7 @@ async fn cancelled_connection_withdraws_retained_registry_capabilities() {
     let channel = NativeChannel::control(send, receive).unwrap();
     let mut receive = Receive::default();
     assert!(
-        matches!(receive.next(&channel).await.unwrap().frame,Frame::Hello{caps,..} if caps&64!=0)
+        matches!(receive.next(&channel).await.unwrap().frame,Frame::Hello{caps,..} if caps&infraternal_protocol::desktop::NATIVE_CAPABILITY!=0)
     );
     crate::transport::Transmit::default()
         .send(
@@ -775,14 +775,14 @@ async fn cancelled_connection_withdraws_retained_registry_capabilities() {
             0,
             &Frame::Hello {
                 version: 1,
-                caps: 66,
+                caps: infraternal_protocol::desktop::NATIVE_CAPABILITY | 2,
                 client_info: "test",
             },
         )
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while caps.load(Ordering::SeqCst) != 64 {
+        while caps.load(Ordering::SeqCst) != infraternal_protocol::desktop::NATIVE_CAPABILITY {
             tokio::task::yield_now().await;
         }
     })

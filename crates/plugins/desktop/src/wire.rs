@@ -31,3 +31,21 @@ fn wire_identity(packet: &[u8], opening: bool) -> Option<[u8; 16]> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The desktop lane bit must stay clear of every core leg-B transport bit.
+    use super::WIRE;
+
+    #[test]
+    fn desktop_lane_is_a_valid_native_lane_above_core_bits() {
+        assert!(WIRE.validate().is_ok());
+        assert!(WIRE.capability >= infraternal_plugin_api::channel::MIN_NATIVE_STREAM_CAPABILITY);
+        assert_eq!(
+            WIRE.capability
+                & (infraternal_plugin_api::channel::REMOTE_PATH_BACKUP
+                    | infraternal_plugin_api::channel::REMOTE_PATH_PROOF),
+            0
+        );
+    }
+}

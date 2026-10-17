@@ -538,9 +538,9 @@ the issue [D262].
 ## 9. Desktop video extension [D104,D200,D208,D232; #146]
 
 Leg A advertises `DESKTOP_VIDEO` (caps bit 3) before desktop messages. Leg B
-advertises the desktop native lane on bit 6; bits0–5 remain reserved for core
-transport capabilities (writer binding, renewal, server paths, standby and
-priming). The extension
+advertises the desktop native lane on bit 8; bits 0–7 remain reserved for core
+transport capabilities (writer binding, renewal, server paths, standby,
+priming, path backup and path proof). The extension
 is additive; v1, terminal framing and frozen upgrade messages are unchanged.
 Leg A remains WebSocket; the two QUIC delivery candidates apply to leg B.
 Neither delivery mode has a default: opening selects it explicitly for measurement.

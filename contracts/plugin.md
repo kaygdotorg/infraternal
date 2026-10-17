@@ -133,7 +133,7 @@ resumable. Terminal streams are resumable by byte offset (contracts/shim.md
 §4, contracts/wire.md).
 
 Native `WireStreamDef.capability` is the leg-B capability and must not alias its
-reserved core bits0–5. The additive optional `browser_capability` declares a
+reserved core bits 0–7 (bits 6 and 7 are path backup and path proof). The additive optional `browser_capability` declares a
 different leg-A bit when the browser extension already has one. If absent, the
 browser uses the native bit and descriptor JSON is unchanged. A declared browser
 bit is a single extension bit (at least bit3); browser advertisement and admission

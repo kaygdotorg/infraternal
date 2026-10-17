@@ -5,7 +5,7 @@ fn identity(bytes: &[u8]) -> Option<Identity> {
 }
 static DEFINITION: WireStreamDef = WireStreamDef {
     browser_capability: None,
-    capability: 64,
+    capability: 256,
     opening_tag: 0x40,
     opening_identity: None,
     requests: &[0x40, 0x42, 0x43, 0x44],
@@ -84,7 +84,7 @@ fn ambiguous_definition_cannot_replace_a_live_decoder() {
 fn distinct_capabilities_cannot_claim_the_same_packet_tag() {
     static OTHER: WireStreamDef = WireStreamDef {
         browser_capability: None,
-        capability: 128,
+        capability: 512,
         ..DEFINITION
     };
     let hub = DatagramHub::default();

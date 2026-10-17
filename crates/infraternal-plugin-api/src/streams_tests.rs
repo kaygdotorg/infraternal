@@ -2,7 +2,7 @@
 use super::*;
 static VALID: WireStreamDef = WireStreamDef {
     browser_capability: None,
-    capability: 64,
+    capability: 256,
     opening_tag: 0x40,
     opening_identity: None,
     requests: &[0x40, 0x42, 0x43, 0x44],
@@ -164,7 +164,7 @@ fn browser_projection_is_optional_validated_and_independent_of_native_bits() {
         browser_capability: Some(8),
         ..VALID
     };
-    assert_eq!(split.capability, 64);
+    assert_eq!(split.capability, 256);
     assert_eq!(split.browser_capability(), 8);
     assert!(split.validate().is_ok());
     for bit in [0, 1, 2, 4, 7, 9] {

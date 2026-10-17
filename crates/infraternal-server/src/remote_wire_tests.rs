@@ -220,7 +220,7 @@ fn opening_for(id: u128) -> Bytes {
 
 static UNCOMPILED: WireStreamDef = WireStreamDef {
     browser_capability: None,
-    capability: 128,
+    capability: 512,
     opening_tag: 0x40,
     opening_identity: None,
     requests: &[0x40],
@@ -247,7 +247,7 @@ async fn unsupported_or_invalid_opening_never_creates_native_stream() {
         .is_err()
     );
     let pair = Pair::new(
-        remote_quic::REMOTE_WRITER_BINDING | infraternal_protocol::desktop::NATIVE_CAPABILITY | 128,
+        remote_quic::REMOTE_WRITER_BINDING | infraternal_protocol::desktop::NATIVE_CAPABILITY | 512,
     )
     .await;
     assert!(matches!(

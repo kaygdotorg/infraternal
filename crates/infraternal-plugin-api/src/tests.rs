@@ -368,7 +368,7 @@ impl AgentPlugin for NativePlugin {
 }
 const NATIVE: crate::streams::WireStreamDef = crate::streams::WireStreamDef {
     browser_capability: None,
-    capability: 64,
+    capability: 256,
     opening_tag: 0x40,
     opening_identity: None,
     requests: &[0x40],
@@ -420,7 +420,7 @@ fn native_discovery_refuses_undeclared_and_ambiguous_providers() {
         .unwrap();
     assert_eq!(
         registry.wire_providers().unwrap()[0].definition.capability,
-        64
+        256
     );
     registry
         .register(Box::new(NativePlugin(&CONFLICTING_DESCRIPTOR)))
@@ -491,7 +491,7 @@ fn native_providers_cannot_alias_distinct_lanes_to_one_browser_capability() {
     };
     const SECOND: crate::StreamDef = crate::StreamDef {
         wire: Some(crate::streams::WireStreamDef {
-            capability: 128,
+            capability: 512,
             browser_capability: Some(8),
             opening_tag: 0x50,
             requests: &[0x50],
@@ -531,7 +531,7 @@ fn native_only_providers_do_not_collide_on_absent_browser_projection() {
     static SECOND_DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         streams: &[crate::StreamDef {
             wire: Some(crate::streams::WireStreamDef {
-                capability: 128,
+                capability: 512,
                 opening_tag: 0x50,
                 requests: &[0x50],
                 replies: &[0x51],
@@ -549,4 +549,24 @@ fn native_only_providers_do_not_collide_on_absent_browser_projection() {
         .register(Box::new(NativePlugin(&SECOND_DESCRIPTOR)))
         .unwrap();
     assert_eq!(registry.wire_providers().unwrap().len(), 2);
+}
+
+#[test]
+fn native_lanes_start_above_every_core_leg_b_bit() {
+    use crate::channel::{
+        LIVE_RENEWAL, MIN_NATIVE_STREAM_CAPABILITY, REMOTE_PATH_BACKUP, REMOTE_PATH_PROOF,
+        REMOTE_PRIMED_WRITERS, REMOTE_STANDBY, REMOTE_WRITER_BINDING, SERVER_PATH_PROPOSALS,
+    };
+    // Bit 0 is the resume bit. A plugin lane that shares any of these bits
+    // would be negotiated by a peer that only meant the core transport feature.
+    let core = 1
+        | REMOTE_WRITER_BINDING
+        | LIVE_RENEWAL
+        | SERVER_PATH_PROPOSALS
+        | REMOTE_STANDBY
+        | REMOTE_PRIMED_WRITERS
+        | REMOTE_PATH_BACKUP
+        | REMOTE_PATH_PROOF;
+    assert_eq!(MIN_NATIVE_STREAM_CAPABILITY.count_ones(), 1);
+    assert!(MIN_NATIVE_STREAM_CAPABILITY > core);
 }
