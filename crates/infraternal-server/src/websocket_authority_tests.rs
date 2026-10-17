@@ -24,7 +24,7 @@ async fn periodic_authority_read_rejects_expiry_committed_by_its_operation() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn periodic_authority_read_keeps_its_existing_timeout() {
+async fn periodic_authority_read_fails_closed_at_the_bounded_wait() {
     assert_eq!(held_authority_operation(Completion::Held).await, Err(()));
 }
 
@@ -124,10 +124,10 @@ async fn held_authority_operation(completion: Completion) -> Result<(), ()> {
     tokio::time::advance(BUSY_AUTHORITY_INTERVAL).await;
     assert!(guarded.as_mut().now_or_never().is_none());
     if matches!(completion, Completion::Held) {
-        // Progress support is not an extension: a still-held connection must
-        // fail at the unchanged production authority-read deadline.
-        tokio::time::advance(AUTHORITY_READ_TIMEOUT).await;
-        let result = guarded.await;
+        // Progress support is not an extension: a still-held connection is a
+        // busy store, retried at the unchanged per-read deadline and failed
+        // closed at the bounded authority wait (#240), never later.
+        let result = advance_through_authority_wait(guarded.as_mut()).await;
         assert!(!owner_polled.load(Ordering::SeqCst));
         assert!(dropped.load(Ordering::SeqCst));
         return result.map(|_| ());
@@ -242,7 +242,6 @@ async fn interrupted_authority_operation(interruption: Interruption) {
         };
         tokio::time::advance(before_read).await;
         assert!(guarded.as_mut().now_or_never().is_none());
-        let read_started = tokio::time::Instant::now();
         match interruption {
             Interruption::Revocation => crate::auth::tests::publish_revocation(&state.auth),
             Interruption::Expiry => tokio::time::advance(Duration::from_millis(10)).await,
@@ -253,18 +252,38 @@ async fn interrupted_authority_operation(interruption: Interruption) {
             !side_effect.load(Ordering::SeqCst),
             "periodic authority read polled a send-like side effect after authority interruption"
         );
+        // The frozen operation keeps the only connection, so the pending read
+        // can never finish: it fails closed at the bounded wait (#240).
         let result = if let Some(result) = completed {
             result
         } else {
-            tokio::time::advance(
-                (read_started + AUTHORITY_READ_TIMEOUT)
-                    .saturating_duration_since(tokio::time::Instant::now()),
-            )
-            .await;
-            guarded.await
+            advance_through_authority_wait(guarded.as_mut()).await
         };
         assert_eq!(result, Err(()));
         return;
     }
     panic!("could not align the initial one-second authority lease");
+}
+
+/// Step paused time through one bounded authority wait. The future must stay
+/// pending for most of it (a busy store is retried, not refused) and must end
+/// by its bound plus one read deadline (a busy store never extends it).
+async fn advance_through_authority_wait<T>(
+    mut guarded: std::pin::Pin<&mut impl std::future::Future<Output = T>>,
+) -> T {
+    let started = tokio::time::Instant::now();
+    loop {
+        if let Some(result) = guarded.as_mut().now_or_never() {
+            assert!(
+                started.elapsed() >= AUTHORITY_WAIT / 2,
+                "a busy store was refused before the bounded authority wait"
+            );
+            return result;
+        }
+        assert!(
+            started.elapsed() <= AUTHORITY_WAIT + AUTHORITY_READ_TIMEOUT,
+            "a busy store extended the bounded authority wait"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
 }
