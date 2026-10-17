@@ -162,6 +162,7 @@ async fn upgrade(
 /// Both socket kinds share one upgrade task type; limits and authority remain
 /// with each caller. Sharing the cold upgrade avoids duplicating its task and
 /// cancellation machinery for retained setup subscriptions (D243, D255).
+#[derive(Clone, Copy)]
 enum SocketMode {
     Bootstrap,
     #[cfg(feature = "remote")]

@@ -3,7 +3,7 @@
 pub(crate) const PAYLOAD_ONLY: bool = cfg!(all(
     feature = "session-payload",
     not(any(
-        feature = "server",
+        feature = "plugin-server",
         feature = "remote",
         feature = "mesh",
         feature = "plugin-host-facts"

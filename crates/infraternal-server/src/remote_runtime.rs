@@ -302,11 +302,14 @@ impl RemoteHosts {
         Ok(())
     }
 
+    /// Admit a link and update its source only when this transport exposes one.
+    /// SSH pipes have no observed socket IP; preserve an existing value or use
+    /// the unspecified address until the enrolled network link is admitted.
     pub(crate) async fn admit_observed(
         &self,
         authority: AuthorityGuard,
         mut link: RemoteLink,
-        ip: std::net::IpAddr,
+        observed_ip: Option<std::net::IpAddr>,
     ) -> io::Result<()> {
         if link.primed() {
             return self.admit_primed(authority, link).await;
@@ -342,11 +345,11 @@ impl RemoteHosts {
             host.authority = authority;
             // Tunnel source addresses are not underlay discovery. Preserve the
             // existing address, including its canonical IPv4 representation.
-            host.ip = if self.4 {
-                host.ip.to_canonical()
-            } else {
-                ip.to_canonical()
-            };
+            if !self.4
+                && let Some(ip) = observed_ip
+            {
+                host.ip = ip.to_canonical();
+            }
             host.changed.send_replace(generation);
         } else {
             self.prove_paths(&mut link)?;
@@ -362,7 +365,10 @@ impl RemoteHosts {
                     ip: if self.4 {
                         std::net::Ipv4Addr::UNSPECIFIED.into()
                     } else {
-                        ip.to_canonical()
+                        observed_ip.map_or_else(
+                            || std::net::Ipv4Addr::UNSPECIFIED.into(),
+                            |ip| ip.to_canonical(),
+                        )
                     },
                     channel: None,
                     uid,

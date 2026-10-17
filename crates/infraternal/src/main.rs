@@ -27,9 +27,9 @@ mod remote_service;
 mod restart;
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_binary;
-mod shim_cli;
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_image;
+mod shim_cli;
 #[cfg(feature = "ssh")]
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
@@ -1091,7 +1091,7 @@ fn run_embedded_agent(matches: &ArgMatches, json_output: bool) -> ExitCode {
 }
 
 fn run_shim_command(matches: &ArgMatches) -> ExitCode {
-    let options = (|| {
+    let options: Result<shim_cli::Options, String> = (|| {
         Ok(shim_cli::Options {
             session: matches
                 .get_one::<String>("session")

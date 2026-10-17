@@ -417,7 +417,6 @@ async fn dispatch_authenticated(
     )
     .await
 }
-#[cfg(feature = "remote")]
 pub(crate) async fn run_authenticated_with_plugins(
     channel: &impl Channel,
     state: PathBuf,

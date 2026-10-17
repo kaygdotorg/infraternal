@@ -37,6 +37,23 @@ enum LinkTransport {
     Quic(QuicLink),
 }
 
+/// Drain the authenticated SSH greeting prefix before reading later channel bytes.
+#[cfg(feature = "ssh")]
+async fn read_ssh_transport(
+    channel: &infraternal_plugin_ssh::duplex::Duplex,
+    prefix: &Mutex<Option<Bytes>>,
+    target: &mut BytesMut,
+    scratch: &mut [u8],
+) -> io::Result<usize> {
+    if let Some(prefix) = prefix.lock().await.take() {
+        target.extend_from_slice(&prefix);
+        return Ok(prefix.len());
+    }
+    let count = channel.read(scratch).await?;
+    target.extend_from_slice(&scratch[..count]);
+    Ok(count)
+}
+
 /// Authority is attached only after durable mTLS admission and guards both
 /// transport directions; direct actor tests may still construct an unguarded link.
 pub(crate) struct RemoteLink {
@@ -378,15 +395,7 @@ impl RemoteLink {
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh {
                 channel, prefix, ..
-            } => {
-                if let Some(prefix) = prefix.lock().await.take() {
-                    target.extend_from_slice(&prefix);
-                    return Ok(prefix.len());
-                }
-                let count = channel.read(scratch).await?;
-                target.extend_from_slice(&scratch[..count]);
-                Ok(count)
-            }
+            } => read_ssh_transport(channel, prefix, target, scratch).await,
             LinkTransport::Tcp {
                 channel,
                 receive,
@@ -589,6 +598,8 @@ impl RemoteLink {
             connection: match &self.transport {
                 LinkTransport::Quic(link) => Some(link.connection.clone()),
                 LinkTransport::Tcp { .. } => None,
+                #[cfg(feature = "ssh")]
+                LinkTransport::Ssh { .. } => None,
             },
             admitted: false,
         }

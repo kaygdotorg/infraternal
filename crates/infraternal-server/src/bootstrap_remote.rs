@@ -300,11 +300,12 @@ impl Backend for RemoteBackend {
             .await
             .map_err(|_| unavailable())?;
             self.hosts
-                .admit(
+                .admit_observed(
                     guard,
                     crate::remote_link::RemoteLink::ssh(channel, session)
                         .await
                         .map_err(|_| unavailable())?,
+                    None,
                 )
                 .await
                 .map_err(|_| unavailable())?;
