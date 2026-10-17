@@ -55,9 +55,20 @@ impl Plugin for MeshPlugin {
         let service = self.mesh.clone();
         let store = service.dataplane();
         let work = self.mesh_work.clone();
-        Some(Box::pin(crate::node_coordination::run(
-            store, service, channel, work,
-        )))
+        if !channel.is_server() {
+            return Some(Box::pin(crate::node_coordination::run(
+                store, service, channel, work,
+            )));
+        }
+        // The server's own channel also reads who is online; the two end together (presence.rs, #236).
+        let presence = crate::presence::run(service.clone(), channel.clone());
+        let coordination = crate::node_coordination::run(store, service, channel, work);
+        Some(Box::pin(async move {
+            tokio::select! {
+                () = coordination => {}
+                () = presence => {}
+            }
+        }))
     }
     fn run(
         &self,
@@ -70,6 +81,7 @@ impl Plugin for MeshPlugin {
         let worker_user = host.user_id().to_owned();
         Box::pin(async move {
             let mut mesh_updates = worker_state.mesh.subscribe();
+            let mut presence_updates = worker_state.mesh.subscribe_presence();
             let mut mesh_subscriptions =
                 Vec::<MeshSubscription>::with_capacity(MAX_MESH_SUBSCRIPTIONS);
             let mut encode = Vec::with_capacity(4096);
@@ -114,6 +126,19 @@ impl Plugin for MeshPlugin {
                                     &mut mesh_subscriptions, &mut sink, &mut encode).await
                             }.boxed()
                         ).await
+                    }
+                    // Presence moves without a revision: each watch gets a fresh authoritative snapshot.
+                    presence = presence_updates.recv(), if !mesh_subscriptions.is_empty() => {
+                        if matches!(presence, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                            Err(())
+                        } else {
+                            host.authorized(async {
+                                    let _permit = worker_state.mesh_work.acquire().await.map_err(|_| ())?;
+                                    send_mesh_resync(&worker_state, &worker_user,
+                                        &mut mesh_subscriptions, &mut sink, &mut encode, false).await
+                                }.boxed()
+                            ).await
+                        }
                     }
                     change = mesh_updates.recv(), if !mesh_subscriptions.is_empty() => {
                         match change {

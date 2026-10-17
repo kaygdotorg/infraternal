@@ -48,6 +48,9 @@ pub struct MeshNode {
     pub last_seen: Option<i64>,
     /// Last measured round-trip time in microseconds.
     pub last_rtt_us: Option<u64>,
+    /// How packets reach the node from the server while it is online, when the server's device shows it (#236).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<crate::presence::NodePath>,
 }
 
 /// A tag and its stable node membership.
@@ -491,6 +494,9 @@ fn node_id(id: u64) -> Result<i64, MeshApiError> {
 pub struct MeshService {
     pool: SqlitePool,
     updates: broadcast::Sender<MeshChange>,
+    // Runtime liveness from the server's own device; never persisted (presence.rs, #236).
+    presence: std::sync::Arc<crate::presence::Presence>,
+    presence_updates: broadcast::Sender<()>,
     // Request-local authority is never installed in the shared service.
     fresh_authority: Option<String>,
     store: crate::store::Store,
@@ -506,10 +512,14 @@ impl MeshService {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
+        // Only "something changed" is carried: one pending notice is as good as many.
+        let (presence_updates, _) = broadcast::channel(1);
         Self {
             store: crate::store::Store::new(pool.clone()),
             pool,
             updates,
+            presence: std::sync::Arc::default(),
+            presence_updates,
             fresh_authority: None,
             invalid_hosts: crate::diagnostics::InvalidHosts::default(),
             list_diagnostics: StorageDiagnostics::new("mesh.list"),
@@ -552,6 +562,19 @@ impl MeshService {
     #[cfg(test)]
     pub(crate) fn pool_for_tests(&self) -> SqlitePool {
         self.pool.clone()
+    }
+
+    /// Install the server's current reading of who is online; viewers hear of it only when it changed (#236).
+    pub fn set_presence(&self, live: crate::presence::Live) {
+        if self.presence.replace(live) {
+            let _ = self.presence_updates.send(());
+        }
+    }
+
+    /// Subscribe to presence transitions. They advance no revision, so a viewer is sent a fresh snapshot.
+    #[must_use]
+    pub fn subscribe_presence(&self) -> broadcast::Receiver<()> {
+        self.presence_updates.subscribe()
     }
 
     /// Subscribe to post-commit revision invalidations; a lagging reader should reload its filtered list.
@@ -859,6 +882,15 @@ impl MeshService {
                             .and_then(|seen| seen.checked_add(NODE_LIVE_SECONDS + 1))
                     })
                     .min();
+                // Presence is the device's first-hand reading; it marks nodes online without a stored
+                // observation, and its transitions are pushed, so it adds no expiry deadline.
+                let mut snapshot = snapshot;
+                for node in &mut snapshot.nodes {
+                    if let Some(path) = self.presence.get(node.node.id) {
+                        node.live = true;
+                        node.path = path;
+                    }
+                }
                 Ok((page_snapshot(snapshot, filter.cursor)?, deadline))
             })
             .await
@@ -1884,6 +1916,7 @@ fn decode_host(
             .is_some_and(|seen| seen <= now && seen >= now.saturating_sub(NODE_LIVE_SECONDS)),
         last_seen,
         last_rtt_us: last_rtt.map(u64::try_from).transpose().ok()?,
+        path: None,
     })
 }
 
