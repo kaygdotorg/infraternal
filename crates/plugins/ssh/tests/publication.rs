@@ -1,9 +1,10 @@
-//! Checks that a routing refusal after shim creation terminates wizard progress without rolling back the protected session (D255).
+//! Exercises early shell publication, retained setup status and retry after SSH transport loss (D255).
 #![allow(clippy::unwrap_used)]
 
 mod common;
 
 use infraternal_plugin_ssh::{
+    auth_order::{AuthProvider, AutoAuth},
     bootstrap::{Authority, Backend, Bootstrap, Resolved},
     install::{BinaryPaths, JoinMaterial},
     model::{Destination, InstallMode, MeshEvidence, Step, Target, TargetAddress},
@@ -381,6 +382,30 @@ struct RetryBackend {
     sessions: std::sync::Mutex<Vec<uuid::Uuid>>,
     resolves: std::sync::atomic::AtomicUsize,
 }
+
+/// The reconnect returns an unopened automatic-auth wrapper, as the production
+/// credential resolver does; its first command must still be the read-only check.
+struct RetryCredentialProvider;
+impl AuthProvider for RetryCredentialProvider {
+    fn network(&self) -> Option<infraternal_plugin_ssh::auth_order::NetworkProvider> {
+        None
+    }
+    fn server_key(&self) -> Operation<'_, Option<Credentials>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn user_key(&self) -> Operation<'_, Option<Credentials>> {
+        Box::pin(async {
+            Ok(Some(Credentials::PrivateKey {
+                key: Secret::new(b"synthetic-retry-key".to_vec()),
+                passphrase: None,
+            }))
+        })
+    }
+    fn password(&self) -> Operation<'_, Option<Credentials>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
 impl RetryBackend {
     fn material(&self) -> JoinMaterial {
         JoinMaterial {
@@ -396,14 +421,20 @@ impl Backend for RetryBackend {
     }
     fn resolve<'a>(
         &'a self,
-        authority: &'a Authority,
-        target: &'a Target,
+        _authority: &'a Authority,
+        _target: &'a Target,
         credential: Option<&'a str>,
     ) -> Operation<'a, Resolved> {
         self.resolves
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(credential, Some("saved-key"));
-        Refused.resolve(authority, target, credential)
+        Box::pin(async move {
+            Ok(Resolved {
+                destination: Destination::parse("user@fixture").unwrap(),
+                credentials: Credentials::Automatic(Arc::new(RetryCredentialProvider)),
+                mesh: MeshEvidence::default(),
+            })
+        })
     }
     fn invitation<'a>(
         &'a self,
@@ -491,10 +522,11 @@ async fn retry_reopens_ssh_after_transport_loss_and_keeps_the_published_shell() 
     let path = common::scratch().join(format!("reconnect-{}", uuid::Uuid::new_v4().simple()));
     std::fs::write(&path, b"synthetic verified full payload").unwrap();
     let disconnected = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let transport = Arc::new(RecoverableTransport {
+    let underlying = Arc::new(RecoverableTransport {
         opens: std::sync::atomic::AtomicUsize::new(0),
         disconnected: disconnected.clone(),
     });
+    let transport = Arc::new(AutoAuth::new(underlying.clone()));
     let backend = Arc::new(RetryBackend {
         host: uuid::Uuid::new_v4(),
         disconnect: disconnected,
@@ -555,12 +587,15 @@ async fn retry_reopens_ssh_after_transport_loss_and_keeps_the_published_shell() 
         completed.stage,
         infraternal_plugin_ssh::setup::Stage::Ready,
         "retry event={completed:?}, opens={}, resolves={}, published_sessions={}",
-        transport.opens.load(std::sync::atomic::Ordering::SeqCst),
+        underlying.opens.load(std::sync::atomic::Ordering::SeqCst),
         backend.resolves.load(std::sync::atomic::Ordering::SeqCst),
         backend.sessions.lock().unwrap().len(),
     );
     assert_eq!(completed.state, infraternal_plugin_ssh::setup::State::Done);
-    assert_eq!(transport.opens.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        underlying.opens.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
     assert_eq!(
         backend.resolves.load(std::sync::atomic::Ordering::SeqCst),
         2

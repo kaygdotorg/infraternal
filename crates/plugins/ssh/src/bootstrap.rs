@@ -258,6 +258,13 @@ impl Bootstrap {
                         .transport
                         .open(resolved.destination, resolved.credentials, resolved.mesh)
                         .await?;
+                    // Automatic credentials return a lazy session that admits only the exact
+                    // read-only check until it has selected and authenticated its SSH method.
+                    // Retry must perform that check before the first exec reattaches the saved
+                    // shim; otherwise the bridge sees an unopened authentication wrapper.
+                    session
+                        .run(crate::probe::CHECK_SCRIPT, Input::Empty)
+                        .await?;
                     installation = installation.with_session(session);
                     installation.resume_session(saved.session_id).await?
                 }
