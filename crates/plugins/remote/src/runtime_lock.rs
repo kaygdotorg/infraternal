@@ -169,10 +169,11 @@ fn legacy_row(row: &str) -> Option<(&str, &str)> {
 // Legacy runtimes did not hold the lifetime lock. A refused connect alone is
 // insufficient before listen. Ask the kernel for candidate ownership instead
 // of inspecting private process descriptors, which cannot establish absence.
+// Inspection carries only matched/unmatched/unknown: any unknown retains state.
 #[cold]
 #[inline(never)]
-fn legacy_bound(runtime: &Path, expected: &fs::Metadata) -> io::Result<bool> {
-    let rows = fs::read_to_string("/proc/net/unix")?;
+fn legacy_bound(runtime: &Path, expected: &fs::Metadata) -> Option<bool> {
+    let rows = fs::read_to_string("/proc/net/unix").ok()?;
     for row in rows.lines().skip(1) {
         let Some((inode, name)) = legacy_row(row) else {
             continue;
@@ -190,12 +191,12 @@ fn legacy_bound(runtime: &Path, expected: &fs::Metadata) -> io::Result<bool> {
             continue;
         }
         // Interpret only candidates; unrelated kernel identifiers need no conversion.
-        let inode = inode.parse::<u32>().map_err(|_| refused())?;
+        let inode = inode.parse::<u32>().ok()?;
         if socket_matches(inode, expected)? {
-            return Ok(true);
+            return Some(true);
         }
     }
-    Ok(false)
+    Some(false)
 }
 
 // Linux unix_diag.h exact-query ABI: UID and VFS identity are requested.
@@ -241,7 +242,7 @@ pub fn check_diagnostic_record(data: &[u8], inode: u32) -> Option<u32> {
 }
 #[cold]
 #[inline(never)]
-fn socket_matches(inode: u32, expected: &fs::Metadata) -> io::Result<bool> {
+fn socket_matches(inode: u32, expected: &fs::Metadata) -> Option<bool> {
     use nix::sys::socket::{
         MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
     };
@@ -250,12 +251,14 @@ fn socket_matches(inode: u32, expected: &fs::Metadata) -> io::Result<bool> {
         SockType::Datagram,
         SockFlag::SOCK_CLOEXEC,
         SockProtocol::NetlinkSockDiag,
-    )?;
+    )
+    .ok()?;
     setsockopt(
         &query,
         sockopt::ReceiveTimeout,
         &nix::sys::time::TimeVal::new(0, 100_000),
-    )?;
+    )
+    .ok()?;
     let mut request = [0_u8; 40];
     request[0..4].copy_from_slice(&40_u32.to_ne_bytes());
     request[4..6].copy_from_slice(&20_u16.to_ne_bytes()); // SOCK_DIAG_BY_FAMILY
@@ -271,27 +274,31 @@ fn socket_matches(inode: u32, expected: &fs::Metadata) -> io::Result<bool> {
         &request,
         &NetlinkAddr::new(0, 0),
         MsgFlags::MSG_DONTWAIT,
-    )? != request.len()
+    )
+    .ok()?
+        != request.len()
     {
-        return Err(refused());
+        return None;
     }
     let mut response = [0_u8; 64];
-    let (count, source) = recvfrom::<NetlinkAddr>(query.as_raw_fd(), &mut response)?;
+    let (count, source) = recvfrom::<NetlinkAddr>(query.as_raw_fd(), &mut response).ok()?;
     if !source.is_some_and(|source| source.pid() == 0 && source.groups() == 0) {
-        return Err(refused());
+        return None;
     }
-    let owner = diagnostic_owner(&response[..count], inode).ok_or_else(refused)?;
+    let owner = diagnostic_owner(&response[..count], inode)?;
     // The kernel VFS record projects inode/device to 32 bits. This scopes an
     // already-bound entry to the probed file; a match only preserves state.
     // New runtimes use the lifetime lock instead of this legacy fallback.
     let device =
         (nix::sys::stat::major(expected.dev()) << 20) | nix::sys::stat::minor(expected.dev());
     if device > u64::from(u32::MAX) {
-        return Err(refused());
+        return None;
     }
-    Ok(owner.uid == expected.uid()
-        && u64::from(owner.device) == device
-        && u64::from(owner.inode) == expected.ino() & u64::from(u32::MAX))
+    Some(
+        owner.uid == expected.uid()
+            && u64::from(owner.device) == device
+            && u64::from(owner.inode) == expected.ino() & u64::from(u32::MAX),
+    )
 }
 #[cold]
 #[inline(never)]
@@ -323,7 +330,7 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
             Err(_) => return Err(77),
         }
         let resolved = fs::read_link(at(runtime, "")).map_err(|_| 77)?;
-        if legacy_bound(&resolved, &before).map_err(|_| 77)? {
+        if legacy_bound(&resolved, &before).ok_or(77)? {
             return Err(73);
         }
     }
