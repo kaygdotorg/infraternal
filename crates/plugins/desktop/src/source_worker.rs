@@ -39,7 +39,6 @@ const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 struct Pending {
     deadline: tokio::time::Instant,
     expected: Kind,
-    resize: Option<Size>,
     reply: Option<tokio::sync::oneshot::Sender<Result<Value, PluginError>>>,
 }
 struct PendingVideo {
@@ -122,18 +121,18 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
                 result = &mut sender => return result.map_err(|_| PluginError::Rejected).and_then(|result| result),
                 packet = leg.lane.receive(), if pending.len() < 64 => {
                     let packet = packet.map_err(|()| PluginError::Rejected)?;
-                    let (kind, body, resize) = command(&packet, &leg.metadata)?;
+                    let (kind, body) = command(&packet, &leg.metadata)?;
                     let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
                     let send_deadline = pending.front().map_or(deadline, |response| response.deadline.min(deadline));
                     tokio::time::timeout_at(send_deadline, helper.send(kind, &body)).await.map_err(|_| PluginError::Rejected)?.map_err(|_| PluginError::Rejected)?;
-                    pending.push_back(Pending { deadline, expected: reply_kind(kind), resize, reply: None });
+                    pending.push_back(Pending { deadline, expected: reply_kind(kind), reply: None });
                 },
                 request = leg.requests.recv(), if pending.len() < 64 => {
                     let Some(request) = request else { return Ok(()); };
                     let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
                     let send_deadline = pending.front().map_or(deadline, |response| response.deadline.min(deadline));
                     tokio::time::timeout_at(send_deadline, helper.send(request.kind, b"{}")).await.map_err(|_| PluginError::Rejected)?.map_err(|_| PluginError::Rejected)?;
-                    pending.push_back(Pending { deadline, expected: reply_kind(request.kind), resize: None, reply: request.reply });
+                    pending.push_back(Pending { deadline, expected: reply_kind(request.kind), reply: request.reply });
                 },
                 message = helper.receive() => {
                     let (kind, body) = message.map_err(|_| PluginError::Rejected)?;
@@ -143,7 +142,6 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
                     } else if kind == Kind::Error { return Err(PluginError::Rejected); }
                     else if pending.front().is_some_and(|response| response.expected == kind) {
                         let response = pending.pop_front().ok_or(PluginError::Rejected)?;
-                        if let Some(size) = response.resize { leg.metadata.start.lock().map_err(|_| PluginError::Rejected)?.size = size; }
                         if let Some(reply) = response.reply { let value = serde_json::from_slice(&body).map_err(|_| PluginError::Rejected); let _ = reply.send(value); }
                     } else if kind != Kind::Geometry { return Err(PluginError::Rejected); }
                 },
@@ -277,10 +275,13 @@ fn reply_kind(kind: Kind) -> Kind {
         _ => Kind::State,
     }
 }
-fn command(
-    packet: &[u8],
-    metadata: &Metadata,
-) -> Result<(Kind, Vec<u8>, Option<Size>), PluginError> {
+/// Translates one viewer packet into a helper command. The helper applies its
+/// commands in order, so the size a Size message sets is the output every later
+/// pointer position refers to: it is recorded when the command is sent, not when
+/// its reply arrives (a click right after a size used to be scaled to the old
+/// output, #146). A failed send or reply ends the whole worker, so the recorded
+/// size never outlives a helper that did not apply it.
+fn command(packet: &[u8], metadata: &Metadata) -> Result<(Kind, Vec<u8>), PluginError> {
     let decoded = decode_frame(packet).map_err(|_| PluginError::Rejected)?;
     if decoded.wire_len != packet.len() {
         return Err(PluginError::Rejected);
@@ -288,15 +289,14 @@ fn command(
     let Frame::Desktop(message) = decoded.frame else {
         return Err(PluginError::Rejected);
     };
-    let (kind, body, resize) = match message {
-        Message::Repair { .. } => (Kind::Keyframe, b"{}".to_vec(), None),
+    let (kind, body) = match message {
+        Message::Repair { .. } => (Kind::Keyframe, b"{}".to_vec()),
         Message::Input(WireInput::Control { active }) => (
             Kind::Control,
             serde_json::to_vec(&serde_json::json!({"active":active}))
                 .map_err(|_| PluginError::Rejected)?,
-            None,
         ),
-        Message::Input(WireInput::Release) => (Kind::ReleaseInput, b"{}".to_vec(), None),
+        Message::Input(WireInput::Release) => (Kind::ReleaseInput, b"{}".to_vec()),
         Message::Size {
             width,
             height,
@@ -311,11 +311,13 @@ fn command(
                 backing_scale,
             };
             size.validate().map_err(|_| PluginError::Rejected)?;
-            (
-                Kind::Resize,
-                serde_json::to_vec(&size).map_err(|_| PluginError::Rejected)?,
-                Some(size),
-            )
+            let body = serde_json::to_vec(&size).map_err(|_| PluginError::Rejected)?;
+            metadata
+                .start
+                .lock()
+                .map_err(|_| PluginError::Rejected)?
+                .size = size;
+            (Kind::Resize, body)
         }
         Message::Input(input) => {
             let size = metadata
@@ -369,13 +371,12 @@ fn command(
             (
                 Kind::Input,
                 serde_json::to_vec(&input).map_err(|_| PluginError::Rejected)?,
-                None,
             )
         }
         _ => return Err(PluginError::Rejected),
     };
     protocol::validate_command(kind, &body).map_err(|_| PluginError::Rejected)?;
-    Ok((kind, body, resize))
+    Ok((kind, body))
 }
 
 #[cfg(test)]
@@ -520,5 +521,71 @@ mod pacing_tests {
         assert!(writing.await.unwrap().is_ok());
         drop(lane);
         assert!(packets.recv().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    //! Pointer input maps to the output size the helper applies before it, in order (#146).
+    use super::*;
+
+    fn packet(message: Message<'_>) -> Vec<u8> {
+        let mut wire = Vec::new();
+        encode_frame_into(&Frame::Desktop(message), &mut wire).unwrap();
+        wire
+    }
+
+    /// The browser sends its latest size when it takes control and the click
+    /// right after it. The helper resizes first, so the click must be scaled
+    /// to the new output even though the Size reply has not arrived yet.
+    #[test]
+    fn a_click_right_after_a_size_maps_to_that_size() {
+        let metadata = Metadata {
+            start: std::sync::Mutex::new(protocol::Start {
+                target: protocol::Target::Window {
+                    window_id: 7,
+                    owner_pid: 70,
+                },
+                size: Size {
+                    width: 1000,
+                    height: 500,
+                    canvas_width: 1000.0,
+                    canvas_height: 500.0,
+                    backing_scale: 1.0,
+                },
+            }),
+            sequence: std::sync::atomic::AtomicU64::new(0),
+        };
+        let (kind, _) = command(
+            &packet(Message::Size {
+                width: 2000,
+                height: 1200,
+                density_milli: 2000,
+            }),
+            &metadata,
+        )
+        .unwrap();
+        assert_eq!(kind, Kind::Resize);
+        let (kind, body) = command(
+            &packet(Message::Input(WireInput::Mouse {
+                x: 250_000,
+                y: 500_000,
+                button: 0,
+                state: 1,
+                modifiers: 0,
+            })),
+            &metadata,
+        )
+        .unwrap();
+        assert_eq!(kind, Kind::Input);
+        let input: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            input["x"], 500.0,
+            "click scaled to the previous output width"
+        );
+        assert_eq!(
+            input["y"], 600.0,
+            "click scaled to the previous output height"
+        );
     }
 }
