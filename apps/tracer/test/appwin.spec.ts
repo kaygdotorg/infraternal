@@ -288,4 +288,56 @@ test("CSS letterbox rejects new input and still releases a drag that leaves the 
   const [down, up] = (await machineState(page)).inputs.slice(before).filter(i => i.input.kind === "mouse" && i.input.state !== 0);
   expect(down!.input).toMatchObject({ x: expect.any(Number), y: expect.any(Number) });
   expect(up!.input).toMatchObject({ x: down!.input.x, y: down!.input.y });
+
+  // Hold the move callback so the outside release must consume a newer valid
+  // position before any queued pointer movement can run after that release.
+  await page.mouse.move(geometry.left + geometry.inside.x, geometry.top + geometry.inside.y);
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  const pendingBefore = (await machineState(page)).inputs.length;
+  await page.evaluate(() => {
+    const originalRequest = window.requestAnimationFrame, originalCancel = window.cancelAnimationFrame;
+    const waiting = new Map<number, FrameRequestCallback>(); let id = 100_000;
+    window.requestAnimationFrame = callback => { waiting.set(++id, callback); return id; };
+    window.cancelAnimationFrame = key => { waiting.delete(key); };
+    Object.assign(window, { flushPendingInputFrames: () => {
+      window.requestAnimationFrame = originalRequest; window.cancelAnimationFrame = originalCancel;
+      for (const [key, callback] of [...waiting]) { if (waiting.delete(key)) callback(performance.now()); }
+    } });
+  });
+  await page.mouse.down();
+  await page.mouse.move(geometry.left + geometry.inside.x + 20, geometry.top + geometry.inside.y);
+  await page.mouse.move(geometry.left + geometry.band.x, geometry.top + geometry.band.y);
+  await page.mouse.up();
+  await page.evaluate(() => (window as unknown as { flushPendingInputFrames(): void }).flushPendingInputFrames());
+  await stage.press("b");
+  await expect.poll(async () => (await machineState(page)).inputs.slice(pendingBefore).map(i => `${i.input.kind}:${i.input.state ?? ""}`)).toEqual(["mouse:1", "mouse:0", "mouse:2", "text:"]);
+  const [pendingDown, pendingMove, pendingUp] = (await machineState(page)).inputs.slice(pendingBefore);
+  expect(pendingMove!.input.x).toBeGreaterThan(pendingDown!.input.x!);
+  expect(pendingUp!.input).toMatchObject({ x: pendingMove!.input.x, y: pendingMove!.input.y });
+
+  // A native touch contact exercises capture and the long-press drag path.
+  const touchBefore = (await machineState(page)).inputs.length;
+  const touch = await page.context().newCDPSession(page);
+  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: geometry.left + geometry.inside.x, y: geometry.top + geometry.inside.y }] });
+  await expect.poll(async () => (await machineState(page)).inputs.slice(touchBefore).map(i => i.input.state)).toEqual([1]);
+  await page.evaluate(() => {
+    const originalRequest = window.requestAnimationFrame, originalCancel = window.cancelAnimationFrame;
+    const waiting = new Map<number, FrameRequestCallback>(); let id = 200_000;
+    window.requestAnimationFrame = callback => { waiting.set(++id, callback); return id; };
+    window.cancelAnimationFrame = key => { waiting.delete(key); };
+    Object.assign(window, { flushPendingInputFrames: () => {
+      window.requestAnimationFrame = originalRequest; window.cancelAnimationFrame = originalCancel;
+      for (const [key, callback] of [...waiting]) { if (waiting.delete(key)) callback(performance.now()); }
+    } });
+  });
+  await touch.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: geometry.left + geometry.inside.x + 20, y: geometry.top + geometry.inside.y }] });
+  await touch.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: geometry.left + geometry.band.x, y: geometry.top + geometry.band.y }] });
+  await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.evaluate(() => (window as unknown as { flushPendingInputFrames(): void }).flushPendingInputFrames());
+  await stage.press("c");
+  await expect.poll(async () => (await machineState(page)).inputs.slice(touchBefore).map(i => `${i.input.kind}:${i.input.state ?? ""}`)).toEqual(["mouse:1", "mouse:0", "mouse:2", "text:"]);
+  const [touchDown, touchMove, touchUp] = (await machineState(page)).inputs.slice(touchBefore);
+  expect(touchMove!.input.x).toBeGreaterThan(touchDown!.input.x!);
+  expect(touchUp!.input).toMatchObject({ x: touchMove!.input.x, y: touchMove!.input.y });
+  await touch.detach();
 });

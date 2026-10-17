@@ -285,6 +285,16 @@ export class AppBinding implements SessionBinding {
     this.send({ kind: "mouse", x: m.x, y: m.y, button: 0, state: 0, modifiers: 0 });
   }
 
+  private releasePoint(point: { x: number; y: number; inside: boolean }): { x: number; y: number } | undefined {
+    // Consume the newest inside move while the remote button is still held.
+    // Cancel its callback so no stale movement can follow the button-up.
+    if (this.moveFrame) cancelAnimationFrame(this.moveFrame);
+    this.flushMove();
+    const release = point.inside ? point : this.lastSent;
+    if (release) this.lastSent = release;
+    return release;
+  }
+
   private wireInput(): void {
     const s = this.stage;
     const on = <E extends keyof HTMLElementEventMap>(type: E, handler: (e: HTMLElementEventMap[E]) => void, options?: AddEventListenerOptions): void => {
@@ -319,10 +329,9 @@ export class AppBinding implements SessionBinding {
       const button = wireButton(e.button);
       if (button === undefined || !(this.buttons & (1 << button))) return;
       this.buttons &= ~(1 << button);
-      const point = this.point(e);
-      // A captured pointer can leave the picture before its up. Release at the
-      // last valid position; dropping it or mapping a CSS band can stick a drag.
-      const p = point.inside ? point : this.lastSent;
+      // A captured pointer can leave the picture before its up. Consume any
+      // pending inside move before releasing at that last valid position.
+      const p = this.releasePoint(this.point(e));
       if (p) this.send({ kind: "mouse", x: p.x, y: p.y, button, state: 2, modifiers: modifierBits(e) });
       else this.send({ kind: "release" });
     };
@@ -395,7 +404,7 @@ export class AppBinding implements SessionBinding {
     this.touch = undefined;
     if (!this.armed()) return;
     const point = this.point(e);
-    const p = point.inside ? point : t.mode === "drag" ? this.lastSent : undefined;
+    const p = t.mode === "drag" ? this.releasePoint(point) : point.inside ? point : undefined;
     if (!p) { if (t.mode === "drag") this.send({ kind: "release" }); return; }
     if (t.mode === "tap") {
       this.send({ kind: "mouse", x: p.x, y: p.y, button: 0, state: 1, modifiers: 0 });
