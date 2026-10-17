@@ -378,3 +378,7 @@ mod ppu_memory_bench;
 #[cfg(all(test, feature = "compact-history"))]
 #[path = "../tests/unit/compact_history.rs"]
 mod compact_history;
+
+#[cfg(all(test, feature = "process-per-user"))]
+#[path = "../tests/unit/review_r2.rs"]
+mod review_r2;
