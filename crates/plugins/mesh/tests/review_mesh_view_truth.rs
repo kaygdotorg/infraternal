@@ -206,7 +206,7 @@ impl NodeChannel for FailingAfterOnce {
             "mesh.status" => serde_json::json!({"state":"On"}),
             "mesh.peers" => {
                 self.broken.store(true, Ordering::SeqCst);
-                serde_json::json!({"peers":[{"node":self.peer,"counters":{"handshake_secs":self.handshake}}],"next_cursor":null})
+                serde_json::json!({"peers":[[self.peer, self.handshake, 0, 0]],"next_cursor":null})
             }
             _ => return Box::pin(async { Err("unknown action") }),
         };
@@ -258,70 +258,5 @@ async fn a_peer_does_not_stay_online_past_its_session_when_the_server_node_stops
     );
 }
 
-/// Poll cost at scale, userspace only: the server node's `mesh.peers` paging as `node_actions.rs` builds it
-/// (re-encode the page after every row, 8 KiB pages, skip rows up to the cursor) and the server's `read_peers`
-/// over every page. The real poll adds one kernel peer dump per page. Run with
-/// `cargo test -p infraternal-plugin-mesh --release --test review_mesh_view_truth -- --ignored --nocapture poll_cost`.
-#[test]
-#[ignore = "measurement"]
-fn poll_cost() {
-    use infraternal_plugin_mesh::{dataplane::Peer, policy::model::Addresses};
-    for peers in [50_u64, 500, 1000] {
-        let config: std::collections::BTreeMap<u64, Peer> = (1..=peers)
-            .map(|id| {
-                let ip = u32::try_from(id).unwrap();
-                (
-                    id,
-                    Peer {
-                        key: PublicKey([u8::try_from(id % 251).unwrap(); 32]),
-                        addresses: Addresses {
-                            ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + ip),
-                            ipv6: std::net::Ipv6Addr::from(0xfd01_u128 << 112 | u128::from(ip)),
-                        },
-                        endpoint: Some(std::net::SocketAddr::from(([203, 0, 113, 7], 40_000))),
-                    },
-                )
-            })
-            .collect();
-        let limit = infraternal_plugin_api::MAX_ACTION_BYTES - 128;
-        let rounds = 20;
-        let started = std::time::Instant::now();
-        let mut pages = 0;
-        for _ in 0..rounds {
-            let mut cursor: Option<u64> = None;
-            let mut live = std::collections::BTreeMap::new();
-            pages = 0;
-            loop {
-                pages += 1;
-                let mut rows = Vec::new();
-                let (mut last, mut more) = (None, false);
-                for (id, peer) in &config {
-                    if cursor.is_some_and(|c| *id <= c) {
-                        continue;
-                    }
-                    rows.push(serde_json::json!({"node":id,"peer":peer,"inbound":{"state":"All"},"outbound":{"state":"All"},"counters":{"persistent_keepalive_secs":25,"handshake_secs":1_800_000_000_u64,"received_bytes":925_000,"sent_bytes":925_000},"path":"Direct"}));
-                    if serde_json::to_vec(&rows).unwrap().len() > limit {
-                        rows.pop();
-                        more = true;
-                        break;
-                    }
-                    last = Some(*id);
-                }
-                let page = serde_json::json!({"peers":rows,"version":4,"next_cursor":if more {last.map(|node| serde_json::json!({"version":4,"node":node}))} else {None}});
-                let wire = serde_json::to_vec(&page).unwrap();
-                let page: serde_json::Value = serde_json::from_slice(&wire).unwrap();
-                match infraternal_plugin_mesh::presence::read_peers(&page, 1_800_000_000, &mut live)
-                {
-                    Some(next) => cursor = next["node"].as_u64(),
-                    None => break,
-                }
-            }
-            assert_eq!(live.len(), usize::try_from(peers).unwrap());
-        }
-        let per_poll = started.elapsed() / rounds;
-        println!(
-            "peers={peers} pages={pages} per_poll={per_poll:?} cpu_share_at_5s={:.3}%",
-            per_poll.as_secs_f64() / 5.0 * 100.0
-        );
-    }
-}
+// The poll-cost measurement moved next to the code it measures, so it runs the real page builder rather than a
+// copy of it: `node_actions.rs` `poll_cost` (#236).

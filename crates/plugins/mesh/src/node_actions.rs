@@ -817,4 +817,57 @@ mod peer_page_tests {
             "{first}"
         );
     }
+    /// Poll cost at scale, userspace only: every `mesh.peers` page the server's node builds for one poll, its
+    /// encoding and decoding across the action frame, and the server's `presence::read_peers` (#236). The kernel
+    /// dump is one per poll and measured separately. Run with
+    /// `cargo test -p infraternal-plugin-mesh --features agent --release --lib -- --ignored --nocapture poll_cost`.
+    #[cfg(feature = "server")]
+    #[test]
+    #[ignore = "measurement"]
+    fn poll_cost() {
+        for peers in [50_u64, 500, 1000] {
+            let config = peer_config(peers);
+            let counters: Counters = config
+                .peers
+                .values()
+                .map(|peer| {
+                    (
+                        peer.peer.key,
+                        crate::wireguard::Counters {
+                            persistent_keepalive_secs: 25,
+                            handshake_secs: 1_800_000_000,
+                            received_bytes: 925_000,
+                            sent_bytes: 925_000,
+                            #[cfg(feature = "test-support")]
+                            handshake_nanos: 0,
+                        },
+                    )
+                })
+                .collect();
+            let rounds = 50;
+            let started = std::time::Instant::now();
+            let mut pages = 0;
+            for _ in 0..rounds {
+                let mut rows = Vec::new();
+                let mut cursor: Option<Cursor> = None;
+                pages = 0;
+                loop {
+                    pages += 1;
+                    let page =
+                        peer_page(Some(&config), &counters, cursor.as_ref(), true).expect("page");
+                    let wire = serde_json::to_vec(&page).expect("encode");
+                    match crate::presence::read_peers(&wire, &mut rows).expect("decode") {
+                        Some(next) => cursor = Some(serde_json::from_value(next).expect("cursor")),
+                        None => break,
+                    }
+                }
+                assert_eq!(rows.len(), config.peers.len());
+            }
+            let per_poll = started.elapsed() / rounds;
+            println!(
+                "peers={peers} pages={pages} per_poll={per_poll:?} cpu_share_at_5s={:.3}%",
+                per_poll.as_secs_f64() / 5.0 * 100.0
+            );
+        }
+    }
 }
