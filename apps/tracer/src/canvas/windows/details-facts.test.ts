@@ -73,37 +73,54 @@ test("unknown optional host facts stay absent instead of appearing as placeholde
   expect(rows.get("Engines")).toBe("None detected");
 });
 
-// "No More tab": the extra facts live in titled sections of the machine tab, shown only with extended info.
+// D126/D156: the default facts always show under titled sections; extended info only adds the technical ones.
 const FULL = {
   host: {
     name: "build-01",
     user: "kayg",
     address: "10.0.0.7",
     facts: {
-      os: "Linux", version: "", kernel: "6.12", architecture: "x86_64",
-      logicalCpus: 8, uptimeSeconds: 7_200, mode: "embedded" as const, executionUid: 1000, engines: [],
+      os: "Linux", version: "", kernel: "6.12", architecture: "x86_64", model: "Test board", cpuModel: "Example CPU",
+      logicalCpus: 8, memory: { usedBytes: 2 * 1024 ** 3, totalBytes: 8 * 1024 ** 3 }, rootDisk: { usedBytes: 4 * 1024 ** 3, totalBytes: 20 * 1024 ** 3 },
+      uptimeSeconds: 7_200, loadAverage: [0.1, 0.2, 0.3] as [number, number, number], mode: "embedded" as const, executionUid: 1000, engines: ["Docker"],
       init: "systemd", virtualization: "KVM", shell: "/bin/zsh", locale: "en_US.UTF-8",
     },
   },
   connection: { state: "connected" as const },
 };
 
-test("extended info off: the machine tab shows only the essentials, ungrouped, and there is no More section", () => {
-  const facts = detailsFacts(FULL);
-  expect(facts.sections.map((section) => section.id)).toEqual(["host", "connection", "session"]);
-  const rows = facts.sections[0]!.rows.filter((row) => row.value.trim() !== "");
-  expect(rows.map((row) => row.key)).toEqual(["Name", "System", "Uptime", "Login", "Address"]);
-  expect(rows.some((row) => row.group)).toBe(false);
-});
-
-test("extended info on: every fact sits under System, Resources or Access", () => {
-  const rows = detailsFacts({ ...FULL, extended: true }).sections[0]!.rows.filter((row) => row.value.trim() !== "");
+const grouped = (extended: boolean) => {
+  const rows = detailsFacts({ ...FULL, extended }).sections[0]!.rows.filter((row) => row.value.trim() !== "");
   const groups = new Map<string, string[]>();
   for (const row of rows) groups.set(row.group!, [...(groups.get(row.group!) ?? []), row.key]);
+  return groups;
+};
+
+test("by default the machine tab shows the D126 facts under System, Resources and Access, with no More section", () => {
+  const facts = detailsFacts(FULL);
+  expect(facts.sections.map((section) => section.id)).toEqual(["host", "connection", "session"]);
+  const groups = grouped(false);
   expect([...groups.keys()]).toEqual(["System", "Resources", "Access"]);
-  expect(groups.get("System")).toEqual(["Name", "System", "Kernel", "Architecture", "Init", "Virtualization"]);
-  expect(groups.get("Resources")).toEqual(["CPU", "Uptime"]);
-  expect(groups.get("Access")).toEqual(["Infraternal agent", "Engines", "Login", "Address", "Shell", "Locale"]);
+  expect(groups.get("System")).toEqual(["Name", "System", "Kernel", "Architecture", "Model"]);
+  expect(groups.get("Resources")).toEqual(["CPU", "Memory", "Disk used on /", "Uptime", "Load average"]);
+  expect(groups.get("Access")).toEqual(["Infraternal agent", "Engines", "Login", "Address"]);
+});
+
+test("extended info adds only init, virtualization, how it is reached, shell and locale", () => {
+  const base = [...grouped(false).values()].flat();
+  const extended = [...grouped(true).values()].flat();
+  expect(extended.filter((key) => !base.includes(key)).sort()).toEqual(["Init", "Locale", "Shell", "Virtualization"]);
+  expect(grouped(true).get("Access")).toContain("Shell");
+});
+
+test("facts the host did not report are omitted by default, not shown as unknown", () => {
+  const sparse = detailsFacts({
+    host: { name: "bare", facts: { os: "Linux", version: "", kernel: "6.1", architecture: "arm64", logicalCpus: 2, mode: "remote", executionUid: 0, engines: [] } },
+    connection: { state: "connected" },
+  }).sections[0]!.rows.filter((row) => row.value.trim() !== "").map((row) => row.key);
+  expect(sparse).not.toContain("Memory");
+  expect(sparse).not.toContain("Model");
+  expect(sparse).not.toContain("Uptime");
 });
 
 test("the header follows the machine's own facts, not the platform the host list guessed", () => {

@@ -71,7 +71,7 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
   };
   const hosts: HostsApi = {
     switches: [{
-      id: "extended-info", title: "Details", label: "Extended info", hint: "System, resources and access facts in each window's details",
+      id: "extended-info", title: "Details", label: "Extended info", hint: "Init, virtualization, shell and locale in each window's details",
       get: readExtendedInfo, set: writeExtendedInfo,
       onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
     }],

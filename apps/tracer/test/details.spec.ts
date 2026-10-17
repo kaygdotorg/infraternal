@@ -22,7 +22,7 @@ test("a click on the pill opens the popover, with plain names and a subtitle for
   await expect(popover(page).locator(".canvas-popover-sub")).toContainText("nix-cache");
   await expect(popover(page).locator(".ui-tab")).toHaveText(["Host", "Connection", "Session"]);
   await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Address" })).toBeVisible();
-  await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Kernel" })).toHaveCount(0); // extended info is off by default
+  await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Kernel" })).toHaveCount(1); // D126 default fact, shown without the extended switch
   await popover(page).locator(".ui-tab", { hasText: "Connection" }).click();
   const delay = popover(page).locator(".ui-kv-row", { hasText: "Connection delay" });
   await expect(delay.locator(".ui-kv-hint")).toHaveText("Round-trip time to the server");
@@ -84,7 +84,7 @@ test("on a phone the popover stays inside the visual viewport and above the key 
     expect(r.y + r.height).toBeLessThanOrEqual(tray.y + 0.5);
     expect(r.y + r.height).toBeLessThanOrEqual(852);
     // A tap outside closes it.
-    await page.touchscreen.tap(200, 120);
+    await page.touchscreen.tap(300, 93); // the window header beside its pill: the taller popover now covers y=120
     await expect(popover(page)).toHaveCount(0, { timeout: 2000 });
   } finally { await context.close(); }
 });
