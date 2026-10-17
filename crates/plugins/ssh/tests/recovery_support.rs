@@ -426,3 +426,89 @@ fn cleanup_holds_runtime_lock_until_all_receipts_retire() {
     );
     assert!(!host.receipt().exists());
 }
+
+/// Review R10 (#230): a surviving non-dumpable session holder is visible only
+/// through the kernel socket table, because `/proc/<pid>` of a non-dumpable
+/// process is not owned by the user. Its listening session endpoint must keep
+/// cleanup away in every home spelling.
+#[test]
+fn review_live_session_socket_in_plain_home_blocks_cleanup() {
+    live_session_socket_blocks_cleanup(None);
+}
+
+/// Review R10 (#230): a newline in the home path splits the session endpoint's
+/// kernel table row; the live endpoint must still block cleanup. Run with a
+/// short `INFRATERNAL_TEST_STATE_ROOT` so the absolute name fits `sun_path`.
+#[test]
+fn review_live_session_socket_in_newline_home_blocks_cleanup() {
+    live_session_socket_blocks_cleanup(Some("\nn"));
+}
+
+fn live_session_socket_blocks_cleanup(home_suffix: Option<&str>) {
+    let mut host = MinimalHost::new();
+    if let Some(suffix) = home_suffix {
+        let name = host.root.file_name().unwrap().to_str().unwrap();
+        let root = host.root.with_file_name(format!("{name}{suffix}"));
+        fs::rename(&host.root, &root).unwrap();
+        host.root = root;
+    }
+    // Distinct per variant: the table check also matches any same-named
+    // endpoint, so parallel variants must not observe each other's holder.
+    let session = host.base().join(if home_suffix.is_some() {
+        "sessions/44444444444444444444444444444444.sock"
+    } else {
+        "sessions/33333333333333333333333333333333.sock"
+    });
+    let program = "import ctypes,os,socket,sys; os.umask(0o177); s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(); os.chdir('/'); assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print('ready',flush=True); sys.stdin.read()";
+    let mut holder = Command::new("python3")
+        .args(["-u", "-c", program])
+        .arg(&session)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 6];
+    holder
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .unwrap();
+    assert_eq!(&ready, b"ready\n");
+    let (inspect, _) = recovery_scripts();
+    // The stale-attempt retirement body: revalidate liveness, then remove
+    // session endpoints before the rollback (same order as the installer).
+    let programs = inspect.trim_end().trim_end_matches("inspect_previous");
+    let fresh = format!(
+        "{programs}\nsetup_guard\nobserved=$(inspect_previous)\nidentity=${{observed% *}}\nidentity=${{identity##* }}\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+        installer_constant("FRESH_CLEANUP"),
+        installer_constant("ROLLBACK_TRANSACTION")
+    );
+    let run = |script: &str| {
+        Command::new("/bin/sh")
+            .args(["-c", &script.replace("$HOME", host.root.to_str().unwrap())])
+            .output()
+            .unwrap()
+    };
+    let inspection = run(&inspect);
+    let cleanup = run(&fresh);
+    let session_preserved = session.exists();
+    let receipt_retained = host.receipt().exists();
+    eprintln!(
+        "inspection={:?} cleanup={:?} session_preserved={session_preserved} receipt_retained={receipt_retained} stderr={}",
+        inspection.status.code(),
+        cleanup.status.code(),
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+    drop(holder.stdin.take());
+    assert!(holder.wait().unwrap().success());
+    assert!(
+        inspection.status.code() == Some(73)
+            && !cleanup.status.success()
+            && session_preserved
+            && receipt_retained,
+        "live session endpoint removed: inspection={:?}, cleanup={:?}, session_preserved={session_preserved}, receipt_retained={receipt_retained}",
+        inspection.status.code(),
+        cleanup.status.code()
+    );
+}
