@@ -31,7 +31,11 @@ enum Allowance {
     /// Host terminal routes: two round trips; the first miss ends the lease.
     Terminal,
     /// The primary host link: two round trips; the first miss only raises doubt.
-    HostLink { doubt: bool },
+    /// `pinned` is set when a doubt recovered while the allowance sat at its
+    /// ceiling: the path needs more than the ceiling allows, so further early
+    /// misses on it are its normal delay, not doubt. Only retirement reports it,
+    /// until a reply brings the allowance back below the ceiling [#234].
+    HostLink { doubt: bool, pinned: bool },
 }
 
 pub(crate) struct Liveness {
@@ -77,7 +81,10 @@ impl Liveness {
     /// The primary host link doubts before it retires [D300].
     pub(crate) fn host_link() -> Self {
         Self {
-            allowance: Allowance::HostLink { doubt: false },
+            allowance: Allowance::HostLink {
+                doubt: false,
+                pinned: false,
+            },
             ..Self::new()
         }
     }
@@ -181,7 +188,10 @@ impl Liveness {
         } else {
             (srtt * 2 + self.rttvar * 4 + HOST_MARGIN).clamp(RESPONSE_FLOOR, RESPONSE_CEILING)
         };
-        if let Allowance::HostLink { doubt } = &mut self.allowance {
+        if let Allowance::HostLink { doubt, pinned } = &mut self.allowance {
+            // Below the ceiling the estimator widens on its own and a late reply
+            // cannot recur at the same delay; at the ceiling it would, forever.
+            *pinned = self.budget == RESPONSE_CEILING && (*doubt || *pinned);
             *doubt = false;
         }
         true
@@ -196,7 +206,7 @@ impl Liveness {
     pub(crate) fn doubt_started(&mut self) -> bool {
         let expired = self.acked != 0 && self.expired();
         match &mut self.allowance {
-            Allowance::HostLink { doubt } if expired && !*doubt => {
+            Allowance::HostLink { doubt, pinned } if expired && !*doubt && !*pinned => {
                 *doubt = true;
                 true
             }
@@ -205,7 +215,7 @@ impl Liveness {
     }
 
     pub(crate) fn doubtful(&self) -> bool {
-        self.allowance == Allowance::HostLink { doubt: true }
+        matches!(self.allowance, Allowance::HostLink { doubt: true, .. })
     }
 
     /// The lease is over: a host link after its second consecutive allowance,
@@ -568,6 +578,64 @@ mod tests {
         assert!(!route.expired());
         assert!(!route.retired());
         assert!(route.response_deadline().is_none());
+    }
+
+    /// One late reply below the ceiling keeps doubt armed: a 150 ms path
+    /// that recovered from one loss still reports the next miss early [#234].
+    #[tokio::test(start_paused = true)]
+    async fn a_recovered_doubt_below_the_ceiling_keeps_early_notice() {
+        let mut route = Liveness::host_link();
+        settle(&mut route, Duration::from_millis(150), 100).await;
+        let budget = route.budget;
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(budget + Duration::from_millis(1)).await;
+        assert!(route.doubt_started());
+        assert!(route.pong(nonce, stamp));
+        settle(&mut route, Duration::from_millis(150), 100).await;
+        route.ping();
+        tokio::time::advance(route.budget + Duration::from_millis(1)).await;
+        assert!(
+            route.doubt_started(),
+            "the next miss is reported early again"
+        );
+    }
+
+    /// At the ceiling a recovered doubt pins the link; draining the path
+    /// below the ceiling restores early doubt [#234].
+    #[tokio::test(start_paused = true)]
+    async fn a_doubt_recovered_at_the_ceiling_pins_until_the_path_drains() {
+        let mut route = Liveness::host_link();
+        settle(&mut route, Duration::from_millis(1500), 20).await;
+        assert_eq!(route.budget, RESPONSE_CEILING);
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(RESPONSE_CEILING + Duration::from_millis(1)).await;
+        assert!(route.doubt_started());
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert!(route.pong(nonce, stamp));
+        let (nonce, stamp) = route.ping();
+        tokio::time::advance(RESPONSE_CEILING + Duration::from_millis(1)).await;
+        assert!(
+            !route.doubt_started(),
+            "a pinned link reports only retirement"
+        );
+        assert!(route.pong(nonce, stamp));
+        settle(&mut route, Duration::from_millis(100), 40).await;
+        assert!(route.budget < RESPONSE_CEILING);
+        route.ping();
+        tokio::time::advance(route.budget + Duration::from_millis(1)).await;
+        assert!(route.doubt_started(), "a drained path doubts early again");
+        // A pinned dead host still retires after two ceilings.
+        let mut pinned = Liveness::host_link();
+        settle(&mut pinned, Duration::from_millis(1500), 20).await;
+        let (nonce, stamp) = pinned.ping();
+        tokio::time::advance(RESPONSE_CEILING + Duration::from_millis(1)).await;
+        assert!(pinned.doubt_started());
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert!(pinned.pong(nonce, stamp));
+        pinned.ping();
+        tokio::time::advance(RESPONSE_CEILING * 2 + Duration::from_millis(1)).await;
+        assert!(!pinned.doubt_started());
+        assert!(pinned.retired());
     }
 
     #[tokio::test(start_paused = true)]
