@@ -296,3 +296,6 @@ fn manual_uninstall(mode: &str) -> String {
         "systemctl --user stop 'infraternal-session-*.scope'; systemctl --user disable --now infraternal-agent.service; rm -rf ~/.config/systemd/user/infraternal-agent.service ~/.local/bin/infraternal ~/.local/share/infraternal; systemctl --user daemon-reload".into()
     }
 }
+#[cfg(test)]
+#[path = "remote_removal_review_tests.rs"]
+mod review_tests;
