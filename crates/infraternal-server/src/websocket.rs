@@ -1691,8 +1691,7 @@ pub(super) async fn probe_deadline(
     let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
-    let now = i64::try_from(wall.as_secs()).map_err(|_| ())?;
-    let expiry = read_expiry(state, user, token, now, false).await?;
+    let expiry = read_expiry(state, user, token, false).await?;
     let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
     started
         .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
@@ -1713,8 +1712,7 @@ async fn authority_deadline(
     token: &str,
     renew: bool,
 ) -> Result<tokio::time::Instant, ()> {
-    let now = unix_seconds()?;
-    let expiry = read_expiry(state, user_id, token, now, renew).await?;
+    let expiry = read_expiry(state, user_id, token, renew).await?;
     // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
     // wall clock after the read, so a slow store can never extend a session.
     let remaining = u64::try_from(expiry - unix_seconds()?).map_err(|_| ())?;
@@ -1728,15 +1726,19 @@ async fn authority_deadline(
 /// answers (no live session, or a storage error) fails at once and is never
 /// retried. The caller does no work meanwhile: every call site awaits this
 /// before it polls the operation it guards, so input stays queued in order
-/// behind the read instead of being dropped with the socket. Both reads are
-/// idempotent (a lookup, or setting expiry from the same `now`). The fast path
-/// is one attempt, as before, plus one clock read. One non-generic function
-/// serves every call site so the retry loop is compiled once (D243).
+/// behind the read instead of being dropped with the socket. One non-generic
+/// function serves every call site so the retry loop is compiled once (D243).
+///
+/// Expiry is monotonic: once a session's end has passed it is never found live
+/// again. Every attempt reads the wall clock when it starts, so a retry after a
+/// wait that crossed the session's end does not judge, or renew, the session by
+/// a time that has already gone. The result is checked once more against the
+/// clock after the read, because the attempt that answered may itself have
+/// waited for a connection past the end.
 async fn read_expiry(
     state: &WebSocketState,
     user_id: &str,
     token: &str,
-    now: i64,
     renew: bool,
 ) -> Result<i64, ()> {
     #[cfg(test)]
@@ -1744,29 +1746,32 @@ async fn read_expiry(
     #[cfg(not(test))]
     let read_timeout = AUTHORITY_READ_TIMEOUT;
     let give_up = tokio::time::Instant::now() + AUTHORITY_WAIT;
-    loop {
+    let expiry = loop {
         let read = async {
+            let now = unix_seconds()?;
             if renew {
                 state.auth.socket_activity(token, user_id, now).await
             } else {
                 state.auth.live_expiry(token, user_id, now).await
             }
+            .map_err(|_| ())
         };
         match tokio::time::timeout(read_timeout, read).await {
-            Ok(result) => return result.map_err(|_| ()),
+            Ok(result) => break result?,
             Err(_) if tokio::time::Instant::now() + AUTHORITY_RETRY_PAUSE < give_up => {
                 tokio::time::sleep(AUTHORITY_RETRY_PAUSE).await;
             }
             Err(_) => return Err(()),
         }
+    };
+    if expiry <= unix_seconds()? {
+        return Err(());
     }
+    Ok(expiry)
 }
 
 async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> bool {
-    let Ok(now) = unix_seconds() else {
-        return false;
-    };
-    read_expiry(state, user_id, token, now, true).await.is_ok()
+    read_expiry(state, user_id, token, true).await.is_ok()
 }
 
 struct ClientAttachment {
