@@ -101,6 +101,18 @@ pub trait Backend: Send + Sync {
         target: &'a Target,
         check: &'a Check,
     ) -> Operation<'a, JoinMaterial>;
+    /// Only a durable failed-host binding may replace the earlier-setup confirmation.
+    /// Unknown servers, hosts, accounts and destinations must return false.
+    fn owns_failed_setup<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _target: &'a Target,
+        _check: &'a Check,
+        _host: uuid::Uuid,
+        _lookup: Option<String>,
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
     /// Bind nonsecret cleanup coordinates to the connection that actually authenticated.
     fn invitation_with_trust<'a>(
         &'a self,
@@ -140,7 +152,7 @@ pub trait Backend: Send + Sync {
         authority: &'a Authority,
         host: uuid::Uuid,
     ) -> Operation<'a, ()>;
-    /// Record explicit earlier-attempt recovery using only public coordinates.
+    /// Record earlier-attempt recovery using only public coordinates.
     fn record_start_fresh(&self, _: &Target, _: uuid::Uuid, _: uuid::Uuid, _: &'static str) {}
 
     /// One public failure record per attempt, before cleanup changes its progress phase.
@@ -737,7 +749,7 @@ impl Bootstrap {
                             &target,
                             attempt,
                             Step::Install,
-                            "Automatic cleanup could not finish. Retry when SSH is available.",
+                            "Automatic cleanup could not finish. Retry to finish the earlier setup before continuing.",
                             started,
                             None,
                         );
@@ -899,6 +911,40 @@ impl Bootstrap {
         }
     }
 
+    /// Old hosts may have no runtime helper, or a cached binary that predates
+    /// the capability level cleanup needs (exit 76). Resolve and verify our
+    /// full executable and publish it to the cache; never ask the host to
+    /// install an interpreter or trust its PATH (#230). The early session
+    /// image never serves here: it has no runtime-lock helper.
+    #[cold]
+    #[inline(never)]
+    fn refresh_helper<'a>(
+        &'a self,
+        batch: &'a BatchInner,
+        target: &'a Target,
+        attempt: u32,
+        started: Instant,
+        session: &'a dyn SshSession,
+        architecture: Option<crate::probe::Architecture>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            let architecture = if let Some(architecture) = architecture {
+                architecture
+            } else {
+                let sniff = session
+                    .run(crate::probe::CHECK_SCRIPT, Input::Empty)
+                    .await?;
+                let check = crate::probe::Check::parse(&sniff.stdout)?;
+                check.authorize_mode(target.mode)?;
+                check.architecture
+            };
+            let (binary, _) = self
+                .payload(batch, target, attempt, started, architecture, false)
+                .await?;
+            Installation::prepare_recovery(session, target, &binary).await
+        })
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
@@ -912,8 +958,8 @@ impl Bootstrap {
         resources: &'a mut AttemptResources,
         auth_once: Option<OneUseAuth>,
     ) -> Operation<'a, ()> {
-        // Bound one setup allocation to each admitted worker. Sharing the poll
-        // boundary keeps the large state machine out of its cancellation wrapper.
+        // One setup state machine is shared with the deadline/cancellation driver [243].
+        // The allocation ends with this host attempt and is never on a session path.
         Box::pin(async move {
             emit(
                 batch,
@@ -943,14 +989,34 @@ impl Bootstrap {
             } else {
                 previous_attempt::check_script(target.mode)
             };
-            let (output, checked) = if self.backend.early_terminal() {
-                session.check_stream(&script).await?
-            } else {
-                let output = session
-                    .run(&script, Input::Empty)
-                    .await
-                    .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))?;
-                (output, None)
+            // An outdated or missing cached runtime helper asks for a refresh
+            // (76): publish our verified full executable, then inspect again (#230).
+            let mut refreshed = false;
+            let (output, checked) = loop {
+                let result = if self.backend.early_terminal() {
+                    session.check_stream(&script).await
+                } else {
+                    session
+                        .run(&script, Input::Empty)
+                        .await
+                        .map(|output| (output, None))
+                        .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))
+                };
+                match result {
+                    Err(error) if error.exit_status == Some(76) && !refreshed => {
+                        refreshed = true;
+                        self.refresh_helper(
+                            batch,
+                            target,
+                            attempt,
+                            started,
+                            session.as_ref(),
+                            None,
+                        )
+                        .await?;
+                    }
+                    result => break result?,
+                }
             };
             // Automatic sign-in selects its authenticated adapter during the
             // read-only check; query bridge support after that selection.
@@ -962,8 +1028,34 @@ impl Bootstrap {
             }
             let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
             check.authorize_mode(target.mode)?;
-            restore_previous(batch, target, attempt, started, session.clone()).await?;
+            match restore_previous(batch, target, attempt, started, session.clone()).await {
+                Err(error) if error.exit_status == Some(76) => {
+                    self.refresh_helper(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        session.as_ref(),
+                        Some(check.architecture),
+                    )
+                    .await?;
+                    restore_previous(batch, target, attempt, started, session.clone()).await?;
+                }
+                result => result?,
+            }
             if let Some(previous) = previous {
+                // Only this server's durable failed-host binding finishes the
+                // earlier setup without asking; anything else still asks (#230).
+                let automatic = self
+                    .backend
+                    .owns_failed_setup(
+                        &batch.authority,
+                        target,
+                        &check,
+                        previous.host,
+                        session.trust_lookup(),
+                    )
+                    .await?;
                 self.await_start_fresh(
                     batch,
                     target,
@@ -971,6 +1063,7 @@ impl Bootstrap {
                     started,
                     session.as_ref(),
                     &previous,
+                    automatic,
                 )
                 .await?;
             }
@@ -1361,32 +1454,45 @@ impl Bootstrap {
         started: Instant,
         session: &dyn SshSession,
         previous: &PreviousAttempt,
+        automatic: bool,
     ) -> Result<(), Failure> {
-        let challenge = uuid::Uuid::new_v4();
-        let (resume, resumed) = oneshot::channel();
-        {
-            let mut states = lock(&batch.states);
-            let state = states
-                .get_mut(&target.id)
-                .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
-            state.start_fresh = Some(PendingFresh { challenge, resume });
+        if automatic {
+            emit(
+                batch,
+                target,
+                attempt,
+                Step::Install,
+                "An earlier setup on this host did not finish; finishing it now.",
+                started,
+                None,
+            );
+        } else {
+            let challenge = uuid::Uuid::new_v4();
+            let (resume, resumed) = oneshot::channel();
+            {
+                let mut states = lock(&batch.states);
+                let state = states
+                    .get_mut(&target.id)
+                    .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
+                state.start_fresh = Some(PendingFresh { challenge, resume });
+            }
+            emit_with_leftovers(
+                batch,
+                target,
+                attempt,
+                Step::Check,
+                "This host has leftovers from an earlier setup",
+                started,
+                Some(Failure::new(
+                    crate::model::FailureKind::StalePreviousAttempt,
+                    "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
+                )),
+                Some(Box::new(previous.findings(target.mode, challenge))),
+            );
+            resumed.await.map_err(|_| {
+                Failure::install("Host provisioning stopped while waiting to start fresh.")
+            })?;
         }
-        emit_with_leftovers(
-            batch,
-            target,
-            attempt,
-            Step::Check,
-            "This host has leftovers from an earlier setup",
-            started,
-            Some(Failure::new(
-                crate::model::FailureKind::StalePreviousAttempt,
-                "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
-            )),
-            Some(Box::new(previous.findings(target.mode, challenge))),
-        );
-        resumed.await.map_err(|_| {
-            Failure::install("Host provisioning stopped while waiting to start fresh.")
-        })?;
         self.backend
             .record_start_fresh(target, previous.host, previous.transaction, "started");
         let result = previous.start_fresh(session, target).await;
@@ -1456,7 +1562,7 @@ async fn restore_previous(
             target,
             attempt,
             Step::Install,
-            "Restoring the previous host attempt before retry.",
+            "An earlier setup on this host did not finish; finishing it now.",
             started,
             None,
         );

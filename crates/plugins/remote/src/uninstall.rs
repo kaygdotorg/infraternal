@@ -79,7 +79,7 @@ fn layout(context: &Context, home: &Path, uid: u32) -> io::Result<Layout> {
         user,
     })
 }
-fn public_file(path: &Path, uid: u32, max: u64) -> io::Result<String> {
+pub(crate) fn public_file(path: &Path, uid: u32, max: u64) -> io::Result<String> {
     use std::{io::Read, os::unix::fs::OpenOptionsExt};
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file()

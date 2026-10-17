@@ -4,6 +4,9 @@ use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 
+pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs the matching infraternal binary on this host. Its files were kept.";
+pub(crate) const SOCKET_PROBE_UNCERTAIN: &str = "Setup could not determine whether the infraternal agent is still running. Its files were kept; check host permissions and retry.";
+
 /// A validated destination; fields are private to prevent bypassing shell/option safety.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Destination {
@@ -281,10 +284,20 @@ impl Failure {
 
     /// Attach a fixed local boundary: channel execution when true, connection setup otherwise.
     #[must_use]
+    // Failure-only rewrites stay out of x86_64 async callers under the measured
+    // size budget; ARM retains its existing code generation [243], #230.
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn at_ssh_boundary(mut self, channel: bool) -> Self {
         // Reuse bounded, static diagnostics rather than growing every retained
         // Failure/event with a field solely for server instrumentation.
-        let boundary = if channel {
+        let boundary = if channel && self.exit_status.is_some() {
+            // Authentication completed and the command returned a status. Its
+            // refusal is setup evidence, not a broken SSH command channel.
+            self.log_tail
+                .retain(|line| *line != "The SSH command channel failed.");
+            "The remote setup command returned a failure status."
+        } else if channel {
             "The SSH command channel failed."
         } else {
             "The SSH connection setup failed."
@@ -297,6 +310,8 @@ impl Failure {
 
     /// Attach the command boundary without changing authentication/trust classification.
     #[must_use]
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn at(mut self, step: InstallStep) -> Self {
         self.failed_step = Some(step);
         if self.kind == FailureKind::Install
@@ -331,26 +346,30 @@ impl Failure {
     /// Classify fixed installer exit codes using the approved path. Join also
     /// executes the uploaded payload, whose status is not an ownership receipt.
     #[must_use]
+    #[cfg_attr(target_arch = "x86_64", cold)]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
     pub fn in_mode(mut self, mode: InstallMode) -> Self {
         if self.kind != FailureKind::Install {
             return self;
         }
         match (self.exit_status, mode) {
-            (Some(71..=73), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
+            (Some(71..=77), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
             (Some(71), InstallMode::Rootless) => {
-                self.message = "An existing folder ~/.local/share/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside, then try again.";
+                self.message = "Setup could not verify ownership or permissions of its files on this host. Check ~/.local/share/infraternal, its parent folders and the infraternal service files, then try again.";
             }
             (Some(71), InstallMode::Root) => {
-                self.message = "An existing folder /var/lib/infraternal on this host wasn't created by infraternal setup or isn't private. Move it aside with administrator access, then try again.";
+                self.message = "Setup could not verify ownership or permissions of its files on this host. Check /var/lib/infraternal, its parent folders and the infraternal service files with administrator access, then try again.";
             }
             (Some(72), _) => {
-                self.message = "Host provisioning found another setup attempt. Retry the host check to continue.";
+                self.message = "An earlier setup on this host did not finish. Retry the host check to finish its cleanup before continuing.";
             }
             (Some(73), _) => {
                 self.kind = FailureKind::SetupRunning;
                 self.message =
                     "Setup is already running on this host. Wait for it to finish, then try again.";
             }
+            (Some(76), _) => self.message = SOCKET_PROBE_UNAVAILABLE,
+            (Some(77), _) => self.message = SOCKET_PROBE_UNCERTAIN,
             _ => {}
         }
         if self.exit_status.is_some() {

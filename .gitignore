@@ -4,6 +4,7 @@ target/
 .svelte-kit/
 build/
 dist/
+__pycache__/
 .wrangler/
 .env*
 !.env.example

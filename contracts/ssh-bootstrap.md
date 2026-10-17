@@ -403,11 +403,15 @@ the default server supplies the verified source through the same SSH plugin.
 ## Classified attempt failures (#169)
 
 Failure adds optional `exit_status` from the authenticated command process (a
-signal or unavailable status omits it). Fixed installer codes 71 and 72 retain
-`failed_step` and identify the approved root/rootless directory with ownership
-or ownership guidance. A competing transaction (72) directs the person back
-to the host check; a live setup (73) offers to wait. Other failures name the
-command boundary and next check. Arbitrary stdout/stderr remains withheld. One server log line per failed
+signal or unavailable status omits it). Fixed installer code 71 retains
+`failed_step` and identifies the approved root/rootless directory with ownership,
+permission and setup-file guidance. An unfinished transaction (72) directs the
+person back to cleanup; a live setup (73) offers to wait. A retry with retained
+coordinates actually finishes the original cleanup before continuing. A returned
+script status is a setup failure, including status 255 after authentication;
+only failures without a script status are classified as command-channel failures.
+Other failures name the command boundary and next check. Arbitrary stdout/stderr
+remains withheld. One server log line per failed
 attempt contains only host UUID (unassigned before issuance), target id, step,
 exit status and static mode; cleanup warnings do not replace the original phase.
 The existing dialog Details disclosure shows the trusted failed-step label.
@@ -441,7 +445,11 @@ The cache creates no background task and grants no host admission authority.
 The existing authenticated SSH check also classifies setup ownership, without a
 second SSH command. A live directory-lock holder, installation executable, open
 setup descriptor or live session socket returns `setup_running`: “Setup is already
-running on this host. Wait for it to finish, then try again.” New setup commands
+running on this host. Wait for it to finish, then try again.” Live shims are
+non-dumpable, so a session socket counts as live when the native helper's one
+socket-diagnostic dump reports any socket bound to an owned `sessions/*.sock`,
+matched by owner and inode, never by name; an unavailable or unexpected dump is
+uncertain and retains the attempt. New setup commands
 serialize on the private installation parent and hold a bounded 180-second
 transaction lease across command gaps. Commit and rollback retire only the
 lease whose PID birth and inherited descriptor match that transaction.
@@ -473,6 +481,88 @@ execution mode, fresh ownership journal and started/completed/refused outcome.
 Authenticated command status and setup-step diagnostics remain available; no
 file contents, process arguments, environments or arbitrary remote output enter
 public findings or logs. No existing enrolled identity is adopted by recovery.
+
+Fresh rollback also retires the infraternal agent's fixed local control socket,
+`sessions/plugins.sock`, which may survive a service stop before the first server
+connection (#230). The owned private runtime directory contains a mode-0600,
+single-link `.lifetime-lock`. The infraternal agent takes its exclusive advisory
+lock before binding any local socket. The remote supervisor retains it across
+worker replacement and temporary credential errors; listener tasks and synchronous
+workers keep the same ownership until their work actually stops.
+The installer holds the same lock through its bounded staging lease and artifact
+replacement, then hands it to the runtime at activation. A stopped process releases
+its lock automatically; a surviving socket path is not itself lifetime authority.
+
+Cleanup opens that lock on descriptor 6 and asks the verified staged infraternal
+binary to validate its descriptor/path identity and take the lock nonblocking on
+the inherited open description. A held lock preserves the transaction and files
+(73). A successful acquisition remains held by the cleanup shell after the helper
+exits, through all retirement and receipt removal. An exclusive setup guard on the
+installation's parent directory also fences startup during final lock-file unlink;
+runtime startup holds shared directory admission while taking its lifetime lock.
+Managed startup checks its loaded host identity against the owner marker and
+refuses outstanding rollback receipts under that admission guard. Publishing a
+new lock beside a live legacy endpoint is refused, so an unheld new file cannot
+misclassify that older runtime during later cleanup.
+Unknown files, ownership mismatches and links retain their existing refusal rules.
+
+Legacy runtimes have no lifetime lock. Only for these runtimes, the same binary
+uses a nonblocking connection to the owned control socket: connection retains it
+(73); errors other than refusal retain it as uncertain (77). Refusal also requires
+conservative same-user bound-endpoint inspection, so a bound endpoint before
+`listen` or with a retained earlier name is not removed. The native helper asks
+the kernel for one socket-diagnostic dump of every Unix socket with its UID and
+VFS identity and compares the owner and inode with the control file (the kernel's
+device is the superblock's, which differs from `stat` on btrfs subvolumes and
+split-layer overlays, so it is not compared; a false match only retains);
+private process descriptors are neither required nor proof that it is stale.
+Socket names are never read, so a home path with spaces or newlines, or one reached
+through an alias, cannot hide a bound endpoint. A socket without a VFS binding
+cannot own a filesystem endpoint.
+Only fixed known records from the kernel are accepted; denied, truncated or
+unexpected replies remain uncertain (77). Only a bound entry for this installation's owned control
+file can retain cleanup; a different directory's or Unix user's socket cannot.
+The binary
+opens the receipt-bound root and private runtime directory without following links,
+checks socket ownership/type/link count before probing, and repeats these checks
+and the same device/inode immediately before unlinking relative to the open directory.
+The session removal loop excludes the control socket.
+
+Recovery needs no host interpreter. If the existing executable cache predates the
+internal helper (76), the server uploads its matching verified binary into that
+cache, then repeats inspection. Only recovery takes this path; clean installations
+keep their existing command sequence. This publishes executable content only and
+never changes host or transaction ownership. Failed or interrupted transfers retain
+the original receipt and can be retried.
+
+A retry with retained cleanup coordinates first finishes that exact host and
+transaction's rollback, before issuing another invitation. Progress says “An
+earlier setup on this host did not finish; finishing it now.” Cleanup coordinates
+never authorize another transaction's lease retirement. Unattributed earlier
+state still requires the existing start-fresh confirmation and full revalidation;
+a receipt alone never permits adoption by a different host or server.
+
+After a server restart, the existing retired bootstrap ledger can authorize that
+same cleanup without another confirmation. It must bind the receipt's exact host
+UUID to the current owner, privilege mode, observed execution uid and authenticated
+SSH lookup. A recorded lookup must match; only when both lookups are absent may
+an exact saved SSH address suffice. Active, unknown or mismatched records cannot
+authorize automatic recovery. The live owner session and root consent are checked
+again. This proof permits retirement of fresh leftovers, never adoption of an
+enrolled identity; the complete shell inventory, inode and liveness checks remain.
+The ledger is queried only when inspection finds earlier setup state. The
+outside receipt remains inspectable after interrupted final retirement removes
+the owner marker or the installation root. An existing root must retain the
+receipt's exact directory inode; without an owner marker it must be empty.
+An absent root still passes the process-liveness checks before receipt removal.
+Neither boundary recreates an ownership marker or relaxes the ledger proof.
+The final outside receipt also denotes completed service rollback before staging
+retirement. A stop during staging removal may leave any subset of its markers.
+Recovery validates surviving transaction/kind markers when present, known
+private staging artifacts and bounded private enrollment/cache trees without
+reading identity contents or following links. Unknown artifacts, foreign
+markers and nested links are refused before mutation. It then retires staging
+without repeating completed service changes, and finishes root/receipt removal.
 
 Exact screen copy for the later UI pass: title “This host has leftovers from an
 earlier setup”; body “infraternal didn't finish setting up here before. Start

@@ -63,7 +63,10 @@ while remaining:
     view = memoryview(chunk)
     while view:
         view = view[os.write(1, view):]
-    if not observed and sent >= 131072 and remaining:
+    # Hold past one full decoder input block (128 KiB plus a frame header):
+    # stopping exactly at 128 KiB deadlocks the decoder whenever the payload
+    # starts page-aligned in the pipe, whatever the setup script's length.
+    if not observed and sent >= 196608 and remaining:
         observed = True
         deadline = time.monotonic() + 10
         payload = Path({payload:?})

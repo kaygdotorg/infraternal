@@ -51,6 +51,8 @@ if [ -f "$stage/was-active" ]; then
 else
     $manager stop infraternal-agent.service >/dev/null 2>&1 || :
 fi
+# Transfer lifetime ownership from the staging lease while replacing artifacts (#230).
+handoff_setup_lease "$stage/payload" yes
 # Journal ownership before replacement, after stopping the previous service.
 # A refused prior stop is separate from an unknown/interrupted reply.
 : > "$stage/activating"
@@ -73,7 +75,11 @@ mv -f "$stage/unit" "$unit"
 pub(super) const START: &str = r#"
 stage="$base/.bootstrap-lock"
 [ ! -L "$stage" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
+# Keep the lease without the lifetime lock, then release this shell's copy so
+# the service takes that lock itself before binding (#230).
+handoff_setup_lease "$base/bin/live" no
 $manager daemon-reload
+exec 6<&-
 $manager enable --now infraternal-agent.service
 "#;
 

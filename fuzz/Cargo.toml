@@ -10,6 +10,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+infraternal-plugin-remote = { version = "0.1.0", path = "../crates/plugins/remote", default-features = false, features = ["agent", "test-support"] }
 infraternal-plugin-release = { version = "0.1.0", path = "../crates/plugins/release", default-features = false }
 serde_json.workspace = true
 infraternal-plugin-ssh = { version = "0.1.0", path = "../crates/plugins/ssh", features = ["session-bridge"] }
@@ -223,6 +224,13 @@ bench = false
 [[bin]]
 name = "shim_spawn_args"
 path = "fuzz_targets/shim_spawn_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "runtime_diag"
+path = "fuzz_targets/runtime_diag.rs"
 test = false
 doc = false
 bench = false
