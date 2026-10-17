@@ -1005,16 +1005,27 @@ rm -rf "$stage"
             })?;
             return self.commit().await;
         }
-        let script = self.script(
-            r#"stage="$base/.bootstrap-lock"
+        // The parent-directory guard is taken only after approval. The new
+        // agent takes a shared lock on that directory before it binds (#230);
+        // holding the exclusive guard across the proof wait would keep the
+        // agent from connecting, and so the proof from ever arriving.
+        let script = Self::script_for(
+            self.mode,
+            self.host,
+            self.transaction,
+            &format!(
+                r#"{SETUP_LOCK}
+stage="$base/.bootstrap-lock"
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 # No journal or artifact changes occur before the caller proves the terminal.
 read -r approved || exit 1
 [ -z "$approved" ] || exit 1
+setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 retire_setup_lease
 rm -rf "$stage"
-"#,
+"#
+            ),
         );
         self.session
             .run(&script, Input::Signal(release))

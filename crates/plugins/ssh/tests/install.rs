@@ -617,6 +617,19 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
             }) => { result.unwrap(); }
         }
         assert!(stage.join("activating").exists());
+        // A starting agent takes a shared lock on the installation's parent
+        // before it binds; admission waiting for proof must not block it (#230).
+        let parent = fixture.base().parent().unwrap().to_owned();
+        assert!(
+            std::process::Command::new("flock")
+                .args(["-s", "-n"])
+                .arg(&parent)
+                .arg("true")
+                .status()
+                .unwrap()
+                .success(),
+            "commit admission holds the setup guard while waiting for proof"
+        );
         if permit {
             release.send(()).unwrap();
             pending.await.unwrap();

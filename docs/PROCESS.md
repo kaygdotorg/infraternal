@@ -143,12 +143,13 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,080,528 bytes |
-  | `aarch64-unknown-linux-musl` | 19,316,104 bytes |
+  | `x86_64-unknown-linux-musl` | 21,080,784 bytes |
+  | `aarch64-unknown-linux-musl` | 19,316,232 bytes |
 
   These are the release-retry measurements (#230 merged into the #189
   production line, 3048580c1): the production line measured 21,090,448 /
-  19,316,264 bytes; the merge is 9,920 / 160 bytes smaller. Lifetime-safe
+  19,316,264 bytes; the merge is 9,920 / 160 bytes smaller. Taking the
+  commit guard only after terminal proof adds back 256 / 128 bytes (#230). Lifetime-safe
   retry adds its runtime-lock helper, kernel endpoint checks and helper
   refresh; its SSH management crate moves from s to z (#230), which more than
   offsets that code on x86_64. The faster add-host path (#189) keeps its
