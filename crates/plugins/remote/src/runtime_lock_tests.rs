@@ -151,7 +151,6 @@ fn dump_records_accept_only_known_shapes() {
     let owner = SocketOwner {
         uid: 1001,
         inode: 4321,
-        device: 123,
     };
     for (length, expected, checked) in [
         (

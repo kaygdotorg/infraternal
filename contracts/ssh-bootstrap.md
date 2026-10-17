@@ -508,7 +508,9 @@ uses a nonblocking connection to the owned control socket: connection retains it
 conservative same-user bound-endpoint inspection, so a bound endpoint before
 `listen` or with a retained earlier name is not removed. The native helper asks
 the kernel for one socket-diagnostic dump of every Unix socket with its UID and
-VFS identity (device and inode) and compares those numbers with the control file;
+VFS identity and compares the owner and inode with the control file (the kernel's
+device is the superblock's, which differs from `stat` on btrfs subvolumes and
+split-layer overlays, so it is not compared; a false match only retains);
 private process descriptors are neither required nor proof that it is stale.
 Socket names are never read, so a home path with spaces or newlines, or one reached
 through an alias, cannot hide a bound endpoint. A socket without a VFS binding

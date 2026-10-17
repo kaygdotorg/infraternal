@@ -151,7 +151,6 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
 struct SocketOwner {
     uid: u32,
     inode: u32,
-    device: u32,
 }
 #[derive(Debug, PartialEq, Eq)]
 enum DumpRecord {
@@ -209,7 +208,6 @@ fn dump_record(data: &[u8]) -> Option<DumpRecord> {
     Some(DumpRecord::Bound(SocketOwner {
         uid: u32::from_ne_bytes([data[56], data[57], data[58], data[59]]),
         inode: u32::from_ne_bytes([data[36], data[37], data[38], data[39]]),
-        device: u32::from_ne_bytes([data[40], data[41], data[42], data[43]]),
     }))
 }
 // Split one kernel datagram into records. Every record this request yields is
@@ -242,7 +240,7 @@ pub fn check_diagnostic_datagram(data: &[u8]) -> Option<Vec<Option<u32>>> {
 
 // Legacy runtimes did not hold the lifetime lock. A refused connect alone is
 // insufficient before listen. Ask the kernel whether any socket is bound to
-// this exact file (UID, device, inode), instead of inspecting private process
+// this file (UID, inode), instead of inspecting private process
 // descriptors, which cannot establish absence. Unknown inspection retains state.
 #[cold]
 #[inline(never)]
@@ -250,12 +248,12 @@ fn legacy_bound(expected: &fs::Metadata) -> Option<bool> {
     use nix::sys::socket::{
         MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
     };
-    // The kernel VFS record projects inode/device to 32 bits. This scopes a
-    // bound entry to the probed file; a match only preserves state.
-    // New runtimes use the lifetime lock instead of this legacy fallback.
-    let device =
-        (nix::sys::stat::major(expected.dev()) << 20) | nix::sys::stat::minor(expected.dev());
-    let device = u32::try_from(device).ok()?;
+    // Match on owner and inode only. The kernel reports the superblock device,
+    // and stat reports the filesystem's own device; they differ on btrfs and on
+    // overlays with layers on different filesystems, so comparing them would
+    // miss a bound endpoint there (#230 R09). A match only preserves state, so
+    // a false match (same inode on another filesystem, 32-bit projection) is
+    // safe. New runtimes use the lifetime lock instead of this legacy fallback.
     let inode = expected.ino() & u64::from(u32::MAX);
     let query = socket(
         AddressFamily::Netlink,
@@ -294,9 +292,7 @@ fn legacy_bound(expected: &fs::Metadata) -> Option<bool> {
         let (mut bound, mut done) = (false, false);
         dump_datagram(&response[..count], |record| match record {
             DumpRecord::Bound(owner) => {
-                bound |= owner.uid == expected.uid()
-                    && owner.device == device
-                    && u64::from(owner.inode) == inode;
+                bound |= owner.uid == expected.uid() && u64::from(owner.inode) == inode;
             }
             DumpRecord::Unbound => {}
             DumpRecord::Done => done = true,
