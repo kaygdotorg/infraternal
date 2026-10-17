@@ -390,11 +390,8 @@ impl tokio::io::AsyncRead for ObservedProxyInput {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
         let before = buffer.filled().len();
-        let result = tokio::io::AsyncRead::poll_read(
-            std::pin::Pin::new(&mut this.reader),
-            cx,
-            buffer,
-        );
+        let result =
+            tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut this.reader), cx, buffer);
         if matches!(&result, std::task::Poll::Ready(Ok(()))) && buffer.filled().len() > before {
             this.arrivals.send(()).unwrap();
         }
