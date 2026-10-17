@@ -157,6 +157,8 @@ pub fn validate(file: &File, state: &Path) -> io::Result<()> {
 struct SocketOwner {
     uid: u32,
     inode: u32,
+    /// Superblock device in the kernel's internal encoding (major << 20 | minor).
+    device: u32,
 }
 #[derive(Debug, PartialEq, Eq)]
 enum DumpRecord {
@@ -214,6 +216,7 @@ fn dump_record(data: &[u8]) -> Option<DumpRecord> {
     Some(DumpRecord::Bound(SocketOwner {
         uid: u32::from_ne_bytes([data[56], data[57], data[58], data[59]]),
         inode: u32::from_ne_bytes([data[36], data[37], data[38], data[39]]),
+        device: u32::from_ne_bytes([data[40], data[41], data[42], data[43]]),
     }))
 }
 // Split one kernel datagram into records. Every record this request yields is
@@ -244,20 +247,53 @@ pub fn check_diagnostic_datagram(data: &[u8]) -> Option<Vec<Option<u32>>> {
     Some(owners)
 }
 
+// Superblock device (kernel encoding) of the mount each file lives on, or
+// `None` where the mount id or the mount table cannot be read. The mount id
+// comes from an O_PATH descriptor's fdinfo, which needs no unsafe call and
+// works on kernels older than statx's mount id.
+#[cold]
+#[inline(never)]
+fn mount_devices(files: &[(PathBuf, fs::Metadata)]) -> Vec<Option<u32>> {
+    let table = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let device = |path: &Path| -> Option<u32> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_PATH | nix::libc::O_NOFOLLOW)
+            .open(path)
+            .ok()?;
+        let info = fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd())).ok()?;
+        let id = info
+            .lines()
+            .find_map(|line| line.strip_prefix("mnt_id:"))?
+            .trim();
+        let mut fields = table
+            .lines()
+            .map(|line| line.split(' '))
+            .find_map(|mut fields| (fields.next() == Some(id)).then_some(fields))?;
+        let (major, minor) = fields.nth(1)?.split_once(':')?;
+        let (major, minor) = (major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?);
+        (major < 1 << 12 && minor < 1 << 20).then_some(major << 20 | minor)
+    };
+    files.iter().map(|(path, _)| device(path)).collect()
+}
+
 // Ask the kernel whether any socket is bound to one of the given files,
 // instead of inspecting private process descriptors (absent for non-dumpable
 // holders) or bound names (distorted by newlines and aliases). `None` means
 // the dump proved nothing, and callers retain state.
 //
-// Files match on owner and inode only. The kernel reports the superblock
-// device, and stat reports the filesystem's own device; they differ on btrfs
-// and on overlays with layers on different filesystems, so comparing them
-// would miss a bound endpoint there (#230 R09). A match only preserves state,
-// so a false match (same inode on another filesystem, 32-bit projection) is
-// safe.
+// Files match on owner, inode and superblock device. The kernel reports the
+// superblock device, while stat reports the filesystem's own device; they
+// differ on btrfs and on overlays with layers on different filesystems (#230
+// R09). So the device compared is that of the mount the file lives on, from
+// its mount id and the mount table, which is the same superblock device. An
+// inode alone also matches unrelated sockets on other filesystems and holds a
+// dead endpoint live forever (#230 R12). When the mount device is unavailable
+// (old kernels, no /proc), an inode match still counts: a false match only
+// preserves state.
 #[cold]
 #[inline(never)]
-fn kernel_bound(files: &[fs::Metadata]) -> Option<bool> {
+fn kernel_bound(files: &[(PathBuf, fs::Metadata)]) -> Option<bool> {
     use nix::sys::socket::{
         MsgFlags, NetlinkAddr, SockProtocol, recvfrom, sendto, setsockopt, sockopt,
     };
@@ -274,6 +310,7 @@ fn kernel_bound(files: &[fs::Metadata]) -> Option<bool> {
         &nix::sys::time::TimeVal::new(0, 100_000),
     )
     .ok()?;
+    let devices = mount_devices(files);
     let request = dump_request();
     if sendto(
         query.as_raw_fd(),
@@ -298,8 +335,10 @@ fn kernel_bound(files: &[fs::Metadata]) -> Option<bool> {
         let (mut bound, mut done) = (false, false);
         dump_datagram(&response[..count], |record| match record {
             DumpRecord::Bound(owner) => {
-                bound |= files.iter().any(|file| {
-                    owner.uid == file.uid() && u64::from(owner.inode) == file.ino() & 0xffff_ffff
+                bound |= files.iter().zip(&devices).any(|((_, file), device)| {
+                    owner.uid == file.uid()
+                        && u64::from(owner.inode) == file.ino() & 0xffff_ffff
+                        && device.is_none_or(|device| device == owner.device)
                 });
             }
             DumpRecord::Unbound => {}
@@ -344,7 +383,7 @@ fn control(runtime: &File, retire: bool, legacy: bool) -> Result<(), u8> {
         }
         // Legacy runtimes did not hold the lifetime lock, and a refused
         // connect alone is insufficient before listen.
-        if kernel_bound(std::slice::from_ref(&before)).ok_or(77)? {
+        if kernel_bound(&[(path.clone(), before.clone())]).ok_or(77)? {
             return Err(73);
         }
     }
@@ -386,7 +425,7 @@ fn sessions(runtime: &File) -> Result<(), u8> {
             if metadata.file_type().is_socket()
                 && metadata.uid() == nix::unistd::Uid::effective().as_raw()
             {
-                files.push(metadata);
+                files.push((entry.path(), metadata));
                 if files.len() > 1024 {
                     return Err(77);
                 }

@@ -151,6 +151,7 @@ fn dump_records_accept_only_known_shapes() {
     let owner = SocketOwner {
         uid: 1001,
         inode: 4321,
+        device: 123,
     };
     for (length, expected, checked) in [
         (
@@ -204,6 +205,10 @@ fn dump_datagrams_split_exactly() {
     assert!(dump_datagram(&datagram, |_| {}).is_none());
 }
 
+fn kernel_holds(path: &Path) -> Option<bool> {
+    kernel_bound(&[(path.to_path_buf(), fs::metadata(path).unwrap())])
+}
+
 /// Kernel ownership remains observable when a runtime makes descriptors private.
 #[test]
 fn legacy_inspection_finds_a_real_bound_socket() {
@@ -211,13 +216,12 @@ fn legacy_inspection_finds_a_real_bound_socket() {
     let path = fixture.state().join("plugins.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
     let _pair = std::os::unix::net::UnixStream::pair().unwrap();
-    let expected = fs::metadata(&path).unwrap();
-    assert_eq!(kernel_bound(std::slice::from_ref(&expected)), Some(true));
+    assert_eq!(kernel_holds(&path), Some(true));
     let other = fixture.state().join("other.sock");
     drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
-    assert_eq!(kernel_bound(&[fs::metadata(other).unwrap()]), Some(false));
+    assert_eq!(kernel_holds(&other), Some(false));
     drop(listener);
-    assert_eq!(kernel_bound(std::slice::from_ref(&expected)), Some(false));
+    assert_eq!(kernel_holds(&path), Some(false));
 }
 
 /// Names are never read: newline homes and absolute aliases keep the same identity.
@@ -236,9 +240,9 @@ fn legacy_inspection_is_independent_of_the_bound_name() {
         ),
     ] {
         let listener = std::os::unix::net::UnixListener::bind(&bound).unwrap();
-        assert_eq!(kernel_bound(&[fs::metadata(&probed).unwrap()]), Some(true));
+        assert_eq!(kernel_holds(&probed), Some(true));
         drop(listener);
-        assert_eq!(kernel_bound(&[fs::metadata(&probed).unwrap()]), Some(false));
+        assert_eq!(kernel_holds(&probed), Some(false));
         fs::remove_file(probed).unwrap();
     }
 }
