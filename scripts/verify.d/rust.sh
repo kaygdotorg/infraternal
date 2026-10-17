@@ -213,6 +213,9 @@ rust_verify_fast() {
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "test" cargo test --workspace --locked
+    # The shared host (#205) patches the native engine and its allocator;
+    # the workspace run builds neither. Its shim lib tests are the gate.
+    rust_run_gate "shim process-per-user" cargo test --locked --package infraternal-shim --features process-per-user --lib
     rust_run_gate "cargo-deny" cargo deny check
     if [[ "$mode" == final ]]; then
         rust_run_gate "static builds" rust_static_build_check
