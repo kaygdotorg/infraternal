@@ -5,14 +5,14 @@
  * decoding, drawing and the frame queue never touch the main thread. The page only forwards encoded access units.
  *
  * Bounded admission and frame ownership:
- * - a decoder holds at most two queued access units; a unit arriving while it is full is dropped, and everything after
- *   it is dropped until the next keyframe (a delta frame without its reference would paint corruption);
- * - a gap in the sequence, a decoder error or a full queue asks the page for a repair keyframe, at most one request
+ * - a decoder holds at most two queued access units; up to eight continuous units, bounded together by one wire access-unit
+ *   budget, can wait for dequeue. Transport bursts retain their required references without queueing decoded pictures;
+ * - a gap in the sequence, a decoder error or a count/byte overflow asks the page for a repair keyframe, at most one request
  *   in flight;
  * - an IDR repairs the reference state inside the running decoder, which is only reconfigured when the profile or the
  *   level in its parameter sets changed; closing it on every IDR would cancel valid queued output;
  * - decoded pictures are drawn directly from the decoder output callback, without a second display-clock queue.
- *   If a newer unit is already admitted, its older decoded picture is closed without conversion. Only decoded pictures
+ *   If a newer unit is already accepted, its older decoded picture is closed without conversion. Only decoded pictures
  *   are skipped: the admitted coded units still establish codec references. Each picture is closed before the callback
  *   returns, so no presentation queue pins decoder memory or holds newer work behind obsolete conversion.
  *
@@ -21,6 +21,7 @@
  * the window closes or has been off screen for long.
  */
 import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
+import { MAX_VIDEO_BYTES } from "../../../../../packages/protocol/src/desktop";
 
 /** The few members of the worker's global scope used here (the project compiles against the page's types). */
 interface WorkerScope {
@@ -54,9 +55,14 @@ let lastSequence = 0;
 let waitingKeyframe = true;
 let repairPending = false;
 let timestamp = 0;
+interface CodedUnit { keyframe: boolean; bytes: Uint8Array; stamp: number }
+const pending: CodedUnit[] = [];
+const MAX_PENDING_UNITS = 8;
+let pendingBytes = 0;
+let pumping = false;
 let first = true;
 let shownW = 0, shownH = 0;
-const stats: WorkerStats = { received: 0, decoded: 0, painted: 0, dropped: 0, superseded: 0, repairs: 0 };
+const stats: WorkerStats = { received: 0, decoded: 0, painted: 0, dropped: 0, superseded: 0, repairs: 0, pendingPeak: 0, pendingBytesPeak: 0 };
 
 /** The least time between two requests for a keyframe. A decoder that cannot keep up asks again as soon as it is idle; each answer is a large
  *  picture that takes longest to decode, so unthrottled repairs feed the overload they answer (measured: 1,100 repairs in 12 s across ten streams). */
@@ -82,11 +88,11 @@ function repair(): void {
 
 function output(frame: VideoFrame): void {
   stats.decoded++;
-  // Newer work is already admitted. Converting obsolete output would block its
-  // callback and can overload the bounded decoder with avoidable canvas work.
-  if (frame.timestamp < timestamp) { stats.superseded++; frame.close(); return; }
-  if (!frame || !canvas || !context) { frame?.close(); return; }
   try {
+    // Newer work is already accepted. Converting obsolete output would block its
+    // callback and can overload the bounded decoder with avoidable canvas work.
+    if (frame.timestamp < timestamp) { stats.superseded++; return; }
+    if (!canvas || !context) return;
     if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
       canvas.width = frame.displayWidth;
       canvas.height = frame.displayHeight;
@@ -98,35 +104,32 @@ function output(frame: VideoFrame): void {
       shownW = frame.displayWidth; shownH = frame.displayHeight;
       post({ t: "size", width: shownW, height: shownH });
     }
-  } finally { frame.close(); }
+  } finally {
+    frame.close();
+    // Output proves codec progress even if its dequeue event is still pending.
+    // No decoded picture waits here for that separate event or a display tick.
+    pump();
+  }
 }
 
-function retireDecoder(): void {
+function discardPending(): void { pending.length = 0; pendingBytes = 0; }
+
+function retireDecoder(keepPending = false): void {
+  if (!keepPending) discardPending();
   if (repairTimer !== undefined) { scope.clearTimeout(repairTimer); repairTimer = undefined; }
   if (decoder && decoder.state !== "closed") decoder.close();
   decoder = undefined;
   codec = undefined;
 }
 
-function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer): void {
-  stats.received++;
-  if (sequence <= lastSequence) return;
-  const continuous = sequence === lastSequence + 1;
-  lastSequence = sequence;
-  if ((decoder?.decodeQueueSize ?? 0) >= 2) {
-    // An IDR still takes a decode slot; admitting repairs while saturated would queue obsolete keyframes without bound.
-    stats.dropped++;
-    waitingKeyframe = true;
-    if (keyframe) repairPending = false;
-    return;
-  }
-  if (!keyframe && (waitingKeyframe || !continuous)) { stats.dropped++; repair(); return; }
-  const bytes = new Uint8Array(buffer);
+function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number): void {
   if (keyframe) {
     const wanted = avcCodecString(bytes) ?? codec;
-    if (!wanted) { repair(); return; }
+    if (!wanted) { discardPending(); repair(); return; }
     if (!decoder || codec !== wanted) {
-      retireDecoder();
+      // Units buffered after this IDR belong to its new codec, not the retired
+      // decoder. Closing the old decoder must preserve that new reference chain.
+      retireDecoder(true);
       codec = wanted;
       decoder = new VideoDecoder({
         output,
@@ -138,7 +141,7 @@ function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer): void {
           repair();
         },
       });
-      decoder.ondequeue = () => { if (waitingKeyframe && (decoder?.decodeQueueSize ?? 2) < 2) repair(); };
+      decoder.ondequeue = () => { pump(); if (waitingKeyframe && (decoder?.decodeQueueSize ?? 2) < 2) repair(); };
       try { decoder.configure({ codec: wanted, optimizeForLatency: true, hardwareAcceleration: hardware }); }
       catch (error) { retireDecoder(); post({ t: "error", reason: "unsupported-codec", detail: String(error) }); return; }
     }
@@ -146,9 +149,63 @@ function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer): void {
     repairPending = false;
   }
   if (!decoder) { stats.dropped++; repair(); return; }
-  const stamp = ++timestamp;
   try { decoder.decode(new EncodedVideoChunk({ type: keyframe ? "key" : "delta", timestamp: stamp, data: bytes })); }
   catch { retireDecoder(); post({ t: "error", reason: "decode" }); repair(); }
+}
+
+function pump(): void {
+  if (pumping) return;
+  pumping = true;
+  try {
+    while (pending.length && (decoder?.decodeQueueSize ?? 0) < 2) {
+      const unit = pending.shift()!;
+      pendingBytes -= unit.bytes.byteLength;
+      decodeUnit(unit.keyframe, unit.bytes, unit.stamp);
+    }
+  } finally { pumping = false; }
+}
+
+function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer): void {
+  stats.received++;
+  if (sequence <= lastSequence) return;
+  const continuous = sequence === lastSequence + 1;
+  lastSequence = sequence;
+  if (!keyframe && (waitingKeyframe || !continuous)) {
+    stats.dropped += pending.length + 1;
+    discardPending(); repair(); return;
+  }
+  if (keyframe) {
+    // A self-contained newer picture supersedes unsubmitted old references.
+    stats.dropped += pending.length;
+    discardPending();
+  }
+  // Consumption can precede the dequeue task. Drain any capacity already
+  // available before applying the pending count/byte bounds to this arrival.
+  if (pending.length) {
+    pump();
+    if (!keyframe && waitingKeyframe) { stats.dropped++; return; }
+  }
+  if (!buffer.byteLength || buffer.byteLength > MAX_VIDEO_BYTES || pending.length >= MAX_PENDING_UNITS || pendingBytes + buffer.byteLength > MAX_VIDEO_BYTES) {
+    stats.dropped += pending.length + 1;
+    discardPending();
+    if (keyframe) repairPending = false;
+    repair(); return;
+  }
+  if (keyframe) { waitingKeyframe = false; repairPending = false; }
+  // Advance before decoder admission: even output from an admitted older unit
+  // is obsolete while a newer accepted picture waits for its codec references.
+  const bytes = new Uint8Array(buffer), stamp = ++timestamp;
+  // Ordinary delivery allocates no pending record. Only references waiting for
+  // codec capacity need the extra bounded queue entry.
+  if (!pending.length && (decoder?.decodeQueueSize ?? 0) < 2) {
+    decodeUnit(keyframe, bytes, stamp);
+    return;
+  }
+  pending.push({ keyframe, bytes, stamp });
+  pendingBytes += buffer.byteLength;
+  stats.pendingPeak = Math.max(stats.pendingPeak, pending.length);
+  stats.pendingBytesPeak = Math.max(stats.pendingBytesPeak, pendingBytes);
+  pump();
 }
 
 scope.onmessage = (event: MessageEvent<ToWorker>) => {

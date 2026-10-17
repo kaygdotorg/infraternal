@@ -26,7 +26,7 @@ export type FromWorker =
   | { t: "first"; width: number; height: number }
   /** The decoded picture changed size (the machine followed a resize, or the window letterboxed). */
   | { t: "size"; width: number; height: number }
-  /** The decoder needs a fresh keyframe: a gap, an overflow or a decoder error. `lastSequence` is the last one decoded. */
+  /** The decoder needs a fresh keyframe: a gap, an overflow or a decoder error. `lastSequence` is the last one received. */
   | { t: "repair"; lastSequence: number }
   /** The decoder cannot work at all. `unsupported-*` is final for this browser; `decode` may be tried again. */
   | { t: "error"; reason: "unsupported-codec" | "unsupported-canvas" | "decode"; detail?: string }
@@ -37,7 +37,10 @@ export interface WorkerStats {
   decoded: number;
   painted: number;
   dropped: number;
-  /** Decoded pictures discarded because newer work was already admitted. */
+  /** Decoded pictures discarded because newer work was already accepted. */
   superseded: number;
   repairs: number;
+  /** High-water marks for coded references awaiting decoder admission; decoded pictures are never queued here. */
+  pendingPeak: number;
+  pendingBytesPeak: number;
 }
