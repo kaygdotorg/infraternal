@@ -854,12 +854,19 @@ async fn run_actor(
     let mut writes = ();
     let mut probe_queue = std::collections::VecDeque::new();
     let mut liveness = Liveness::host_link();
-    // Windows told about the current doubt episode; only they get its recovery.
+    // Windows told about the current doubt episode on the current link; only
+    // they get its recovery. Every lease reset and every lost link clears it.
     let mut doubted = Vec::new();
     let mut ticks = tokio::time::interval(TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // A doubt belongs to the link it was raised on. Once that link is gone,
+        // its windows were told Reconnecting and only the replacement's own
+        // replay fence may confirm them [D300, #234].
+        if connection.is_none() {
+            doubted.clear();
+        }
         #[cfg(feature = "remote")]
         hot.observe(&attachments);
         #[cfg(feature = "remote")]
@@ -883,7 +890,7 @@ async fn run_actor(
                     if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                         writes.stop().await;
                         // The promoted connection has not answered this route's probes yet.
-                        liveness = Liveness::host_link();
+                        fresh_host_lease(&mut liveness, &mut doubted);
                     }
                     process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
                 },
@@ -914,7 +921,7 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
-                liveness = Liveness::host_link();
+                fresh_host_lease(&mut liveness, &mut doubted);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -929,7 +936,7 @@ async fn run_actor(
         };
         // Nothing probes an unused host link. A later attachment gets a fresh lease.
         if attachments.is_empty() {
-            liveness = Liveness::host_link();
+            fresh_host_lease(&mut liveness, &mut doubted);
         }
         #[cfg(feature = "remote")]
         let control_ready = writes.can_admit();
@@ -969,7 +976,7 @@ async fn run_actor(
                 if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                     writes.stop().await;
                     // The promoted connection has not answered this route's probes yet.
-                    liveness = Liveness::host_link();
+                    fresh_host_lease(&mut liveness, &mut doubted);
                 }
                 #[cfg(feature = "remote")]
                 process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
@@ -2619,6 +2626,13 @@ fn connection_lost(
     // An old child gets bounded TERM/KILL cleanup independently of recovery.
     // Accepted shim input and surviving session processes remain authoritative.
     tokio::spawn(cleanup_connection(connection));
+}
+
+/// A new or promoted host link starts a fresh lease with no doubt episode: a
+/// doubt raised on an earlier link never confirms windows on this one [#234].
+fn fresh_host_lease(liveness: &mut Liveness, doubted: &mut Vec<u64>) {
+    *liveness = Liveness::host_link();
+    doubted.clear();
 }
 
 /// Tells settled windows that the shared host link is doubtful, or that it
