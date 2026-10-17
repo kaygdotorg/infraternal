@@ -84,11 +84,21 @@ class Host(suite.Host):
             if index == 0:
                 self.pid = child.pid
             until = suite.clock_now() + 120
-            while not self.path(index).exists():
+            while True:
                 assert child.poll() is None, 'shipping shim exited during startup'
                 assert suite.clock_now() < until, 'shipping shim startup timed out'
+                if self.path(index).exists():
+                    try:
+                        peer = await suite.Peer.connect(self.path(index))
+                        break
+                    except (ConnectionRefusedError, FileNotFoundError):
+                        # bind publishes the path before listen. Retry only
+                        # setup refusal while this exact child remains alive;
+                        # an accepted connection still requires valid Hello.
+                        assert child.poll() is None, 'shipping shim exited before listen'
+                        self.log.write(f'startup listen retry index={index} pid={child.pid}\n'.encode())
+                        self.log.flush()
                 await asyncio.sleep(.01)
-            peer = await suite.Peer.connect(self.path(index))
             assert peer.pid == child.pid, 'unexpected shipping shim identity'
             self.peers.append(peer)
             children = Path(f'/proc/{child.pid}/task/{child.pid}/children').read_text().split()

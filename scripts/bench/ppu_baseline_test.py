@@ -91,5 +91,47 @@ class Cleanup(unittest.IsolatedAsyncioTestCase):
             child.wait()
 
 
+class Readiness(unittest.IsolatedAsyncioTestCase):
+    """A published socket path can precede its listener becoming ready."""
+    def setUp(self):
+        from pathlib import Path
+        from unittest.mock import AsyncMock, Mock
+        self.host = baseline.Host.__new__(baseline.Host)
+        self.host.binary, self.host.root = Path('binary'), Path('unused-state')
+        self.host.count, self.host.origin = 1, 3
+        self.host.children, self.host.peers, self.host.shells = [], [], []
+        self.host.log = Mock()
+        self.host.path = lambda index: SimpleNamespace(exists=lambda: True)
+        self.child = SimpleNamespace(pid=424242, poll=Mock(return_value=None))
+        self.peer = SimpleNamespace(pid=424242, echo=AsyncMock())
+        self.connect = AsyncMock(side_effect=[ConnectionRefusedError(), self.peer])
+        def read(path):
+            if path.name == 'children':
+                return '424243'
+            fields = ['0'] * 20
+            fields[19] = '123'
+            return '424243 (shell) ' + ' '.join(fields)
+        patches = [patch.object(baseline.subprocess, 'Popen', return_value=self.child),
+                   patch.object(baseline.suite.Peer, 'connect', self.connect),
+                   patch.object(baseline.Path, 'read_text', read),
+                   patch.object(baseline.asyncio, 'sleep', AsyncMock()),
+                   patch.object(baseline.suite, 'sample')]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    async def test_live_shim_waits_for_listen_after_socket_publication(self):
+        await self.host.ready()
+        self.assertEqual(self.connect.await_count, 2)
+        self.assertEqual(self.host.peers, [self.peer])
+        self.peer.echo.assert_awaited_once()
+
+    async def test_exited_shim_is_not_hidden_by_a_listen_retry(self):
+        self.child.poll.side_effect = [None, 0]
+        with self.assertRaisesRegex(AssertionError, 'shipping shim exited'):
+            await self.host.ready()
+        self.assertEqual(self.connect.await_count, 1)
+
+
 if __name__ == '__main__':
     unittest.main()
