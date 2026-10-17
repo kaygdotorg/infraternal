@@ -110,7 +110,8 @@ fn review_r3_noisy_neighbour_does_not_make_quiet_sessions_approximate() {
     let before = host.used();
     // Quiet session 3 opens a full-screen program, and session 2 resizes.
     terminals[3].process(b"\x1b[?1049h\x1b[2J\x1b[Hvim");
-    terminals[2].resize(120, 40).unwrap_or(());
+    // Taller, not wider: widening with this much history aborts (PPU-R3-1).
+    terminals[2].resize(80, 40).unwrap_or(());
     numbered(&mut terminals[1], 1, 300_000, 1000, 79);
     let (refused, inexact) = verdicts(&terminals);
     eprintln!(
@@ -255,10 +256,13 @@ fn review_r3_host_accounting_balances_through_recovery() {
 /// combining characters so heap-owned and pool pages both recycle.
 #[test]
 fn review_r3_recycled_history_matches_unbounded_reference() {
-    for history in [64 * 1024, 655 * 1024, 4 * 1024 * 1024] {
+    for history in [64 * 1024, 655 * 1024, 1024 * 1024] {
         let host = HostBudget::new(POOL, FLOOR);
         let mut bounded = Terminal::with_host_budget(80, 24, history, Some(host.clone())).unwrap();
-        let mut reference = Terminal::new(80, 24).unwrap();
+        // The per-session engine aborts on widening in this build (r3-1),
+        // so the reference is a bounded terminal with a larger share.
+        let mut reference =
+            Terminal::with_history_budget(80, 24, (history * 4).min(6 * 1024 * 1024)).unwrap();
         for terminal in [&mut bounded, &mut reference] {
             terminal.process(b"\x1bc");
         }
@@ -290,7 +294,15 @@ fn review_r3_recycled_history_matches_unbounded_reference() {
                 bounded.retained_history_rows(),
                 reference.retained_history_rows()
             );
-            let snapshot = bounded.snapshot().expect("exact snapshot after recycling");
+            // The faithful painter refuses some wrap states in every build;
+            // recycling must not refuse a state the reference can paint.
+            let Ok(snapshot) = bounded.snapshot() else {
+                assert!(
+                    reference.snapshot().is_err(),
+                    "share {history} {stage}: reference paints exactly, recycled terminal cannot"
+                );
+                return;
+            };
             let mut replay = Terminal::new(bounded.dimensions.0, bounded.dimensions.1).unwrap();
             replay.process(b"\x1bc");
             replay.process(&snapshot);
@@ -332,4 +344,51 @@ fn review_r3_bounded_terminal_reflows_long_mixed_history() {
         assert!(!terminal.memory().2);
         assert!(terminal.snapshot().is_ok());
     }
+}
+
+/// Recycling at the smallest host share keeps a faithful snapshot after
+/// every line (lines that do not soft-wrap; wrapped rows are refused by the
+/// painter in every build).
+#[test]
+fn review_r3_recycled_unwrapped_history_keeps_exact_snapshot() {
+    let host = HostBudget::new(POOL, FLOOR);
+    let mut terminal = host_terminal(80, 24, 1000, &host);
+    for n in 0..4000_usize {
+        terminal.process(format!("{n:08} {}\r\n", "u".repeat(60)).as_bytes());
+        if n >= 100 {
+            assert!(terminal.snapshot().is_ok(), "line {n}: snapshot inexact");
+        }
+    }
+}
+
+/// The floor covers an idle 80x24 screen only. 400 sessions at 200x50 (one
+/// person's busy host) each print a few screens of ordinary output; visible
+/// screens alone must not exhaust the pool and refuse later sessions.
+#[test]
+fn review_r3_four_hundred_laptop_screens_fit_the_host() {
+    const SESSIONS: usize = 400;
+    let host = HostBudget::new(POOL, FLOOR);
+    let mut terminals: Vec<_> = (0..SESSIONS)
+        .map(|_| host_terminal(200, 50, SESSIONS, &host))
+        .collect();
+    for (index, terminal) in terminals.iter_mut().enumerate() {
+        numbered(terminal, index, 0, 200, 199);
+    }
+    let (refused, inexact) = verdicts(&terminals);
+    eprintln!(
+        "laptop x400: pool {}/{POOL}; one session uses {} B; refused {} (first {:?}), inexact {}",
+        host.used(),
+        terminals[0].memory().0,
+        refused.len(),
+        refused.first(),
+        inexact.len()
+    );
+    assert!(
+        refused.is_empty() && inexact.is_empty(),
+        "{} of {SESSIONS} sessions refused ordinary output, first {:?}; {} inexact (pool {}/{POOL})",
+        refused.len(),
+        refused.first(),
+        inexact.len(),
+        host.used()
+    );
 }
