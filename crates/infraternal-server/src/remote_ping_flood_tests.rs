@@ -26,7 +26,13 @@ static RELAY_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 
 /// One ordered datagram relay delays each direction without changing host networking.
 /// A full delay queue tail-drops, as a bounded router queue would; QUIC recovers.
-async fn delayed_link(socket: tokio::net::UdpSocket, server: SocketAddr, delay: Duration) {
+/// `loss_ppm` drops that share of datagrams at random, for a lossy long-haul path.
+async fn delayed_link(
+    socket: tokio::net::UdpSocket,
+    server: SocketAddr,
+    delay: Duration,
+    loss_ppm: u32,
+) {
     let mut client = None;
     let mut queued: VecDeque<(tokio::time::Instant, SocketAddr, Vec<u8>)> = VecDeque::new();
     let mut bytes = vec![0; 65536];
@@ -39,7 +45,7 @@ async fn delayed_link(socket: tokio::net::UdpSocket, server: SocketAddr, delay: 
                     let Some(client) = client else { continue; };
                     client
                 } else { client = Some(source); server };
-                if queued.len() >= 32768 {
+                if queued.len() >= 32768 || rand::random::<u32>() % 1_000_000 < loss_ppm {
                     RELAY_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
@@ -73,6 +79,14 @@ async fn primary_ping_during_terminal_flood() {
         .unwrap_or_else(|_| "0".into())
         .parse()
         .unwrap();
+    let loss_ppm: u32 = std::env::var("INFRATERNAL_PING_LOSS_PPM")
+        .unwrap_or_else(|_| "0".into())
+        .parse()
+        .unwrap();
+    // A third PTY absorbs a continuous paste, so server-to-host traffic competes
+    // with control frames on the same connection, as an upload does.
+    let upload = std::env::var("INFRATERNAL_PING_UPLOAD").is_ok_and(|value| value == "1");
+    let terminals = if upload { 3 } else { 2 };
     let state = PathBuf::from(std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").unwrap())
         .join(format!("{:08x}", rand::random::<u32>()));
     let state = infraternal_agent::sessions::state(Some(state)).unwrap();
@@ -82,7 +96,7 @@ async fn primary_ping_during_terminal_flood() {
         pids: Vec::new(),
     };
     let mut shims = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..terminals {
         let session = infraternal_agent::sessions::launch(
             &binary,
             &state,
@@ -120,7 +134,12 @@ async fn primary_ping_during_terminal_flood() {
     let relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let endpoint = relay.local_addr().unwrap();
     let mut tasks = tokio::task::JoinSet::new();
-    tasks.spawn(delayed_link(relay, address, Duration::from_millis(rtt / 2)));
+    tasks.spawn(delayed_link(
+        relay,
+        address,
+        Duration::from_millis(rtt / 2),
+        loss_ppm,
+    ));
     let identity = infraternal_agent::remote_client::RemoteIdentity {
         identity: Identity {
             certificate: node.certificate.clone(),
@@ -203,8 +222,8 @@ async fn primary_ping_during_terminal_flood() {
         .await;
         handles.push(handle);
     }
-    let mut ready = [false; 2];
-    let mut tails = [Vec::new(), Vec::new()];
+    let mut ready = vec![false; terminals];
+    let mut tails = vec![Vec::new(); terminals];
     while !ready.iter().all(|ready| *ready) {
         let (index, event) = tokio::time::timeout(Duration::from_secs(15), output.recv())
             .await
@@ -216,8 +235,18 @@ async fn primary_ping_during_terminal_flood() {
         }
     }
     // A real parked secondary enables the shipping bounded control writer path.
+    // Primed terminal writers move onto it, so it crosses its own delayed relay;
+    // otherwise terminal bytes would bypass the configured RTT and loss.
+    let warm_relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let warm_address = warm_relay.local_addr().unwrap();
+    tasks.spawn(delayed_link(
+        warm_relay,
+        address,
+        Duration::from_millis(rtt / 2),
+        loss_ppm,
+    ));
     let (_warm_endpoint, warm_connection, warm) =
-        super::standby::connect_control(address, &node, &root).await;
+        super::standby::connect_control(warm_address, &node, &root).await;
     let mut warm_receive = Receive::default();
     let mut warm_tx = Transmit::default();
     warm_tx
@@ -268,16 +297,20 @@ async fn primary_ping_during_terminal_flood() {
         let mut terminals = tokio::task::JoinSet::new();
         loop { tokio::select! {
             bound = remote_quic::accept_bound(&binding) => {
-                let channel = NativeChannel::terminal(bound.unwrap()).unwrap();
+                // The server retires this secondary with a lost primary; report, do not panic.
+                let Ok(bound) = bound else { eprintln!("PING_FLOOD_WARM_ENDED accept"); break; };
+                let channel = NativeChannel::terminal(bound).unwrap();
                 let state = warm_state.clone();
                 terminals.spawn(async move { let _ = infraternal_agent::daemon::run_negotiated_bound_terminal(&channel, Some(state)).await; });
             }
             frame = warm_receive.next(&warm) => {
-                match frame.unwrap().frame {
-                    Frame::Ping { nonce, sent_us } => warm_tx.send(&warm, 0, &Frame::Pong { nonce, sent_us }).await.unwrap(),
-                    Frame::Call { call_id, .. } => warm_tx.send(&warm, 0, &Frame::Result { call_id, ok: false, json: b"{}" }).await.unwrap(),
-                    _ => {},
-                }
+                let Ok(frame) = frame else { eprintln!("PING_FLOOD_WARM_ENDED read"); break; };
+                let sent = match frame.frame {
+                    Frame::Ping { nonce, sent_us } => warm_tx.send(&warm, 0, &Frame::Pong { nonce, sent_us }).await,
+                    Frame::Call { call_id, .. } => warm_tx.send(&warm, 0, &Frame::Result { call_id, ok: false, json: b"{}" }).await,
+                    _ => Ok(()),
+                };
+                if sent.is_err() { eprintln!("PING_FLOOD_WARM_ENDED write"); break; }
             }
         }}
     });
@@ -290,7 +323,7 @@ async fn primary_ping_during_terminal_flood() {
     .expect("owned control FIFO must be enabled before measurement");
     let flood = b"while :; do head -c 33554432 /dev/zero | tr '\\000' x; done\n";
     let prepare = b"stty -echo -opost; printf 'READY_%s\\n' PING\n";
-    let mut sequence = [u64::try_from(prepare.len()).unwrap(); 2];
+    let mut sequence = vec![u64::try_from(prepare.len()).unwrap(); terminals];
     terminal_send(
         &handles[0],
         Frame::Input {
@@ -300,6 +333,24 @@ async fn primary_ping_during_terminal_flood() {
     )
     .await;
     sequence[0] += u64::try_from(flood.len()).unwrap();
+    let uploaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    if upload {
+        let sink = b"exec cat > /dev/null\n";
+        terminal_send(&handles[2], Frame::Input { in_seq: sequence[2], bytes: sink }).await;
+        let paste = handles[2].clone();
+        let mut in_seq = sequence[2] + u64::try_from(sink.len()).unwrap();
+        let counter = uploaded.clone();
+        tasks.spawn(async move {
+            // Canonical-mode lines stay under the 4 KiB tty line limit.
+            let mut line = vec![b'y'; 4000];
+            *line.last_mut().unwrap() = b'\n';
+            loop {
+                terminal_send(&paste, Frame::Input { in_seq, bytes: &line }).await;
+                in_seq += u64::try_from(line.len()).unwrap();
+                counter.fetch_add(u64::try_from(line.len()).unwrap(), std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
     let started = Instant::now();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut sent = None;
@@ -310,7 +361,7 @@ async fn primary_ping_during_terminal_flood() {
     let mut retired = 0_u64;
     let mut echo_tail = Vec::new();
     println!(
-        "PING_FLOOD_START rtt_ms={rtt} duration_s={seconds} terminals=2 load={}",
+        "PING_FLOOD_START rtt_ms={rtt} loss_ppm={loss_ppm} duration_s={seconds} terminals={terminals} load={}",
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
     loop {
@@ -329,7 +380,7 @@ async fn primary_ping_during_terminal_flood() {
                 let (index, event) = event.unwrap();
                 match event {
                     TerminalOutput::Output { bytes, .. } if index == 0 => flood_bytes += u64::try_from(bytes.len()).unwrap(),
-                    TerminalOutput::Output { bytes, .. } => {
+                    TerminalOutput::Output { bytes, .. } if index == 1 => {
                         echo_tail.extend_from_slice(&bytes);
                         let marker = format!("ECHO_{nonce}\n");
                         if echo_tail.windows(marker.len()).any(|part| part == marker.as_bytes()) {
@@ -360,7 +411,8 @@ async fn primary_ping_during_terminal_flood() {
             .unwrap_or(f64::NAN)
     };
     println!(
-        "PING_FLOOD_RESULT rtt_ms={rtt} duration_s={seconds} primary_closes={primary_closes} primary_loss_notices={closes} terminals_retired={retired} reconnects={reconnects} relay_drops={} flood_bytes={flood_bytes} echo_samples={} echo_p50_ms={:.3} echo_p99_ms={:.3} load={}",
+        "PING_FLOOD_RESULT rtt_ms={rtt} loss_ppm={loss_ppm} upload_bytes={} duration_s={seconds} primary_closes={primary_closes} primary_loss_notices={closes} terminals_retired={retired} reconnects={reconnects} relay_drops={} flood_bytes={flood_bytes} echo_samples={} echo_p50_ms={:.3} echo_p99_ms={:.3} load={}",
+        uploaded.load(std::sync::atomic::Ordering::Relaxed),
         RELAY_DROPS.load(std::sync::atomic::Ordering::Relaxed),
         samples.len(),
         quantile(50),
