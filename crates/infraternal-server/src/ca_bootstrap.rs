@@ -337,16 +337,28 @@ mod tests {
             .unwrap();
         trust.set_param(&params).unwrap();
         let chain = openssl::stack::Stack::new().unwrap();
-        assert!(
-            openssl::x509::X509StoreContext::new()
-                .unwrap()
-                .init(
-                    &trust.build(),
-                    &identity.certificate,
-                    &chain,
-                    openssl::x509::X509StoreContextRef::verify_cert
-                )
-                .unwrap()
-        );
+        let verified = openssl::x509::X509StoreContext::new()
+            .unwrap()
+            .init(&trust.build(), &identity.certificate, &chain, |context| {
+                let verified = context.verify_cert()?;
+                // Keep the failure inside the initialized context: verification
+                // state is cleared when init returns. Public dates distinguish a
+                // clock failure from chain/purpose failures without logging keys.
+                assert!(
+                    verified,
+                    "certificate verification: error={} depth={} generated_at={} verified_at={} root_validity={}..{} leaf_validity={}..{}",
+                    context.error(),
+                    context.error_depth(),
+                    now,
+                    crate::runtime::unix_seconds().unwrap(),
+                    material.issuer().not_before(),
+                    material.issuer().not_after(),
+                    identity.certificate.not_before(),
+                    identity.certificate.not_after(),
+                );
+                Ok(verified)
+            })
+            .unwrap();
+        assert!(verified);
     }
 }
