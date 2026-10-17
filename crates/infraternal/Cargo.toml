@@ -16,10 +16,11 @@ serde.workspace = true
 serde_json.workspace = true
 infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false, optional = true }
 tokio = { workspace = true, optional = true }
-infraternal-shim.workspace = true
+# Executable images use only the audited callback-free Rust VT boundary (D243).
+infraternal-shim = { workspace = true, features = ["session-image", "cli"] }
 infraternal-agent = { path = "../infraternal-agent", version = "0.1.0", default-features = false, optional = true }
 infraternal-mesh = { path = "../infraternal-mesh", version = "0.1.0", optional = true }
-infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
+infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true, features = ["session-bridge"] }
 infraternal-plugin-relay = { path = "../plugins/relay", version = "0.1.0", optional = true }
 infraternal-plugin-backup = { path = "../plugins/backup", version = "0.1.0", optional = true }
 thiserror.workspace = true
@@ -41,10 +42,13 @@ infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optiona
 # Per-run test authority is compiled only into explicit staging images (#188 D1).
 staging-trust = ["plugin-server", "infraternal-server/staging-trust"]
 release = ["plugin-server", "infraternal-server/release", "dep:infraternal-plugin-release", "dep:sqlx"]
-remote = ["plugin-agent", "plugin-server", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-plugin-remote/server", "dep:base64", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:tokio-openssl", "dep:url"]
-ssh = ["plugin-ssh", "plugin-server", "infraternal-server/ssh"]
+remote = ["infraternal-shim/ca-handoff", "plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:base64", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:tokio-openssl", "dep:url"]
+# Private SSH session routes need the host runtime even when its operator role is absent.
+ssh = ["plugin-ssh", "dep:infraternal-agent", "dep:tokio", "infraternal-server?/ssh"]
+# Private release profile for the early shim/SSH startup image.
+session-payload = ["ssh"]
 default = ["release", "remote", "ssh", "plugin-host-facts", "plugin-agent", "plugin-backup", "plugin-mesh", "plugin-relay", "plugin-server", "plugin-ssh"]
-plugin-agent = ["dep:infraternal-agent", "dep:tokio"]
+plugin-agent = ["dep:infraternal-agent", "dep:tokio", "tokio/rt-multi-thread"]
 plugin-backup = ["dep:infraternal-plugin-backup"]
 plugin-mesh = ["dep:infraternal-mesh", "dep:infraternal-plugin-mesh", "infraternal-server?/mesh", "plugin-agent", "infraternal-agent/mesh", "dep:tokio"]
 # Preserve the production feature name without enabling a server role.
@@ -52,7 +56,7 @@ mesh = ["plugin-mesh"]
 ee = ["infraternal-server?/ee", "infraternal-agent?/ee"]
 plugin-host-facts = ["plugin-agent", "dep:infraternal-plugin-host-facts", "infraternal-agent/plugin-host-facts"]
 plugin-relay = ["dep:infraternal-plugin-relay"]
-plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "dep:tokio"]
+plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "infraternal-plugin-remote?/server", "dep:tokio"]
 plugin-ssh = ["dep:infraternal-plugin-ssh"]
 
 [lints]

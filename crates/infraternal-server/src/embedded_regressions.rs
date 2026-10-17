@@ -367,6 +367,96 @@ async fn healthy_streams_progress_at_user_attachment_capacity() {
     );
 }
 
+/// A resumed browser can reclaim a writer before its previous handle drops.
+#[tokio::test]
+async fn resumed_writer_closes_previous_route_before_shared_stream_reuse() {
+    let (mut link, mut peer) = connection();
+    let (old_output, _old_receiver) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(old_output))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let (output, _receiver) = mpsc::channel(4);
+    let (reply, result) = oneshot::channel();
+    assert!(
+        process_command(
+            Command::Attach {
+                id: 2,
+                session_id: [1; 16],
+                stream_id: 2,
+                last_out_seq: 11,
+                last_in_seq: 7,
+                output,
+                input_credit: watch::channel(7).0,
+                monitored: false,
+                reply,
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+        )
+        .await
+    );
+    assert_eq!(result.await.unwrap().unwrap(), (2, 2));
+    assert!(!attachments.contains_key(&1));
+    assert_eq!(routes.get(&2), Some(&2));
+    let mut bytes = [0; 256];
+    let count = peer.read(&mut bytes).await.unwrap();
+    let closed = decode_muxed_frame(&bytes[..count]).unwrap();
+    assert_eq!(closed.stream_id, 2);
+    assert!(
+        matches!(closed.frame, Frame::Close { .. }),
+        "reclaiming a live shared writer must retire its previous remote route"
+    );
+    let attached = decode_muxed_frame(&bytes[closed.wire_len..count]).unwrap();
+    assert_eq!(attached.stream_id, 2);
+    assert!(matches!(
+        attached.frame,
+        Frame::AttachTerm { session_id, last_out_seq: 11, last_in_seq: 7 } if session_id == &[1; 16]
+    ));
+}
+
+/// Writer reuse cannot retire a different session's existing attachment.
+#[tokio::test]
+async fn resumed_writer_for_other_session_preserves_live_route() {
+    let (mut link, peer) = connection();
+    let (old_output, _old_receiver) = mpsc::channel(4);
+    let mut attachments = HashMap::from([(1, attachment(old_output))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let (output, _receiver) = mpsc::channel(4);
+    let (reply, result) = oneshot::channel();
+    assert!(
+        process_command(
+            Command::Attach {
+                id: 2,
+                session_id: [2; 16],
+                stream_id: 2,
+                last_out_seq: 0,
+                last_in_seq: 0,
+                output,
+                input_credit: watch::channel(0).0,
+                monitored: false,
+                reply,
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut HashMap::new(),
+        )
+        .await
+    );
+    assert!(matches!(result.await.unwrap(), Err(AgentError::Protocol)));
+    assert!(attachments.contains_key(&1));
+    assert_eq!(routes.get(&2), Some(&1));
+    let mut peer = peer.into_std().unwrap();
+    assert_eq!(
+        std::io::Read::read(&mut peer, &mut [0; 1])
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a rejected session cannot send a Close for the live writer"
+    );
+}
+
 #[tokio::test]
 async fn reattach_must_restore_output_credit() {
     let (mut old, mut old_peer) = connection();

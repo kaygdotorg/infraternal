@@ -41,10 +41,13 @@ where
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[allow(clippy::too_many_lines)] // Keep discovery, disable and same-socket restart together.
 async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     let _guard = SERIAL.lock().await;
+    // Functional discovery/lifecycle checks must not spend their authority-read
+    // deadline while real SQLite and socket I/O await the shared build host.
+    let _clock = FrozenSocketTime::new().await;
     let f = fixture().await;
     let (socket, _peer) = UnixStream::pair().unwrap();
     let state = crate::websocket::WebSocketState::new(

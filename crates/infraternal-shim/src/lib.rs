@@ -9,6 +9,7 @@ pub mod frame;
 mod locale;
 mod pty;
 pub mod ring;
+pub mod startup;
 
 /// Resolve locale variables for a scrubbed login shell [#161].
 ///

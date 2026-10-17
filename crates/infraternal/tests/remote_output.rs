@@ -49,3 +49,18 @@ fn remote_refusal_matches_its_declared_cli_output() {
         }
     }
 }
+
+#[cfg(not(feature = "plugin-server"))]
+#[test]
+fn node_build_refuses_server_creation() {
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["server", "--json"])
+        .output()
+        .expect("run the node server command");
+    assert!(!output.status.success());
+    let creation = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["server", "init", "--json"])
+        .output()
+        .expect("run the node server-init command");
+    assert!(!creation.status.success());
+}

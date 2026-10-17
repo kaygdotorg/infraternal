@@ -210,7 +210,7 @@ async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
     let (opened, session) = tokio::sync::oneshot::channel();
     let proof_actor = actor.clone();
     let proof = tokio::spawn(async move {
-        canary_registered(&proof_actor, |id| {
+        canary_registered(&proof_actor, [2, 4], |id| {
             opened.send(id).unwrap();
             Ok(())
         })
@@ -219,7 +219,7 @@ async fn cancellation_keeps_the_owned_session_available_for_cleanup() {
     let id = session.await.unwrap();
     proof.abort();
     let _ = proof.await;
-    finish_canary(&actor, id).await.unwrap();
+    finish_canary(&actor, id, 4).await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), done)
         .await
         .unwrap()
@@ -237,4 +237,30 @@ async fn readiness_accepts_primary_exit_without_reattaching_to_a_retired_session
         .unwrap()
         .unwrap();
     task.abort();
+}
+
+#[tokio::test]
+async fn private_writers_reserve_the_browser_allocator_without_publishing_sessions() {
+    let (_, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    assert_eq!(canary_writers(&pool).await.unwrap(), [2, 4]);
+    assert_eq!(canary_writers(&pool).await.unwrap(), [6, 8]);
+    let sequence: i64 =
+        sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name='terminal_writers'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        sequence, 4,
+        "the next browser must receive a fresh writer id"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "private readiness is never a public session");
+    sqlx::query("UPDATE sqlite_sequence SET seq=2147483646 WHERE name='terminal_writers'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(canary_writers(&pool).await.is_err());
 }

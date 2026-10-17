@@ -22,6 +22,7 @@ export * from "./kv-list";
 export * from "./switch";
 export * from "./spinner";
 export * from "./step-status";
+export * from "./setup-ring";
 export * from "./toast";
 export * from "./pane-stepper";
 export * from "./chip-input";

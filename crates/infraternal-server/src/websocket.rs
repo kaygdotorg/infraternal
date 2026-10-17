@@ -4,6 +4,18 @@ use crate::embedded::{
     AgentError, AttachmentHandle, EmbeddedAgent, SessionInventoryState, TerminalOutput,
     TerminalSize,
 };
+/// Public fixture clocks distinguish browser stalls from serialized backend work.
+#[cfg(test)]
+fn addhost_timeline(step: &'static str) {
+    if std::env::var_os("ADDHOST_BROWSER_TIMELINE").is_some()
+        && let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+    {
+        eprintln!(
+            "{{\"source\":\"socket\",\"step\":\"{step}\",\"epoch_ms\":{}}}",
+            now.as_secs_f64() * 1000.0
+        );
+    }
+}
 use crate::{
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
@@ -203,6 +215,11 @@ impl WebSocketState {
         self
     }
 
+    #[cfg(feature = "ssh")]
+    pub(crate) fn session_notifications(&self) -> watch::Sender<u64> {
+        self.session_changes.clone()
+    }
+
     /// Wake authenticated session-list subscribers after the local host changes its live set.
     fn sessions_changed(&self) {
         self.session_changes
@@ -396,7 +413,7 @@ async fn run_socket(
     let mut pending_welcome = None;
     let handshake = tokio::time::timeout_at(
         handshake_deadline,
-        while_authorized(
+        while_authorized_value(
             &state,
             &user_id,
             &session_token,
@@ -631,26 +648,45 @@ async fn run_socket(
 
 /// Interrupt pending work on authority loss. Subscribing before the read closes the missed-wakeup window.
 /// Checks on the ready branch prevent a late backend reply winning against committed revocation.
-pub(super) async fn while_authorized<T: Send>(
+pub(super) async fn while_authorized(
     state: &WebSocketState,
     user: &str,
     token: &str,
     renew: bool,
-    operation: impl std::future::Future<Output = Result<T, ()>> + Send,
-) -> Result<T, ()> {
+    operation: impl std::future::Future<Output = Result<(), ()>> + Send,
+) -> Result<(), ()> {
     // Sharing the watchdog across operation future types bounds transport code
     // size as compiled plugins grow. One short-lived allocation replaces each
     // separate watchdog state machine; operation cancellation stays unchanged.
     while_authorized_operation(state, user, token, renew, operation.boxed()).await
 }
 
-async fn while_authorized_operation<T: Send>(
+/// Keep owned results behind the shared guard until its final authority check.
+/// Only value-returning operations need this slot; ordinary frames retain the
+/// existing boxed operation's allocation payload and common unit watchdog.
+async fn while_authorized_value<T: Send>(
     state: &WebSocketState,
     user: &str,
     token: &str,
     renew: bool,
-    operation: infraternal_plugin_api::Operation<'_, Result<T, ()>>,
+    operation: impl std::future::Future<Output = Result<T, ()>> + Send,
 ) -> Result<T, ()> {
+    let mut value = None;
+    while_authorized(state, user, token, renew, async {
+        value = Some(operation.await?);
+        Ok(())
+    })
+    .await?;
+    value.ok_or(())
+}
+
+async fn while_authorized_operation(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+    renew: bool,
+    operation: infraternal_plugin_api::Operation<'_, Result<(), ()>>,
+) -> Result<(), ()> {
     let mut revocations = state.auth.revocation_events();
     let mut expiry = authority_deadline(state, user, token, renew).await?;
     let mut check = tokio::time::interval_at(
@@ -659,7 +695,7 @@ async fn while_authorized_operation<T: Send>(
     );
     check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(operation);
-    loop {
+    let result = loop {
         tokio::select! {
             biased;
             changed = revocations.changed() => {
@@ -667,19 +703,46 @@ async fn while_authorized_operation<T: Send>(
                 expiry = socket_deadline(state, user, token).await?;
             }
             () = tokio::time::sleep_until(expiry) => { expiry = socket_deadline(state, user, token).await?; }
-            _ = check.tick() => { expiry = socket_deadline(state, user, token).await?; }
-            result = &mut operation => {
-                // The entry read authenticates this operation. All production revocations
-                // publish after commit, and renewal can only extend expiry. Recheck that
-                // generation/deadline without two redundant SQLite reads per fast frame.
-                // Backend/persistence boundaries still read actual authority and predicate SQL.
-                if revocations.has_changed().map_err(|_| ())? || tokio::time::Instant::now() >= expiry {
-                    socket_deadline(state, user, token).await?;
+            _ = check.tick() => {
+                // The operation may own the connection this read needs. Keep
+                // polling its owner instead of suspending a transaction while
+                // waiting for that same pool. Neither completion nor progress
+                // renews the already-started authority read's deadline.
+                let authority = socket_deadline(state, user, token);
+                tokio::pin!(authority);
+                tokio::select! {
+                    biased;
+                    changed = revocations.changed() => {
+                        changed.map_err(|_| ())?;
+                        // A guarded poll may itself send bytes. Stop polling
+                        // it on authority loss; a late result check cannot
+                        // undo a write. Finish this same bounded read, then
+                        // recheck after the notification, not its old snapshot.
+                        authority.await?;
+                        expiry = socket_deadline(state, user, token).await?;
+                    }
+                    () = tokio::time::sleep_until(expiry) => {
+                        authority.await?;
+                        expiry = socket_deadline(state, user, token).await?;
+                    }
+                    checked = &mut authority => { expiry = checked?; }
+                    result = &mut operation => {
+                        expiry = authority.await?;
+                        break result;
+                    }
                 }
-                return result;
             }
+            result = &mut operation => break result,
         }
+    };
+    // The entry read authenticates this operation. All production revocations
+    // publish after commit, and renewal can only extend expiry. Recheck that
+    // generation/deadline without two redundant SQLite reads per fast frame.
+    // Backend/persistence boundaries still read actual authority and predicate SQL.
+    if revocations.has_changed().map_err(|_| ())? || tokio::time::Instant::now() >= expiry {
+        socket_deadline(state, user, token).await?;
     }
+    result
 }
 
 // Initial subscription must distinguish an unread state from a known absence.
@@ -1266,6 +1329,8 @@ where
     // The surrounding watchdog authenticates every frame, including attach, input and credit.
     match decoded.frame {
         Frame::Ping { nonce, sent_us } if stream_id == CONTROL_STREAM => {
+            #[cfg(test)]
+            addhost_timeline("control_ping");
             send_frame(
                 sink,
                 CONTROL_STREAM,
@@ -1310,7 +1375,7 @@ where
                 // proofs, input and revocation; never suspend the multiplexed receive loop.
                 // The existing bounded call queue owns cancellation on socket teardown.
                 pending_plugin_calls.spawn(async move {
-                    let result = while_authorized(&state, &user, &token, false, async {
+                    let result = while_authorized_value(&state, &user, &token, false, async {
                         Ok(open_terminal(&state, &user, &token, size, host).await)
                     })
                     .await
@@ -1409,6 +1474,8 @@ where
             last_out_seq,
             last_in_seq,
         } if stream_id != 0 && stream_id % 2 == 1 => {
+            #[cfg(test)]
+            addhost_timeline("attach_received");
             if attachments.contains_key(&stream_id) || attachments.len() >= MAX_ATTACHMENTS {
                 return Err(());
             }
@@ -1463,6 +1530,8 @@ where
                     .map_err(|_| ())?,
             )
             .await?;
+            #[cfg(test)]
+            addhost_timeline("attach_agent_resolved");
             let attachment = tokio::time::timeout(
                 BACKEND_TIMEOUT,
                 agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
@@ -1470,6 +1539,8 @@ where
             .await
             .map_err(|_| ())?
             .map_err(|_| ())?;
+            #[cfg(test)]
+            addhost_timeline("attach_sent");
             if !session_is_live(state, user_id, session_token).await {
                 return Err(());
             }

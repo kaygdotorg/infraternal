@@ -364,6 +364,8 @@ pub enum CliHandler {
     RemoveHost,
     /// Answer a private SSH authentication prompt.
     SshAskpass,
+    /// Start the SSH shell through the owned session shim.
+    SshSession,
 }
 
 /// Example invocation and its user-facing result.

@@ -54,6 +54,7 @@ printf '%s\n' 'isolated-public-policy'
         ssh_keyscan: "unused".into(),
         ssh_keygen: "unused".into(),
         askpass_binary: "unused".into(),
+        tcp_connector: None,
         scratch: root.clone(),
         command_timeout: Duration::from_secs(3),
     };

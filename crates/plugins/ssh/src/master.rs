@@ -26,6 +26,7 @@ use tokio::{
 };
 
 struct Diagnostics {
+    method: crate::auth_evidence::MethodReceipt,
     bytes: Secret,
     authenticated: bool,
     failed: bool,
@@ -66,46 +67,23 @@ impl Master {
             .map_err(|_| Failure::install("The SSH connection helper could not start."))?;
         let group = Group::owned(&child)?;
         let prompt = parent.register(&child)?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| Failure::install("The SSH connection diagnostics are unavailable."))?;
         let diagnostics = Arc::new(Mutex::new(Diagnostics {
+            method: crate::auth_evidence::MethodReceipt::default(),
             bytes: Secret::new(Vec::new()),
             authenticated: false,
             failed: false,
             complete: false,
         }));
-        let observed = diagnostics.clone();
-        let reading = tokio::spawn(async move {
-            let mut chunk = zeroize::Zeroizing::new([0; 1024]);
-            loop {
-                let count = match stderr.read(&mut chunk[..]).await {
-                    Ok(0) => {
-                        lock(&observed).complete = true;
-                        return;
-                    }
-                    Ok(count) => count,
-                    Err(_) => {
-                        lock(&observed).failed = true;
-                        return;
-                    }
-                };
-                let mut state = lock(&observed);
-                // Retain no further raw diagnostics after trusted authentication.
-                // Command stderr belongs to each separate mux client's bounded pipe.
-                if state.authenticated {
-                    continue;
-                }
-                if state.bytes.expose().len() + count > 8192 {
-                    state.failed = true;
-                    return;
-                }
-                let mut bytes = state.bytes.expose().to_vec();
-                bytes.extend_from_slice(&chunk[..count]);
-                state.bytes = Secret::new(bytes);
-            }
-        });
+        let progress = Arc::new(tokio::sync::Notify::new());
+        let reading = crate::tasks::spawn(read_diagnostics(
+            stderr,
+            diagnostics.clone(),
+            progress.clone(),
+        ));
         let master = Self {
             group,
             _prompt: prompt,
@@ -148,12 +126,23 @@ impl Master {
                     return Ok(());
                 }
                 // Active connection startup only. No healthy/idle polling loop.
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                master.startup_pause(&progress).await;
             }
         })
         .await
         .map_err(|_| Failure::new(FailureKind::Unreachable, "The SSH connection timed out."))??;
         Ok(master)
+    }
+
+    /// OpenSSH listens on the control socket right after it logs the method
+    /// receipt, so poll briefly from then on; before it, wake on diagnostics
+    /// or the coarse interval (#189).
+    async fn startup_pause(&self, progress: &tokio::sync::Notify) {
+        if lock(&self.diagnostics).method.network().is_some() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        } else {
+            let _ = tokio::time::timeout(Duration::from_millis(10), progress.notified()).await;
+        }
     }
 
     /// Observe exit without reaping: cancellation must retain the owned group identity.
@@ -184,12 +173,55 @@ impl Master {
     pub fn socket(&self) -> &Path {
         &self.socket
     }
+
+    /// Local protocol method only; provider identity never comes from diagnostics.
+    #[must_use]
+    pub fn network_authenticated(&self) -> bool {
+        lock(&self.diagnostics).method.network() == Some(true)
+    }
 }
 impl Drop for Master {
     fn drop(&mut self) {
         self.group.retire();
         self.reading.abort();
         let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+/// Retain bounded pre-authentication diagnostics and wake the startup wait.
+async fn read_diagnostics(
+    mut stderr: tokio::process::ChildStderr,
+    observed: Arc<Mutex<Diagnostics>>,
+    progressed: Arc<tokio::sync::Notify>,
+) {
+    let mut chunk = zeroize::Zeroizing::new([0; 1024]);
+    loop {
+        let count = match stderr.read(&mut chunk[..]).await {
+            Ok(0) => {
+                lock(&observed).complete = true;
+                return;
+            }
+            Ok(count) => count,
+            Err(_) => {
+                lock(&observed).failed = true;
+                return;
+            }
+        };
+        let mut state = lock(&observed);
+        state.method.feed(&chunk[..count]);
+        progressed.notify_one();
+        // Retain no further raw diagnostics after trusted authentication.
+        // Command stderr belongs to each separate mux client's bounded pipe.
+        if state.authenticated {
+            continue;
+        }
+        if state.bytes.expose().len() + count > 8192 {
+            state.failed = true;
+            return;
+        }
+        let mut bytes = state.bytes.expose().to_vec();
+        bytes.extend_from_slice(&chunk[..count]);
+        state.bytes = Secret::new(bytes);
     }
 }
 

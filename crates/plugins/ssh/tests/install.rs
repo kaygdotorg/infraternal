@@ -2,24 +2,100 @@
 #![allow(clippy::unwrap_used)]
 
 mod common;
+#[path = "install/streaming.rs"]
+mod streaming;
 
 use infraternal_plugin_ssh::{
     install::{Installation, JoinMaterial},
     model::{Failure, InstallMode, Target, TargetAddress},
-    transport::{CommandOutput, Input, Operation, Secret, SshSession},
+    transport::{CommandOutput, Input, Operation, PayloadInput, Secret, SshSession},
 };
+use std::fmt::Write as _;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 use tokio::{io::AsyncWriteExt, process::Command};
 
 struct Local {
     root: PathBuf,
 }
+struct Compound(Local);
+impl SshSession for Compound {
+    fn stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        self.0.stream(script)
+    }
+    fn setup_steps(&self) -> bool {
+        true
+    }
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        self.0.run(script, input)
+    }
+}
 impl SshSession for Local {
+    fn stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        Box::pin(async move {
+            let script = script.replace("$HOME", self.root.to_str().unwrap());
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &script]);
+            infraternal_plugin_ssh::duplex::Duplex::spawn(&mut command)
+        })
+    }
+
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             // Map the remote user's home to isolated fixture storage without
             // changing the process's HOME or touching a real user's installation.
             let script = script.replace("$HOME", self.root.to_str().unwrap());
+            // Model a lease child that has forked but has not yet been scheduled
+            // to close its inherited parent lock; this exercises a real fd race.
+            let script = if self.root.join("delay-lease-exec").exists() {
+                script.replace(
+                    "(exec 9<&-; exec sleep 180)",
+                    "(sleep 1; exec 9<&-; exec sleep 180)",
+                )
+            } else {
+                script
+            };
+            // A test-only public marker proves that the real shell has reached
+            // its blocking admission read; yielding alone would not prove overlap.
+            let script = if matches!(&input, Input::Signal(_)) {
+                script.replace(
+                    "read -r approved",
+                    &format!(
+                        ": > {}\nread -r approved",
+                        infraternal_plugin_ssh::transport::shell_quote(
+                            self.root.join("commit-admitted").to_str().unwrap()
+                        )
+                    ),
+                )
+            } else {
+                script
+            };
+            if matches!(&input, Input::Negotiated { .. }) {
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", &script]).env(
+                    "PATH",
+                    format!("{}:/usr/bin:/bin", self.root.join("tools").display()),
+                );
+                let output = infraternal_plugin_ssh::process::execute(
+                    &mut command,
+                    input,
+                    std::time::Duration::from_secs(60),
+                )
+                .await?;
+                if !output.success {
+                    let mut error = Failure::install("The synthetic remote command failed.");
+                    error.exit_status = output.exit_status;
+                    return Err(error);
+                }
+                return Ok(CommandOutput {
+                    stdout: output.stdout,
+                });
+            }
             let mut child = Command::new("/bin/sh")
                 .args(["-c", &script])
                 .env(
@@ -36,6 +112,30 @@ impl SshSession for Local {
             // A refusal may close stdin before consuming an upload. Inspect the
             // command status first; successful commands still require a full write.
             let written = match input {
+                Input::Negotiated { .. } => {
+                    unreachable!("negotiation uses the bounded process helper")
+                }
+                Input::PayloadAndInvitation {
+                    payload,
+                    invitation,
+                } => {
+                    let payload = match payload {
+                        PayloadInput::Bytes(bytes) => bytes.to_vec(),
+                        PayloadInput::File { path, size } => {
+                            let bytes = std::fs::read(path).unwrap();
+                            assert_eq!(bytes.len() as u64, size);
+                            bytes
+                        }
+                    };
+                    match stdin.write_all(&payload).await {
+                        Ok(()) => stdin.write_all(invitation).await,
+                        Err(error) => Err(error),
+                    }
+                }
+                Input::Signal(release) => match release.await {
+                    Ok(()) => stdin.write_all(b"\n").await,
+                    Err(_) => Err(std::io::ErrorKind::Interrupted.into()),
+                },
                 Input::Empty => Ok(()),
                 Input::Bytes(bytes) => stdin.write_all(bytes).await,
                 Input::File(path) => stdin.write_all(&std::fs::read(path).unwrap()).await,
@@ -156,6 +256,424 @@ impl Drop for Fixture {
 fn executable(path: &std::path::Path, text: &str) {
     std::fs::write(path, text).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+struct CorruptUpload(Local);
+impl SshSession for CorruptUpload {
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        let input = if script.contains("gzip -dc >") || script.contains("zstd -dc >") {
+            Input::Bytes(b"invalid compressed stream")
+        } else {
+            input
+        };
+        self.0.run(script, input)
+    }
+}
+
+#[tokio::test]
+async fn framed_upload_keeps_invitation_after_verified_raw_and_compressed_payloads() {
+    for compressed in [false, true] {
+        let fixture = Fixture::new();
+        let mut program = std::fs::read_to_string(&fixture.binary).unwrap().replace(
+            "cat >/dev/null",
+            "received=$(cat); [ \"$received\" = synthetic-capability ] || exit 1",
+        );
+        if compressed {
+            program.push_str("\n# ");
+            program.extend(std::iter::repeat_n('x', 70_000));
+            program.push('\n');
+        }
+        std::fs::write(&fixture.binary, program).unwrap();
+        let install = Installation::new(
+            Arc::new(Compound(Local {
+                root: fixture.root.clone(),
+            })),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        assert!(
+            install
+                .stage_and_setup(&fixture.binary, &fixture.join)
+                .await
+                .unwrap()
+        );
+        assert!(fixture.base().join(".bootstrap-lock/activating").exists());
+        install.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+    }
+}
+
+#[tokio::test]
+async fn framed_join_refusal_keeps_status_separate_from_upload() {
+    let fixture = Fixture::new();
+    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    let install = Installation::new(
+        Arc::new(Compound(Local {
+            root: fixture.root.clone(),
+        })),
+        &fixture.target,
+        &fixture.join,
+    )
+    .unwrap();
+    let error = install
+        .stage_and_setup(&fixture.binary, &fixture.join)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Join)
+    ));
+    assert_eq!(error.exit_status, Some(71));
+    assert!(!fixture.base().join(".bootstrap-lock/activating").exists());
+    install.rollback().await.unwrap();
+}
+
+#[test]
+fn framed_receipts_preserve_upload_failures_and_reject_extra_output() {
+    use infraternal_plugin_ssh::{install::parse_transfer_setup, model::InstallStep};
+    assert!(matches!(
+        infraternal_plugin_ssh::install::interrupted_transfer_step(
+            b"STEP upload\nSTEP join\nSTEP install\n"
+        ),
+        Some(infraternal_plugin_ssh::model::InstallStep::Install)
+    ));
+    assert!(
+        infraternal_plugin_ssh::install::interrupted_transfer_step(b"STEP upload\r\n").is_none()
+    );
+    let error = parse_transfer_setup(b"STEP upload\nFAIL upload 71\n").unwrap_err();
+    assert!(matches!(error.failed_step, Some(InstallStep::Upload)));
+    assert_eq!(error.exit_status, Some(71));
+    assert!(
+        parse_transfer_setup(
+            b"STEP upload\nSTEP join\nSTEP install\nSTEP start\nSTEP linger\nyes\nDONE\n"
+        )
+        .unwrap()
+    );
+    assert!(
+        parse_transfer_setup(b"STEP upload\nFAIL upload 71\nextra\n")
+            .unwrap_err()
+            .exit_status
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn missing_payload_preserves_the_bootstrap_binary_remedy() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(&fixture.binary).unwrap();
+    let error = fixture
+        .transaction()
+        .stage(&fixture.binary)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "The matching static infraternal binary is unavailable."
+    );
+    assert!(!fixture.base().exists());
+}
+
+#[tokio::test]
+async fn successful_stage_releases_the_parent_lock_from_its_lease_child() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root.join("delay-lease-exec"), b"").unwrap();
+    let transaction = fixture.transaction();
+    transaction.stage(&fixture.binary).await.unwrap();
+    let lease = std::fs::read_to_string(fixture.base().join(".bootstrap-lock/lease")).unwrap();
+    let pid = lease.split_ascii_whitespace().next().unwrap();
+    assert!(
+        std::fs::symlink_metadata(format!("/proc/{pid}/fd/9")).is_err(),
+        "a successful upload must not leave its parent guard inherited by the lease"
+    );
+    transaction.enroll_and_start(&fixture.join).await.unwrap();
+    transaction.rollback().await.unwrap();
+}
+
+struct NegotiatedChoices {
+    local: Local,
+    choices: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+impl SshSession for NegotiatedChoices {
+    fn setup_steps(&self) -> bool {
+        true
+    }
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            let negotiated = matches!(&input, Input::Negotiated { .. });
+            let output = self.local.run(script, input).await?;
+            if negotiated {
+                let receipt = output
+                    .stdout
+                    .split_inclusive(|byte| *byte == b'\n')
+                    .nth(1)
+                    .unwrap();
+                assert!(
+                    infraternal_plugin_ssh::transport::TransferChoice::parse(receipt).is_some()
+                );
+                self.choices.lock().unwrap().push(receipt.to_vec());
+            }
+            Ok(output)
+        })
+    }
+}
+
+#[tokio::test]
+async fn negotiated_retry_reuses_only_a_verified_cache_after_activation_refusal() {
+    use infraternal_plugin_ssh::model::InstallStep;
+    for corrupt in [false, true] {
+        let fixture = Fixture::new();
+        let choices = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transaction = || {
+            Installation::new(
+                Arc::new(NegotiatedChoices {
+                    local: Local {
+                        root: fixture.root.clone(),
+                    },
+                    choices: choices.clone(),
+                }),
+                &fixture.target,
+                &fixture.join,
+            )
+            .unwrap()
+        };
+        std::fs::write(fixture.root.join("refuse-start"), b"").unwrap();
+        let first = transaction();
+        let error = first
+            .stage_and_setup(&fixture.binary, &fixture.join)
+            .await
+            .unwrap_err();
+        assert!(matches!(error.failed_step, Some(InstallStep::Start)));
+        first.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+        if corrupt {
+            std::fs::write(
+                fixture
+                    .base()
+                    .with_file_name("infraternal.bootstrap-cache")
+                    .join("payload"),
+                b"corrupted public cache",
+            )
+            .unwrap();
+        }
+        std::fs::remove_file(fixture.root.join("refuse-start")).unwrap();
+        let second = transaction();
+        second
+            .stage_and_setup(&fixture.binary, &fixture.join)
+            .await
+            .unwrap();
+        assert_eq!(
+            *choices.lock().unwrap(),
+            [
+                b"TRANSFER raw\n".to_vec(),
+                if corrupt {
+                    b"TRANSFER raw\n".to_vec()
+                } else {
+                    b"TRANSFER reuse\n".to_vec()
+                }
+            ],
+        );
+        assert_eq!(
+            std::fs::read(fixture.base().join("bin/live")).unwrap(),
+            std::fs::read(&fixture.binary).unwrap()
+        );
+        second.rollback().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn compressed_stage_roundtrips_and_rejects_corruption_before_execution() {
+    for corrupt in [false, true] {
+        let fixture = Fixture::new();
+        // The fixture remains executable shell text and exceeds the raw fallback threshold.
+        let mut payload = std::fs::read(&fixture.binary).unwrap();
+        payload.extend_from_slice(b"\n# ");
+        payload.extend(std::iter::repeat_n(b'x', 70_000));
+        payload.push(b'\n');
+        std::fs::write(&fixture.binary, &payload).unwrap();
+        let local = Local {
+            root: fixture.root.clone(),
+        };
+        let session: Arc<dyn SshSession> = if corrupt {
+            Arc::new(CorruptUpload(local))
+        } else {
+            Arc::new(local)
+        };
+        let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+        let result = install.stage(&fixture.binary).await;
+        if corrupt {
+            assert!(result.is_err());
+            assert!(!fixture.base().join(".bootstrap-lock/state").exists());
+        } else {
+            result.unwrap();
+            assert_eq!(
+                std::fs::read(fixture.base().join(".bootstrap-lock/payload")).unwrap(),
+                payload
+            );
+        }
+        install.rollback().await.unwrap();
+        assert!(!fixture.base().exists());
+    }
+}
+
+#[test]
+fn setup_receipts_require_exact_order_and_preserve_failure_boundaries() {
+    use infraternal_plugin_ssh::install::{interrupted_setup_step, parse_setup};
+    use infraternal_plugin_ssh::model::InstallStep;
+    let prefix = "STEP join\nSTEP install\nSTEP start\nSTEP linger\n";
+    assert!(parse_setup(format!("{prefix}yes\nDONE\n").as_bytes()).unwrap());
+    assert!(!parse_setup(format!("{prefix}no\nDONE\n").as_bytes()).unwrap());
+    let mut receipt = String::new();
+    for (name, expected) in [
+        ("join", InstallStep::Join),
+        ("install", InstallStep::Install),
+        ("start", InstallStep::Start),
+        ("linger", InstallStep::Install),
+    ] {
+        writeln!(receipt, "STEP {name}").unwrap();
+        assert_eq!(
+            format!("{:?}", interrupted_setup_step(receipt.as_bytes())),
+            format!("{:?}", Some(expected))
+        );
+        let error = parse_setup(format!("{receipt}FAIL {name} 71\n").as_bytes()).unwrap_err();
+        assert_eq!(
+            format!("{:?}", error.failed_step),
+            format!("{:?}", Some(expected))
+        );
+        assert_eq!(error.exit_status, Some(71));
+    }
+    for invalid in [
+        "",
+        "STEP join",
+        "STEP start\n",
+        "STEP join\nFAIL join 0\n",
+        "STEP join\nFAIL join 071\n",
+        "STEP join\nFAIL install 71\n",
+        "STEP join\nFAIL join 71\nextra\n",
+    ] {
+        assert!(parse_setup(invalid.as_bytes()).is_err(), "{invalid:?}");
+    }
+    assert!(parse_setup(&[b'x'; 257]).is_err());
+    let malformed = parse_setup(b"STEP join\r\nFAIL join 71\r\n").unwrap_err();
+    assert!(
+        malformed.exit_status.is_none(),
+        "noncanonical receipt claimed a remote status"
+    );
+    assert!(interrupted_setup_step(b"STEP join\r\n").is_none());
+    assert!(interrupted_setup_step(b"STEP join\nprivate\n").is_none());
+}
+
+#[tokio::test]
+async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
+    for permit in [false, true] {
+        let fixture = Fixture::new();
+        let install = Installation::new(
+            Arc::new(Compound(Local {
+                root: fixture.root.clone(),
+            })),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        install.stage(&fixture.binary).await.unwrap();
+        install.setup(&fixture.join).await.unwrap();
+        let stage = fixture.base().join(".bootstrap-lock");
+        let (release, receiver) = tokio::sync::oneshot::channel();
+        let pending = install.commit_after(receiver);
+        tokio::pin!(pending);
+        tokio::select! {
+            result = &mut pending => panic!("commit preceded proof: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                while !fixture.root.join("commit-admitted").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }) => { result.unwrap(); }
+        }
+        assert!(stage.join("activating").exists());
+        if permit {
+            release.send(()).unwrap();
+            pending.await.unwrap();
+            assert!(!stage.exists());
+        } else {
+            drop(release);
+            assert!(pending.await.is_err());
+            assert!(stage.join("activating").exists());
+            install.rollback().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn compound_setup_keeps_owned_rollback_and_linger_warning() {
+    let fixture = Fixture::new();
+    let session = Arc::new(Compound(Local {
+        root: fixture.root.clone(),
+    }));
+    let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+    install.stage(&fixture.binary).await.unwrap();
+    std::fs::write(fixture.root.join("deny-linger"), b"deny").unwrap();
+    assert!(!install.setup(&fixture.join).await.unwrap());
+    assert!(fixture.base().join(".bootstrap-lock/activating").exists());
+    install.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
+}
+
+#[tokio::test]
+async fn compound_activation_and_start_failures_keep_exact_step_and_rollback() {
+    use infraternal_plugin_ssh::model::InstallStep;
+    for refuse_start in [false, true] {
+        let fixture = Fixture::new();
+        let install = Installation::new(
+            Arc::new(Compound(Local {
+                root: fixture.root.clone(),
+            })),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        install.stage(&fixture.binary).await.unwrap();
+        let launcher = fixture.root.join(".local/bin/infraternal");
+        if refuse_start {
+            std::fs::write(fixture.root.join("refuse-start"), b"refuse").unwrap();
+        } else {
+            std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+            std::fs::write(&launcher, b"foreign").unwrap();
+        }
+        let error = install.setup(&fixture.join).await.unwrap_err();
+        if refuse_start {
+            assert!(matches!(error.failed_step, Some(InstallStep::Start)));
+            assert_eq!(error.exit_status, Some(1));
+        } else {
+            assert!(matches!(error.failed_step, Some(InstallStep::Install)));
+            assert_eq!(error.exit_status, Some(71));
+        }
+        install.rollback().await.unwrap();
+        if !refuse_start {
+            assert_eq!(std::fs::read(&launcher).unwrap(), b"foreign");
+        }
+        assert!(!fixture.base().exists());
+    }
+}
+
+#[tokio::test]
+async fn compound_join_failure_preserves_the_original_status_and_boundary() {
+    let fixture = Fixture::new();
+    executable(&fixture.binary, "#!/bin/sh\nexit 71\n");
+    let session = Arc::new(Compound(Local {
+        root: fixture.root.clone(),
+    }));
+    let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+    install.stage(&fixture.binary).await.unwrap();
+    let error = install.setup(&fixture.join).await.unwrap_err();
+    assert!(matches!(
+        error.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Join)
+    ));
+    assert_eq!(error.exit_status, Some(71));
+    assert!(!error.message.contains("move"));
+    assert!(!fixture.base().join(".bootstrap-lock/activating").exists());
+    install.rollback().await.unwrap();
+    assert!(!fixture.base().exists());
 }
 
 #[tokio::test]
@@ -1534,5 +2052,775 @@ async fn installed_infraternal_agent_always_restarts_without_start_limit() {
     assert!(unit.lines().any(|line| line == "Restart=always"));
     assert!(unit.lines().any(|line| line == "RestartSec=2"));
     assert!(unit.lines().any(|line| line == "StartLimitIntervalSec=0"));
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn staged_shell_bridge_keeps_protocol_bytes_and_releases_setup_guard() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    // A real shell process stands in for the CLI only at its fixed receipt
+    // boundary. The separate real-binary oracle verifies shim/session ownership.
+    let original = std::fs::read_to_string(&f.binary).unwrap();
+    let payload = format!(
+        "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\n{original}\n#{}\n",
+        "x".repeat(100_000)
+    );
+    executable(&f.binary, &payload);
+    let transaction = f.transaction();
+    let (actual, channel) = transaction.stage_session(&f.binary).await.unwrap();
+    assert_eq!(actual, id);
+    let frame = b"\0\xffterminal\n";
+    channel.write(frame).await.unwrap();
+    let mut output = vec![0; frame.len()];
+    let mut offset = 0;
+    while offset < output.len() {
+        offset += channel.read(&mut output[offset..]).await.unwrap();
+    }
+    assert_eq!(output, frame);
+    let mut lock = Command::new("flock");
+    assert!(
+        lock.args(["-n", f.base().parent().unwrap().to_str().unwrap(), "true"])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    // The exact owned transaction remains usable while the bridge is live.
+    transaction.setup(&f.join).await.unwrap();
+    drop(channel);
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_setup_retry_preserves_the_bridge_and_host_identity_state() {
+    for after_activation in [false, true] {
+        let f = Fixture::new();
+        let id = uuid::Uuid::new_v4();
+        let original = std::fs::read_to_string(&f.binary).unwrap();
+        let refuse = f.root.join("refuse-join");
+        let payload = format!(
+            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nif [ -f {} ]; then rm {}; mkdir -p \"$3\"; printf 'public-fixture-state\\n' > \"$3/proof\"; exit 1; fi\n{original}",
+            infraternal_plugin_ssh::transport::shell_quote(refuse.to_str().unwrap()),
+            infraternal_plugin_ssh::transport::shell_quote(refuse.to_str().unwrap())
+        );
+        executable(&f.binary, &payload);
+        if after_activation {
+            std::fs::write(f.root.join("refuse-start"), b"").unwrap();
+        } else {
+            std::fs::write(&refuse, b"").unwrap();
+        }
+        let transaction = f.transaction();
+        let (session, channel) = transaction.stage_session(&f.binary).await.unwrap();
+        assert_eq!(session, id);
+        assert!(transaction.setup(&f.join).await.is_err());
+        if after_activation {
+            std::fs::remove_file(f.root.join("refuse-start")).unwrap();
+        }
+        // A live session's rendezvous and unrelated files cannot be rollback targets.
+        std::fs::create_dir_all(f.base().join("sessions/sessions")).unwrap();
+        let sentinel = f.base().join("sessions/sessions/live-marker");
+        std::fs::write(&sentinel, b"original live session").unwrap();
+        let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&sentinel).unwrap());
+        transaction.restart_setup(&f.binary, &f.join).await.unwrap();
+        assert_eq!(
+            std::fs::read(f.base().join("state/proof")).unwrap(),
+            b"public-fixture-state\n"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"original live session");
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&sentinel).unwrap()),
+            inode
+        );
+        channel.write(b"same session\n").await.unwrap();
+        assert_eq!(channel.line(32).await.unwrap(), b"same session\n");
+        transaction.commit().await.unwrap();
+        channel.write(b"after setup commit\n").await.unwrap();
+        assert_eq!(channel.line(32).await.unwrap(), b"after setup commit\n");
+        drop(channel);
+    }
+}
+
+#[tokio::test]
+async fn early_staging_preserves_canonical_foreign_root_refusal() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.base()).unwrap();
+    std::fs::set_permissions(f.base(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let failure = f
+        .transaction()
+        .stage_session(&f.binary)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        failure.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+    ));
+    assert_eq!(failure.exit_status, Some(71));
+}
+
+struct SingleCheckChannel {
+    local: Local,
+    streams: std::sync::atomic::AtomicUsize,
+}
+impl SshSession for SingleCheckChannel {
+    fn stream<'a>(
+        &'a self,
+        script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        assert_eq!(
+            self.streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a checked upload must not reopen the SSH command channel"
+        );
+        Box::pin(async move {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]).env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.local.root.join("tools").display()),
+            );
+            infraternal_plugin_ssh::duplex::Duplex::spawn(&mut command)
+        })
+    }
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        self.local.run(script, input)
+    }
+}
+
+#[tokio::test]
+async fn one_command_channel_carries_check_verified_upload_and_bridge_bytes() {
+    let f = Fixture::new();
+    // Public command text can now arrive through stdin after the first script.
+    // Map each shell execution into fixture storage without changing HOME.
+    executable(
+        &f.root.join("tools/sh"),
+        &format!(
+            "#!/usr/bin/python3\n\"\"\"Isolate public fixture scripts; preserve their stdin byte stream.\"\"\"\nimport os,sys\nargs=sys.argv[1:]\nif len(args)>1 and args[0]=='-c': args[1]=args[1].replace('$HOME', {root:?})\nos.execv('/bin/sh',['sh',*args])\n",
+            root = f.root.to_str().unwrap()
+        ),
+    );
+    let id = uuid::Uuid::new_v4();
+    executable(
+        &f.binary,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
+            "x".repeat(100_000)
+        ),
+    );
+    let session = Arc::new(SingleCheckChannel {
+        local: Local {
+            root: f.root.clone(),
+        },
+        streams: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let check = "printf 'INFRATERNAL_CHECK_V1\\nLinux\\nx86_64\\nsystemd\\n1002\\nno\\nyes\\nyes\\nno\\nINFRATERNAL_SETUP_CLEAR\\n'";
+    let (output, checked) = Installation::check_channel(session.as_ref(), check)
+        .await
+        .unwrap();
+    assert!(
+        infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout)
+            .unwrap()
+            .1
+            .is_none()
+    );
+    let transaction = Installation::new(session.clone(), &f.target, &f.join).unwrap();
+    let (actual, bridge) = transaction
+        .stage_session_on(&f.binary, Some(checked))
+        .await
+        .unwrap();
+    assert_eq!(actual, id);
+    bridge.write(b"\0\xffsame channel\n").await.unwrap();
+    assert_eq!(bridge.line(64).await.unwrap(), b"\0\xffsame channel\n");
+    assert_eq!(session.streams.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(bridge);
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn duplex_check_refuses_named_failures_and_oversized_records_before_staging() {
+    for status in [71, 73, 75] {
+        let f = Fixture::new();
+        let session = Local {
+            root: f.root.clone(),
+        };
+        let failure = Installation::check_channel(&session, &format!("exit {status}"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(failure.exit_status, Some(status));
+        assert!(matches!(
+            failure.failed_step,
+            Some(infraternal_plugin_ssh::model::InstallStep::Connect)
+        ));
+        assert!(!f.base().exists());
+    }
+    let f = Fixture::new();
+    let session = Local {
+        root: f.root.clone(),
+    };
+    assert!(
+        Installation::check_channel(&session, "printf '%600s\\n' x")
+            .await
+            .is_err()
+    );
+    assert!(!f.base().exists());
+}
+
+/// Shadow review (#189): the negotiated transfer frames the payload with
+/// `head -c N` and then lets the join step read the private invitation from
+/// the same stdin. A `head` that reads through a stdio buffer takes more than N bytes from a pipe, so the
+/// invitation never reaches `join`. The system GNU head passes; the buffered
+/// head models the other supported userlands and must pass too.
+#[tokio::test]
+async fn negotiated_transfer_delivers_the_invitation_after_a_buffering_head() {
+    for buffered in [false, true] {
+        let fixture = Fixture::new();
+        executable(
+            &fixture.binary,
+            "#!/bin/sh\n[ \"$1 $2\" = 'agent --data' ] || exit 1\nstate=$3\nmkdir -p \"$state\"\ncat > \"$state/invitation\"\n",
+        );
+        if buffered {
+            // Reads whole stdio-sized blocks like getc/fread-based head
+            // implementations, then writes only the first N bytes.
+            executable(
+                &fixture.root.join("tools/head"),
+                "#!/usr/bin/python3\nimport os, sys, time\nn = int(sys.argv[sys.argv.index('-c') + 1])\nbuf = b''\nwhile len(buf) < n:\n    time.sleep(0.05)\n    chunk = os.read(0, 4096)\n    if not chunk:\n        break\n    buf += chunk\nview = memoryview(buf[:n])\nwhile view:\n    view = view[os.write(1, view):]\n",
+            );
+        }
+        let session = Arc::new(Compound(Local {
+            root: fixture.root.clone(),
+        }));
+        let install = Installation::new(session, &fixture.target, &fixture.join).unwrap();
+        let result = install
+            .stage_and_setup(&fixture.binary, &fixture.join)
+            .await;
+        let delivered = std::fs::read(fixture.base().join("state/invitation")).unwrap_or_default();
+        assert!(
+            result.is_ok() && delivered == fixture.join.stdin.expose(),
+            "buffered head={buffered}: setup={:?} invitation bytes delivered={}",
+            result.as_ref().err().map(|error| &error.message),
+            delivered.len()
+        );
+        let _ = install.rollback().await;
+    }
+}
+
+/// A scripted remote that observes the exact byte order on the checked channel
+/// (#189): it never runs the setup program, it only records what arrived when.
+struct ScriptedRemote {
+    program: String,
+}
+impl SshSession for ScriptedRemote {
+    fn stream<'a>(
+        &'a self,
+        _script: &'a str,
+    ) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        Box::pin(async move {
+            let mut command = Command::new("/usr/bin/python3");
+            command.args(["-c", &self.program]);
+            infraternal_plugin_ssh::duplex::Duplex::spawn(&mut command)
+        })
+    }
+    fn run<'a>(&'a self, _: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async { Err(Failure::install("The scripted remote has one channel.")) })
+    }
+}
+
+/// `reader` is what the remote reports for its setup-script reader. `then`
+/// runs after the framed setup script was read, with `script`, `exact(n)`,
+/// `quiet()` (true when no further byte arrives within 300 ms) and `out`.
+fn scripted_remote(caps: &str, reader: &str, then: &str) -> ScriptedRemote {
+    let caps = caps.replace('\n', "\\n");
+    ScriptedRemote {
+        program: format!(
+            r"
+import os, re, select, sys
+out = sys.stdout.buffer
+def exact(n):
+    data = b''
+    while len(data) < n:
+        chunk = os.read(0, n - len(data))
+        if not chunk: sys.exit(3)
+        data += chunk
+    return data
+def line():
+    data = b''
+    while not data.endswith(b'\n'):
+        byte = os.read(0, 1)
+        if not byte: sys.exit(3)
+        data += byte
+    return data
+def quiet():
+    return not select.select([0], [], [], 0.3)[0]
+def size(choice):
+    return int(re.search(choice.encode() + rb'\)[^\n]*?head -c (\d+)', script)[1])
+out.write(b'STEP connect\nINFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n{caps}CHECK ready {reader}\n')
+out.flush()
+script = exact(int(line()))
+{then}
+out.flush()
+os.execvp('cat', ['cat'])
+"
+        ),
+    }
+}
+
+async fn scripted_staging(
+    f: &Fixture,
+    remote: ScriptedRemote,
+) -> Result<(uuid::Uuid, infraternal_plugin_ssh::duplex::Duplex), Failure> {
+    let session = Arc::new(remote);
+    let (_, checked) = Installation::check_channel(session.as_ref(), "true")
+        .await
+        .unwrap();
+    let transaction = Installation::new(session, &f.target, &f.join).unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        transaction.stage_session_on(&f.binary, Some(checked)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("staging stalled: the payload and its receipts were serialized"))
+}
+
+fn large_fixture_binary(f: &Fixture, id: uuid::Uuid) {
+    // Large enough for the shared encodings; contents are public fixture bytes.
+    executable(
+        &f.binary,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\nexit 1\n#{}\n",
+            "x".repeat(100_000)
+        ),
+    );
+}
+
+#[tokio::test]
+async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    // The remote reads the whole payload before writing a single receipt. A
+    // server that waits for `STEP upload`/`TRANSFER` first would stall here.
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "dd",
+        &format!(
+            "choice = re.search(rb'\\nchoice=(\\w+)\\n', script)[1].decode()\nassert choice in ('zstd', 'gzip', 'raw'), choice\npayload = exact(size(choice))\nout.write(b'STEP upload\\nTRANSFER ' + choice.encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
+        ),
+    );
+    let (session, bridge) = scripted_staging(&f, remote).await.unwrap();
+    assert_eq!(session, id);
+    bridge.write(b"bridge bytes\n").await.unwrap();
+    assert_eq!(bridge.line(64).await.unwrap(), b"bridge bytes\n");
+}
+
+#[tokio::test]
+async fn buffering_setup_reader_receives_no_payload_until_selection() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    // Without an exact reader the remote keeps selecting under its lock, and
+    // no payload byte may follow the setup script before that receipt.
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "head",
+        &format!(
+            "assert b'\\nchoice=raw\\nif ' in script\nassert quiet(), 'payload followed the setup script'\nout.write(b'STEP upload\\nTRANSFER raw\\n'); out.flush()\npayload = exact(size('raw'))\nout.write(b'STEP start\\nSESSION {id}\\n')"
+        ),
+    );
+    assert_eq!(scripted_staging(&f, remote).await.unwrap().0, id);
+}
+
+#[tokio::test]
+async fn reported_cache_digest_selects_reuse_without_sending_payload() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    let digest = {
+        use sha2::Digest as _;
+        let bytes = sha2::Sha256::digest(std::fs::read(&f.binary).unwrap());
+        bytes.iter().fold(String::new(), |mut text, byte| {
+            write!(text, "{byte:02x}").unwrap();
+            text
+        })
+    };
+    let remote = scripted_remote(
+        &format!("CAPS zstd gzip {digest}\n"),
+        "dd",
+        &format!(
+            "assert b'\\nchoice=reuse\\n' in script\nassert quiet(), 'a reused payload was sent'\nout.write(b'STEP upload\\nTRANSFER reuse\\nSTEP start\\nSESSION {id}\\n')"
+        ),
+    );
+    assert_eq!(scripted_staging(&f, remote).await.unwrap().0, id);
+}
+
+#[tokio::test]
+async fn declared_transfer_refuses_a_different_selection_or_a_named_refusal() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "dd",
+        &format!("out.write(b'STEP upload\\nTRANSFER raw\\nSTEP start\\nSESSION {id}\\n')"),
+    );
+    let failure = scripted_staging(&f, remote).await.err().unwrap();
+    assert!(matches!(
+        failure.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+    ));
+    // A lock refusal arrives while payload bytes are still in flight.
+    let remote = scripted_remote(
+        "CAPS zstd gzip -\n",
+        "dd",
+        "out.write(b'STEP upload\\nFAIL upload 72\\n'); out.flush(); sys.exit(0)",
+    );
+    let failure = scripted_staging(&f, remote).await.err().unwrap();
+    assert_eq!(failure.exit_status, Some(72));
+}
+
+#[tokio::test]
+async fn checked_staging_survives_a_buffering_payload_reader_and_reuses_the_cache() {
+    let f = Fixture::new();
+    executable(
+        &f.root.join("tools/sh"),
+        &format!(
+            "#!/usr/bin/python3\n\"\"\"Isolate public fixture scripts; preserve their stdin byte stream.\"\"\"\nimport os,sys\nargs=sys.argv[1:]\nif len(args)>1 and args[0]=='-c': args[1]=args[1].replace('$HOME', {root:?})\nos.execv('/bin/sh',['sh',*args])\n",
+            root = f.root.to_str().unwrap()
+        ),
+    );
+    // Reads whole stdio-sized blocks like getc/fread-based head implementations.
+    executable(
+        &f.root.join("tools/head"),
+        "#!/usr/bin/python3\nimport os, sys\nn = int(sys.argv[sys.argv.index('-c') + 1])\nbuf = b''\nwhile len(buf) < n:\n    chunk = os.read(0, 4096)\n    if not chunk:\n        break\n    buf += chunk\nview = memoryview(buf[:n])\nwhile view:\n    view = view[os.write(1, view):]\n",
+    );
+    let log = f.root.join("decoded");
+    for tool in ["zstd", "gzip"] {
+        executable(
+            &f.root.join(format!("tools/{tool}")),
+            &format!(
+                "#!/bin/sh\nprintf '{tool}\\n' >> '{}'\nexec /usr/bin/{tool} \"$@\"\n",
+                log.display()
+            ),
+        );
+    }
+    let id = uuid::Uuid::new_v4();
+    large_fixture_binary(&f, id);
+    let check = "printf 'INFRATERNAL_CHECK_V1\\nLinux\\nx86_64\\nsystemd\\n1002\\nno\\nyes\\nyes\\nno\\nINFRATERNAL_SETUP_CLEAR\\n'";
+    for attempt in 0..2 {
+        let session = Arc::new(SingleCheckChannel {
+            local: Local {
+                root: f.root.clone(),
+            },
+            streams: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (_, checked) = Installation::check_channel(session.as_ref(), check)
+            .await
+            .unwrap();
+        let transaction = Installation::new(session.clone(), &f.target, &f.join).unwrap();
+        let (actual, bridge) = transaction
+            .stage_session_on(&f.binary, Some(checked))
+            .await
+            .unwrap();
+        assert_eq!(actual, id);
+        assert_eq!(
+            std::fs::read(f.base().join(".bootstrap-lock/payload")).unwrap(),
+            std::fs::read(&f.binary).unwrap()
+        );
+        bridge.write(b"\0\xffbridge\n").await.unwrap();
+        assert_eq!(bridge.line(64).await.unwrap(), b"\0\xffbridge\n");
+        drop(bridge);
+        transaction.rollback().await.unwrap();
+        // The first attempt decodes one compressed payload; the second finds
+        // the published cache through the check and sends nothing to decode.
+        let decoded = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(decoded.lines().count(), 1, "attempt {attempt}: {decoded}");
+    }
+}
+
+#[tokio::test]
+async fn streamed_digest_refuses_a_short_file_or_a_changed_stream_before_launch() {
+    // `tee` that keeps the stream intact but truncates its file models a
+    // failed file write; a decoder that alters one byte models corruption.
+    for (tool, text) in [
+        (
+            "tee",
+            "#!/usr/bin/python3\nimport os, sys\ndata = sys.stdin.buffer.read()\nopen(sys.argv[1], 'wb').write(data[:-10])\nsys.stdout.buffer.write(data)\n",
+        ),
+        (
+            "decoders",
+            "#!/usr/bin/python3\nimport os, subprocess, sys\ntool = '/usr/bin/' + os.path.basename(sys.argv[0])\ndata = bytearray(subprocess.run([tool, *sys.argv[1:]], stdin=sys.stdin, capture_output=True).stdout)\ndata[100] ^= 1\nsys.stdout.buffer.write(data)\n",
+        ),
+    ] {
+        let f = Fixture::new();
+        executable(
+            &f.root.join("tools/sh"),
+            &format!(
+                "#!/usr/bin/python3\nimport os,sys\nargs=sys.argv[1:]\nif len(args)>1 and args[0]=='-c': args[1]=args[1].replace('$HOME', {root:?})\nos.execv('/bin/sh',['sh',*args])\n",
+                root = f.root.to_str().unwrap()
+            ),
+        );
+        // Whichever codec the check reports, its decoder alters the stream.
+        let names: &[&str] = if tool == "tee" {
+            &["tee"]
+        } else {
+            &["zstd", "gzip"]
+        };
+        for name in names {
+            executable(&f.root.join(format!("tools/{name}")), text);
+        }
+        let id = uuid::Uuid::new_v4();
+        large_fixture_binary(&f, id);
+        // The setup program arrives on stdin; the `tools/sh` mapping keeps
+        // every remote path inside the fixture root.
+        let session = Arc::new(SingleCheckChannel {
+            local: Local {
+                root: f.root.clone(),
+            },
+            streams: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let check = "printf 'INFRATERNAL_CHECK_V1\\nLinux\\nx86_64\\nsystemd\\n1002\\nno\\nyes\\nyes\\nno\\nINFRATERNAL_SETUP_CLEAR\\n'";
+        let (_, checked) = Installation::check_channel(session.as_ref(), check)
+            .await
+            .unwrap();
+        let transaction = Installation::new(session, &f.target, &f.join).unwrap();
+        let failure = transaction
+            .stage_session_on(&f.binary, Some(checked))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{tool}: an unverified payload was launched"));
+        assert!(
+            matches!(
+                failure.failed_step,
+                Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+            ),
+            "{tool}: {failure:?}"
+        );
+        assert_eq!(failure.exit_status, Some(1), "{tool}");
+        transaction.rollback().await.unwrap();
+    }
+}
+
+#[test]
+fn optional_session_payload_is_architecture_scoped_and_refuses_symlinks() {
+    use infraternal_plugin_ssh::{install::BinaryPaths, probe::Architecture};
+    let f = Fixture::new();
+    let paths = BinaryPaths {
+        x86_64: f.binary.clone(),
+        aarch64: f.root.join("arm"),
+    };
+    assert_eq!(
+        paths.session_payload(Architecture::X86_64).unwrap(),
+        f.binary
+    );
+    let x86 = f.root.join("infraternal-x86_64-session-musl");
+    std::fs::write(&x86, b"trusted release fixture").unwrap();
+    assert_eq!(paths.session_payload(Architecture::X86_64).unwrap(), x86);
+    assert_eq!(
+        paths.session_payload(Architecture::Aarch64).unwrap(),
+        paths.aarch64
+    );
+    let arm = f.root.join("infraternal-aarch64-session-musl");
+    std::os::unix::fs::symlink(&f.binary, &arm).unwrap();
+    assert!(paths.session_payload(Architecture::Aarch64).is_err());
+    std::fs::remove_file(&x86).unwrap();
+    std::fs::create_dir(&x86).unwrap();
+    assert!(paths.session_payload(Architecture::X86_64).is_err());
+}
+
+#[tokio::test]
+async fn full_payload_restaging_preserves_the_running_session_build() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    let starter = f.root.join("session-build");
+    executable(
+        &starter,
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = __ssh-session ] || exit 1\nprintf 'SESSION {id}\\n'\nexec cat\n"
+        ),
+    );
+    let transaction = Installation::new(
+        Arc::new(Compound(Local {
+            root: f.root.clone(),
+        })),
+        &f.target,
+        &f.join,
+    )
+    .unwrap();
+    let (session, channel) = transaction.stage_session(&starter).await.unwrap();
+    assert_eq!(session, id);
+    channel.write(b"before full upload\n").await.unwrap();
+    assert_eq!(channel.line(64).await.unwrap(), b"before full upload\n");
+    // Force a real compressed full transfer after the distinct session image.
+    let full = format!(
+        "#!/bin/sh\nif [ \"$1\" = __ssh-session ]; then printf 'SESSION {id}\\n'; exec cat; fi\n{}\n#{}\n",
+        std::fs::read_to_string(&f.binary).unwrap(),
+        "x".repeat(100_000)
+    );
+    std::fs::write(&f.binary, full).unwrap();
+    transaction
+        .restart_setup_with(
+            &f.binary,
+            &f.join,
+            Some(infraternal_plugin_ssh::transport::TransferChoice::Gzip),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(f.base().join("bin/live")).unwrap(),
+        std::fs::read(&f.binary).unwrap()
+    );
+    channel.write(b"after full upload\n").await.unwrap();
+    assert_eq!(channel.line(64).await.unwrap(), b"after full upload\n");
+    let reopened = transaction.resume_session(id).await.unwrap();
+    reopened.write(b"verified full bridge\n").await.unwrap();
+    assert_eq!(reopened.line(64).await.unwrap(), b"verified full bridge\n");
+    drop(reopened);
+    transaction.commit().await.unwrap();
+    channel.write(b"after commit\n").await.unwrap();
+    assert_eq!(channel.line(64).await.unwrap(), b"after commit\n");
+}
+
+/// Restaging after the early prompt must reuse compound upload/enrollment;
+/// separate rollback, cache lookup, upload and setup commands add SSH round trips.
+#[tokio::test]
+async fn session_restaging_uses_one_compound_command() {
+    struct Counted {
+        local: Local,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl SshSession for Counted {
+        fn setup_steps(&self) -> bool {
+            true
+        }
+        fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.local.run(script, input)
+        }
+    }
+    let f = Fixture::new();
+    let counted = Arc::new(Counted {
+        local: Local {
+            root: f.root.clone(),
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let transaction = Installation::new(counted.clone(), &f.target, &f.join).unwrap();
+    transaction.stage(&f.binary).await.unwrap();
+    counted.calls.store(0, std::sync::atomic::Ordering::SeqCst);
+    transaction.restart_setup(&f.binary, &f.join).await.unwrap();
+    assert_eq!(counted.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read(f.base().join("bin/live")).unwrap(),
+        std::fs::read(&f.binary).unwrap()
+    );
+    transaction.commit().await.unwrap();
+}
+
+/// A compound restage cannot turn another transaction's lease into permission
+/// to upload, enroll or remove its private journal.
+#[tokio::test]
+async fn compound_restaging_refuses_a_foreign_journal_before_upload() {
+    let f = Fixture::new();
+    let transaction = Installation::new(
+        Arc::new(Compound(Local {
+            root: f.root.clone(),
+        })),
+        &f.target,
+        &f.join,
+    )
+    .unwrap();
+    transaction.stage(&f.binary).await.unwrap();
+    let journal = f.base().join(".bootstrap-lock/transaction");
+    let original = std::fs::read(&journal).unwrap();
+    let foreign = uuid::Uuid::new_v4().simple().to_string();
+    std::fs::write(&journal, &foreign).unwrap();
+    let payload = f.base().join(".bootstrap-lock/payload");
+    let before = std::fs::read(&payload).unwrap();
+    let refusal = transaction
+        .restart_setup_with(
+            &f.binary,
+            &f.join,
+            Some(infraternal_plugin_ssh::transport::TransferChoice::Raw),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.exit_status, Some(72));
+    assert!(matches!(
+        refusal.failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Upload)
+    ));
+    assert_eq!(std::fs::read_to_string(&journal).unwrap(), foreign);
+    assert_eq!(std::fs::read(&payload).unwrap(), before);
+    assert!(!f.base().join("state").exists());
+    std::fs::write(&journal, original).unwrap();
+    transaction.rollback().await.unwrap();
+}
+
+/// A failed deferred upload leaves an incomplete stage; only an admitted cached
+/// image may reopen the original shim, and changed cache bytes must not execute.
+#[tokio::test]
+async fn partial_full_upload_rebridges_from_a_verified_image() {
+    let f = Fixture::new();
+    let id = uuid::Uuid::new_v4();
+    let starter = f.root.join("session-build");
+    executable(
+        &starter,
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = __ssh-session ] || exit 1\nprintf 'SESSION {id}\\n'\nexec cat\n"
+        ),
+    );
+    let transaction = Installation::new(
+        Arc::new(Compound(Local {
+            root: f.root.clone(),
+        })),
+        &f.target,
+        &f.join,
+    )
+    .unwrap();
+    let (_, original) = transaction.stage_session(&starter).await.unwrap();
+    let stage = f.base().join(".bootstrap-lock/payload");
+    // Restaging unlinks the old image before writing a new inode; the running
+    // shim and verified cache retain the original inode throughout that write.
+    std::fs::remove_file(&stage).unwrap();
+    std::fs::write(&stage, b"incomplete full executable").unwrap();
+    let reopened = transaction.resume_session(id).await.unwrap();
+    reopened
+        .write(b"same session after partial upload\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.line(64).await.unwrap(),
+        b"same session after partial upload\n"
+    );
+    original
+        .write(b"original bridge remains usable\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        original.line(64).await.unwrap(),
+        b"original bridge remains usable\n"
+    );
+    drop(reopened);
+    let journal = f.base().join(".bootstrap-lock/transaction");
+    let owned = std::fs::read(&journal).unwrap();
+    std::fs::write(&journal, uuid::Uuid::new_v4().simple().to_string()).unwrap();
+    assert!(transaction.resume_session(id).await.is_err());
+    std::fs::write(&journal, owned).unwrap();
+    let cache = f
+        .base()
+        .with_file_name("infraternal.bootstrap-cache")
+        .join("payload");
+    let executed = f.root.join("unverified-executed");
+    executable(
+        &cache,
+        &format!(
+            "#!/bin/sh\ntouch {}\nprintf 'SESSION {id}\\n'\nexec cat\n",
+            infraternal_plugin_ssh::transport::shell_quote(executed.to_str().unwrap()),
+        ),
+    );
+    assert!(transaction.resume_session(id).await.is_err());
+    assert!(!executed.exists(), "changed cache bytes must never execute");
+    drop(original);
     transaction.rollback().await.unwrap();
 }

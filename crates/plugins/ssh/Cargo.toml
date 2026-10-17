@@ -5,10 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# The signed first-prompt image shares the installed host's terminal dispatcher.
+session-bridge = ["dep:infraternal-agent"]
+
 [dependencies]
+infraternal-agent = { path = "../../infraternal-agent", version = "0.1.0", default-features = false, optional = true }
 infraternal-plugin-api.workspace = true
 infraternal-shim.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["uio"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

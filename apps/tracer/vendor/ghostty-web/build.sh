@@ -65,6 +65,8 @@ git -C "$source_dir" apply "$vendor_dir/local-theme-api.patch"
 git -C "$source_dir" apply "$vendor_dir/cell-metrics.patch"
 # Link underlines use the active accent and render only while revealed.
 git -C "$source_dir" apply "$vendor_dir/link-underline.patch"
+# Dispose global input listeners even when opening failed or the renderer was hidden.
+git -C "$source_dir" apply "$vendor_dir/renderer-disposal.patch"
 
 git -C "$source_dir" submodule update --quiet --init --recursive --depth=1
 if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then

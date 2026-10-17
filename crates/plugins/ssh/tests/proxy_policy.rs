@@ -32,6 +32,7 @@ async fn unchecked_proxy_hops_are_refused_before_credential_helpers_or_network()
         ssh_keyscan: "unused".into(),
         ssh_keygen: "unused".into(),
         askpass_binary: "unused".into(),
+        tcp_connector: None,
         scratch: root.clone(),
         command_timeout: Duration::from_secs(3),
     };

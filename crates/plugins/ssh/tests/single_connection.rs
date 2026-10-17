@@ -42,6 +42,7 @@ async fn one_physical_connection_erases_helpers_and_refuses_reconnect() {
         ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
         ssh_keygen: "/usr/bin/ssh-keygen".into(),
         askpass_binary: std::env::current_exe().unwrap(),
+        tcp_connector: None,
         scratch: fixture.clone(),
         command_timeout: Duration::from_secs(15),
     };

@@ -137,12 +137,13 @@ async fn full_control_lane_retries_retirement_census_on_capacity_without_request
         )
         .await
         .unwrap();
-        run_channel(
+        run_channel::<false>(
             daemon_channel.as_ref(),
             root,
             None,
             None,
-            service.registry.clone(),
+            Some(service.registry.clone()),
+            None,
         )
         .await
     });

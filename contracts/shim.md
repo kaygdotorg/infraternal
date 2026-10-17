@@ -163,7 +163,11 @@ mutation. Trim bytes below accepted, refuse gaps, and advance accepted only
 when queueing the remaining suffix. Duplicate requests return the current
 written acknowledgment without queueing again. Advance written only by actual
 successful PTY writes. Ack may coalesce to the latest written offset; it needs
-no unbounded queue. State requests return both cursors. Cursors and queued
+no unbounded queue. State requests return both cursors. On a selected writer's
+data link, a state reply may subsume the standalone Ack. Its written cursor
+remains authoritative acknowledgment progress even when requested only for
+liveness; consumers must not discard it or acknowledge the accepted cursor.
+Cursors and queued
 input survive peer loss; reconnecting infraternal agents query state and replay
 safely, including after a crash between input send and Ack. This guarantee
 does not cover a shim or host crash. Caps-zero shims cannot give PTY-write

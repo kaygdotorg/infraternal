@@ -16,7 +16,7 @@ serde_json.workspace = true
 bytes = { workspace = true, optional = true }
 infraternal-protocol = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread"] }
 uuid = { workspace = true, optional = true }
 nix = { workspace = true, optional = true }
 

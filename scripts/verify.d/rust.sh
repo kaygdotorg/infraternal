@@ -64,8 +64,8 @@ rust_check_static_binary() {
     fi
 
     case "$target" in
-        x86_64-unknown-linux-musl) max_size_bytes=21300016 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19500376 ;;
+        x86_64-unknown-linux-musl) max_size_bytes=21090448 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19316264 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
@@ -209,7 +209,7 @@ rust_verify_fast() {
     RUST_GATE_FAILED=0
 
     rust_run_gate "fmt" cargo fmt --all --check
-    rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/snapshot.zig
+    rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/*.zig
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "test" cargo test --workspace --locked

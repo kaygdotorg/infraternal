@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = []
-transport = ["dep:ring", "dep:zeroize", "dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol"]
+transport = ["dep:ring", "dep:zeroize", "dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol", "dep:uuid"]
 agent = ["transport", "dep:infraternal-shim", "dep:nix", "nix/net"]
 server = ["transport", "infraternal-plugin-api/socket-host"]
 test-support = ["transport"]
@@ -16,6 +16,7 @@ test-support = ["transport"]
 ring = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 infraternal-shim = { workspace = true, optional = true }
 nix = { workspace = true, optional = true, features = ["net"] }
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }

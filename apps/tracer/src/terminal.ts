@@ -222,6 +222,8 @@ class ByteQueue {
 
 /** The sole terminal session in the tracer; all network and renderer buffers are bounded. */
 export class TerminalClient {
+  private static rendererPreparation: Promise<void> | undefined;
+  private static readonly rendererWarmups = new Map<string, Promise<void>>();
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
@@ -429,9 +431,23 @@ export class TerminalClient {
    */
   static async open(config: TerminalConfig): Promise<TerminalClient> {
     const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
-    await loadFont(font);
-    await init();
-    const terminal = new Terminal({
+    await TerminalClient.prepareResources(font);
+    const terminal = TerminalClient.createRenderer(font, config);
+    const client = new TerminalClient(config, terminal, font);
+    // Weights go in before the first measurement so the grid is measured from the face it draws.
+    client.installFontWeights();
+    client.remeasureFont();
+    client.keepLigaturesOff();
+    client.installCursorLayerHook();
+    client.loadStyledFaces();
+    // An already opened terminal has paid the same first-renderer cost. Also
+    // supersede an optional warm-up still waiting for resources on this font.
+    TerminalClient.rendererWarmups.set(font.id, Promise.resolve());
+    return client;
+  }
+
+  private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
+    return new Terminal({
       fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
@@ -445,14 +461,49 @@ export class TerminalClient {
         selectionBackground: "#44485c",
       },
     });
-    const client = new TerminalClient(config, terminal, font);
-    // Weights go in before the first measurement so the grid is measured from the face it draws.
-    client.installFontWeights();
-    client.remeasureFont();
-    client.keepLigaturesOff();
-    client.installCursorLayerHook();
-    client.loadStyledFaces();
-    return client;
+  }
+
+  /** Warm font, parser and canvas setup during sign-in; no session or socket is opened. */
+  static async prepare(font: MonoFont = fontById(DEFAULT_FONT_ID)!): Promise<void> {
+    let warmup = TerminalClient.rendererWarmups.get(font.id);
+    if (!warmup) {
+      warmup = TerminalClient.prepareResources(font).then(() => {
+        if (TerminalClient.rendererWarmups.get(font.id) !== warmup) return;
+        // First canvas/font setup can block long enough to expire a healthy
+        // socket. Exercise it before publication, with no input or live loop
+        // left behind. Inert, hidden content cannot steal sign-in focus.
+        const host = document.createElement("div");
+        host.inert = true;
+        host.style.cssText = "position:fixed;left:-10000px;top:0;width:800px;height:480px;visibility:hidden;pointer-events:none";
+        const renderer = TerminalClient.createRenderer(font, {});
+        try {
+          document.body.append(host);
+          renderer.open(host);
+        } finally {
+          try { renderer.dispose(); } finally { host.remove(); }
+        }
+      });
+      TerminalClient.rendererWarmups.set(font.id, warmup);
+      const pending = warmup;
+      void warmup.catch(() => {
+        if (TerminalClient.rendererWarmups.get(font.id) === pending) TerminalClient.rendererWarmups.delete(font.id);
+      });
+    }
+    await warmup;
+  }
+
+  private static async prepareResources(font: MonoFont): Promise<void> {
+    let renderer = TerminalClient.rendererPreparation;
+    if (!renderer) {
+      renderer = init();
+      TerminalClient.rendererPreparation = renderer;
+      // Concurrent opens/preparation must share one instance. A failed optional
+      // warm-up must not poison the later session's ordinary initialization.
+      void renderer.catch(() => {
+        if (TerminalClient.rendererPreparation === renderer) TerminalClient.rendererPreparation = undefined;
+      });
+    }
+    await Promise.all([loadFont(font), renderer]);
   }
 
   get isConnected(): boolean { return this.attachmentConfirmed; }

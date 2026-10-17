@@ -5,10 +5,7 @@ use infraternal_agent::{
     remote_client::{self, RemoteIdentity},
     remote_tls::Identity,
 };
-use infraternal_server::{
-    enrollment::Mode,
-    remote_http::{JoinInvitation, JoinRequest, JoinResponse},
-};
+use infraternal_plugin_remote::enrollment::{JoinInvitation, JoinRequest, JoinResponse, Mode};
 use openssl::{
     hash::MessageDigest,
     pkey::PKey,
@@ -456,11 +453,14 @@ pub(crate) fn uninstall_if_requested() -> Option<std::process::ExitCode> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        runtime.block_on(infraternal_plugin_remote::uninstall::cleanup(
-            &plan,
-            &home,
-            nix::unistd::Uid::effective().as_raw(),
-        ))
+        infraternal_agent::block_on_io(
+            &runtime,
+            Box::pin(infraternal_plugin_remote::uninstall::cleanup(
+                &plan,
+                &home,
+                nix::unistd::Uid::effective().as_raw(),
+            )),
+        )
     };
     Some(if execute().is_ok() {
         std::process::ExitCode::SUCCESS

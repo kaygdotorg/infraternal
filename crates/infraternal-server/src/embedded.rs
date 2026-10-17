@@ -265,6 +265,16 @@ impl EmbeddedAgent {
         )
     }
 
+    /// Observe the currently greeted route without opening or replaying any remote work.
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    pub(crate) async fn installed_route(&self) -> Result<bool, AgentError> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::InstalledRoute(reply))
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)
+    }
     /// The secondary joins this actor only after enrolled identity admission.
     #[cfg(feature = "remote")]
     pub(crate) async fn prime(&self, link: RemoteLink) -> Result<(), AgentError> {
@@ -282,6 +292,21 @@ impl EmbeddedAgent {
             .map_err(|_| AgentError::Unavailable)?;
         admission.admitted = result.is_ok();
         result
+    }
+
+    /// Component shutdown retires SSH fallback without ending installed transports.
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    pub(crate) async fn retire_ssh(&self) -> Result<(), AgentError> {
+        let (reply, retired) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            self.commands
+                .send(Command::RetireSsh(reply))
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            retired.await.map_err(|_| AgentError::Unavailable)
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
     }
 
     /// A bounded control call shares the existing id allocator and reply dispatcher.
@@ -461,6 +486,10 @@ impl EmbeddedAgent {
 }
 
 enum Command {
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    InstalledRoute(oneshot::Sender<bool>),
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    RetireSsh(oneshot::Sender<()>),
     #[cfg(feature = "remote")]
     Prime {
         link: Box<RemoteLink>,
@@ -794,7 +823,7 @@ async fn forward_inputs(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "Keep link loss, capability invalidation and census publication in the same actor lifetime."
+    reason = "Keep link loss, capability invalidation, census publication, fallback retirement, and route ownership ordered in the same actor turn."
 )]
 async fn run_actor(
     mut source: Source,
@@ -806,6 +835,9 @@ async fn run_actor(
     let mut routes = HashMap::<u32, u64>::new();
     let mut pending = HashMap::<u32, PendingCall>::new();
     let mut connection: Option<AgentConnection> = None;
+    // Keep the old SSH channel until the new transport proves writer replay.
+    // A failed replacement can still reattach the same shim through SSH.
+    let mut fallback: Option<AgentConnection> = None;
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
@@ -870,13 +902,10 @@ async fn run_actor(
                 tokio::time::sleep(backoff).await;
             }
             first_attempt = false;
-            if let Ok(mut fresh) = source.connect().await {
-                if !reattach_all(&mut fresh, &mut attachments, &mut routes).await {
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                    routes.clear();
-                    cleanup_connection(fresh).await;
-                    continue;
-                }
+            if let Some(fresh) =
+                connect_with_fallback(&mut source, &mut attachments, &mut routes, &mut fallback)
+                    .await
+            {
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
@@ -967,7 +996,7 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if let Source::Remote { pending,.. } = &mut source { *pending = Some(Box::new(replacement)); }
                 if let Some(old) = connection.take() {
-                    connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                    retain_fallback(old, &mut fallback, &mut routes, &mut pending).await;
                     session_inventory.send_replace(SessionInventoryState::Unavailable);
                 }
             }
@@ -976,6 +1005,22 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if let Command::Prime { link: secondary, reply } = command {
                     hot.start(*secondary, link.execution_uid, &attachments, reply);
+                    continue;
+                }
+                #[cfg(all(feature = "remote", feature = "ssh"))]
+                if let Command::RetireSsh(reply) = command {
+                    if fallback.as_ref().is_some_and(ssh_backed)
+                        && let Some(old) = fallback.take()
+                    {
+                        cleanup_connection(old).await;
+                    }
+                    if connection.as_ref().is_some_and(ssh_backed)
+                        && let Some(old) = connection.take()
+                    {
+                        connection_lost(old, &mut attachments, &mut routes, &mut pending);
+                        session_inventory.send_replace(SessionInventoryState::Unavailable);
+                    }
+                    let _ = reply.send(());
                     continue;
                 }
                 #[cfg(feature = "remote")]
@@ -1047,6 +1092,7 @@ async fn run_actor(
                 if let Incoming::SessionInventory(ids) = incoming {
                     session_inventory
                         .send_replace(SessionInventoryState::Available(Arc::from(ids)));
+                    retire_fallback(&attachments, &mut fallback).await;
                     continue;
                 }
                 if !process_incoming(incoming, link, &mut attachments, &mut routes, &mut pending).await {
@@ -1060,8 +1106,78 @@ async fn run_actor(
                         first_attempt = attachments.values().any(|a| !a.awaiting_ack);
                     }
                 }
+                retire_fallback(&attachments, &mut fallback).await;
             }
         }
+    }
+}
+
+#[cfg(all(feature = "remote", feature = "ssh"))]
+fn ssh_backed(connection: &AgentConnection) -> bool {
+    matches!(&connection.peer, Peer::Remote(link) if link.ssh_backed())
+}
+
+async fn connect_with_fallback(
+    source: &mut Source,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    fallback: &mut Option<AgentConnection>,
+) -> Option<AgentConnection> {
+    // A replacement that dies before its first writer Ack has consumed its
+    // admission. Restore SSH before waiting for an unrelated future admission.
+    #[cfg(feature = "remote")]
+    if fallback.is_some() && matches!(source, Source::Remote { pending: None, .. }) {
+        return restore_fallback(fallback, attachments, routes).await;
+    }
+    if let Ok(mut fresh) = source.connect().await {
+        if reattach_all(&mut fresh, attachments, routes).await {
+            return Some(fresh);
+        }
+        routes.clear();
+        cleanup_connection(fresh).await;
+    }
+    restore_fallback(fallback, attachments, routes).await
+}
+
+async fn retain_fallback(
+    old: AgentConnection,
+    fallback: &mut Option<AgentConnection>,
+    routes: &mut HashMap<u32, u64>,
+    pending: &mut HashMap<u32, PendingCall>,
+) {
+    routes.clear();
+    for (_, call) in pending.drain() {
+        call.refuse(AgentError::Unavailable);
+    }
+    if let Some(previous) = fallback.replace(old) {
+        cleanup_connection(previous).await;
+    }
+}
+
+async fn restore_fallback(
+    fallback: &mut Option<AgentConnection>,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+) -> Option<AgentConnection> {
+    let mut old = fallback.take()?;
+    if reattach_all(&mut old, attachments, routes).await {
+        Some(old)
+    } else {
+        cleanup_connection(old).await;
+        None
+    }
+}
+
+async fn retire_fallback(
+    attachments: &HashMap<u64, AttachmentState>,
+    fallback: &mut Option<AgentConnection>,
+) {
+    if attachments
+        .values()
+        .all(|attachment| !attachment.awaiting_ack)
+        && let Some(old) = fallback.take()
+    {
+        cleanup_connection(old).await;
     }
 }
 
@@ -1404,6 +1520,17 @@ async fn process_command(
     pending: &mut HashMap<u32, PendingCall>,
 ) -> bool {
     match command {
+        // The actor consumes this command before entering ordinary dispatch.
+        #[cfg(all(feature = "remote", feature = "ssh"))]
+        Command::RetireSsh(_) => false,
+        #[cfg(all(feature = "remote", feature = "ssh"))]
+        Command::InstalledRoute(reply) => {
+            // Commands run only after greeting. Registry queue admission can
+            // precede replacement, so it cannot stand in for this local fence.
+            let _ =
+                reply.send(matches!(&connection.peer, Peer::Remote(link) if !link.ssh_backed()));
+            true
+        }
         #[cfg(feature = "remote")]
         Command::Prime { reply, .. } => {
             let _ = reply.send(Err(AgentError::Unavailable));
@@ -1548,8 +1675,22 @@ async fn process_command(
                     let _ = reply.send(Err(AgentError::Protocol));
                     return true;
                 }
-                // A resumed browser may reclaim its writer even if a full command
-                // queue prevented the old handle's best-effort Detach notification.
+                // A resumed browser may reclaim its writer before the old
+                // handle's best-effort Detach arrives. Retire the remote route
+                // too: shared dispatch rejects Attach on an already-open stream.
+                if !write_frame(
+                    connection,
+                    stream_id,
+                    &Frame::Close {
+                        code: 1000,
+                        reason: "writer reattached",
+                    },
+                )
+                .await
+                {
+                    let _ = reply.send(Err(AgentError::Unavailable));
+                    return false;
+                }
                 attachments.remove(&previous);
                 routes.remove(&stream_id);
             }

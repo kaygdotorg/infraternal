@@ -27,7 +27,7 @@ class ReleaseScripts(unittest.TestCase):
             # This isolated packaging stand-in observes build inputs; real binaries are checked separately.
             for name, body in (
                 ('auth-toolchain', '#!/usr/bin/env bash\nexit 0\n'),
-                ('package-release', '#!/usr/bin/env bash\nset -eu\n[[ "$INFRATERNAL_RELEASE_BUILD" == 1 ]]\nmkdir -p "$1"\nfor name in infraternal infraternal-x86_64-musl infraternal-aarch64-musl; do printf "%s\\n" "$INFRATERNAL_RELEASE_VERSION" > "$1/$name"; done\n'),
+                ('package-release', '#!/usr/bin/env bash\nset -eu\n[[ "$INFRATERNAL_RELEASE_BUILD" == 1 ]]\nmkdir -p "$1"\nfor name in infraternal infraternal-x86_64-musl infraternal-aarch64-musl infraternal-x86_64-session-musl infraternal-aarch64-session-musl; do printf "%s\\n" "$INFRATERNAL_RELEASE_VERSION" > "$1/$name"; done\n'),
             ):
                 script = repo / 'scripts' / name
                 script.write_text(body)
@@ -52,8 +52,11 @@ class ReleaseScripts(unittest.TestCase):
                     stamp = datetime.strptime(bundle.name, 'edge-%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
                     self.assertGreaterEqual(stamp, started)
                     self.assertLessEqual(stamp, finished)
-                for name in ('VERSION','infraternal','infraternal-x86_64-musl','infraternal-aarch64-musl'):
+                for name in ('VERSION','infraternal','infraternal-x86_64-musl','infraternal-aarch64-musl','infraternal-x86_64-session-musl','infraternal-aarch64-session-musl'):
                     self.assertEqual((bundle / name).read_text(), bundle.name+'\n')
+                checksums = (bundle / 'SHA256SUMS').read_text().splitlines()
+                self.assertEqual({line.split()[1] for line in checksums}, {p.name for p in bundle.iterdir() if p.name != 'SHA256SUMS'})
+                self.assertEqual(subprocess.run(['sha256sum', '--strict', '--check', 'SHA256SUMS'], cwd=bundle, capture_output=True).returncode, 0)
                 if channel == 'stable':
                     self.assertNotEqual(build('--channel',channel).returncode, 0)
             for version in ('1.2','1.2.3-rc1','edge-20261011t071500Z','edge-20261011T071500z','../1.2.3','1.2.3\n'):
@@ -91,7 +94,18 @@ class ReleaseScripts(unittest.TestCase):
     def test_edge_publication_is_verified_and_immutable(self):
         self.local_publication('edge-20261011T071500Z')
 
-    def local_publication(self, version):
+    def test_signed_session_images_are_verified(self):
+        self.local_publication('0.1.0', verification_only=True)
+
+    def test_older_signed_releases_without_session_images_are_verified(self):
+        self.local_publication('0.1.0', include_sessions=False, verification_only=True)
+
+    def test_new_publication_requires_both_session_images_before_upload(self):
+        for arch in ('x86_64', 'aarch64'):
+            with self.subTest(architecture=arch):
+                self.local_publication('0.1.0', missing_session=arch)
+
+    def local_publication(self, version, include_sessions=True, verification_only=False, missing_session=None):
         scratch = Path(os.environ.get('CARGO_TARGET_DIR', Path.home() / '.cache/codex-scratch/release-pipeline/target'))
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
@@ -108,12 +122,27 @@ class ReleaseScripts(unittest.TestCase):
             bundle = target / 'releases' / version
             bundle.mkdir(parents=True)
             files = {name: ('synthetic ' + name).encode() for name in ('infraternal', 'infraternal-x86_64-musl', 'infraternal-aarch64-musl')}
+            if include_sessions:
+                for arch in ('x86_64', 'aarch64'):
+                    name = f'infraternal-{arch}-session-musl'
+                    files[name] = ('synthetic ' + name).encode()
             files["VERSION"] = (version + "\n").encode()
             for name, body in files.items():
                 (bundle / name).write_bytes(body)
             store = {}
             requests = []
             error = [None]
+            def sign_store():
+                # Hash the uploaded objects, matching the real signer rather than
+                # assuming the publisher included every locally built artifact.
+                manifest = ''.join(hashlib.sha256(store[version + '/' + name]).hexdigest() + '  ' + name + '\n' for name in sorted(files) if version + '/' + name in store).encode()
+                sums = repo / 'SHA256SUMS'
+                sums.write_bytes(manifest)
+                signature = sums.with_suffix('.sig')
+                signature.unlink(missing_ok=True)
+                subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(key), '-n', 'infraternal-release', str(sums)], check=True, capture_output=True)
+                store[version + '/SHA256SUMS'] = manifest
+                store[version + '/SHA256SUMS.sig'] = signature.read_bytes()
             class Handler(http.server.BaseHTTPRequestHandler):
                 def log_message(self, *args):
                     pass
@@ -149,12 +178,7 @@ class ReleaseScripts(unittest.TestCase):
                         error[0] = 'wrong version requested'
                         self.respond(400)
                         return
-                    manifest = ''.join(hashlib.sha256(store[version + '/' + name]).hexdigest() + '  ' + name + '\n' for name in sorted(files)).encode()
-                    sums = repo / 'SHA256SUMS'
-                    sums.write_bytes(manifest)
-                    subprocess.run(['ssh-keygen', '-Y', 'sign', '-f', str(key), '-n', 'infraternal-release', str(sums)], check=True, capture_output=True)
-                    store[version + '/SHA256SUMS'] = manifest
-                    store[version + '/SHA256SUMS.sig'] = sums.with_suffix('.sig').read_bytes()
+                    sign_store()
                     self.respond(200, b'{}')
                 def do_GET(self):
                     requests.append(('GET', self.path))
@@ -173,6 +197,25 @@ class ReleaseScripts(unittest.TestCase):
             def run(script, requested=version):
                 return subprocess.run([str(repo / 'scripts/release' / script), requested], env=env, capture_output=True, text=True)
             try:
+                if missing_session:
+                    (bundle / f'infraternal-{missing_session}-session-musl').unlink()
+                    self.assertNotEqual(run('publish').returncode, 0)
+                    self.assertFalse(requests, "an incomplete new bundle must fail before network work")
+                    return
+                if verification_only:
+                    store.update({version + '/' + name: body for name, body in files.items()})
+                    sign_store()
+                    verified = run('verify')
+                    self.assertEqual(verified.returncode, 0, verified.stderr)
+                    if include_sessions:
+                        for arch in ('x86_64', 'aarch64'):
+                            name = f'infraternal-{arch}-session-musl'
+                            store[version + '/' + name] = b'tampered'
+                            self.assertNotEqual(run('verify').returncode, 0)
+                            store[version + '/' + name] = files[name]
+                        del store[version + '/infraternal-aarch64-session-musl']
+                        self.assertNotEqual(run('verify').returncode, 0)
+                    return
                 (bundle / "VERSION").write_bytes(b"999.999.999\n")
                 self.assertNotEqual(run('publish').returncode, 0)
                 self.assertFalse(any(method in ('PUT', 'POST') for method, _ in requests), "wrong local version must fail before publication")
@@ -182,7 +225,8 @@ class ReleaseScripts(unittest.TestCase):
                 self.assertIn('Published and verified', result.stdout)
                 self.assertIsNone(error[0])
                 self.assertFalse(any(method == "HEAD" for method, _ in requests))
-                self.assertEqual(len([r for r in requests if r[0] == 'PUT']), 4)
+                self.assertEqual(len([r for r in requests if r[0] == 'PUT']), 6)
+                self.assertEqual({path.rsplit('/', 1)[-1] for method, path in requests if method == 'PUT'}, set(files))
                 before = len(requests)
                 self.assertNotEqual(run('publish').returncode, 0)
                 self.assertFalse(any(r[0] in ('PUT', 'POST') for r in requests[before:]))

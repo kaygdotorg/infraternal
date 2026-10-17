@@ -2,15 +2,111 @@
 use super::*;
 use infraternal_plugin_ssh::auth_order::{AuthProvider, AutoAuth, NetworkProvider};
 use infraternal_plugin_ssh::openssh::OpenSsh;
+use infraternal_plugin_ssh::transport::TransferChoice;
 use std::{io::Read, path::PathBuf, time::Instant};
+
+#[path = "bootstrap_instant_tests.rs"]
+mod instant;
+#[path = "bootstrap_browser_tests.rs"]
+mod browser;
+static FULLY_JOINED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Own only this live controller's private fixture files until its bindings drop.
+struct LiveFixtureDirectory(PathBuf);
+impl Drop for LiveFixtureDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn live_fixture(scratch: &std::path::Path) -> (LiveFixtureDirectory, Fixture) {
+    let directory = LiveFixtureDirectory(scratch.join(format!("live-authority-{}", Uuid::new_v4())));
+    // Use the runtime's private persistent pool, including its connection and
+    // journal settings. A cancelled acquisition must not reset authority.
+    let pool = crate::runtime::test_open_database(&directory.0).await.unwrap();
+    let (store, pool, prior) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
+    (directory, fixture_with_store(true, store, pool, prior).await)
+}
+
+#[tokio::test]
+async fn live_fixture_keeps_authority_after_connection_retirement() {
+    let scratch = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/addhost-instant"),
+        PathBuf::from,
+    );
+    // Retain the file owner until after the fixture and its pool handles drop.
+    let (_directory, fixture) = live_fixture(&scratch).await;
+    let connection = fixture.pool.acquire().await.unwrap();
+    connection.close().await.unwrap();
+    let owners: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id='owner'")
+        .fetch_one(&fixture.pool).await.unwrap();
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(&fixture.cookie)).fetch_one(&fixture.pool).await.unwrap();
+    assert_eq!(owners, 1);
+    assert_eq!(sessions, 1);
+}
+
+// Fixture images are explicit trusted inputs, independent of release HTTP/signing tests.
+struct FixturePayloads {
+    binaries: BinaryPaths,
+    session: Option<PathBuf>,
+}
+impl infraternal_plugin_ssh::install::PayloadSource for FixturePayloads {
+    fn get(&self, architecture: infraternal_plugin_ssh::probe::Architecture) -> Operation<'_, PathBuf> {
+        infraternal_plugin_ssh::install::PayloadSource::get(&self.binaries, architecture)
+    }
+    fn session(&self, _architecture: infraternal_plugin_ssh::probe::Architecture) -> Operation<'_, Option<PathBuf>> {
+        Box::pin(async { Ok(self.session.clone()) })
+    }
+}
+fn fixture_payload_source(
+    binaries: BinaryPaths,
+    session: Option<PathBuf>,
+) -> Arc<dyn infraternal_plugin_ssh::install::PayloadSource> {
+    Arc::new(FixturePayloads { binaries, session })
+}
+
+#[tokio::test]
+async fn live_fixture_keeps_the_full_image_and_selects_the_explicit_session_image() {
+    let full = PathBuf::from("full-fixture");
+    let session = PathBuf::from("session-fixture");
+    let binaries = BinaryPaths { x86_64: full.clone(), aarch64: full.clone() };
+    let legacy = fixture_payload_source(binaries.clone(), None);
+    assert_eq!(legacy.get(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap(), full);
+    assert!(legacy.session(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap().is_none());
+    let instant = fixture_payload_source(binaries, Some(session.clone()));
+    assert_eq!(instant.get(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap(), full);
+    assert_eq!(instant.session(infraternal_plugin_ssh::probe::Architecture::X86_64).await.unwrap(), Some(session));
+}
+
+/// The provisioning listener's socket admission is exercised directly below.
+fn enrollment_acceptor(
+    config: axum_server::tls_openssl::OpenSSLConfig,
+) -> axum_server::tls_openssl::OpenSSLAcceptor<axum_server::accept::NoDelayAcceptor> {
+    crate::server_tls::acceptor(config)
+}
+
+#[tokio::test]
+async fn provisioning_https_uses_production_tcp_admission() {
+    crate::server_tls::tests::assert_nodelay_with(enrollment_acceptor).await;
+}
 
 static FIRST_INSTALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static UPLOAD_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+fn timeline(step: &'static str, state: &'static str) {
+    if std::env::var_os("ADDHOST_BROWSER_TIMELINE").is_some() {
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        println!("TIMELINE source=server step={step} state={state} epoch_ms={:.3}", epoch.as_secs_f64() * 1000.0);
+    }
+}
+
 /// Time only the delegated production operation; emit no arguments or payload.
 async fn measured<T>(step: &'static str, operation: Operation<'_, T>) -> Result<T, Failure> {
     let started = Instant::now();
+    timeline(step, "start");
     let result = operation.await;
+    timeline(step, "end");
     println!(
         "METRIC breakit2 step={step} elapsed_ms={:.3} ok={}",
         started.elapsed().as_secs_f64() * 1000.0,
@@ -23,10 +119,28 @@ struct TimedSession {
     inner: Arc<dyn SshSession>,
 }
 impl SshSession for TimedSession {
+    fn session_bridge(&self) -> bool { std::env::var_os("ADDHOST_INSTANT").is_some() && self.inner.session_bridge() }
+    fn stream<'a>(&'a self, script: &'a str) -> Operation<'a, infraternal_plugin_ssh::duplex::Duplex> {
+        if script.contains("setup_step upload") { UPLOAD_STARTED.store(true, Ordering::SeqCst); }
+        Box::pin(measured("launch_channel_helper", self.inner.stream(script)))
+    }
+
+    fn check_stream<'a>(&'a self, script: &'a str) -> Operation<'a, (CommandOutput, Option<infraternal_plugin_ssh::install::Checked>)> {
+        Box::pin(measured("check_and_retain_channel", self.inner.check_stream(script)))
+    }
+    fn setup_steps(&self) -> bool { self.inner.setup_steps() }
+    fn authentication(&self) -> Option<infraternal_plugin_ssh::auth_order::Authentication> {
+        self.inner.authentication()
+    }
+    fn trust_lookup(&self) -> Option<String> { self.inner.trust_lookup() }
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let step = match &input {
+                Input::Negotiated { .. } | Input::PayloadAndInvitation { .. } => "upload_setup",
+                Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => "upload",
                 Input::File(_) => "upload",
+                Input::Bytes(_) if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1") => "reuse_setup",
+                Input::Bytes(_) if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1") => "setup",
                 Input::Bytes(_) => "join",
                 Input::Empty if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) => {
                     "check"
@@ -39,9 +153,9 @@ impl SshSession for TimedSession {
                 Input::Empty if script.contains("enable --now") => "start",
                 Input::Empty if script.contains("enable-linger") => "linger",
                 Input::Empty if script.contains("stage/activating") => "install",
-                Input::Empty => "commit",
+                Input::Signal(_) | Input::Empty => "commit",
             };
-            if step == "upload" {
+            if matches!(step, "upload" | "upload_setup") {
                 UPLOAD_STARTED.store(true, Ordering::SeqCst);
             }
             if step == "install"
@@ -53,13 +167,34 @@ impl SshSession for TimedSession {
                     "The fixture refused its first install boundary.",
                 ));
             }
-            let file_bytes = if let Input::File(path) = &input {
+            let negotiated_sizes = if let Input::Negotiated { raw, gzip, zstd, .. } = &input {
+                Some((match raw { infraternal_plugin_ssh::transport::PayloadInput::Bytes(bytes) => bytes.len() as u64, infraternal_plugin_ssh::transport::PayloadInput::File { size, .. } => *size }, gzip.map_or(0, |bytes| bytes.len() as u64), zstd.map_or(0, |bytes| bytes.len() as u64)))
+            } else { None };
+            let mut file_bytes = if let Input::PayloadAndInvitation { payload, .. } = &input {
+                Some(match payload {
+                    infraternal_plugin_ssh::transport::PayloadInput::Bytes(bytes) => bytes.len() as u64,
+                    infraternal_plugin_ssh::transport::PayloadInput::File { size, .. } => *size,
+                })
+            } else if let Input::File(path) = &input {
                 path.metadata().ok().map(|metadata| metadata.len())
+            } else if let Input::Bytes(bytes) = &input {
+                (step == "upload").then(|| u64::try_from(bytes.len()).unwrap())
             } else {
                 None
             };
+            // Refuse activation only after the real staged enrollment has run.
+            // A compound command's outer transport receipt remains successful;
+            // its fixed FAIL receipt is classified by the production decoder.
+            let refused = (matches!(step, "setup" | "upload_setup" | "reuse_setup")
+                && std::env::var_os("BREAKIT2_RETRY").is_some()
+                && FIRST_INSTALL.swap(false, Ordering::SeqCst))
+                .then(|| script.replacen("if sh -c \"$2\"; then", "if [ \"$1\" != install ] && sh -c \"$2\"; then", 1));
             let started = Instant::now();
-            let result = self.inner.run(script, input).await;
+            let result = self.inner.run(refused.as_deref().unwrap_or(script), input).await;
+            if let (Some((raw, gzip, zstd)), Ok(output)) = (negotiated_sizes, &result) {
+                let choice = output.stdout.split_inclusive(|byte| *byte == b'\n').find_map(TransferChoice::parse);
+                file_bytes = match choice { Some(TransferChoice::Raw) => Some(raw), Some(TransferChoice::Gzip) => Some(gzip), Some(TransferChoice::Zstd) => Some(zstd), _ => None };
+            }
             if let Some(bytes) = file_bytes {
                 println!(
                     "METRIC breakit2 file_input_bytes={bytes} accepted={}",
@@ -93,7 +228,9 @@ impl SshTransport for TimedTransport {
                 "key_sign_in"
             };
             let started = Instant::now();
+            timeline(step, "start");
             let result = self.adapter.open(destination, credentials, mesh).await;
+            timeline(step, "end");
             println!(
                 "METRIC breakit2 step={step} elapsed_ms={:.3} ok={}",
                 started.elapsed().as_secs_f64() * 1000.0,
@@ -170,6 +307,15 @@ pub(super) struct ObservedBackend(
     pub(super) Option<CanaryReturnHook>,
 );
 impl Backend for ObservedBackend {
+    fn early_terminal(&self) -> bool { std::env::var_os("ADDHOST_INSTANT").is_some() && self.0.early_terminal() }
+    fn publish_terminal<'a>(&'a self, a: &'a Authority, h: Uuid, id: Uuid, channel: infraternal_plugin_ssh::duplex::Duplex, session: Arc<dyn SshSession>) -> Operation<'a, ()> {
+        Box::pin(measured("publish_terminal", self.0.publish_terminal(a, h, id, channel, session)))
+    }
+    fn authority_cancelled<'a>(&'a self, a: &'a Authority) -> Operation<'a, ()> { self.0.authority_cancelled(a) }
+    fn setup_cancelled(&self, h: Uuid) -> Operation<'_, ()> { self.0.setup_cancelled(h) }
+    fn reissue_invitation<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, JoinMaterial> { self.0.reissue_invitation(a,h) }
+    fn stop(&self) -> Operation<'_, ()> { self.0.stop() }
+
     fn record_failure(&self, t: &Target, h: Option<Uuid>, p: Step, f: &Failure) {
         self.0.record_failure(t, h, p, f);
     }
@@ -244,7 +390,7 @@ impl Backend for ObservedBackend {
             );
             let session = result.map_err(|_| unavailable())?;
             self.0.attempts.lock().unwrap().get_mut(&h).unwrap().canary =
-                Some((actor.clone(), session));
+                Some((actor.clone(), session, [2, 4]));
             let output = tokio::time::timeout(
                 Duration::from_secs(10),
                 diagnostic_canary_output(&actor, session),
@@ -256,7 +402,7 @@ impl Backend for ObservedBackend {
                 self.0.attempts.lock().unwrap().get_mut(&h).unwrap().canary = None;
                 println!("DIAG breakit2 canary_cleanup_ok=true primary_exit=true");
             } else {
-                let cleanup = finish_canary(&actor, session).await;
+                let cleanup = finish_canary(&actor, session, 4).await;
                 println!("DIAG breakit2 canary_cleanup_ok={}", cleanup.is_ok());
             }
             output
@@ -272,7 +418,11 @@ impl Backend for ObservedBackend {
         Box::pin(measured("authority_retirement", self.0.failed(a, h)))
     }
     fn completed<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, ()> {
-        Box::pin(measured("authority_commit", self.0.completed(a, h)))
+        Box::pin(async move {
+            measured("authority_commit", self.0.completed(a, h)).await?;
+            *FULLY_JOINED.lock().unwrap() = Some(Instant::now());
+            Ok(())
+        })
     }
 }
 
@@ -382,7 +532,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         .read_to_end(&mut private)
         .unwrap();
     assert!(private.len() <= 24576);
-    let mut f = fixture(true).await;
+    let (_directory, mut f) = live_fixture(&scratch).await;
     let (identity, material) =
         crate::remote_runtime::tests::server_material_for_name("addhost-breakit2.test");
     let source: Arc<dyn CaKeySource> = Arc::new(Signer(Some(material.clone())));
@@ -425,18 +575,15 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         &identity.key.private_key_to_der().unwrap(),
     )
     .unwrap();
-    let server = tokio::spawn(
-        axum_server::bind_openssl(std::net::SocketAddr::new(controller_ip, 4929), http_tls)
-            .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
-    );
     f.backend = Arc::new(RemoteBackend {
         base: PendingRemoteRuntime {
             auth: Some(auth.clone()),
             key: Arc::new(crate::ssh_key::UnavailableSshKey),
         },
-        issuer: InvitationIssuer::new(auth, f.pool.clone(), store, service),
+        issuer: InvitationIssuer::new(auth.clone(), f.pool.clone(), store, service),
         hosts,
         attempts: Mutex::default(),
+        sessions_changed: Mutex::default(),
     });
     let retry_private = std::env::var_os("BREAKIT2_RETRY").map(|_| private.clone());
     let transport = Arc::new(FixtureTransport {
@@ -448,12 +595,15 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                 ssh_keyscan: "/usr/bin/ssh-keyscan".into(),
                 ssh_keygen: "/usr/bin/ssh-keygen".into(),
                 askpass_binary: binary.clone(),
+                tcp_connector: Some(binary.clone()),
                 scratch: scratch.clone(),
                 command_timeout: Duration::from_secs(30),
             },
         }),
         private: Mutex::new(Some(Secret::new(private))),
     });
+    let binaries = BinaryPaths { x86_64: binary.clone(), aarch64: binary.clone() };
+    let session_image = std::env::var_os("INFRATERNAL_REMOTE_TEST_SESSION_BINARY").map(PathBuf::from);
     let runner = Bootstrap::new(
         transport.clone(),
         Arc::new(ObservedBackend(f.backend.clone(), None, None)),
@@ -461,7 +611,22 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
             x86_64: binary.clone(),
             aarch64: binary,
         },
+    ).with_payload_source(fixture_payload_source(binaries, session_image));
+    let prepared = Instant::now();
+    runner.prepare_payloads().await;
+    println!("METRIC payload_prepare startup_ms={:.3}", prepared.elapsed().as_secs_f64() * 1000.0);
+    if std::env::var_os("ADDHOST_BROWSER_TIMELINE").is_some() {
+        browser::run(&f, auth, runner, http, http_tls, controller_ip, &address).await;
+        drop(listeners);
+        return;
+    }
+    let server = tokio::spawn(
+        axum_server::bind(std::net::SocketAddr::new(controller_ip, 4929))
+        .acceptor(enrollment_acceptor(http_tls))
+        .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
     );
+    let started = Instant::now();
+    *FULLY_JOINED.lock().unwrap() = None;
     let batch = runner
         .start_authenticated(
             "owner".into(),
@@ -542,6 +707,40 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                         failure.failed_step, failure.exit_status
                     );
                 }
+                if event.step == Step::Done && std::env::var_os("ADDHOST_INSTANT").is_some() {
+                    assert!(event.session_id.is_some(), "instant acceptance requires a published shim, never a legacy completion");
+                }
+                if event.step == Step::Done && let (Some(host), Some(session)) = (event.host_id, event.session_id) {
+                    // Persist the native fixture's writer exactly as a browser
+                    // would, so private readiness shares its real allocator.
+                    let connection = Uuid::new_v4();
+                    sqlx::query("INSERT INTO websocket_connections(connection_id,token_hash,user_id,created_at,active) VALUES(?,?,'owner',unixepoch(),1)")
+                        .bind(connection.as_bytes().as_slice()).bind([0_u8;32].as_slice()).execute(&f.pool).await.unwrap();
+                    sqlx::query("INSERT INTO terminal_writers(connection_id,client_stream,session_id) VALUES(?,1,?)")
+                        .bind(connection.as_bytes().as_slice()).bind(session.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+                    let actor = f.backend.hosts.actor(host).await.unwrap();
+                    let terminal = instant::EarlyTerminal::attach(&actor, session, started).await;
+                    // Once the published shim is interactive, closing the wizard
+                    // must leave the same bounded background setup alive.
+                    drop(batch);
+                    let status = runner.setup_status();
+                    let mut setup_changed = status.subscribe("owner", host).unwrap();
+                    loop {
+                        let events = status.events("owner", host, 0).unwrap().1;
+                        if let Some(failure) = events.iter().find(|event| event.state == infraternal_plugin_ssh::setup::State::Failed) {
+                            panic!("published setup failed at {:?}", failure.stage);
+                        }
+                        if events.iter().any(|event| event.stage == infraternal_plugin_ssh::setup::Stage::Ready && event.state == infraternal_plugin_ssh::setup::State::Done) { break; }
+                        setup_changed.changed().await.unwrap();
+                    }
+                    let joined = FULLY_JOINED.lock().unwrap().unwrap();
+                    println!("METRIC addhost_instant fully_joined_ms={:.3}", joined.duration_since(started).as_secs_f64() * 1000.0);
+                    assert!(f.backend.hosts.installed(host).await);
+                    terminal.after_handover().await;
+                    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions WHERE remote_host_id=?")
+                        .bind(host.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+                    assert_eq!(sessions, 1, "handover cannot create another public shell");
+                }
                 return event.step;
             }
             changed.changed().await.unwrap();
@@ -568,4 +767,33 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     } else {
         assert_eq!(result, Step::Done, "real SSH bootstrap did not complete");
     }
+}
+
+/// Observe only whether the test fixture reaches the intended fixed failure step.
+struct RetryObservation(std::sync::atomic::AtomicBool);
+impl SshSession for RetryObservation {
+    fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            self.0.store(script.contains("if [ \"$1\" != install ] && sh -c"), Ordering::SeqCst);
+            Ok(CommandOutput { stdout: b"STEP join\nSTEP install\nFAIL install 1\n".to_vec() })
+        })
+    }
+}
+
+#[tokio::test]
+async fn compound_retry_fixture_reaches_install_boundary() {
+    // Environment changes belong to a fresh child, never to concurrent tests.
+    if std::env::var_os("ADDHOST_FAST_RETRY_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["bootstrap_runtime::remote_backend::tests::breakit2_live::compound_retry_fixture_reaches_install_boundary", "--exact"])
+            .env("ADDHOST_FAST_RETRY_CHILD", "1")
+            .env("BREAKIT2_RETRY", "1")
+            .output().unwrap();
+        assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("running 1 test"), "compound retry fixture did not inject at install");
+        return;
+    }
+    let observation = Arc::new(RetryObservation(std::sync::atomic::AtomicBool::new(false)));
+    let session = TimedSession { inner: observation.clone() };
+    session.run("# INFRATERNAL_SETUP_STEPS_V1\nif sh -c \"$2\"; then :; fi\n", Input::Bytes(b"public-fixture")).await.unwrap();
+    assert!(observation.0.load(Ordering::SeqCst));
 }

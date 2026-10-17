@@ -107,6 +107,7 @@ impl Revocations {
 #[derive(Clone)]
 pub(crate) struct AuthorityGuard {
     store: EnrollmentStore,
+    provisioning_owner: Option<String>,
     pub(crate) identity: HostAuthority,
     signal: Arc<Revocation>,
     certificate: Arc<watch::Sender<Admission>>,
@@ -154,6 +155,7 @@ impl AuthorityGuard {
             .min(initial_deadline);
         Ok(Self {
             store,
+            provisioning_owner: None,
             certificate: Arc::new(
                 watch::channel(Admission {
                     fingerprint,
@@ -165,6 +167,60 @@ impl AuthorityGuard {
             identity,
             signal,
         })
+    }
+
+    /// SSH publication is admitted by exact pending host ownership, never by
+    /// a fabricated certificate. Only the trusted bootstrap backend calls this.
+    #[cfg(feature = "ssh")]
+    pub(crate) async fn provisioning(
+        store: EnrollmentStore,
+        owner: &str,
+        host: Uuid,
+        uid: u32,
+    ) -> io::Result<Self> {
+        let row: Option<(String, i64)> = sqlx::query_as("SELECT mode,execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
+            .bind(host.as_bytes().as_slice()).bind(owner).fetch_optional(&store.0).await.map_err(|_| denied())?;
+        let (mode, execution_uid) = row.ok_or_else(denied)?;
+        if execution_uid != i64::from(uid) {
+            return Err(denied());
+        }
+        let mode = match mode.as_str() {
+            "rootful" => crate::enrollment::Mode::Rootful,
+            "rootless" => crate::enrollment::Mode::Rootless,
+            _ => return Err(denied()),
+        };
+        let identity = HostAuthority {
+            host,
+            mode,
+            execution_uid: uid,
+            not_after: 0,
+        };
+        let signal = store.1.register(host)?;
+        if *signal.changed.borrow() {
+            return Err(denied());
+        }
+        Ok(Self {
+            store,
+            provisioning_owner: Some(owner.to_owned()),
+            signal,
+            certificate: Arc::new(
+                watch::channel(Admission {
+                    // This slot is never read as certificate authority on SSH.
+                    fingerprint: [0; 32],
+                    identity: identity.clone(),
+                    // A failed setup must keep its shell usable. Worker admission has
+                    // its separate 180-second bound; the retained transport uses
+                    // the browser lifetime ceiling and immediate host revocation.
+                    expires: Instant::now() + Duration::from_hours(30 * 24),
+                })
+                .0,
+            ),
+            identity,
+        })
+    }
+
+    pub(crate) fn installed(&self) -> bool {
+        self.provisioning_owner.is_none()
     }
 
     pub(crate) fn permits(&self) -> bool {
@@ -244,6 +300,16 @@ impl AuthorityGuard {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?;
         let now = i64::try_from(now.as_secs()).map_err(io::Error::other)?;
+        if let Some(owner) = &self.provisioning_owner {
+            let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND execution_uid=? AND revoked_at IS NULL)")
+                .bind(self.identity.host.as_bytes().as_slice()).bind(owner).bind(i64::from(self.identity.execution_uid))
+                .fetch_one(&self.store.0).await.map_err(|_| denied())?;
+            return if live && self.permits() {
+                Ok(())
+            } else {
+                Err(denied())
+            };
+        }
         let admitted = self.certificate.borrow().clone();
         let live = tokio::time::timeout(
             Duration::from_secs(5),
@@ -277,5 +343,45 @@ mod cut_tests {
         revocations.tombstoned(host);
         drop(reconnect);
         assert!(revocations.cuts.lock().unwrap().is_empty());
+    }
+    #[cfg(feature = "ssh")]
+    #[tokio::test]
+    async fn provisional_ssh_authority_requires_exact_pending_owner_and_uid() {
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        assert!(
+            AuthorityGuard::provisioning(store.clone(), "owner", host, 1002)
+                .await
+                .is_err()
+        );
+        sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            AuthorityGuard::provisioning(store.clone(), "foreign", host, 1002)
+                .await
+                .is_err()
+        );
+        assert!(
+            AuthorityGuard::provisioning(store.clone(), "owner", host, 0)
+                .await
+                .is_err()
+        );
+        let guard = AuthorityGuard::provisioning(store.clone(), "owner", host, 1002)
+            .await
+            .unwrap();
+        assert!(!guard.installed());
+        assert!(guard.permits());
+        guard.admit_operation().await.unwrap();
+        store.revoke("owner", host, 2_000_000_000).await.unwrap();
+        assert!(!guard.permits());
+        assert!(guard.admit_operation().await.is_err());
+        guard.cancelled().await;
+        assert!(
+            AuthorityGuard::provisioning(store, "owner", host, 1002)
+                .await
+                .is_err()
+        );
     }
 }

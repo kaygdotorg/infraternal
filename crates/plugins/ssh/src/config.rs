@@ -12,6 +12,19 @@ pub struct PublicSshConfiguration {
     alias: Option<String>,
 }
 impl PublicSshConfiguration {
+    /// The descriptor helper implements default routing only. Let native SSH
+    /// apply source/interface and family restrictions before contacting a host.
+    #[must_use]
+    pub(crate) fn permits_connector(&self) -> bool {
+        self.options
+            .iter()
+            .all(|(name, value)| match name.as_str() {
+                "bindaddress" | "bindinterface" => value == "none",
+                "addressfamily" => value == "any",
+                _ => true,
+            })
+    }
+
     /// Parse only the bounded output of trusted system OpenSSH's configuration query.
     /// # Errors
     /// Invalid endpoints, proxy hops, duplicated policy and control bytes refuse parsing.

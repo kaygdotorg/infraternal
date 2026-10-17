@@ -26,7 +26,7 @@ pub enum ExecutionMode {
 
 /// Descriptors compiled into this infraternal agent binary, for server-side authorization.
 #[must_use]
-pub fn descriptors() -> &'static [&'static PluginDescriptor] {
+pub const fn descriptors() -> &'static [&'static PluginDescriptor] {
     DESCRIPTORS
 }
 
@@ -45,7 +45,10 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
         feature = "remote",
         all(feature = "mesh", target_os = "linux")
     )),
-    allow(clippy::unnecessary_wraps)
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "Keep the fallible registry API identical when every optional component is compiled out."
+    )
 )]
 pub(crate) fn registry_at(
     mode: ExecutionMode,

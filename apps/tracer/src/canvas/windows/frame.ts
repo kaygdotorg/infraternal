@@ -104,7 +104,7 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   }, { signal });
   // The pill moves the window, and a press that does not move opens the details popover (#127). A pointer opens on release
   // (the press is then known not to be a drag); Enter or Space on the focused pill is a click with no pointer (detail 0).
-  pill.addEventListener("click", (e) => { e.preventDefault(); if (e.detail === 0 && camera.lod !== "thumb") cx.details?.toggle(rec, "keyboard"); }, { signal });
+  pill.addEventListener("click", (e) => { e.preventDefault(); if (e.detail === 0 && camera.lod !== "thumb" && !rec.setup?.handlePill("keyboard")) cx.details?.toggle(rec, "keyboard"); }, { signal });
   pill.style.touchAction = "none";
   pill.dataset.grab = "";
   let press: { id: number; x: number; y: number; timer: number; touch: boolean } | undefined;
@@ -126,7 +126,8 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
     if (!press || e.pointerId !== press.id) return;
     window.clearTimeout(press.timer);
     press = undefined;
-    if (e.type === "pointerup") cx.details?.toggle(rec, "pointer");
+    // A failed setup explains itself in the pill first; the details are one press further.
+    if (e.type === "pointerup" && !rec.setup?.handlePill("pointer")) cx.details?.toggle(rec, "pointer");
   };
   pill.addEventListener("pointerup", release, { signal });
   pill.addEventListener("pointercancel", release, { signal });

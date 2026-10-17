@@ -3,7 +3,8 @@
 
 Stable releases use the workspace `x.y.z` version in `Cargo.toml`. Edge releases
 use `edge-YYYYMMDDTHHMMSSZ`, stamped from UTC at build time [226]. The public bucket
-contains `releases/<version>/infraternal-{x86_64,aarch64}-musl`, the server
+contains `releases/<version>/infraternal-{x86_64,aarch64}-musl`, the initial-shell
+`infraternal-{x86_64,aarch64}-session-musl` images, the server
 `infraternal` copy, `VERSION`, `SHA256SUMS`, `SHA256SUMS.sig`, `releases/index.json`, and `releases/channels/<channel>.json`.
 The release-signer Worker hashes R2 objects itself, signs the manifest and adds
 the index entry and channel pointer. The pipeline never holds the signing private key [224]. The signed `VERSION`
@@ -23,7 +24,12 @@ scripts/release/build --channel edge
 
 This reuses `scripts/package-release`, `.cargo/musl-{cc,ar}.sh` and
 `scripts/auth-toolchain` (checksum-pinned Zig 0.15.2 [213]). It produces the
-complete immutable bundle in `$CARGO_TARGET_DIR/releases/<version>`.
+complete immutable bundle in `$CARGO_TARGET_DIR/releases/<version>`. New
+publication requires both host images and both session images before network
+work begins. Every image is uploaded and included in the signer-generated
+checksums. Public verification still accepts older signed releases without
+session images; an advertised session image must be present and match its
+signed digest.
 The build requires `--channel`; there is no default. Use `--channel stable`
 for the workspace version. Both architecture binaries and signed `VERSION`
 carry the same stamped identity.

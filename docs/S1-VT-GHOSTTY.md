@@ -53,6 +53,21 @@ API; returned resize errors permanently retire the handle and reconstruct at
 the last good size as documented in the third-review section below. Independent
 review of that boundary is still required; these measurements are implementation evidence.
 
+Release packaging follows the stripped final executable (D243, #189): only
+`ReleaseFast` sets the native root module's `strip` flag. Native panic messages
+and termination remain; raw-address stack fallback and external-symbol lookup
+are unavailable in that build. Debug and `ReleaseSafe` keep their diagnostics.
+This does not change frame-pointer settings, unwind-table settings, parser
+checks, or Rust's `panic = "unwind"` task containment (D5).
+
+The `session-image` feature selects a callback-free archive for executable
+images, including the full CLI's session-payload fallback. It omits native
+logging configuration exports and their unused formatters; it never reports
+successful callback configuration while dropping callbacks. Ordinary archives retain the upstream logging exports
+and behavior. Both modes use the same pinned terminal engine and Rust
+initialization/resize error handling; mode and adapter source enter the native
+cache key.
+
 `native/snapshot.zig` reads Ghostty's actual screen/page/cell state. It streams
 VT into the caller's bounded buffer and does not use the built-in terminal
 formatter, clone history, or maintain a second terminal-state engine. It uses

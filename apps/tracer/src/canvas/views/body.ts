@@ -11,6 +11,11 @@ import { onDemand } from "../../on-demand";
 /** True for kinds whose window is a terminal session: the only kind that can split or take input. */
 export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal" && !rec.model.noAccess;
 
+/** Policy for the view's terminal-exit callback, extracted so clean exits can be tested without a browser canvas. */
+export function shouldCloseWindowAfterExit(status: number, setupPending: boolean): boolean {
+  return status === 0 && !setupPending;
+}
+
 export function makeBody(cx: Ctx, rec: WinRec): void {
   const m = rec.model;
   const body = rec.card.body;
@@ -35,7 +40,8 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       // A session id the window just learned (a new shell was created on the server): the inventory knows it is open.
       if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session } : undefined);
     }, exited: (status) => {
-      if (status === 0) cx.win.close(rec);
+      const setupPending = rec.setup?.isPending() ?? false;
+      if (shouldCloseWindowAfterExit(status, setupPending)) cx.win.close(rec);
     }, refused: (message) => cx.sessionUi?.refused(rec, message) ?? false });
     rec.binding = binding;
     if (binding.connected === false) rec.card.setStatus("connecting");

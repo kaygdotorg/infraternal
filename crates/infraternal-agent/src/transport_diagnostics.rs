@@ -56,7 +56,7 @@ fn report(kind: &str, timings: &mut [u128], baseline: u64, retained: u64, cpu: u
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
-async fn delayed_copy(
+pub(crate) async fn delayed_copy(
     mut reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin,
 ) -> io::Result<()> {

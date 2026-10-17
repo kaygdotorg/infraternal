@@ -169,7 +169,15 @@ async fn control_precedes_bulk_without_reordering_snapshot_notice() {
     assert!(control.try_send(Message::Pong(0, 456, 0)).is_ok());
     let (written, mut frames) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
+        writer(
+            &Capture(written),
+            bulk_rx,
+            Some(control_rx),
+            false,
+            false,
+            0,
+        )
+        .await
     });
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
         .await
@@ -291,7 +299,15 @@ async fn census_and_open_result_share_fifo_order() {
     reply(&control, Message::Result(0, 1, true, b"{}".to_vec())).unwrap();
     let (written, mut frames) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        writer(&Capture(written), bulk_rx, Some(control_rx), false, false).await
+        writer(
+            &Capture(written),
+            bulk_rx,
+            Some(control_rx),
+            false,
+            false,
+            0,
+        )
+        .await
     });
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
         .await

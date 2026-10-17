@@ -102,6 +102,28 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
             Effect::Read,
         ),
         action(
+            "ssh.setup-watch",
+            "Read a host's remaining setup steps",
+            &[
+                "Select the host and its existing terminal window.",
+                "Read retained setup stages, then follow live updates.",
+            ],
+            "ssh.setup-watch",
+            "ssh.setup-event",
+            Effect::Read,
+        ),
+        action(
+            "ssh.setup-retry",
+            "Retry remaining setup steps",
+            &[
+                "Select a host with failed setup steps.",
+                "Retry with current owner access; keep its existing terminal session.",
+            ],
+            "ssh.setup-retry",
+            "ssh.setup-event",
+            Effect::Write,
+        ),
+        action(
             "ssh.up",
             "Turn on SSH host provisioning",
             &["Choose an existing node.", "Turn on its SSH component."],
@@ -132,10 +154,16 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
             Effect::Read,
         ),
     ],
-    events: &[EventDef {
-        id: "ssh.progress",
-        schema: SchemaRef("ssh.event"),
-    }],
+    events: &[
+        EventDef {
+            id: "ssh.progress",
+            schema: SchemaRef("ssh.event"),
+        },
+        EventDef {
+            id: "ssh.setup",
+            schema: SchemaRef("ssh.setup-event"),
+        },
+    ],
     streams: &[StreamDef {
         id: "ssh.progress",
         schema: SchemaRef("ssh.event"),
