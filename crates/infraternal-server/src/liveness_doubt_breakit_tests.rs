@@ -2,6 +2,7 @@
 //! the branch and drives the shipped code until the claim fails.
 use super::*;
 use crate::liveness::Liveness;
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -259,4 +260,39 @@ async fn doubt_and_retire_times_per_rtt() {
             silent.elapsed().as_millis()
         );
     }
+}
+
+/// Claim (P3-2): "a full window is told on a later tick". A window whose
+/// queue is full when the doubt begins still gets `LinkDoubt` once it has
+/// room, and then its recovery; a window never told gets no recovery.
+#[tokio::test(start_paused = true)]
+async fn a_window_full_at_doubt_start_is_told_on_a_later_tick() {
+    let (full_tx, mut full_rx) = mpsc::channel(1);
+    full_tx
+        .try_send(TerminalOutput::Ack { in_seq_acked: 0 })
+        .unwrap();
+    let (free_tx, mut free_rx) = mpsc::channel(4);
+    let attachments = HashMap::from([(1, attachment(full_tx)), (2, attachment(free_tx))]);
+    let mut route = Liveness::host_link();
+    settle(&mut route, Duration::from_millis(1), 10).await;
+    let (nonce, stamp) = route.ping();
+    let mut doubted = Vec::new();
+    while !route.doubtful() {
+        tokio::time::advance(crate::liveness::TICK).await;
+        report_doubt(&mut route, &mut doubted, &attachments);
+    }
+    assert!(matches!(free_rx.try_recv(), Ok(TerminalOutput::LinkDoubt)));
+    assert_eq!(doubted, vec![2], "the full window is not told yet");
+    // The full window drains; the next tick of the same episode tells it.
+    assert!(matches!(full_rx.try_recv(), Ok(TerminalOutput::Ack { .. })));
+    tokio::time::advance(crate::liveness::TICK).await;
+    report_doubt(&mut route, &mut doubted, &attachments);
+    assert!(matches!(full_rx.try_recv(), Ok(TerminalOutput::LinkDoubt)));
+    assert!(free_rx.try_recv().is_err(), "a told window is told once");
+    // The reply clears doubt; both told windows get their recovery.
+    assert!(route.pong(nonce, stamp));
+    report_doubt(&mut route, &mut doubted, &attachments);
+    assert!(matches!(full_rx.try_recv(), Ok(TerminalOutput::Recovered)));
+    assert!(matches!(free_rx.try_recv(), Ok(TerminalOutput::Recovered)));
+    assert!(doubted.is_empty());
 }

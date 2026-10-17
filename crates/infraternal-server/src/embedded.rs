@@ -997,11 +997,7 @@ async fn run_actor(
                 let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
                 // One miss may be a single lost packet held behind retransmission:
                 // the windows show reconnecting and the link stays [D300].
-                if liveness.doubt_started() {
-                    notify_doubt(false, &mut doubted, &attachments);
-                } else if !liveness.doubtful() && !doubted.is_empty() {
-                    notify_doubt(true, &mut doubted, &attachments);
-                }
+                report_doubt(&mut liveness, &mut doubted, &attachments);
                 if (liveness.retired() || !probe_ok
                     || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
                     && let Some(old) = connection.take() {
@@ -2637,6 +2633,22 @@ fn connection_lost(
 fn fresh_host_lease(liveness: &mut Liveness, doubted: &mut Vec<u64>) {
     *liveness = Liveness::host_link();
     doubted.clear();
+}
+
+/// One tick of doubt reporting for the primary host link [D300]. Every tick of
+/// a doubt episode offers the notice again, so a window whose queue was full
+/// when the episode began is told once it has room (it is skipped while it is
+/// already in `doubted`). The recovery side retries the same way [#234].
+fn report_doubt(
+    liveness: &mut Liveness,
+    doubted: &mut Vec<u64>,
+    attachments: &HashMap<u64, AttachmentState>,
+) {
+    if liveness.doubt_started() || liveness.doubtful() {
+        notify_doubt(false, doubted, attachments);
+    } else if !doubted.is_empty() {
+        notify_doubt(true, doubted, attachments);
+    }
 }
 
 /// Tells settled windows that the shared host link is doubtful, or that it
