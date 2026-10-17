@@ -1,0 +1,112 @@
+//! Break-it review of host-uninstall kernel retirement: `Node::retire` must remove only what this installation made (#235).
+//!
+//! Run as root inside a disposable network namespace (a container with
+//! `CAP_NET_ADMIN`). Each test builds its own fixture interface and state dir.
+#![cfg(all(feature = "agent", target_os = "linux"))]
+#![allow(clippy::unwrap_used)]
+
+use infraternal_plugin_mesh::node::Node;
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn ip(args: &[&str]) -> bool {
+    Command::new("ip").args(args).status().unwrap().success()
+}
+fn link_present() -> bool {
+    ip(&["link", "show", "infraternal0"])
+}
+fn fresh_state(name: &str) -> PathBuf {
+    let directory = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    directory
+}
+fn cleanup(directory: &Path) {
+    let _ = ip(&["link", "delete", "infraternal0"]);
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", "infraternal_mesh"])
+        .status();
+    let _ = fs::remove_dir_all(directory);
+}
+
+/// The server machine also joins its own mesh through its embedded infraternal
+/// agent (D239), with the same fixed interface name and the same component
+/// marker. A bootstrap installation on that machine whose state never recorded
+/// a mesh node did not make that interface; its uninstall must leave it, or
+/// removing the host cuts the server off its own mesh.
+#[test]
+#[ignore = "Run as root in a disposable network namespace."]
+fn retire_leaves_a_marked_interface_this_installation_never_recorded() {
+    let state = fresh_state("retire-unrecorded");
+    assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
+    assert!(ip(&[
+        "link",
+        "set",
+        "infraternal0",
+        "alias",
+        "infraternal.mesh.v1"
+    ]));
+    let result = Node::retire(&state);
+    let survived = link_present();
+    cleanup(&state);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        survived,
+        "uninstall deleted a mesh interface its installation never recorded"
+    );
+}
+
+/// An interface with our name but without our marker is not ours. Leaving it
+/// is correct; refusing the whole uninstall over it is not, because the helper
+/// calls this after the service is already disabled and stopped, so a refusal
+/// leaves an offline, still-installed host the server has already forgotten.
+#[test]
+#[ignore = "Run as root in a disposable network namespace."]
+fn retire_leaves_a_foreign_interface_without_failing_the_uninstall() {
+    let state = fresh_state("retire-foreign");
+    assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
+    let result = Node::retire(&state);
+    let survived = link_present();
+    cleanup(&state);
+    assert!(survived, "retire deleted an unmarked interface");
+    assert!(
+        result.is_ok(),
+        "a foreign interface aborted the uninstall after the service stopped: {result:?}"
+    );
+}
+
+/// Ownership of every object is decided before any is deleted: a foreign
+/// packet-filter table must not leave the uninstall half done, with our
+/// interface already gone and the files kept.
+#[test]
+#[ignore = "Run as root in a disposable network namespace with nft."]
+fn retire_checks_every_object_before_deleting_any() {
+    let state = fresh_state("retire-partial");
+    assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
+    assert!(ip(&[
+        "link",
+        "set",
+        "infraternal0",
+        "alias",
+        "infraternal.mesh.v1"
+    ]));
+    assert!(
+        Command::new("nft")
+            .args(["add", "table", "inet", "infraternal_mesh"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let result = Node::retire(&state);
+    let survived = link_present();
+    cleanup(&state);
+    assert!(
+        result.is_ok() || survived,
+        "retire deleted the interface, then refused the foreign table: half-done uninstall"
+    );
+}
