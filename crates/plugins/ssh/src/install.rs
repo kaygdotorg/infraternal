@@ -127,50 +127,53 @@ impl Installation {
     /// Upload with a per-attempt lock; the caller retains this handle even on failure.
     /// # Errors
     /// Reports binary, ownership, concurrent install or upload failure.
-    pub async fn stage(&self, binary: &Path) -> Result<(), Failure> {
-        let digest = binary_digest(binary)
-            .await
-            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
-        let query = format!(
-            "{PAYLOAD_CACHE}\nvalidate_cache\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then printf 'reuse\\n'; fi",
-            shell_quote(&digest)
-        );
-        let cached = self
-            .session
-            .run(&self.script(&query), Input::Empty)
-            .await
-            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
-        let reuse = match cached.stdout.as_slice() {
-            b"reuse\n" => true,
-            b"" => false,
-            _ => {
-                return Err(Failure::install("The payload reuse response was invalid.")
-                    .at(InstallStep::Upload));
-            }
-        };
-        let transfer = if reuse {
-            "ln \"$cache/payload\" \"$stage/payload\""
-        } else {
-            "cat > \"$stage/payload\""
-        };
-        let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
-        let runtime = r#"
+    pub fn stage<'a>(&'a self, binary: &'a Path) -> crate::transport::Operation<'a, ()> {
+        // Keep upload's temporary state outside the enclosing setup poller [243].
+        Box::pin(async move {
+            let digest = binary_digest(binary)
+                .await
+                .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+            let query = format!(
+                "{PAYLOAD_CACHE}\nvalidate_cache\nif [ -f \"$cache/payload\" ] && printf '%s  %s\\n' {} \"$cache/payload\" | sha256sum -c - >/dev/null 2>&1; then printf 'reuse\\n'; fi",
+                shell_quote(&digest)
+            );
+            let cached = self
+                .session
+                .run(&self.script(&query), Input::Empty)
+                .await
+                .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+            let reuse = match cached.stdout.as_slice() {
+                b"reuse\n" => true,
+                b"" => false,
+                _ => {
+                    return Err(Failure::install("The payload reuse response was invalid.")
+                        .at(InstallStep::Upload));
+                }
+            };
+            let transfer = if reuse {
+                "ln \"$cache/payload\" \"$stage/payload\""
+            } else {
+                "cat > \"$stage/payload\""
+            };
+            let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
+            let runtime = r#"
 if [ "$kind" = fresh ]; then handoff_setup_lease "$stage/payload" yes; fi
 "#;
-        let body = format!(
-            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{runtime}",
-            shell_quote(&digest)
-        );
-        let input = if reuse {
-            Input::Empty
-        } else {
-            Input::File(binary)
-        };
-        self.session
-            .run(&self.script(&body), input)
-            .await
-            .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
-        Ok(())
+            let body = format!(
+                "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{runtime}",
+                shell_quote(&digest)
+            );
+            let input = if reuse {
+                Input::Empty
+            } else {
+                Input::File(binary)
+            };
+            self.session
+                .run(&self.script(&body), input)
+                .await
+                .map_err(|error| error.at(InstallStep::Upload).in_mode(self.mode))?;
+            Ok(())
+        })
     }
 
     /// Publish only the trusted executable cache when legacy recovery needs a newer helper.
@@ -764,23 +767,25 @@ finish_fresh() {
 }
 "#;
 
-async fn binary_digest(path: &Path) -> Result<String, Failure> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| Failure::install("The matching static infraternal binary is unavailable."))?;
-    let mut digest = Sha256::new();
-    let mut bytes = vec![0; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut bytes)
-            .await
-            .map_err(|_| Failure::install("The static infraternal binary could not be read."))?;
-        if count == 0 {
-            break;
+fn binary_digest(path: &Path) -> crate::transport::Operation<'_, String> {
+    // Upload and earlier-cache recovery share the same bounded hash poller [243].
+    Box::pin(async move {
+        let mut file = tokio::fs::File::open(path).await.map_err(|_| {
+            Failure::install("The matching static infraternal binary is unavailable.")
+        })?;
+        let mut digest = Sha256::new();
+        let mut bytes = vec![0; 64 * 1024];
+        loop {
+            let count = file.read(&mut bytes).await.map_err(|_| {
+                Failure::install("The static infraternal binary could not be read.")
+            })?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&bytes[..count]);
         }
-        digest.update(&bytes[..count]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
+        Ok(format!("{:x}", digest.finalize()))
+    })
 }
 
 /// Decode only the fixed public policy receipt; remote diagnostics never become logs.
