@@ -758,6 +758,11 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                                 println!("RETRY timeout=published_setup stage={:?} failed_step={:?} network_restored=true", failure.stage, failure.failed_step);
                                 retried_attempt = Some(failure.attempt);
                                 published_retry = true;
+                                // A retry re-authenticates when its saved route is gone;
+                                // hand the fixture key over again, as the batch retry does.
+                                if let Some(private) = retry_private.take() {
+                                    *transport.private.lock().unwrap() = Some(Secret::new(private));
+                                }
                                 runner.retry_setup("owner".into(), Secret::new(f.cookie.as_bytes().to_vec()), host).unwrap();
                                 continue;
                             }
