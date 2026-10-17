@@ -266,10 +266,7 @@ impl AgentPlugin for UninstallPlugin {
             (self.kernel.inspect)(&self.context.sessions).map_err(|_| PluginError::Rejected)?;
         if request.dry_run {
             return Ok(ActionReply {
-                json: serde_json::to_vec(
-                    &serde_json::json!({"state":"ready","owned":true,"left":left}),
-                )
-                .map_err(|_| PluginError::Rejected)?,
+                json: reply(r#"{"state":"ready","owned":true,"left":["#, &left),
                 after_write: None,
             });
         }
@@ -320,13 +317,27 @@ impl AgentPlugin for UninstallPlugin {
         }
         let mut handoff = handoff;
         Ok(ActionReply {
-            json: serde_json::to_vec(
-                &serde_json::json!({"state":"accepted","cleanup":"pending","left":left}),
-            )
-            .map_err(|_| PluginError::Rejected)?,
+            json: reply(r#"{"state":"accepted","cleanup":"pending","left":["#, &left),
             after_write: Some(Box::new(move || handoff.arm())),
         })
     }
+}
+/// A reply object ending in the names of kernel objects left in place.
+///
+/// The names are fixed identifiers from the kernel hooks (no quotes or
+/// escapes), so they are written directly rather than through a JSON value.
+fn reply(head: &str, left: &[&str]) -> Vec<u8> {
+    let mut json = head.as_bytes().to_vec();
+    for (index, name) in left.iter().enumerate() {
+        if index > 0 {
+            json.push(b',');
+        }
+        json.push(b'"');
+        json.extend(name.bytes().filter(|byte| *byte != b'"' && *byte != b'\\'));
+        json.push(b'"');
+    }
+    json.extend(b"]}");
+    json
 }
 /// Run the transient-unit launcher to completion within a bound.
 ///
@@ -934,6 +945,18 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert!(intact && matches);
+    }
+    #[test]
+    fn replies_name_the_objects_left_as_valid_json() {
+        let json = reply(
+            r#"{"state":"accepted","left":["#,
+            &["infraternal0", "the IFM_* iptables chains"],
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({"state":"accepted","left":["infraternal0","the IFM_* iptables chains"]})
+        );
+        assert_eq!(reply(r#"{"left":["#, &[]), br#"{"left":[]}"#);
     }
     #[test]
     fn uninstall_never_accepts_request_selected_paths_or_foreign_identity() {
