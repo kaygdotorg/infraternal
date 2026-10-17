@@ -612,26 +612,10 @@ async fn run_socket(
                     Inbound::TransportPing(payload) => {
                         if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
-                    Inbound::SocketClose { .. } | Inbound::Failure(_) => {
-                        let end = transport.end_reason();
-                        let socket_close = transport.socket_close();
-                        let who = if end == crate::websocket_transport::EndReason::ClientWentAway {
-                            CloseWho::Browser
-                        } else {
-                            CloseWho::Server
-                        };
-                        record_socket_close(
-                            &state,
-                            &attachments,
-                            who,
-                            end.close_reason(),
-                            socket_close.code,
-                            socket_close.reason,
-                        );
-                        close_already_logged = true;
-                        loop_result = Err(());
-                        break;
-                    }
+                    // The transport's read task consumes socket ends and receive
+                    // failures itself (it retires the context, logged above); only
+                    // frames reach this queue.
+                    Inbound::SocketClose { .. } | Inbound::Failure(_) => {}
                     Inbound::Frame(wire) => {
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
