@@ -905,6 +905,14 @@ mod tests {
         ));
     }
 
+    mod already_added_breakit {
+        //! Break-it review of the already-added host id (#189).
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bootstrap_already_added_breakit_tests.rs"
+        ));
+    }
+
     mod retirement_contention {
         //! A separate SQLite writer can outlive the connection's busy timeout.
         include!(concat!(
