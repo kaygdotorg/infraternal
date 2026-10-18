@@ -1,7 +1,7 @@
 /**
  * The product canvas: the canvas on real sessions. After sign-in the screen shows the Console view, whose windows
  * are terminal sessions on the embedded host or admitted remote hosts, several at once over the one
- * WebSocket. The layout persists through the store adapter (local storage until the server sync of #98).
+ * WebSocket. The server owns the shared layout; the browser caches it for first draw (D245, D248).
  *
  * Only real things are offered: the Console view, and the Settings view with the sections that exist today
  * (appearance, toolbar, shortcuts, about). Containers, sharing and add-host appear when their adapters do.
@@ -27,7 +27,8 @@ import { createCanvas, type CanvasController } from "./create";
 import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
-import { LocalCanvasStore } from "./model/store";
+import { ServerCanvasStore } from "./model/server-store";
+import { reconcile } from "./model/reconcile";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createLazyMeshApi } from "./mesh/lazy";
 import { connectionTransport } from "./mesh/transport";
@@ -120,7 +121,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       }
     }
   });
-  const store = new LocalCanvasStore(options.accountId);
+  const store = new ServerCanvasStore(connection, options.accountId, () => { if (!disposed) core.toast.show({ message: "Layout changes are waiting to sync. Reconnect to try again.", tone: "error", duration: 5000 }); });
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: embedded, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
@@ -178,16 +179,14 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const canvas = createCanvas(core, {
     adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority },
     float: false,
-    persisted: (id) => id === "console" || id === "mesh",
+    persisted: (id) => id !== "settings",
   });
   canvasReady = () => canvas.cx.win.setHostIdentity({ host: embedded.name }, { ...(embedded.os ? { os: embedded.os } : {}), ...(embedded.user ? { user: embedded.user } : {}) });
   // Remote hosts: every open window of a host takes what the list says, whenever the list says it.
   const applyIdentities = (hosts: readonly { id: string; name: string; user?: string; os?: HostPlatform }[]): void => {
     for (const h of hosts) canvas.cx.win.setHostIdentity({ host: h.name, hostId: h.id }, { ...(h.os ? { os: h.os } : {}), user: h.user });
   };
-  canvas.setViews((m) => {
-    const doc = saved?.views.find((v) => v.id === "console");
-    const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
+  const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
       if (target.type !== "session") return undefined;
       if (target.hostId) {
         sessions.registerHost({ id: target.hostId, name: target.host, ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) });
@@ -196,14 +195,34 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       // Historical documents represent only the embedded host. Unknown labels are never rebound locally.
       return target.host === options.host.name ? { host: options.host.name, sessionId: target.id, ...(target.name ? { session: target.name } : {}), ...(embedded.user ? { user: embedded.user } : {}), ...(embedded.os ? { os: embedded.os } : {}) } : undefined;
     };
+  canvas.setViews((m) => {
+    const doc = saved?.views.find((v) => v.id === "console");
     let cols = doc && doc.layout.type === "tiled" ? columnsFromDocument(doc.layout, m, resolve) : [];
     // First run, or nothing left to restore: one new shell.
-    if (!cols.length) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
+    if (!doc && !saved) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
     const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: 0, y: 0 };
     const settings = buildSettingsView(false, m, BUILTIN_SECTIONS);
     settings.x = boxOf(console_, m).w + CELL;
-    return [console_, settings];
+    const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh" && v.layout.type === "tiled").map((v): ViewModel => ({
+      id: v.id, name: v.name, layout: "tiled", cols: v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : [], nodes: [], x: v.cell.x * CELL, y: v.cell.y * CELL,
+    }));
+    return [console_, ...recovered, settings];
   });
+  // Capture initial structure once; subsequent server paints reset the comparison baseline.
+  if (saved) canvas.cx.store.reset(); else canvas.cx.store.changed();
+  let paintRevision = 0;
+  const offLayout = store.subscribe(() => {
+    // Journal any completed local edit before another device's update can replace its presentation.
+    canvas.flush();
+    const document = store.current();
+    const revision = ++paintRevision;
+    void reconcile(canvas.cx, document, resolve, () => !disposed && revision === paintRevision).then(() => {
+      if (disposed || revision !== paintRevision) return;
+      canvas.cx.store.reset();
+      inventory.setLayout(document);
+    });
+  });
+  if (saved) inventory.setLayout(saved);
   // The Mesh view follows the server's answer (D187).
   const offMeshView = offerMeshView(canvas.cx, mesh, { keep: Boolean(savedMesh) });
   canvas.cx.nav.flyView("console", true);
@@ -230,6 +249,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     canvas, sessions, connection,
     dispose() {
       canvas.flush();
+      offLayout();
       offRoundTrip();
       disposed = true;
       offHosts?.();
