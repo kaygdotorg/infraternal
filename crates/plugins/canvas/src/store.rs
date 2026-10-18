@@ -102,7 +102,9 @@ impl Store {
                 .await?
                 .into_iter()
                 .collect();
+        let before = document.clone();
         reduce(&mut document, &request.intent, &closed)?;
+        let noop = document == before;
         // Existing references were checked when admitted. Rechecking them on
         // unrelated edits would freeze the layout after an ended session is reaped.
         if let Intent::Open { window, .. } | Intent::Split { window, .. } = &request.intent {
@@ -124,7 +126,7 @@ impl Store {
         if !document.valid() {
             return Err(Error);
         }
-        let event = json!({"type":"canvas.layout.operation","revision":document.revision,"op_id":request.op_id,"intent":request.intent});
+        let event = json!({"type":"canvas.layout.operation","revision":document.revision,"op_id":request.op_id,"intent":request.intent,"noop":noop});
         save(
             &mut tx,
             account,

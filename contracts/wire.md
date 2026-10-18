@@ -581,8 +581,10 @@ withdraws its subscriptions and cancels its workers. It needs an existing server
 
 `Subscribe {"topic":"canvas.layout"}` sends
 `{"type":"canvas.layout.snapshot","revision":N,"initialized":true|false,"document":DOC}`
-then ordered `{"type":"canvas.layout.operation","revision":N,"op_id":ID,"intent":INTENT}`
-events, using the requested subscription ID. DOC is exactly the v1
+then ordered `{"type":"canvas.layout.operation","revision":N,"op_id":ID,"intent":INTENT,"noop":false}`
+events, using the requested subscription ID. When `noop:true`, advance the
+revision without applying the intent; a reconnect snapshot need not carry
+historical close tombstones. DOC is exactly the v1
 `infraternal.canvas` document (`apps/tracer/src/canvas/model/document.ts`), with
 its revision set to N. Cameras, focus, terminal content and credentials are
 excluded. Reconnect resubscribes and receives a fresh canonical snapshot.
