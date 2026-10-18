@@ -438,6 +438,9 @@ export class MuxConnection {
     };
     socket.onerror = () => {
       if (this.socket !== socket || this.closed) return;
+      // A browser reports a socket that failed at the network as `error` and then `close` 1006 with no reason. Retiring
+      // the socket here makes the later close event ignored, so the console line must be written now (#227).
+      this.noteClose(1006, "");
       this.disconnect(socket);
       socket.close();
     };
