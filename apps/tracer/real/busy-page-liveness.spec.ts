@@ -29,7 +29,9 @@ async function enrol(page: Page, origin: string, token: string): Promise<void> {
 }
 
 test("busy page preserves healthy routes and idle silence still retires", async ({ page }, info) => {
-  test.setTimeout(12 * 60_000);
+  test.skip(process.env.BUSY_PAGE_DEAD_BUSY === "1", "separate stopped-route workload");
+  test.skip(process.env.BUSY_PAGE_RESTORE_INPUT === "1", "separate restore-input workload");
+  test.setTimeout(20 * 60_000);
   const rtt = Number(process.env.BUSY_PAGE_RTT ?? 150);
   const server = await startRealServer({ latencyMs: rtt / 2 });
   try {
@@ -79,7 +81,7 @@ test("busy page preserves healthy routes and idle silence still retires", async 
         await cdp.send("Tracing.start", { categories: "toplevel,devtools.timeline", transferMode: "ReportEvents" });
       }
       await cdp.send("Emulation.setCPUThrottlingRate", { rate: 6 });
-      await page.evaluate(() => {
+      const restoredIds = await page.evaluate(() => {
         const account = localStorage.getItem("tracer.user-id");
         const key = `infraternal.canvas.${account}`;
         const doc = JSON.parse(localStorage.getItem(key) ?? "null") as CanvasDocument | null;
@@ -94,12 +96,34 @@ test("busy page preserves healthy routes and idle silence still retires", async 
         const save = () => localStorage.setItem(key, JSON.stringify(doc));
         save();
         window.addEventListener("pagehide", save, { once: true });
+        return windows.map((window) => window.id);
       });
       await page.reload();
       const scaleStart = await page.evaluate(() => performance.now());
       await expect(windows).toHaveCount(65, { timeout: 60_000 });
+      expect(await windows.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.windowId))).toEqual(restoredIds);
       await page.keyboard.press("Escape");
-      await page.waitForTimeout(60_000);
+      if (process.env.BUSY_PAGE_PRINTING === "1") {
+        await expect(page.locator('.cl[data-view="console"] .ui-window[data-status="live"]')).toHaveCount(65, { timeout: 60_000 });
+        // Real shell output continues across the observation window. The fixture
+        // ends these private sessions on disposal, even if an assertion fails.
+        for (let printer = 0; printer < 3; printer++) {
+          await windows.nth(printer).evaluate((node) => {
+            node.dispatchEvent(new PointerEvent("pointerdown"));
+            node.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+          });
+          await expect(windows.nth(printer)).toHaveAttribute("data-active", "");
+          await page.keyboard.insertText(`for review_tick in $(seq 1 900); do printf 'REVIEW_LINE_${printer}_%s\\n' "$review_tick"; seq 1 100; sleep 1; done`);
+          await page.keyboard.press("Enter");
+          await expect.poll(() => server.bridges.flatMap((bridge) => [...bridge.output.values()]).some((output) => output.includes(`REVIEW_LINE_${printer}_1`)), { timeout: 15_000 }).toBe(true);
+          await page.waitForTimeout(500);
+        }
+        await page.waitForTimeout(3000);
+        const printers = server.bridges.flatMap((bridge) => [...bridge.output.values()]).filter((output) => (output.match(/REVIEW_LINE_\d+_\d+/g) ?? []).length >= 3).length;
+        console.log(`BUSY_PAGE printers ${JSON.stringify({ printers })}`);
+        expect(printers).toBe(3);
+      }
+      await page.waitForTimeout(Number(process.env.BUSY_PAGE_OBSERVE_MS ?? 60_000));
       if (process.env.BUSY_PAGE_TRACE === "1") {
         const done = new Promise<void>((resolve) => cdp.once("Tracing.tracingComplete", () => resolve()));
         await cdp.send("Tracing.end");
@@ -140,6 +164,92 @@ test("busy page preserves healthy routes and idle silence still retires", async 
       const reconnecting = receipt.reconnecting.find((at) => at >= start);
       console.log(`BUSY_PAGE dead_link ${JSON.stringify({ rtt, trial, reconnectingMs: reconnecting === undefined ? null : reconnecting - start, retiredMs: retired.at - start, load: loadavg() })}`);
     }
+  } finally {
+    await page.close();
+    await server.dispose();
+  }
+});
+
+test("typing into a restored terminal stays with that terminal while others initialize", async ({ page }, info) => {
+  test.skip(process.env.BUSY_PAGE_RESTORE_INPUT !== "1", "explicit restore-input workload only");
+  const server = await startRealServer({ latencyMs: 75 });
+  try {
+    await enrol(page, server.origin, server.token);
+    const windows = page.locator('.cl[data-view="console"] .ui-window');
+    for (let index = 1; index < 8; index++) {
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:split:down", source: "pointer" } })));
+      await expect(windows).toHaveCount(index + 1);
+      await page.waitForTimeout(250);
+    }
+    await expect(page.locator('.cl[data-view="console"] .ui-window[data-status="live"]')).toHaveCount(8);
+    // Widen the scheduling gap between zero-delay tasks. Input tasks can arrive
+    // between renderer initializations in an ordinary busy browser too; this
+    // makes that interleaving deterministic without changing the production code.
+    await page.addInitScript(() => {
+      const schedule = window.setTimeout.bind(window);
+      let next = 0;
+      window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (timeout === 0) { next = Math.max(next, performance.now()) + 150; return schedule(handler, next - performance.now(), ...args); }
+        return schedule(handler, timeout, ...args);
+      }) as typeof window.setTimeout;
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    const input = page.locator('.cl[data-view="console"] .terminal-host textarea').first();
+    await input.waitFor({ state: "attached" });
+    const initializing = await page.locator('.cl[data-view="console"] .terminal-host textarea').count();
+    expect(initializing).toBeGreaterThan(0);
+    await input.focus();
+    const chosen = await input.evaluate((node) => node.closest<HTMLElement>(".ui-window")?.dataset.windowId);
+    await page.keyboard.type("echo restore-$((6*7))\n", { delay: 35 });
+    const result = () => server.bridges.flatMap((bridge) => [...bridge.output.values()]).filter((output) => output.includes("restore-42")).length;
+    await page.waitForTimeout(3000);
+    console.log(`BUSY_PAGE restore_input ${JSON.stringify({ initializing, chosen, executed: result(), focused: await page.evaluate(() => document.activeElement?.closest<HTMLElement>(".ui-window")?.dataset.windowId) })}`);
+    await page.screenshot({ path: info.outputPath("restore-input.png") });
+    expect(result()).toBe(1);
+  } finally {
+    await page.close();
+    await server.dispose();
+  }
+});
+
+test("repeated busy tasks do not keep a stopped route live", async ({ page }, info) => {
+  test.skip(process.env.BUSY_PAGE_DEAD_BUSY !== "1", "explicit stopped-route workload only");
+  const server = await startRealServer({ latencyMs: 75 });
+  try {
+    await page.addInitScript(() => {
+      const closes: Array<{ code: number; reason: string }> = [];
+      (window as unknown as { reviewCloses: typeof closes }).reviewCloses = closes;
+      const close = WebSocket.prototype.close;
+      WebSocket.prototype.close = function (code?: number, reason?: string) {
+        closes.push({ code: code ?? 0, reason: reason ?? "" });
+        return close.call(this, code, reason);
+      };
+    });
+    await enrol(page, server.origin, server.token);
+    const terminal = page.locator('.cl[data-view="console"] .ui-window').first();
+    await expect(terminal).toHaveAttribute("data-status", "live");
+    await page.waitForTimeout(3000);
+    await terminal.locator(".terminal-host textarea").focus();
+    server.retainBrowserRoutes();
+    await server.restart(async () => {
+      // Input issued on the retained, now silent route must stay buffered and
+      // activate the existing fast-probe cadence while the page still runs tasks.
+      await page.keyboard.type("x");
+      await page.evaluate(() => {
+        const until = performance.now() + 6500;
+        const spin = () => {
+          const end = performance.now() + 75;
+          while (performance.now() < end) { /* prescribed busy-page workload */ }
+          if (performance.now() < until) setTimeout(spin, 0);
+        };
+        setTimeout(spin, 0);
+      });
+      await page.waitForTimeout(6000);
+      const closes = await page.evaluate(() => (window as unknown as { reviewCloses: Array<{ code: number; reason: string }> }).reviewCloses);
+      console.log(`BUSY_PAGE stopped_busy ${JSON.stringify({ closes, status: await terminal.getAttribute("data-status"), load: loadavg() })}`);
+      await page.screenshot({ path: info.outputPath("stopped-busy.png") });
+      expect(closes.some((close) => close.code === 4000 && close.reason === "connection unresponsive")).toBe(true);
+    });
   } finally {
     await page.close();
     await server.dispose();
