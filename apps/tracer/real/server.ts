@@ -80,6 +80,14 @@ export interface RealServer {
   dispose(): Promise<void>;
 }
 
+/** Content-free timing of the fixture TLS bridge, separate from production server work. */
+export interface DesktopStage {
+  stage: "fixture_receive" | "fixture_send_begin" | "fixture_send_end";
+  at: number;
+  sequence: string;
+  captureNs: string;
+  bytes: number;
+}
 const text = new TextDecoder();
 
 /**
@@ -90,6 +98,8 @@ export async function startRealServer(options: {
   latencyMs?: number;
   /** Record public control timestamps only for an explicitly enabled VM measurement. */
   timedControls?: boolean;
+  /** Explicit native-window measurement only; bootstrap messages never enter it. */
+  onDesktopStage?: (receipt: DesktopStage) => void;
   /** The bridge does not decode or keep the server's output (benchmarks with busy terminals). */
   lean?: boolean;
   address?: string;
@@ -207,6 +217,7 @@ export async function startRealServer(options: {
       if (protocol) bridges.push(bridge);
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
+      const desktopDecoder = options.onDesktopStage && protocol ? new WebSocketFrameDecoder() : undefined;
       const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
       browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
@@ -231,7 +242,15 @@ export async function startRealServer(options: {
       });
       upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
       upstream.on("message", (data, binary) => {
+        const receivedAt = desktopDecoder ? performance.timeOrigin + performance.now() : 0;
         const bytes = Buffer.from(data as Buffer);
+        const desktop: Omit<DesktopStage, "stage" | "at">[] | undefined = desktopDecoder ? [] : undefined;
+        if (desktopDecoder && binary && desktop) desktopDecoder.feed(new Uint8Array(bytes), (_stream, frame) => {
+          if (frame.type !== "Desktop" || frame.message.kind !== "video" || desktop.length === 128) return;
+          const video = frame.message;
+          const identity = { sequence: video.sequence.toString(), captureNs: video.captureNs.toString(), bytes: video.bytes.length };
+          desktop.push(identity); options.onDesktopStage?.({ ...identity, stage: "fixture_receive", at: receivedAt });
+        });
         if (!lean && protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") {
@@ -267,7 +286,17 @@ export async function startRealServer(options: {
           }
           if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId });
         });
-        later(() => { if (!bridge.closed && browser.readyState === WebSocket.OPEN) browser.send(bytes, { binary }); });
+        later(() => {
+          if (bridge.closed || browser.readyState !== WebSocket.OPEN) return;
+          if (!desktop?.length) { browser.send(bytes, { binary }); return; }
+          const began = performance.timeOrigin + performance.now();
+          for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_begin", at: began });
+          browser.send(bytes, { binary }, (error) => {
+            if (error) return;
+            const ended = performance.timeOrigin + performance.now();
+            for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_end", at: ended });
+          });
+        });
       });
       const eraseQueue = (): void => { for (const entry of queued.splice(0)) entry.bytes.fill(0); };
       upstream.on("close", (code, reason) => {
