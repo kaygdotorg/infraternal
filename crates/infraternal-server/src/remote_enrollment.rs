@@ -35,7 +35,8 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
     }
 
     fn signer(&self) -> Result<CertificateAuthority, RemoteEnrollmentError> {
-        CertificateAuthority::from_source(self.source.as_ref()).map_err(|_| RemoteEnrollmentError)
+        let material = self.source.load().map_err(|_| refused("signer_load"))?;
+        CertificateAuthority::from_material(material).map_err(|_| refused("signer_material"))
     }
 
     /// Preflight public authority before CSR/signing; send DER only after atomic commit.
