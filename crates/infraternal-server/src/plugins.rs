@@ -933,10 +933,6 @@ pub(crate) async fn compiled_with_hosts(
     #[cfg(feature = "remote")] hosts: crate::remote_runtime::RemoteHosts,
 ) -> Result<PluginRuntime, PluginError> {
     let plugins: Vec<Arc<dyn Plugin>> = vec![
-        #[cfg(feature = "canvas")]
-        Arc::new(infraternal_plugin_canvas::socket::CanvasPlugin(Arc::new(
-            crate::canvas_store::Store::new(pool.clone()),
-        ))),
         #[cfg(feature = "mesh")]
         Arc::new(infraternal_plugin_mesh::MeshPlugin::new(pool.clone())),
         #[cfg(feature = "release")]
@@ -948,6 +944,11 @@ pub(crate) async fn compiled_with_hosts(
                 hosts,
             }),
         )),
+        // Append features so existing discovery positions remain stable.
+        #[cfg(feature = "canvas")]
+        Arc::new(infraternal_plugin_canvas::socket::CanvasPlugin(Arc::new(
+            crate::canvas_store::Store::new(pool.clone()),
+        ))),
     ];
     PluginRuntime::new(plugins, "server")
         .with_store(pool.clone())
