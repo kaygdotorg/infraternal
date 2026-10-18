@@ -1,116 +1,270 @@
-//! Formats public Mesh node records for human operators; the generic CLI never knows Mesh fields [16,198,202].
-use infraternal_plugin_api::PluginError;
+//! Presents public Mesh node records for people and for the JSON envelope; the generic CLI never knows Mesh fields [16,198,202], #239.
+use infraternal_plugin_api::{
+    PluginError,
+    present::{Presented, Tone, age, bytes, pairs, table},
+};
 use serde_json::Value;
-use std::fmt::Write;
 
-pub(crate) fn format(action: &str, output: &[u8]) -> Result<String, PluginError> {
+pub(crate) fn present(action: &str, output: &[u8], width: usize) -> Result<Presented, PluginError> {
     let value: Value = serde_json::from_slice(output).map_err(|_| PluginError::Rejected)?;
     match action {
-        "mesh.status" => status(&value),
-        "mesh.peers" => peers(&value),
+        "mesh.status" => status(value, width),
+        "mesh.peers" => peers(&value, width),
         _ => Err(PluginError::UnknownAction),
     }
 }
-fn status(value: &Value) -> Result<String, PluginError> {
+
+fn plural(count: u64, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     let state = value["state"].as_str().ok_or(PluginError::Rejected)?;
-    let next = match state {
-        "Off" => "Run infraternal mesh up to start the component.",
-        "Waiting" => "Connect this infraternal agent to its enrolled server.",
-        "Stopping" => "Run infraternal mesh down again to finish cleanup.",
-        "On" => "Run infraternal mesh peers to inspect direct paths.",
+    let count = value["peer_count"].as_u64().ok_or(PluginError::Rejected)?;
+    let (tone, message, next) = match state {
+        "Off" => (
+            Tone::Idle,
+            "Mesh is off on this machine.".to_owned(),
+            vec!["infraternal mesh up"],
+        ),
+        "Waiting" => (
+            Tone::Attention,
+            "Mesh is on, waiting for this machine to reach its server.".to_owned(),
+            vec!["infraternal status"],
+        ),
+        "Stopping" => (
+            Tone::Attention,
+            "Mesh is shutting down.".to_owned(),
+            vec!["infraternal mesh down"],
+        ),
+        "On" => (
+            Tone::Good,
+            format!("Mesh is on. {}.", plural(count, "peer", "peers")),
+            // Only offer the list when it has something in it.
+            if count > 0 {
+                vec!["infraternal mesh peers"]
+            } else {
+                Vec::new()
+            },
+        ),
         _ => return Err(PluginError::Rejected),
     };
-    let mut text = format!(
-        "Mesh\n  State    {state}\n  Peers    {}",
-        value["peer_count"].as_u64().ok_or(PluginError::Rejected)?
-    );
-    if let Some(version) = value["version"].as_u64() {
-        write!(text, "\n  Version  {version}").map_err(|_| PluginError::Rejected)?;
-    }
-    if let Some(policy) = value["default_policy"].as_str() {
-        if !matches!(policy, "Allow" | "Deny") {
-            return Err(PluginError::Rejected);
-        }
-        write!(text, "\n  Default  {policy}").map_err(|_| PluginError::Rejected)?;
-    }
+    let mut rows: Vec<(&str, String)> = Vec::new();
     if let Some(address) = value["addresses"]["ipv4"].as_str() {
         let address: std::net::Ipv4Addr = address.parse().map_err(|_| PluginError::Rejected)?;
-        write!(text, "\n  IPv4     {address}").map_err(|_| PluginError::Rejected)?;
+        rows.push(("Address", address.to_string()));
     }
     if let Some(address) = value["addresses"]["ipv6"].as_str() {
         let address: std::net::Ipv6Addr = address.parse().map_err(|_| PluginError::Rejected)?;
-        write!(text, "\n  IPv6     {address}").map_err(|_| PluginError::Rejected)?;
+        rows.push(("Address", address.to_string()));
+    }
+    if let Some(policy) = value["default_policy"].as_str() {
+        rows.push((
+            "Access",
+            match policy {
+                "Allow" => "everyone may reach everyone, unless a rule says otherwise",
+                "Deny" => "nothing is reachable unless a rule allows it",
+                _ => return Err(PluginError::Rejected),
+            }
+            .to_owned(),
+        ));
     }
     if let Some(link) = value.get("server_link") {
         use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
         let link: ServerLink =
             serde_json::from_value(link.clone()).map_err(|_| PluginError::Rejected)?;
         let kind = match link.kind {
-            ServerLinkKind::Disconnected => "Disconnected",
-            ServerLinkKind::Local => "Local",
-            ServerLinkKind::Fallback => "Fallback (enrolled port)",
-            ServerLinkKind::Mesh => "Mesh",
+            ServerLinkKind::Disconnected => "not connected",
+            ServerLinkKind::Local => "this machine is the server",
+            ServerLinkKind::Fallback => "over the enrolled port",
+            ServerLinkKind::Mesh => "over the mesh",
         };
         let reason = match link.reason {
-            ServerLinkReason::Connecting => "Connecting to the enrolled server.",
-            ServerLinkReason::Local => "Server on this node.",
-            ServerLinkReason::MeshUnavailable => "Mesh path unavailable.",
-            ServerLinkReason::MeshProven => "Authenticated mesh path proven.",
-            ServerLinkReason::MeshRefused => "Mesh path refused; retrying.",
-            ServerLinkReason::MeshInterrupted => "Mesh path interrupted.",
-            ServerLinkReason::MeshDisabled => "Mesh path withdrawn.",
+            ServerLinkReason::Connecting => "connecting to the enrolled server",
+            ServerLinkReason::Local => "the server runs on this machine",
+            ServerLinkReason::MeshUnavailable => "the mesh path is not available",
+            ServerLinkReason::MeshProven => "the mesh path is proven",
+            ServerLinkReason::MeshRefused => "the mesh path was refused, retrying",
+            ServerLinkReason::MeshInterrupted => "the mesh path was interrupted",
+            ServerLinkReason::MeshDisabled => "the mesh path was withdrawn",
         };
-        write!(text, "\n  Server   {kind}\n  Reason   {reason}")
-            .map_err(|_| PluginError::Rejected)?;
+        rows.push(("Server", format!("{kind}; {reason}")));
         if let Some(endpoint) = link.endpoint {
-            write!(text, "\n  Link     {endpoint}").map_err(|_| PluginError::Rejected)?;
+            rows.push(("Link", endpoint.to_string()));
         }
     }
-    write!(text, "\n  Next     {next}").map_err(|_| PluginError::Rejected)?;
-    Ok(text)
+    if let Some(version) = value["version"].as_u64() {
+        rows.push(("Rules", format!("version {version}")));
+    }
+    Ok(Presented {
+        tone,
+        message,
+        body: pairs(&rows, 0, width),
+        next: next.into_iter().map(str::to_owned).collect(),
+        data: value,
+    })
 }
-fn peers(value: &Value) -> Result<String, PluginError> {
-    let mut text = format!(
-        "Mesh peers\n  {:>8}  {:<15}  {:<47}  {:<10}  {:>12}  {:>12}",
-        "Node", "Address", "Endpoint", "Path", "RX bytes", "TX bytes"
-    );
-    for row in value["peers"].as_array().ok_or(PluginError::Rejected)? {
-        let node = row["node"].as_u64().ok_or(PluginError::Rejected)?;
-        let address: std::net::Ipv4Addr = row["peer"]["addresses"]["ipv4"]
-            .as_str()
-            .ok_or(PluginError::Rejected)?
-            .parse()
-            .map_err(|_| PluginError::Rejected)?;
-        let endpoint = row["peer"]["endpoint"]
-            .as_str()
-            .map(|endpoint| {
-                endpoint
-                    .parse::<std::net::SocketAddr>()
-                    .map(|endpoint| endpoint.to_string())
-            })
-            .transpose()
-            .map_err(|_| PluginError::Rejected)?
-            .unwrap_or_else(|| "Unlearned".into());
-        let path = row["path"].as_str().ok_or(PluginError::Rejected)?;
-        if !matches!(path, "Direct" | "Unproven") {
-            return Err(PluginError::Rejected);
+
+/// Standard base64 of a 32-byte public key; the JSON form of a key is text, never a byte array.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |n, (i, byte)| n | (u32::from(*byte) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
         }
-        let received = row["counters"]["received_bytes"]
-            .as_u64()
-            .ok_or(PluginError::Rejected)?;
-        let sent = row["counters"]["sent_bytes"]
-            .as_u64()
-            .ok_or(PluginError::Rejected)?;
-        write!(
-            text,
-            "\n  {node:>8}  {address:<15}  {endpoint:<47}  {path:<10}  {received:>12}  {sent:>12}"
-        )
+    }
+    out
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn peers(value: &Value, width: usize) -> Result<Presented, PluginError> {
+    peers_at(value, width, now_secs())
+}
+
+/// One peer as a table row, a JSON record, and, when it has no direct path yet, its label and address.
+struct PeerView {
+    cells: Vec<String>,
+    record: Value,
+    waiting: Option<(String, String)>,
+}
+
+fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
+    let node = row["node"].as_u64().ok_or(PluginError::Rejected)?;
+    let address: std::net::Ipv4Addr = row["peer"]["addresses"]["ipv4"]
+        .as_str()
+        .ok_or(PluginError::Rejected)?
+        .parse()
         .map_err(|_| PluginError::Rejected)?;
+    let endpoint = row["peer"]["endpoint"]
+        .as_str()
+        .map(str::parse::<std::net::SocketAddr>)
+        .transpose()
+        .map_err(|_| PluginError::Rejected)?;
+    let direct = match row["path"].as_str() {
+        Some("Direct") => true,
+        Some("Unproven") => false,
+        _ => return Err(PluginError::Rejected),
+    };
+    let received = row["counters"]["received_bytes"]
+        .as_u64()
+        .ok_or(PluginError::Rejected)?;
+    let sent = row["counters"]["sent_bytes"]
+        .as_u64()
+        .ok_or(PluginError::Rejected)?;
+    // The kernel reports the time of the last handshake; people want its age.
+    let ago = row["counters"]["handshake_secs"]
+        .as_u64()
+        .filter(|secs| *secs > 0)
+        .map(|secs| now.saturating_sub(secs));
+    let key: Vec<u8> = row["peer"]["key"]
+        .as_array()
+        .ok_or(PluginError::Rejected)?
+        .iter()
+        .map(|byte| byte.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+        .collect::<Option<_>>()
+        .ok_or(PluginError::Rejected)?;
+    // The server will send machine names once the mesh configuration carries them; until
+    // then a peer is known by its mesh address.
+    let name = row["peer"]["name"].as_str().map(str::to_owned);
+    let label = name.clone().unwrap_or_else(|| address.to_string());
+    let mut record = serde_json::json!({
+        "node": node,
+        "address": address.to_string(),
+        "path": if direct { "direct" } else { "unproven" },
+        "key": base64(&key),
+        "received_bytes": received,
+        "sent_bytes": sent,
+    });
+    if let Some(name) = name {
+        record["name"] = name.into();
     }
-    if value["next_cursor"].is_null() {
-        text.push_str("\n\n  Next  Send traffic to establish an unproven direct path.");
+    if let Some(endpoint) = endpoint {
+        record["endpoint"] = endpoint.to_string().into();
     }
-    Ok(text)
+    if let Some(ago) = ago {
+        record["last_handshake_secs_ago"] = ago.into();
+    }
+    Ok(PeerView {
+        cells: vec![
+            label.clone(),
+            if direct { "direct" } else { "none yet" }.to_owned(),
+            bytes(received),
+            bytes(sent),
+            ago.map_or_else(|| "never".to_owned(), age),
+            endpoint.map_or_else(String::new, |endpoint| endpoint.to_string()),
+        ],
+        record,
+        waiting: (!direct).then(|| (label, address.to_string())),
+    })
+}
+
+/// The peers page as people and scripts read it. `now` is the wall clock in seconds, so tests can fix it.
+fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginError> {
+    let mut rows = Vec::new();
+    let mut records = Vec::new();
+    let mut waiting = Vec::new();
+    for row in value["peers"].as_array().ok_or(PluginError::Rejected)? {
+        let view = peer_view(row, now)?;
+        rows.push(view.cells);
+        records.push(view.record);
+        waiting.extend(view.waiting);
+    }
+    let more = !value["next_cursor"].is_null();
+    let count = records.len() as u64;
+    let message = if count == 0 {
+        "No other machines are on the mesh.".to_owned()
+    } else if waiting.is_empty() {
+        format!(
+            "{}, all direct.",
+            plural(count, "peer on the mesh", "peers on the mesh")
+        )
+    } else {
+        format!(
+            "{}, {} without a direct path yet.",
+            plural(count, "peer on the mesh", "peers on the mesh"),
+            waiting.len()
+        )
+    };
+    // Only offer to set up a path when one is missing, and name the machine.
+    let next = match waiting.first() {
+        Some((label, address)) if !more => vec![format!(
+            "Send traffic to {label} to set up its direct path, for example: ping {address}"
+        )],
+        _ => Vec::new(),
+    };
+    let mut data = serde_json::json!({"peers": records});
+    for key in ["version", "next_cursor"] {
+        if !value[key].is_null() {
+            data[key] = value[key].clone();
+        }
+    }
+    Ok(Presented {
+        tone: Tone::Good,
+        message,
+        body: table(
+            &["Peer", "Path", "Received", "Sent", "Handshake", "Endpoint"],
+            &rows,
+            0,
+            width,
+            None,
+        ),
+        next,
+        data,
+    })
 }
 
 #[cfg(test)]
@@ -124,20 +278,20 @@ mod tests {
             (
                 ServerLinkKind::Mesh,
                 ServerLinkReason::MeshProven,
-                "Server   Mesh",
-                "Authenticated mesh path proven.",
+                "over the mesh",
+                "the mesh path is proven",
             ),
             (
                 ServerLinkKind::Fallback,
                 ServerLinkReason::MeshInterrupted,
-                "Server   Fallback (enrolled port)",
-                "Mesh path interrupted.",
+                "over the enrolled port",
+                "the mesh path was interrupted",
             ),
             (
                 ServerLinkKind::Fallback,
                 ServerLinkReason::MeshRefused,
-                "Server   Fallback (enrolled port)",
-                "Mesh path refused; retrying.",
+                "over the enrolled port",
+                "the mesh path was refused, retrying",
             ),
         ] {
             let link = ServerLink {
@@ -147,15 +301,73 @@ mod tests {
                 source_port: None,
             };
             let value = serde_json::json!({"state":"On","peer_count":2,"server_link":link});
-            let text = status(&value).expect("human status");
-            assert!(text.contains(label));
-            assert!(text.contains(explanation));
-            assert!(text.contains("Link     10.254.0.1:7443"));
+            let text = status(value, 100).expect("human status").body;
+            assert!(text.contains(label), "{text}");
+            assert!(text.contains(explanation), "{text}");
+            assert!(text.contains("Link    10.254.0.1:7443"), "{text}");
         }
     }
     #[test]
     fn legacy_status_remains_readable_and_invalid_link_is_refused() {
-        assert!(status(&serde_json::json!({"state":"On","peer_count":0})).is_ok());
-        assert!(status(&serde_json::json!({"state":"On","peer_count":0,"server_link":{"kind":"Mesh","reason":"MeshProven","endpoint":"invalid input"}})).is_err());
+        assert!(status(serde_json::json!({"state":"On","peer_count":0}), 80).is_ok());
+        assert!(status(serde_json::json!({"state":"On","peer_count":0,"server_link":{"kind":"Mesh","reason":"MeshProven","endpoint":"invalid input"}}), 80).is_err());
+    }
+
+    fn peer(node: u64, address: &str, handshake: u64) -> serde_json::Value {
+        serde_json::json!({
+            "node": node,
+            "peer": {"key": vec![1_u8; 32], "addresses": {"ipv4": address}, "endpoint": "10.69.69.217:47823"},
+            "inbound": {"state": "All"}, "outbound": {"state": "All"},
+            "counters": {"handshake_secs": handshake, "received_bytes": 18_056_740_u64, "sent_bytes": 19_041_052_u64},
+            "path": if handshake > 0 { "Direct" } else { "Unproven" },
+        })
+    }
+
+    #[test]
+    fn peers_show_units_ages_and_no_hint_when_every_path_is_direct() {
+        let page = serde_json::json!({"peers": [peer(3, "10.254.0.3", 988)], "version": 4, "next_cursor": null});
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
+        assert_eq!(shown.message, "1 peer on the mesh, all direct.");
+        assert_eq!(
+            shown.body,
+            "10.254.0.3  direct  18 MB  19 MB  12 s ago  10.69.69.217:47823\n"
+        );
+        assert!(shown.next.is_empty(), "{:?}", shown.next);
+        // JSON: text key, an age instead of an epoch time, raw byte counts.
+        let record = &shown.data["peers"][0];
+        assert_eq!(
+            record["key"],
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+        );
+        assert_eq!(record["last_handshake_secs_ago"], 12);
+        assert_eq!(record["received_bytes"], 18_056_740_u64);
+        assert!(record.get("counters").is_none());
+    }
+
+    #[test]
+    fn an_unproven_peer_gets_a_hint_that_names_it() {
+        let page = serde_json::json!({"peers": [peer(3, "10.254.0.3", 990), peer(4, "10.254.0.4", 0)], "next_cursor": null});
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
+        assert_eq!(
+            shown.message,
+            "2 peers on the mesh, 1 without a direct path yet."
+        );
+        assert!(shown.next[0].contains("10.254.0.4"), "{:?}", shown.next);
+        assert!(shown.body.starts_with("PEER"), "{}", shown.body);
+        assert!(shown.body.lines().all(|line| line.chars().count() <= 100));
+    }
+
+    #[test]
+    fn a_wide_table_stays_within_the_width() {
+        let mut row = peer(3, "10.254.0.3", 990);
+        row["peer"]["endpoint"] = "[2001:db8:1234:5678:9abc:def0:1234:5678]:47823".into();
+        let page =
+            serde_json::json!({"peers": [row, peer(4, "10.254.0.4", 990)], "next_cursor": null});
+        let shown = peers_at(&page, 80, 1000).expect("present peers");
+        assert!(
+            shown.body.lines().all(|line| line.chars().count() <= 80),
+            "{}",
+            shown.body
+        );
     }
 }

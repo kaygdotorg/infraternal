@@ -7,6 +7,8 @@ license.workspace = true
 
 [features]
 default = []
+# Also compile commands for components that are not built yet (hidden, D299 C5).
+placeholders = []
 socket-host = ["dep:bytes", "dep:sqlx", "dep:tokio"]
 
 [dependencies]

@@ -35,13 +35,13 @@ pub mod remote_tls;
 /// Remove one enrolled host under a purpose-bound fresh owner passkey proof.
 pub const REMOVE: ActionDef = ActionDef {
     id: "remote.host.remove",
-    summary: "Remove host",
+    summary: "Remove a host and uninstall its infraternal agent.",
     instructions: &[
-        "Select an enrolled host on the existing server.",
-        "Preview removal; it revokes host access and forgets application SSH trust.",
-        "Confirm the named host with a fresh owner passkey.",
-        "By default uninstall the owned infraternal agent through its current channel.",
-        "If the host is unreachable, remove server access and report what remains on the host.",
+        "Find the host's ID in the app and the address of your server.",
+        "Run the command to see what will happen: the host loses access and its SSH trust is forgotten.",
+        "Confirm the removal with your owner passkey, then run the command again with --finish.",
+        "By default the infraternal agent is uninstalled from the host; add --retain to keep it.",
+        "If the host cannot be reached, its access is still removed and the command says what is left on it.",
     ],
     input: SchemaRef("remote.host.remove"),
     output: SchemaRef("remote.host.removed"),
@@ -75,13 +75,13 @@ pub mod uninstall;
 /// Enroll one node; this action cannot create a server.
 pub const JOIN: ActionDef = ActionDef {
     id: "remote.host.join",
-    summary: "Enroll the infraternal agent through pinned HTTPS, then connect",
+    summary: "Enroll this machine with a server, then stay connected to it.",
     instructions: &[
-        "Obtain an invitation from an existing server.",
-        "Pass invitation material through private stdin.",
-        "Run infraternal agent join with the server enrollment URL.",
-        "For service installation use --enroll-only, then start the retained identity with infraternal agent run.",
-        "Retain the private enrolled identity for subsequent reconnects.",
+        "Get an invitation from your server in the app.",
+        "Pipe the invitation into standard input; it is never taken from the arguments.",
+        "Run infraternal agent join with the server's enrollment address.",
+        "To install a service, add --enroll-only, then start the service with infraternal agent run.",
+        "Keep the identity this saves; it is how the machine reconnects later.",
     ],
     input: SchemaRef("remote.host.join"),
     output: SchemaRef("remote.identity"),
@@ -94,11 +94,10 @@ pub const JOIN: ActionDef = ActionDef {
 /// Reconnect a node with its existing private identity.
 pub const RUN: ActionDef = ActionDef {
     id: "remote.host.run",
-    summary: "Reconnect the infraternal agent using its enrolled identity",
+    summary: "Reconnect this machine to its server. This is what its service runs.",
     instructions: &[
-        "Select the private enrolled identity directory.",
-        "Run infraternal agent run.",
-        "Keep the foreground process running; stopping it removes the connection.",
+        "Run infraternal agent run on a machine that is already enrolled.",
+        "Leave it running: while it runs the machine stays connected, and stopping it disconnects the machine.",
     ],
     input: SchemaRef("remote.identity"),
     output: SchemaRef("remote.status"),

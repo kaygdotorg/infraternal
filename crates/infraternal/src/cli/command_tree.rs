@@ -25,7 +25,8 @@ pub fn build(registry: &ActionRegistry) -> Command {
             infraternal_plugin_api::release_version::channel(infraternal_plugin_api::VERSION)
                 .unwrap_or("unknown")
         ))
-        .about("Manage infraternal servers and node components.")
+        .bin_name("infraternal")
+        .about("Run and manage infraternal on this machine.")
         .disable_help_subcommand(true)
         .arg(
             Arg::new("json")
@@ -36,7 +37,7 @@ pub fn build(registry: &ActionRegistry) -> Command {
         );
     let tree = command_tree(registry);
     for child in &tree.children {
-        root = root.subcommand(build_node(child));
+        root = root.subcommand(build_node(child, &[]));
     }
     root
 }
@@ -59,6 +60,7 @@ pub fn selected(matches: &ArgMatches) -> SelectedCommand<'_> {
 struct CommandNode<'a> {
     name: String,
     plugin_description: Option<String>,
+    group_description: Option<String>,
     action: Option<&'a ActionDefinition>,
     children: Vec<CommandNode<'a>>,
 }
@@ -73,6 +75,7 @@ impl CommandNode<'_> {
                 self.children.push(Self {
                     name: name.to_owned(),
                     plugin_description: None,
+                    group_description: None,
                     action: None,
                     children: Vec::new(),
                 });
@@ -91,12 +94,20 @@ fn command_tree(registry: &ActionRegistry) -> CommandNode<'_> {
     let mut root = CommandNode {
         name: "infraternal".to_owned(),
         plugin_description: None,
+        group_description: None,
         action: None,
         children: Vec::new(),
     };
     for plugin in registry.plugins() {
         for action in &plugin.actions {
             insert_action(&mut root, plugin, action);
+        }
+        for (path, description) in &plugin.groups {
+            let mut node = &mut root;
+            for part in path.split(' ') {
+                node = node.child_mut(part);
+            }
+            node.group_description = Some(description.clone());
         }
     }
     root
@@ -107,6 +118,11 @@ fn insert_action<'a>(
     plugin: &'a PluginDefinition,
     action: &'a ActionDefinition,
 ) {
+    // A placeholder for a component that is not built yet is neither shown nor parsed:
+    // typing it is an unknown command, like any typo (D299 C5).
+    if action.availability == infraternal_plugin_api::ActionAvailability::NotAvailableYet {
+        return;
+    }
     let Some((first, remainder)) = action.command.split_first() else {
         return;
     };
@@ -120,8 +136,12 @@ fn insert_action<'a>(
     node.action = Some(action);
 }
 
-fn build_node(node: &CommandNode<'_>) -> Command {
+/// `inherited` are the options of the ancestors that every subcommand also accepts, wherever they
+/// are typed. A subcommand that does not declare one still accepts it, but hides it from its help:
+/// listing options it ignores would invite people to pass them.
+fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
     let mut command = Command::new(node.name.clone());
+    let mut shared: Vec<Arg> = Vec::new();
     if let Some(action) = node.action {
         if action.visible {
             command = command
@@ -142,7 +162,7 @@ fn build_node(node: &CommandNode<'_>) -> Command {
                     .required
                     .iter()
                     .any(|field| field == name),
-                action.visible,
+                action.visible && !action.cli_hidden_inputs.contains(name),
             );
             if let Some(required) = action.cli_requires.get(name) {
                 argument = argument.requires(required.clone());
@@ -155,7 +175,14 @@ fn build_node(node: &CommandNode<'_>) -> Command {
                 argument = argument.long(None::<&str>).index(index + 1);
             } else if !node.children.is_empty() && !action.input_schema.required.contains(name) {
                 // Inherited server/node coordinates work before or after an operator subcommand.
-                argument = argument.global(true);
+                let mut heading = node.name.clone();
+                if let Some(first) = heading.get_mut(..1) {
+                    first.make_ascii_uppercase();
+                }
+                argument = argument
+                    .global(true)
+                    .help_heading(format!("{heading} options"));
+                shared.push(hidden_inherited_arg(&argument));
             }
             command = command.arg(argument);
         }
@@ -163,22 +190,55 @@ fn build_node(node: &CommandNode<'_>) -> Command {
             command = command.arg(
                 Arg::new("command")
                     .value_name("COMMAND")
-                    .help("Command path to print, such as `status` or `mesh up`.")
+                    .help("The command to print, such as `status` or `mesh peers`.")
                     .index(1)
                     .num_args(1..)
                     .action(ArgAction::Append),
             );
         }
-    } else if let Some(description) = &node.plugin_description {
+    } else if let Some(description) = node
+        .group_description
+        .as_ref()
+        .or(node.plugin_description.as_ref())
+    {
         command = command.about(description.clone());
     }
     if !node.has_visible_action() {
         command = command.hide(true);
     }
+    for arg in inherited {
+        if !command
+            .get_arguments()
+            .any(|own| own.get_id() == arg.get_id())
+        {
+            command = command.arg(hidden_inherited_arg(arg));
+        }
+    }
+    let mut passed: Vec<Arg> = inherited
+        .iter()
+        .filter(|arg| !shared.iter().any(|own| own.get_id() == arg.get_id()))
+        .map(hidden_inherited_arg)
+        .collect();
+    passed.extend(shared);
     for child in &node.children {
-        command = command.subcommand(build_node(child));
+        command = command.subcommand(build_node(child, &passed));
     }
     command
+}
+
+/// Descendants only need to consume an inherited switch and its value; repeating the full argument
+/// metadata at each tree level needlessly retains its clone and validation machinery in the binary.
+fn hidden_inherited_arg(argument: &Arg) -> Arg {
+    let mut hidden = Arg::new(argument.get_id().clone())
+        .action(argument.get_action().clone())
+        .hide(true);
+    if let Some(long) = argument.get_long() {
+        hidden = hidden.long(long.to_owned());
+    }
+    if let Some(short) = argument.get_short() {
+        hidden = hidden.short(short);
+    }
+    hidden
 }
 
 fn long_about(action: &ActionDefinition) -> String {
@@ -251,20 +311,141 @@ mod tests {
     use crate::cli::actions::registry;
 
     #[test]
+    fn every_command_in_the_tree_takes_json() {
+        // D299: no command is exempt, hidden internal ones included.
+        fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            if !command
+                .get_arguments()
+                .any(|argument| argument.get_id() == "json")
+            {
+                missing.push(path.to_owned());
+            }
+            for child in command.get_subcommands() {
+                walk(child, &format!("{path} {}", child.get_name()), missing);
+            }
+        }
+        let registry = registry().expect("action registry");
+        let mut root = build(&registry);
+        root.build();
+        let mut missing = Vec::new();
+        walk(&root, "infraternal", &mut missing);
+        assert!(missing.is_empty(), "commands without --json: {missing:?}");
+    }
+
+    #[test]
+    fn public_help_is_plain_words() {
+        // D299: no "plugin actions", no empty group, no internal vocabulary, one style.
+        const INTERNAL: [&str; 8] = [
+            "plugin",
+            "capability",
+            "descriptor",
+            "uid",
+            "runtime directory",
+            "stdin",
+            "described by",
+            "action json",
+        ];
+        fn words(text: &str, what: &str, problems: &mut Vec<String>) {
+            let lower = text.to_ascii_lowercase();
+            for word in INTERNAL {
+                if lower.contains(word) {
+                    problems.push(format!("{what}: internal word `{word}` in {text:?}"));
+                }
+            }
+            if !text.chars().next().is_some_and(char::is_uppercase) || !text.ends_with('.') {
+                problems.push(format!("{what}: not a capitalised sentence: {text:?}"));
+            }
+        }
+        fn walk(command: &clap::Command, path: &str, problems: &mut Vec<String>) {
+            if command.is_hide_set() {
+                return;
+            }
+            let about = command
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            if about.is_empty() {
+                problems.push(format!("{path}: no description"));
+            } else {
+                words(&about, path, problems);
+            }
+            for argument in command.get_arguments() {
+                if argument.is_hide_set()
+                    || argument.get_id() == "help"
+                    || argument.get_id() == "version"
+                {
+                    continue;
+                }
+                let help = argument
+                    .get_help()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                words(&help, &format!("{path} --{}", argument.get_id()), problems);
+            }
+            for child in command.get_subcommands() {
+                walk(child, &format!("{path} {}", child.get_name()), problems);
+            }
+        }
+        let registry = registry().expect("action registry");
+        let mut root = build(&registry);
+        root.build();
+        let mut problems = Vec::new();
+        walk(&root, "infraternal", &mut problems);
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
     fn root_help_uses_registered_descriptions_and_long_action_guidance() {
         let registry = registry().expect("action registry");
         let mut help_command = build(&registry);
         let help = help_command.render_long_help().to_string();
-        assert!(help.contains("Show this node's role and running components."));
-        assert!(help.contains("Start the configured node components."));
+        assert!(help.contains("Show what infraternal runs on this machine."));
         assert!(!help.contains("server install"));
-        let up_help = build(&registry)
-            .try_get_matches_from(["infraternal", "up", "--help"])
+        let status_help = build(&registry)
+            .try_get_matches_from(["infraternal", "status", "--help"])
             .expect_err("help is an early exit");
+        assert!(status_help.to_string().contains("Steps:"));
+    }
+
+    #[test]
+    fn root_help_lines_fit_80_columns() {
+        // The parser does not wrap help in this build, so the descriptions must be short enough.
+        let registry = registry().expect("action registry");
+        let help = build(&registry).render_help().to_string();
+        for line in help.lines() {
+            assert!(
+                line.chars().count() <= 80,
+                "{} columns: {line}",
+                line.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn unbuilt_placeholders_are_neither_shown_nor_parsed() {
+        // D299 C5: `up`, `relay`, `mesh list` and friends only say "not available yet".
+        let registry = registry().expect("action registry");
+        let help = build(&registry).render_long_help().to_string();
+        for placeholder in ["relay", "backup", "release", "host "] {
+            assert!(
+                !help.contains(&format!("\n  {placeholder}")),
+                "{placeholder}: {help}"
+            );
+        }
+        for command in [["up"], ["relay"], ["release"]] {
+            assert!(
+                build(&registry)
+                    .try_get_matches_from(std::iter::once("infraternal").chain(command))
+                    .is_err(),
+                "{command:?}"
+            );
+        }
+        // The builds that keep the declarations (feature `placeholders`) still hide them.
+        #[cfg(feature = "placeholders")]
         assert!(
-            up_help
-                .to_string()
-                .contains("Start the node components when lifecycle management is available.")
+            registry
+                .actions()
+                .any(|a| !a.action.is_public() && a.action.visible)
         );
     }
 

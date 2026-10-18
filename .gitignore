@@ -12,3 +12,7 @@ __pycache__/
 # Evidence and captures stay in job scratch and are attached to their issue.
 evidence/
 captures/
+
+# Compiled Python is build output.
+__pycache__/
+*.pyc

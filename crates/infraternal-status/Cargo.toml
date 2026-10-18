@@ -1,0 +1,15 @@
+# Reads a node's role and component states from its unit files and data directories (#237).
+[package]
+name = "infraternal-status"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+
+[lints]
+workspace = true

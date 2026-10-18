@@ -841,9 +841,17 @@ pub fn configure_logging(json: bool) {
     if json {
         let _ = formatter.json().with_ansi(false).try_init();
     } else {
-        let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        let color = logging_color(
+            std::io::stderr().is_terminal(),
+            std::env::var_os("NO_COLOR"),
+        );
         let _ = formatter.with_ansi(color).try_init();
     }
+}
+
+/// Only a non-empty `NO_COLOR` value disables ANSI in terminal logs.
+fn logging_color(terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
+    terminal && no_color.is_none_or(|value| value.is_empty())
 }
 
 async fn health(State(pool): State<SqlitePool>) -> Response {
@@ -1016,12 +1024,12 @@ mod tests {
     //! Verifies startup storage, setup-token socket lifecycle, and proxy validation with local fixtures.
 
     use super::{
-        ProxyNetwork, ServerConfig, TlsFiles, router_with_agent, set_private_directory,
-        start_setup_token_socket, validate_config,
+        ProxyNetwork, ServerConfig, TlsFiles, logging_color, router_with_agent,
+        set_private_directory, start_setup_token_socket, validate_config,
     };
     use crate::embedded::EmbeddedAgent;
     use axum::{body::Body, http::Request};
-    use std::{net::SocketAddr, path::PathBuf, str::FromStr};
+    use std::{ffi::OsString, net::SocketAddr, path::PathBuf, str::FromStr};
     use tower::ServiceExt;
 
     fn temp_dir() -> PathBuf {
@@ -1053,6 +1061,14 @@ mod tests {
         let ipv6 = ProxyNetwork::from_str("2001:db8::/32").expect("valid IPv6 network");
         assert!(ipv6.contains("2001:db8:1::1".parse().expect("valid IP")));
         assert!(ProxyNetwork::from_str("10.0.0.1/33").is_err());
+    }
+
+    #[test]
+    fn empty_no_color_does_not_disable_terminal_logs() {
+        assert!(logging_color(true, None));
+        assert!(logging_color(true, Some(OsString::new())));
+        assert!(!logging_color(true, Some(OsString::from("1"))));
+        assert!(!logging_color(false, None));
     }
 
     /// The ordinary runtime, rather than a standalone plugin router, must expose admission.

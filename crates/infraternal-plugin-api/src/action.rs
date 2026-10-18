@@ -120,25 +120,60 @@ impl JsonSchema {
                 ),
                 ("command".to_owned(), Self::string("Executed command path.")),
                 (
+                    "ok".to_owned(),
+                    Self::boolean("True when the command did what was asked; matches exit code 0."),
+                ),
+                (
                     "state".to_owned(),
                     Self::string("Plain machine-readable command state."),
                 ),
                 ("message".to_owned(), Self::string("Short result summary.")),
                 (
+                    "next".to_owned(),
+                    Self::array(
+                        Self::string("A command or action that fits this state."),
+                        "Recommended follow-ups, at most three; empty when nothing is needed.",
+                    ),
+                ),
+                (
                     "next_step".to_owned(),
-                    Self::string("Optional recommended follow-up action."),
+                    Self::string("First entry of `next`, kept for readers of the first envelope."),
                 ),
                 (
                     "details".to_owned(),
                     Self::string("Technical detail associated with a failed command."),
+                ),
+                (
+                    "error".to_owned(),
+                    Self::object(
+                        [
+                            (
+                                "code".to_owned(),
+                                Self::string(
+                                    "Stable error code such as usage, not_found or unreachable.",
+                                ),
+                            ),
+                            (
+                                "argument".to_owned(),
+                                Self::string("Name of the argument at fault, never its value."),
+                            ),
+                            (
+                                "detail".to_owned(),
+                                Self::string("What went wrong, in plain words."),
+                            ),
+                        ],
+                        ["code".to_owned()],
+                    ),
                 ),
                 ("data".to_owned(), data),
             ],
             [
                 "schema_version".to_owned(),
                 "command".to_owned(),
+                "ok".to_owned(),
                 "state".to_owned(),
                 "message".to_owned(),
+                "next".to_owned(),
                 "data".to_owned(),
             ],
         )
@@ -414,6 +449,9 @@ pub struct ActionDefinition {
     /// Permission and effect metadata shared with non-CLI adapters.
     #[serde(flatten)]
     pub contract: ActionContract,
+    /// Inputs that still parse but are left out of help because they are for scripts and tests.
+    #[serde(skip)]
+    pub cli_hidden_inputs: Vec<String>,
     /// Original hosted descriptor, retaining schema references and any-of permissions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hosted: Option<crate::ActionDef>,
@@ -480,6 +518,7 @@ impl ActionDefinition {
             cli_handler: CliHandler::Unavailable,
             cli_positionals: Vec::new(),
             cli_requires: BTreeMap::new(),
+            cli_hidden_inputs: Vec::new(),
         }
     }
 
@@ -497,6 +536,16 @@ impl ActionDefinition {
         names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.cli_positionals = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Keep these inputs out of `--help`; they stay accepted and stay in generated skills.
+    #[must_use]
+    pub fn with_cli_hidden_inputs(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.cli_hidden_inputs = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -519,6 +568,13 @@ impl ActionDefinition {
     pub const fn not_available_yet(mut self) -> Self {
         self.availability = ActionAvailability::NotAvailableYet;
         self
+    }
+
+    /// Whether people and AI agents should be told about this command: it works and is not internal.
+    /// Placeholders for components that are not built yet are neither listed nor callable (D299 C5).
+    #[must_use]
+    pub fn is_public(&self) -> bool {
+        self.visible && self.availability == ActionAvailability::Available
     }
 
     /// Keep an action registered for internal execution without displaying it.
@@ -606,6 +662,9 @@ pub struct PluginDefinition {
     pub description: String,
     /// Actions declared by this plugin.
     pub actions: Vec<ActionDefinition>,
+    /// Descriptions of command groups below the plugin's own, keyed by the space-joined path
+    /// such as `server release`, so help never shows a group with no words.
+    pub groups: Vec<(String, String)>,
 }
 
 impl PluginDefinition {
@@ -620,7 +679,15 @@ impl PluginDefinition {
             id: id.into(),
             description: description.into(),
             actions: actions.into_iter().collect(),
+            groups: Vec::new(),
         }
+    }
+
+    /// Describe a command group (the path of words before its commands) for help.
+    #[must_use]
+    pub fn with_group(mut self, path: impl Into<String>, description: impl Into<String>) -> Self {
+        self.groups.push((path.into(), description.into()));
+        self
     }
 }
 
@@ -875,9 +942,18 @@ mod tests {
         assert_eq!(schema.schema_type, super::JsonSchemaType::Object);
         assert_eq!(
             schema.required,
-            ["schema_version", "command", "state", "message", "data"]
+            [
+                "schema_version",
+                "command",
+                "ok",
+                "state",
+                "message",
+                "next",
+                "data"
+            ]
         );
         assert!(schema.properties.contains_key("next_step"));
+        assert!(schema.properties.contains_key("error"));
         assert!(schema.properties.contains_key("details"));
         assert_eq!(
             schema.properties["data"].schema_type,

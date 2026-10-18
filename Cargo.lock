@@ -1337,6 +1337,7 @@ dependencies = [
  "infraternal-plugin-ssh",
  "infraternal-server",
  "infraternal-shim",
+ "infraternal-status",
  "nix",
  "openssl",
  "serde",
@@ -1589,6 +1590,14 @@ dependencies = [
  "openssl",
  "vt100",
  "vte",
+]
+
+[[package]]
+name = "infraternal-status"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "uuid",
 ]
 
 [[package]]

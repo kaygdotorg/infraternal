@@ -1,6 +1,13 @@
-//! Generates node component commands from plugin declarations; execution and human presentation stay in their plugins [16,198,202].
+//! Runs node component commands against the local infraternal agent and presents the reply in the shared envelope [16,198,202], #239.
+//!
+//! Commands come from plugin declarations; this module knows no plugin fields. The plugin
+//! presents its own reply (`present`), and the answer, the aligned text and the JSON data
+//! all come from that one presentation.
 use clap::ArgMatches;
-use infraternal_plugin_api::PluginRegistry;
+use infraternal_plugin_api::{
+    PluginRegistry,
+    present::{Presented, Tone},
+};
 use serde_json::{Value, json};
 use std::{
     io::{self, Read},
@@ -8,12 +15,36 @@ use std::{
     process::ExitCode,
 };
 
+use crate::cli::output::{CommandResult, CommandState, Exit, RenderOptions, emit, print};
+
+/// Causes that happen before any call to the infraternal agent, tagged inside the `io::Error` so
+/// [`refuse`] can say what really went wrong instead of blaming a reply that never came.
+#[derive(Debug)]
+enum Cause {
+    /// No usable runtime directory: `XDG_RUNTIME_DIR` is unset or not private to this account.
+    NoRuntimeDirectory,
+    /// The input given on standard input is not accepted.
+    BadInput,
+}
+
+impl std::fmt::Display for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoRuntimeDirectory => "no usable runtime directory",
+            Self::BadInput => "input not accepted",
+        })
+    }
+}
+
+impl std::error::Error for Cause {}
+
 pub(crate) fn run_action(
     action: &infraternal_plugin_api::ActionDefinition,
     arguments: &ArgMatches,
     json_output: bool,
 ) -> ExitCode {
     let definition = action;
+    let command = definition.command.join(" ");
     let Some(action) = action.hosted else {
         return ExitCode::FAILURE;
     };
@@ -29,9 +60,10 @@ pub(crate) fn run_action(
                 .take((infraternal_plugin_api::MAX_ACTION_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)?;
             if bytes.len() > infraternal_plugin_api::MAX_ACTION_BYTES {
-                return Err(io::ErrorKind::InvalidInput.into());
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, Cause::BadInput));
             }
-            serde_json::from_slice(&bytes).map_err(io::Error::other)?
+            serde_json::from_slice(&bytes)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, Cause::BadInput))?
         } else {
             json!({})
         };
@@ -48,73 +80,179 @@ pub(crate) fn run_action(
         }
         let state = infraternal_agent::sessions::state_path(
             arguments.get_one::<String>("state").map(PathBuf::from),
-        )?;
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, Cause::NoRuntimeDirectory))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         // Share the startup reactor instead of generating another poll loop [243].
         infraternal_agent::block_on_io(
             &runtime,
-            Box::pin(execute(&state, &registry, action.id, input, json_output)),
+            Box::pin(execute(
+                &state,
+                &registry,
+                &command,
+                action.id,
+                input,
+                json_output,
+            )),
         )
     })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => refuse(
-            json_output,
-            action.id,
-            "The component action was refused or the local infraternal agent is unavailable.",
-        ),
+        Err(error) => refuse(json_output, &command, &error),
     }
 }
-fn refuse(json_output: bool, action: &str, message: &str) -> ExitCode {
-    crate::output::refuse(
+
+/// Say which of the possible causes it was, and the one thing to do about it.
+fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
+    let cause = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Cause>());
+    let (message, why, next, exit) = match (cause, error.kind()) {
+        (Some(Cause::NoRuntimeDirectory), _) => (
+            "The infraternal agent's runtime directory could not be found.",
+            "XDG_RUNTIME_DIR is not set, or it is not a private directory of this account.",
+            "Run this command in a login session of the account that runs the infraternal agent, or pass --state.",
+            Exit::Unreachable,
+        ),
+        (Some(Cause::BadInput), _) => (
+            "The input given on standard input was not accepted.",
+            "It is too large or is not the JSON this command reads.",
+            "infraternal skill",
+            Exit::Usage,
+        ),
+        (None, io::ErrorKind::NotFound) => (
+            "The infraternal agent on this machine is not running.",
+            "No socket was found in the infraternal agent's runtime directory.",
+            "infraternal status",
+            Exit::Unreachable,
+        ),
+        (None, io::ErrorKind::ConnectionRefused) => (
+            "The infraternal agent on this machine is not running.",
+            "Its socket is there, but nothing answers on it.",
+            "infraternal status",
+            Exit::Unreachable,
+        ),
+        (None, io::ErrorKind::PermissionDenied) => (
+            "This account is not allowed to use the infraternal agent here.",
+            "The infraternal agent answers only the account that runs it.",
+            "Run this command as the account that runs the infraternal agent.",
+            Exit::NotAllowed,
+        ),
+        (None, io::ErrorKind::TimedOut) => (
+            "The infraternal agent did not answer in time.",
+            "There was no reply within 5 seconds.",
+            "infraternal status",
+            Exit::Unreachable,
+        ),
+        (None, _) => (
+            "The infraternal agent could not complete this request.",
+            "It sent a reply this command does not understand.",
+            "infraternal status",
+            Exit::Failed,
+        ),
+    };
+    emit(
+        CommandResult::new(command, CommandState::Failed, message, json!({}))
+            .with_details(why)
+            .with_next_step(next),
         json_output,
-        action,
-        message,
-        "Use the infraternal agent's uid and runtime directory; read the action help.",
-        1,
+        exit,
     )
 }
 async fn call(state: &std::path::Path, action: &str, input: &Value) -> io::Result<Vec<u8>> {
     let input = serde_json::to_vec(input).map_err(io::Error::other)?;
     infraternal_agent::plugin_control::call(state, action, &input).await
 }
+
+fn state_of(presented: &Presented) -> CommandState {
+    match presented.tone {
+        Tone::Good => CommandState::Ready,
+        Tone::Idle => CommandState::Stopped,
+        Tone::Attention => CommandState::Pending,
+    }
+}
+
 async fn execute(
     state: &std::path::Path,
     registry: &PluginRegistry,
+    command: &str,
     action: &str,
     mut input: Value,
     json_output: bool,
 ) -> io::Result<()> {
+    let mut pages = None;
     loop {
         let output = call(state, action, &input).await?;
         let value: Value = serde_json::from_slice(&output).map_err(io::Error::other)?;
-        if json_output {
-            println!("{value}");
+        let next_cursor = value
+            .get("next_cursor")
+            .filter(|cursor| !cursor.is_null())
+            .cloned();
+        if let Some(all_pages) = &mut pages {
+            merge_page(all_pages, value)?;
         } else {
-            let presentation = registry
-                .human_status_action(action)
-                .map_err(|_| io::ErrorKind::InvalidData)?;
-            let shown = if let Some(presentation) = presentation {
-                call(state, presentation, &json!({})).await?
-            } else {
-                output
-            };
-            println!(
-                "{}",
-                registry
-                    .format_human(presentation.unwrap_or(action), &shown)
-                    .map_err(|_| io::ErrorKind::InvalidData)?
-            );
+            pages = Some(value);
         }
-        let Some(cursor) = value.get("next_cursor").filter(|cursor| !cursor.is_null()) else {
-            return Ok(());
+        let Some(cursor) = next_cursor else {
+            break;
         };
         let object = input.as_object_mut().ok_or(io::ErrorKind::InvalidData)?;
-        if object.get("cursor") == Some(cursor) {
+        if object.get("cursor") == Some(&cursor) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         object.insert("cursor".into(), cursor.clone());
     }
+
+    let value = pages.ok_or(io::ErrorKind::InvalidData)?;
+    // Present and write only after every page succeeds, so the envelope describes the whole list.
+    let output = serde_json::to_vec(&value).map_err(io::Error::other)?;
+    // A write may show the current status of what it changed.
+    let presentation = registry
+        .human_status_action(action)
+        .map_err(|_| io::ErrorKind::InvalidData)?;
+    let shown = if let Some(presentation) = presentation {
+        call(state, presentation, &json!({})).await?
+    } else {
+        output
+    };
+    let width = RenderOptions::detect(false).usable_width();
+    let presented = registry
+        .present(presentation.unwrap_or(action), &shown, width)
+        .map_err(|_| io::ErrorKind::InvalidData)?;
+    let mut result = CommandResult::new(
+        command,
+        state_of(&presented),
+        presented.message.clone(),
+        presented.data.clone(),
+    )
+    .with_body(presented.body.clone());
+    for next in &presented.next {
+        result = result.with_next_step(next.clone());
+    }
+    print(&result, json_output, false);
+    Ok(())
+}
+
+/// Combine the array records from successive pages and retain the final page's metadata.
+fn merge_page(all_pages: &mut Value, page: Value) -> io::Result<()> {
+    let Value::Object(page) = page else {
+        return Err(io::ErrorKind::InvalidData.into());
+    };
+    let Some(all_pages) = all_pages.as_object_mut() else {
+        return Err(io::ErrorKind::InvalidData.into());
+    };
+    for (key, value) in page {
+        match all_pages.entry(key) {
+            serde_json::map::Entry::Vacant(entry) => {
+                entry.insert(value);
+            }
+            serde_json::map::Entry::Occupied(mut entry) => match (entry.get_mut(), value) {
+                (Value::Array(all), Value::Array(mut next)) => all.append(&mut next),
+                (current, value) => *current = value,
+            },
+        }
+    }
+    Ok(())
 }

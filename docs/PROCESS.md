@@ -143,12 +143,15 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,096,144 bytes |
-  | `aarch64-unknown-linux-musl` | 19,325,520 bytes |
+  | `x86_64-unknown-linux-musl` | 21,144,112 bytes |
+  | `aarch64-unknown-linux-musl` | 19,370,696 bytes |
 
-  These are the release-3 measurements (release-2 plus #230 same-server
-  re-enrollment and #227 close logging): +16,000 / +2,872 bytes over release-2
-  (D243, with the logging growth covered by D301).
+  These are the release-4 measurements: release-prod-live plus CLI overhaul
+  (#239) and status truth (#237), +47,968 / +45,176 bytes. This one-off D243
+  exception is accepted within the task's +64 KB ceiling for D299's versioned
+  `--json` envelope and D303–D305 command behavior, together with #237's
+  status truth (+17 KB). The trim follow-up is owed; each cap stays at its
+  exact measured size until a later measured reduction ratchets it down.
 
   The release-2 measurements were: the release-retry line (next paragraph,
   21,080,848 / 19,316,360) plus D300 host-link doubt (#234), already-added

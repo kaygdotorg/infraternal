@@ -2,7 +2,7 @@
 
 use infraternal_plugin_api::{
     ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, CliHandler,
-    JsonSchema, PluginDefinition, SafetyNotes,
+    JsonSchema, PluginDefinition, SafetyNotes, placeholders,
 };
 
 /// Stable plugin owner used to materialize only the requested CLI definitions.
@@ -13,19 +13,24 @@ pub const ID: &str = "server";
 pub fn plugin() -> PluginDefinition {
     let mut plugin = PluginDefinition::new(
         ID,
-        "Create and run the infraternal control plane.",
+        "Run the infraternal server.",
         [
             server_run_action(),
             server_init_action(),
-            server_features_action(),
             server_install_compat_action(),
             server_setup_token_action(),
         ],
     );
     #[cfg(feature = "release")]
+    {
+        plugin
+            .actions
+            .extend(infraternal_plugin_release::descriptor::server_cli_actions());
+        plugin = plugin.with_group("server release", "Look at the server's releases.");
+    }
     plugin
         .actions
-        .extend(infraternal_plugin_release::descriptor::server_cli_actions());
+        .extend(placeholders(|| [server_features_action()]));
     for action in &mut plugin.actions {
         if action.input_schema.properties.contains_key("remote_ca_dir") {
             action
@@ -57,12 +62,12 @@ fn server_run_action() -> ActionDefinition {
     );
     ActionDefinition::new(
         ["server"],
-        "Run the configured infraternal server.",
-        "Use this command to run the control plane in the foreground with the supplied listener and data settings.",
+        "Run the infraternal server in this terminal.",
+        "Use this to run the server in the foreground, for a trial or under your own service manager.",
         [
-            "Choose a listener address and private data directory.",
-            "Provide HTTPS settings or select a trusted reverse proxy mode.",
-            "Start the server and review its final state.",
+            "Choose where it listens and a private folder for its data.",
+            "Give it HTTPS files, or say that a trusted reverse proxy handles HTTPS.",
+            "Start it. It runs until you stop it.",
         ],
         JsonSchema::object(server_input_fields(), std::iter::empty()),
         JsonSchema::command_result_with(server_data),
@@ -83,37 +88,39 @@ fn server_init_action() -> ActionDefinition {
     inputs.extend([
         (
             "system".to_owned(),
-            JsonSchema::boolean("Install a system service after confirmation."),
+            JsonSchema::boolean(
+                "Install for the whole machine (needs root) instead of your account.",
+            ),
         ),
         (
             "user".to_owned(),
-            JsonSchema::boolean("Install a user service after confirmation."),
+            JsonSchema::boolean("Install for your account only."),
         ),
         (
             "yes".to_owned(),
-            JsonSchema::boolean("Confirm server setup."),
+            JsonSchema::boolean("Do not ask for confirmation."),
         ),
         (
             "dry_run".to_owned(),
-            JsonSchema::boolean("Print the installation plan without applying it."),
+            JsonSchema::boolean("Show what would be installed and change nothing."),
         ),
         (
             "force".to_owned(),
-            JsonSchema::boolean("Replace a different existing service unit."),
+            JsonSchema::boolean("Replace a different service that has the same name."),
         ),
         (
             "name".to_owned(),
-            JsonSchema::string("Service unit name without the .service suffix."),
+            JsonSchema::string("Service name, without .service."),
         ),
     ]);
     ActionDefinition::new(
         ["server", "init"],
-        "Create and start a service for this server.",
-        "Use this command to explicitly set up a persistent server on this node.",
+        "Install the server as a service and start it.",
+        "Use this the first time you set up a server on this machine.",
         [
-            "Choose the listener, data directory, and public origin.",
-            "Run with --dry-run to review the unit and systemd operations.",
-            "Confirm interactively or pass --yes, then review the service state.",
+            "Choose where it listens, its data folder and its public address.",
+            "Run with --dry-run to see exactly what would be installed.",
+            "Run it again and confirm, or pass --yes when no one is at the terminal.",
         ],
         JsonSchema::object(inputs, std::iter::empty()),
         JsonSchema::command_result_with(server_init_result_schema()),
@@ -186,15 +193,15 @@ fn server_install_compat_action() -> ActionDefinition {
         ),
         (
             "dry_run".to_owned(),
-            JsonSchema::boolean("Print the installation plan without applying it."),
+            JsonSchema::boolean("Show what would be installed and change nothing."),
         ),
         (
             "force".to_owned(),
-            JsonSchema::boolean("Replace a different existing service unit."),
+            JsonSchema::boolean("Replace a different service that has the same name."),
         ),
         (
             "name".to_owned(),
-            JsonSchema::string("Service unit name without the .service suffix."),
+            JsonSchema::string("Service name, without .service."),
         ),
     ]);
     ActionDefinition::new(
@@ -241,17 +248,17 @@ fn server_setup_token_action() -> ActionDefinition {
     );
     ActionDefinition::new(
         ["server", "setup-token"],
-        "Read the active one-time owner setup capability.",
-        "Use this command only during first-owner setup while the server setup socket is active.",
+        "Print the one-time code for creating the first owner.",
+        "Use this only while setting up the first owner, before anyone has signed in.",
         [
-            "Start the server and begin first-owner setup.",
-            "Read the one-time capability from the private local socket.",
-            "Enter the capability only into the matching setup flow.",
+            "Start the server and open its address in the app.",
+            "Run this to read the one-time code from the server's private local socket.",
+            "Enter the code only on the setup screen. Treat it as a secret.",
         ],
         JsonSchema::object(
             [(
                 "data".to_owned(),
-                JsonSchema::string("Server data directory."),
+                JsonSchema::string("Folder of the server's data."),
             )],
             std::iter::empty(),
         ),
@@ -305,45 +312,49 @@ fn server_input_fields() -> Vec<(String, JsonSchema)> {
     vec![
         (
             "remote_listen".to_owned(),
-            JsonSchema::string("Explicit QUIC and TCP/TLS host listener."),
+            JsonSchema::string("Address and port where enrolled hosts connect."),
         ),
         (
             "remote_ca_dir".to_owned(),
-            JsonSchema::string("Retained public CA trust directory; requires remote listener."),
+            JsonSchema::string(
+                "Folder of trusted certificate authority files for hosts. Needs --remote-listen.",
+            ),
         ),
         (
             "listen".to_owned(),
-            JsonSchema::string("HTTP(S) listener address."),
+            JsonSchema::string("Address and port to listen on, such as 127.0.0.1:7443."),
         ),
         (
             "data".to_owned(),
-            JsonSchema::string("Private data directory."),
+            JsonSchema::string("Folder for the server's data. Only this account may read it."),
         ),
         (
             "public_origin".to_owned(),
-            JsonSchema::string("Public HTTPS origin."),
+            JsonSchema::string(
+                "The server's public HTTPS address, such as https://infra.example.org.",
+            ),
         ),
         (
             "web_root".to_owned(),
-            JsonSchema::string("Directory containing the built web application."),
+            JsonSchema::string("Folder with the built web app."),
         ),
         (
             "tls_cert".to_owned(),
-            JsonSchema::string("PEM certificate chain path."),
+            JsonSchema::string("File with the TLS certificate chain (PEM)."),
         ),
         (
             "tls_key".to_owned(),
-            JsonSchema::string("PEM private key path."),
+            JsonSchema::string("File with the TLS private key (PEM)."),
         ),
         (
             "behind_proxy".to_owned(),
-            JsonSchema::boolean("Trust a configured TLS-terminating reverse proxy."),
+            JsonSchema::boolean("A reverse proxy in front of the server handles HTTPS."),
         ),
         (
             "trusted_proxy".to_owned(),
             JsonSchema::array(
                 JsonSchema::string("Proxy peer address or CIDR."),
-                "Trusted reverse proxy peers.",
+                "Addresses or networks of the reverse proxies to trust.",
             ),
         ),
     ]

@@ -20,7 +20,8 @@ fn diagnostic_requires_locked_pages_and_supports_json_without_public_help() {
     assert!(output.status.success(), "key memory refused under 8 MiB");
     assert_eq!(output.stderr, [] as [u8; 0]);
     let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(record["action"], "internal.key-memory-check");
+    assert_eq!(record["command"], "__key-memory-check");
+    assert_eq!(record["ok"], true);
     assert_eq!(record["state"], "ready");
     assert_eq!(
         record["message"],
@@ -45,6 +46,8 @@ fn diagnostic_requires_locked_pages_and_supports_json_without_public_help() {
         assert_eq!(refused.stderr, [] as [u8; 0]);
         let record: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
         assert_eq!(record["state"], "refused");
+        assert_eq!(record["ok"], false);
+        assert_eq!(record["error"]["code"], "failed");
         assert_eq!(record["message"], "Key memory refused");
     }
 }
