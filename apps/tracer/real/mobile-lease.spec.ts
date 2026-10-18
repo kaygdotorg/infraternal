@@ -36,6 +36,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     await expect.poll(() => page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).toEqual({ locked: false, initialized: true });
     const terminal = page.locator('.cl[data-view="console"] .ui-window').first();
     await expect(terminal).toHaveAttribute("data-status", "live");
+    console.log("MOBILE_UI terminal ready");
     const before = server.bridges.length;
     for (const suspension of [5000, 30_000]) {
       await page.evaluate(() => {
@@ -71,6 +72,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     await expect.poll(() => recovered().filter(bridge => bridge.serverClose === "s0 the server refused to resume the connection").length, { timeout: 30_000 }).toBe(1);
     await expect.poll(() => recovered().filter(bridge => bridge.helloResume === false).length, { timeout: 30_000 }).toBe(1);
     await expect(terminal).toHaveAttribute("data-status", "live", { timeout: 30_000 });
+    console.log("MOBILE_UI fresh attach ready");
     const resend = page.getByRole("button", { name: "Resend typing", exact: true });
     await expect(resend).toBeVisible();
     await expect(page.getByText("Your waiting typing is saved.", { exact: false })).toBeVisible();
@@ -81,8 +83,15 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
       await page.locator("#palette-input").fill(theme);
       await page.locator(`[data-action="theme:${theme}"]`).click();
       for (const size of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
+        console.log(`MOBILE_UI theme=${theme} width=${size.width} begin`);
         await page.setViewportSize(size);
+        await page.keyboard.press("Control+Shift+K");
+        await expect(page.locator("#palette")).toBeVisible();
+        await page.locator("#palette-input").fill("Go to Console");
+        await page.locator('[data-action="canvas:view:console"]').click({ timeout: 5000 });
         await expect(resend).toBeInViewport();
+        await resend.click({ trial: true, timeout: 5000 });
+        console.log(`MOBILE_UI theme=${theme} width=${size.width} clickable`);
         await page.screenshot({ path: tracerEvidencePath("mobile-lease", `retained-typing-${theme}-${size.width}.png`) });
       }
     }
@@ -102,7 +111,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     await expect.poll(() => server.bridges.flatMap(bridge => [...bridge.output.values()]).some(output => output.includes("mobile-resumed-42"))).toBe(true);
     await page.screenshot({ path: tracerEvidencePath("mobile-lease", "resumed.png") });
   } finally {
-    await context.close();
-    await server.dispose();
+    try { await context.close(); }
+    finally { await server.dispose(); }
   }
 });
