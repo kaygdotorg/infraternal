@@ -245,3 +245,89 @@ async fn cancelling_remote_dispatch_retires_the_borrowed_authenticated_channel()
         io::ErrorKind::BrokenPipe
     );
 }
+
+/// Retry reattaches a published shim while the failed attempt's infraternal
+/// agent still holds the runtime lifetime lock. The terminal-only dispatcher
+/// must greet and publish its census without taking that lock; the full one
+/// refuses, which is the published-path Retry failure (#230).
+#[tokio::test]
+async fn reattach_dispatch_serves_while_another_runtime_holds_the_lifetime_lock() {
+    let state = State::new();
+    let held = infraternal_plugin_remote::runtime_lock::acquire(&state.0).unwrap();
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let (host, _control) = channels().await;
+    assert_eq!(
+        run_authenticated(&host, Some(state.0.clone()), uid)
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+    let (host, control) = channels().await;
+    let path = state.0.clone();
+    let daemon =
+        tokio::spawn(async move { run_authenticated_terminal(&host, Some(path), uid).await });
+    Transmit::default()
+        .send(&control, 0, &hello())
+        .await
+        .unwrap();
+    let mut rx = Receive::default();
+    assert!(matches!(
+        rx.next(&control).await.unwrap().frame,
+        Frame::Hello { version: 1, .. }
+    ));
+    let Frame::Event { event_json, .. } = rx.next(&control).await.unwrap().frame else {
+        panic!("startup inventory required");
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(event_json).unwrap()["type"],
+        "terminal.sessions.snapshot"
+    );
+    // Without node actions, a new shell or plugin call is refused and the
+    // reattached terminal stays connected.
+    let json = serde_json::to_vec(&serde_json::json!({"uid":uid,"cols":80,"rows":24})).unwrap();
+    let mut tx = Transmit::default();
+    for (call_id, action_id) in [(7, "terminal.open"), (8, "plugins.list")] {
+        tx.send(
+            &control,
+            0,
+            &Frame::Call {
+                call_id,
+                action_id,
+                input_json: &json,
+            },
+        )
+        .await
+        .unwrap();
+        let frame = loop {
+            let next = rx.next(&control).await.unwrap();
+            if !matches!(next.frame, Frame::Event { .. }) {
+                break next.frame;
+            }
+        };
+        assert!(
+            matches!(frame, Frame::Result { call_id: id, ok: false, .. } if id == call_id),
+            "{action_id} must be refused"
+        );
+    }
+    tx.send(
+        &control,
+        0,
+        &Frame::Ping {
+            nonce: 9,
+            sent_us: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        rx.next(&control).await.unwrap().frame,
+        Frame::Pong { nonce: 9, .. }
+    ));
+    // The reattach never bound plugin control beside the live runtime.
+    assert!(!state.0.join("plugins.sock").exists());
+    control.retire();
+    daemon.abort();
+    let _ = daemon.await;
+    drop(held);
+}

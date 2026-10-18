@@ -1789,6 +1789,13 @@ where
                     if decode_muxed_frame(&bytes).is_ok_and(|decoded| {
                         matches!(decoded.frame, Frame::Ping { .. } | Frame::Pong { .. })
                     }) => {}
+                // The server names why it closes (#227) with an application Close
+                // frame before the native close; it carries no authority.
+                Some(Ok(Message::Binary(ref wire)))
+                    if matches!(
+                        decode_muxed_frame(wire).map(|d| d.frame),
+                        Ok(Frame::Close { .. })
+                    ) => {}
                 next => break next,
             }
         }

@@ -19,6 +19,13 @@ fn addhost_timeline(step: &'static str) {
 use crate::{
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
+    stream_close::{
+        AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
+        ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseOwner,
+        CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION, PROTOCOL_ERROR,
+        RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE, classify_terminal_close,
+        safe_agent_close_reason, safe_websocket_reason,
+    },
 };
 use axum::{
     Router,
@@ -79,6 +86,8 @@ const AUTHORITY_WAIT: Duration = Duration::from_secs(1);
 const AUTHORITY_RETRY_PAUSE: Duration = Duration::from_millis(5);
 const AUTHORITY_RETRY_PAUSE_MAX: Duration = Duration::from_millis(100);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
+/// Bounds the lookup that names a refused resume's sessions in the close log.
+const REFUSAL_LOG_TIMEOUT: Duration = Duration::from_millis(250);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
 // Reject further AttachTerm requests on a socket at this bound.
@@ -148,6 +157,7 @@ pub(crate) struct WebSocketState {
     authority: Arc<AuthorityLimits>,
     users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
     session_changes: watch::Sender<u64>,
+    close_logs: StreamCloseLog,
 }
 
 impl WebSocketState {
@@ -189,6 +199,7 @@ impl WebSocketState {
         )
         .await?;
         let (session_changes, _) = watch::channel(0_u64);
+        let close_logs = StreamCloseLog::new();
         let mut inventory = agent.session_inventory();
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
@@ -238,6 +249,7 @@ impl WebSocketState {
             }),
             users: Arc::default(),
             session_changes,
+            close_logs,
         })
     }
 
@@ -483,6 +495,7 @@ async fn run_socket(
     }
 
     let mut pending_welcome = None;
+    let mut resume_attempt = None;
     let handshake = tokio::time::timeout_at(
         handshake_deadline,
         while_authorized_value(
@@ -499,15 +512,69 @@ async fn run_socket(
                 &user_id,
                 &session_token,
                 &mut pending_welcome,
+                &mut resume_attempt,
             ),
         ),
     )
     .await;
     let Ok(Ok((connection_id, proof_authority, link_doubt_notices))) = handshake else {
+        let reason = if resume_attempt.is_some() {
+            RESUME_REFUSED
+        } else {
+            ATTACH_REFUSED
+        };
+        let _ = tokio::time::timeout(
+            CLOSE_TIMEOUT,
+            send_frame(
+                &mut sink,
+                CONTROL_STREAM,
+                &Frame::Close {
+                    code: 1008,
+                    reason: reason.client_text,
+                },
+                &mut encode,
+            ),
+        )
+        .await;
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, send_message(&mut sink, Message::Close(None)))
             .await;
         drop(sink);
         drop(source);
+        if let Some(connection_id) = resume_attempt {
+            // After the socket is closed, so a busy database never delays the refusal;
+            // bounded, so it never holds the task either. A timeout only loses lines.
+            let rows = tokio::time::timeout(
+                REFUSAL_LOG_TIMEOUT,
+                sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
+                    .bind(connection_id.as_slice())
+                    .bind(&user_id)
+                    .fetch_all(&state.pool),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+            for row in rows {
+                let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice())
+                else {
+                    continue;
+                };
+                let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
+                let host_id = host_bytes
+                    .as_deref()
+                    .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
+                let stream_id =
+                    u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
+                state.close_logs.record(&CloseRecord::new(
+                    CloseOwner::of(&user_id),
+                    CloseWho::Server,
+                    RESUME_REFUSED,
+                    host_id,
+                    session_id,
+                    stream_id,
+                ));
+            }
+        }
         if let Some(welcome) = pending_welcome.take() {
             rollback_connection(&state.pool, &user_id, &welcome).await;
         }
@@ -541,6 +608,11 @@ async fn run_socket(
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
     let mut loop_result = Ok(());
+    let mut teardown_reason = crate::stream_close::SERVER_PROCESSING_FAILED;
+    let mut close_already_logged = false;
+    // Set when teardown already read the session's authority, so the 1011 Close below reuses that
+    // answer instead of reading a second time (#227).
+    let mut session_live_at_teardown = None;
     loop {
         transport.active(!attachments.is_empty());
         tokio::select! {
@@ -564,27 +636,78 @@ async fn run_socket(
                     ).await.is_err() { break; }
             }
             changed = revocations.changed() => {
-                if changed.is_err() { break; }
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                if changed.is_err() {
+                    teardown_reason = RESUME_REFUSED;
+                    loop_result = Err(());
+                    break;
+                }
+                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
+                    teardown_reason = RESUME_REFUSED;
+                    loop_result = Err(());
+                    break;
+                };
                 expiry = deadline;
             }
             () = tokio::time::sleep_until(expiry) => {
-                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else { break; };
+                let Ok(deadline) = socket_deadline(&state, &user_id, &session_token).await else {
+                    teardown_reason = RESUME_REFUSED;
+                    loop_result = Err(());
+                    break;
+                };
                 expiry = deadline;
             }
             input = transport.recv() => {
-                let input = match input {
-                    Ok(Some(input)) => input,
-                    Ok(None) => break,
-                    Err(()) => {
-                        loop_result = Err(());
+                let Ok(Some(input)) = input else {
+                        let end = transport.end_reason();
+                        let socket_close = transport.socket_close();
+                        let who = if end == crate::websocket_transport::EndReason::ClientWentAway {
+                            CloseWho::Browser
+                        } else {
+                            CloseWho::Server
+                        };
+                        record_socket_close(
+                            &state,
+                            &attachments,
+                            who,
+                            end.close_reason(),
+                            socket_close.code,
+                            socket_close.reason,
+                        );
+                        close_already_logged = true;
+                        if end != crate::websocket_transport::EndReason::ClientWentAway
+                            && end != crate::websocket_transport::EndReason::ServerWriteFailed
+                        {
+                            let code = match end {
+                                crate::websocket_transport::EndReason::SizeLimit => 1009,
+                                crate::websocket_transport::EndReason::IdleTimeout => 1001,
+                                crate::websocket_transport::EndReason::AuthorizationRefused => 1008,
+                                crate::websocket_transport::EndReason::FlowControlRefused => 1013,
+                                _ => 1002,
+                            };
+                            let _ = tokio::time::timeout(
+                                CLOSE_TIMEOUT,
+                                send_frame(
+                                    &mut sink,
+                                    CONTROL_STREAM,
+                                    &Frame::Close {
+                                        code,
+                                        reason: end.close_reason().client_text,
+                                    },
+                                    &mut encode,
+                                ),
+                            )
+                            .await;
+                        }
                         break;
-                    }
                 };
                 match input {
                     Inbound::TransportPing(payload) => {
                         if while_authorized(&state, &user_id, &session_token, true, send_message(&mut sink, Message::Pong(payload))).await.is_err() { break; }
                     }
+                    // The transport's read task consumes socket ends and receive
+                    // failures itself (it retires the context, logged above); only
+                    // frames reach this queue.
+                    Inbound::SocketClose { .. } | Inbound::Failure(_) => {}
                     Inbound::Frame(wire) => {
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
@@ -614,7 +737,14 @@ async fn run_socket(
                     }
                     if let Ok(decoded) = decode_muxed_frame(&wire)
                         && decoded.stream_id == CONTROL_STREAM
-                        && let Frame::Close { code, .. } = decoded.frame {
+                        && let Frame::Close { code, reason } = decoded.frame {
+                        record_control_close(
+                            &state,
+                            &attachments,
+                            code,
+                            reason,
+                        );
+                        close_already_logged = true;
                         let _ = while_authorized(&state, &user_id, &session_token, true, async {
                             send_frame(&mut sink, CONTROL_STREAM,
                                 &Frame::Close { code, reason: "connection closed" }, &mut encode).await?;
@@ -631,7 +761,11 @@ async fn run_socket(
                         }
                         Dispatch::Unhandled => {}
                     }
-                    if while_authorized(&state, &user_id, &session_token, true, handle_client_frame(
+                    // Set only when the frame handler itself fails, so a failure of the
+                    // wrapper's own authority reads is never blamed on the frame.
+                    let mut frame_failed = false;
+                    let handled = while_authorized(&state, &user_id, &session_token, true, async {
+                        let handled = handle_client_frame(
                             wire,
                             &state,
                             &user_id,
@@ -644,7 +778,15 @@ async fn run_socket(
                             &output_tx,
                             &mut sink,
                             &mut encode,
-                        )).await.is_err() {
+                        ).await;
+                        frame_failed = handled.is_err();
+                        handled
+                    }).await;
+                    if handled.is_err() {
+                        // Provisional: a failed frame or a missed wrapper read. Teardown
+                        // confirms it with one read, so a refusal or a busy store is
+                        // never logged as a bad frame.
+                        teardown_reason = if frame_failed { PROTOCOL_ERROR } else { AUTHORITY_UNAVAILABLE };
                             loop_result = Err(());
                             break;
                         }
@@ -688,14 +830,40 @@ async fn run_socket(
     }
     pending_plugin_calls.shutdown().await;
     drop(plugins);
+    if !close_already_logged && !attachments.is_empty() {
+        let end = transport.end_reason();
+        let reason = if end != crate::websocket_transport::EndReason::Open {
+            end.close_reason()
+        } else if teardown_reason == PROTOCOL_ERROR
+            || teardown_reason == AUTHORITY_UNAVAILABLE
+            || teardown_reason == crate::stream_close::SERVER_PROCESSING_FAILED
+        {
+            // These exits are guarded work that failed with the transport still
+            // open: its authority read, or the work itself. One bounded read tells
+            // a refusal and a busy server from a real failure.
+            let (reason, live) =
+                failure_reason(&state, &user_id, &session_token, teardown_reason).await;
+            session_live_at_teardown = Some(live);
+            reason
+        } else {
+            teardown_reason
+        };
+        teardown_reason = reason;
+        record_socket_close(&state, &attachments, CloseWho::Server, reason, None, None);
+    }
     drop(attachments);
-    // Only a still-authorized browser hears why its socket ended. One attempt,
-    // no wait and no renewal: a busy store must not hold the transport open
-    // here, and a socket that is closing is not activity.
+    // Only a still-authorized browser hears why its socket ended. The liveness
+    // is the one non-renewing, single-attempt read already made for the close
+    // log when the exit was a failure; otherwise make that read now. No wait
+    // and no renewal: a busy store must not hold the transport open here, and
+    // a socket that is closing is not activity (#240).
     if loop_result.is_err()
-        && read_expiry(&state, &user_id, &session_token, false, Duration::ZERO)
-            .await
-            .is_ok()
+        && match session_live_at_teardown {
+            Some(live) => live,
+            None => teardown_read(&state, &user_id, &session_token)
+                .await
+                .is_ok(),
+        }
     {
         let _ = tokio::time::timeout(
             CLOSE_TIMEOUT,
@@ -704,7 +872,7 @@ async fn run_socket(
                 CONTROL_STREAM,
                 &Frame::Close {
                     code: 1011,
-                    reason: "connection ended",
+                    reason: teardown_reason.client_text,
                 },
                 &mut encode,
             ),
@@ -1064,10 +1232,28 @@ where
             let Some((kind, awaits_ack)) = link_notice(&output, link_doubt_notices) else {
                 return Ok(());
             };
+            // Only a lost route is a close worth logging; a doubted link is kept (D300).
+            let reason = match output {
+                TerminalOutput::RouteExpired => Some(TERMINAL_ROUTE_IDLE),
+                TerminalOutput::Reconnecting => Some(AGENT_CONNECTION_DROPPED),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                state.close_logs.record(&attachment.close_record(
+                    stream_id,
+                    CloseWho::InfraternalAgent,
+                    reason,
+                ));
+            }
             attachment.awaiting_ack |= awaits_ack;
             let session_id = uuid::Uuid::from_bytes(attachment.session_id).to_string();
-            let notice = serde_json::to_vec(&json!({"type": kind, "session_id": session_id}))
-                .map_err(|_| ())?;
+            let notice = match reason {
+                Some(reason) => {
+                    json!({"type": kind, "session_id": session_id, "reason": reason.client_text})
+                }
+                None => json!({"type": kind, "session_id": session_id}),
+            };
+            let notice = serde_json::to_vec(&notice).map_err(|_| ())?;
             send_frame(
                 sink,
                 stream_id,
@@ -1124,15 +1310,16 @@ where
                 .await
                 .is_ok()
         }
-        TerminalOutput::Closed { code } => {
+        TerminalOutput::Closed { who, code, reason } => {
             // The host's infraternal agent found no shim for the session: a final
             // answer, distinct from every transient close (wire §4, #158).
             let gone = code == CLOSE_SESSION_GONE;
-            let reason = if gone {
-                SESSION_GONE_REASON
-            } else {
-                "attachment ended"
-            };
+            let reason = if gone { SESSION_GONE_REASON } else { reason };
+            let close_reason = classify_terminal_close(reason);
+            let mut close = attachment.close_record(stream_id, who, close_reason);
+            close.agent_close_code = Some(code);
+            close.agent_close_reason = Some(reason);
+            state.close_logs.record(&close);
             let sent = send_frame(sink, stream_id, &Frame::Close { code, reason }, encode)
                 .await
                 .is_ok();
@@ -1179,6 +1366,7 @@ async fn handshake<S, K>(
     user_id: &str,
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
+    resume_attempt: &mut Option<[u8; 16]>,
 ) -> Result<([u8; 16], probe_authority::Lease, bool), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
@@ -1210,6 +1398,7 @@ where
             ) => (*connection_id, *resume_token),
             _ => return Err(()),
         };
+        *resume_attempt = Some(id);
         resume_connection(
             &state.pool,
             user_id,
@@ -1593,6 +1782,26 @@ where
             }
             let mut session = [0_u8; 16];
             session.copy_from_slice(session_id);
+            // `None`: this account has no record of the session. The id is the client's
+            // choice and may be another account's, so no line ever names it (#227).
+            let Ok(owned_host) = session_host_id(&state.pool, user_id, &session).await else {
+                // The store could not answer; the browser's frame was well formed.
+                state.close_logs.record(&CloseRecord::new(
+                    CloseOwner::of(user_id),
+                    CloseWho::Server,
+                    AUTHORITY_UNAVAILABLE,
+                    None,
+                    NO_SESSION,
+                    stream_id,
+                ));
+                return Err(());
+            };
+            let logged_session = if owned_host.is_some() {
+                session
+            } else {
+                NO_SESSION
+            };
+            let host_id = owned_host.flatten();
             let Ok((input_acked, writer_stream)) = owned_writer(
                 &state.pool,
                 user_id,
@@ -1607,9 +1816,33 @@ where
                 // stream Close instead of losing the whole socket: the browser would
                 // reconnect and attach again at once, forever (#158). Every other
                 // refusal (authority, the writer limit, the database) still closes it.
-                if session_is_live(state, user_id, session_token).await
+                let authority = authority_read(state, user_id, session_token).await;
+                if authority == AuthorityRead::Live
                     && session_gone(&state.pool, user_id, &session).await?
                 {
+                    let close = if owned_host.is_some() {
+                        let mut close = CloseRecord::new(
+                            CloseOwner::of(user_id),
+                            CloseWho::Server,
+                            AGENT_STREAM_ENDED,
+                            host_id,
+                            session,
+                            stream_id,
+                        );
+                        close.out_seq = last_out_seq;
+                        close.input_sent = last_in_seq;
+                        close
+                    } else {
+                        CloseRecord::new(
+                            CloseOwner::of(user_id),
+                            CloseWho::Browser,
+                            ATTACH_UNOWNED,
+                            None,
+                            NO_SESSION,
+                            stream_id,
+                        )
+                    };
+                    state.close_logs.record(&close);
                     ended.insert(stream_id)?;
                     let gone = Frame::Close {
                         code: CLOSE_SESSION_GONE,
@@ -1617,47 +1850,140 @@ where
                     };
                     return send_frame(sink, stream_id, &gone, encode).await;
                 }
-                return Err(());
+                // A read that missed its bound is a busy server, not a refused attach.
+                let refusal = attach_refusal(authority);
+                let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
+                    CloseWho::Server,
+                    refusal,
+                    host_id,
+                    logged_session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_sent = last_in_seq;
+                return close_terminal_stream(
+                    state,
+                    TerminalClose {
+                        record: close,
+                        code: 1008,
+                    },
+                    attachments,
+                    ended,
+                    sink,
+                    encode,
+                )
+                .await;
             };
             if last_in_seq > input_acked {
+                let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
+                    CloseWho::Server,
+                    PROTOCOL_ERROR,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                state.close_logs.record(&close);
                 return Err(());
             }
-            if !session_is_live(state, user_id, session_token).await {
+            let authority = authority_read(state, user_id, session_token).await;
+            if authority != AuthorityRead::Live {
+                let refusal = attach_refusal(authority);
+                let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
+                    CloseWho::Server,
+                    refusal,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                state.close_logs.record(&close);
                 return Err(());
             }
-            let host: Option<Vec<u8>> = sqlx::query_scalar(
-                "SELECT remote_host_id FROM terminal_sessions WHERE id=? AND user_id=?",
-            )
-            .bind(session.as_slice())
-            .bind(user_id)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(|_| ())?;
-            let agent = terminal_agent(
-                state,
-                user_id,
-                host.as_deref()
-                    .map(uuid::Uuid::from_slice)
-                    .transpose()
-                    .map_err(|_| ())?,
-            )
-            .await?;
+            let Ok(agent) = terminal_agent(state, user_id, host_id).await else {
+                let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
+                    CloseWho::Server,
+                    AGENT_CONNECTION_REFUSED,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                return close_terminal_stream(
+                    state,
+                    TerminalClose {
+                        record: close,
+                        code: 1013,
+                    },
+                    attachments,
+                    ended,
+                    sink,
+                    encode,
+                )
+                .await;
+            };
             #[cfg(test)]
             addhost_timeline("attach_agent_resolved");
-            let attachment = tokio::time::timeout(
+            let Ok(Ok(attachment)) = tokio::time::timeout(
                 BACKEND_TIMEOUT,
                 agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
             )
             .await
-            .map_err(|_| ())?
-            .map_err(|_| ())?;
+            else {
+                let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
+                    CloseWho::InfraternalAgent,
+                    AGENT_CONNECTION_REFUSED,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                return close_terminal_stream(
+                    state,
+                    TerminalClose {
+                        record: close,
+                        code: 1013,
+                    },
+                    attachments,
+                    ended,
+                    sink,
+                    encode,
+                )
+                .await;
+            };
             #[cfg(test)]
             addhost_timeline("attach_sent");
-            if !session_is_live(state, user_id, session_token).await {
+            let authority = authority_read(state, user_id, session_token).await;
+            if authority != AuthorityRead::Live {
+                let refusal = attach_refusal(authority);
+                let mut close = CloseRecord::new(
+                    CloseOwner::of(user_id),
+                    CloseWho::Server,
+                    refusal,
+                    host_id,
+                    session,
+                    stream_id,
+                );
+                close.out_seq = last_out_seq;
+                close.input_acked = input_acked;
+                close.input_sent = last_in_seq;
+                state.close_logs.record(&close);
                 return Err(());
             }
             let (handle, mut output) = attachment.split();
-            let agent_stream = handle.stream_id();
             attachments.insert(
                 stream_id,
                 ClientAttachment {
@@ -1668,6 +1994,8 @@ where
                     ),
                     handle,
                     session_id: session,
+                    host_id,
+                    owner: CloseOwner::of(user_id),
                     last_out_seq,
                     last_in_acked: input_acked,
                     input_sent_end: input_acked,
@@ -1686,13 +2014,16 @@ where
                 // An isolated slow attachment closes its browser stream explicitly so the
                 // client reconnects from delivered offsets instead of waiting silently.
                 let _ = sender
-                    .send((stream_id, TerminalOutput::Closed { code: 1013 }))
+                    .send((
+                        stream_id,
+                        TerminalOutput::Closed {
+                            who: CloseWho::InfraternalAgent,
+                            code: 1013,
+                            reason: "attachment ended",
+                        },
+                    ))
                     .await;
             });
-            tracing::debug!(
-                agent_stream,
-                "attached browser terminal stream to embedded infraternal agent"
-            );
             send_frame(
                 sink,
                 stream_id,
@@ -1703,8 +2034,12 @@ where
             )
             .await
         }
-        Frame::Close { .. } if stream_id != 0 && stream_id % 2 == 1 => {
-            attachments.remove(&stream_id).ok_or(())?;
+        Frame::Close { code, reason } if stream_id != 0 && stream_id % 2 == 1 => {
+            let attachment = attachments.remove(&stream_id).ok_or(())?;
+            let mut close = attachment.close_record(stream_id, CloseWho::Browser, CLIENT_WENT_AWAY);
+            close.browser_stream_close_code = Some(code);
+            close.browser_stream_close_reason = Some(safe_agent_close_reason(reason));
+            state.close_logs.record(&close);
             Ok(())
         }
         Frame::Input { in_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
@@ -1722,7 +2057,7 @@ where
             if attachment.input.enqueue(passthrough).is_ok() {
                 return Ok(());
             }
-            retire_input_stream(stream_id, attachments, ended, sink, encode).await
+            retire_input_stream(state, stream_id, attachments, ended, sink, encode).await
         }
         Frame::Resize {
             cols,
@@ -1738,28 +2073,84 @@ where
             if attachment.input.enqueue(passthrough).is_ok() {
                 return Ok(());
             }
-            retire_input_stream(stream_id, attachments, ended, sink, encode).await
+            retire_input_stream(state, stream_id, attachments, ended, sink, encode).await
         }
         Frame::Credit { bytes } if stream_id != 0 && stream_id % 2 == 1 => {
-            let attachment = attachments.get_mut(&stream_id).ok_or(())?;
-            let credit = attachment.credit.checked_add(u64::from(bytes)).ok_or(())?;
-            if credit > MAX_CREDIT {
-                return Err(());
-            }
-            attachment.credit = credit;
-            attachment
-                .handle
-                .send_frame(passthrough)
-                .await
-                .map_err(|_| ())
+            let refused = {
+                let attachment = attachments.get_mut(&stream_id).ok_or(())?;
+                if let Some(credit) = attachment.credit.checked_add(u64::from(bytes))
+                    && credit <= MAX_CREDIT
+                {
+                    attachment.credit = credit;
+                    return attachment
+                        .handle
+                        .send_frame(passthrough)
+                        .await
+                        .map_err(|_| ());
+                }
+                true
+            };
+            debug_assert!(refused);
+            let close = attachments.get(&stream_id).ok_or(())?.close_record(
+                stream_id,
+                CloseWho::Server,
+                CREDIT_REFUSED,
+            );
+            close_terminal_stream(
+                state,
+                TerminalClose {
+                    record: close,
+                    code: 1013,
+                },
+                attachments,
+                ended,
+                sink,
+                encode,
+            )
+            .await
         }
         _ => Err(()),
     }
 }
 
+struct TerminalClose {
+    record: CloseRecord,
+    code: u16,
+}
+
+/// Log a terminal close once, retire its local attachment, and notify the browser.
+async fn close_terminal_stream<K>(
+    state: &WebSocketState,
+    close: TerminalClose,
+    attachments: &mut HashMap<u32, ClientAttachment>,
+    ended: &mut EndedStreams,
+    sink: &mut K,
+    encode: &mut Vec<u8>,
+) -> Result<(), ()>
+where
+    K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
+{
+    let stream_id = close.record.browser_stream_id;
+    let reason = close.record.reason.client_text;
+    attachments.remove(&stream_id);
+    state.close_logs.record(&close.record);
+    ended.insert(stream_id)?;
+    send_frame(
+        sink,
+        stream_id,
+        &Frame::Close {
+            code: close.code,
+            reason,
+        },
+        encode,
+    )
+    .await
+}
+
 /// FIFO overload retires only its stream; trailing Input/Resize/Credit are
 /// absorbed until explicit reattach, preserving control and sibling dispatch.
 async fn retire_input_stream<K>(
+    state: &WebSocketState,
     stream: u32,
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
@@ -1769,15 +2160,20 @@ async fn retire_input_stream<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
-    attachments.remove(&stream);
-    ended.insert(stream)?;
-    send_frame(
-        sink,
+    let close = attachments.get(&stream).ok_or(())?.close_record(
         stream,
-        &Frame::Close {
+        CloseWho::Server,
+        INPUT_QUEUE_FULL,
+    );
+    close_terminal_stream(
+        state,
+        TerminalClose {
+            record: close,
             code: 1013,
-            reason: "input queue full",
         },
+        attachments,
+        ended,
+        sink,
         encode,
     )
     .await
@@ -1797,7 +2193,9 @@ pub(super) async fn probe_deadline(
     let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
-    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT).await?;
+    let expiry = read_expiry(state, user, token, false, AUTHORITY_WAIT)
+        .await
+        .map_err(|_| ())?;
     let wall_deadline = Duration::from_secs(u64::try_from(expiry).map_err(|_| ())?);
     started
         .checked_add(wall_deadline.checked_sub(wall).ok_or(())?)
@@ -1818,7 +2216,9 @@ async fn authority_deadline(
     token: &str,
     renew: bool,
 ) -> Result<tokio::time::Instant, ()> {
-    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT).await?;
+    let expiry = read_expiry(state, user_id, token, renew, AUTHORITY_WAIT)
+        .await
+        .map_err(|_| ())?;
     // The wait may have taken up to AUTHORITY_WAIT: measure the deadline from the
     // wall clock after the read, so a slow store can never extend a session.
     let remaining = u64::try_from(expiry - unix_seconds()?).map_err(|_| ())?;
@@ -1856,7 +2256,7 @@ async fn read_expiry(
     token: &str,
     renew: bool,
     wait: Duration,
-) -> Result<i64, ()> {
+) -> Result<i64, AuthorityMiss> {
     #[cfg(test)]
     let read_timeout = state.authority_read_timeout;
     #[cfg(not(test))]
@@ -1875,8 +2275,11 @@ async fn read_expiry(
                     .auth
                     .live_expiry(token, user_id, now)
                     .await
-                    .map_err(|_| ()),
-                Err(()) => Err(()),
+                    .map_err(|error| match error {
+                        crate::auth::Error::Denied => AuthorityMiss::Refused,
+                        _ => AuthorityMiss::Unavailable,
+                    }),
+                Err(()) => Err(AuthorityMiss::Unavailable),
             };
             drop(place);
             Some(result)
@@ -1887,12 +2290,12 @@ async fn read_expiry(
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
             }
-            _ => return Err(()),
+            _ => return Err(AuthorityMiss::Unavailable),
         }
     };
-    let now = unix_seconds()?;
+    let now = unix_seconds().map_err(|()| AuthorityMiss::Unavailable)?;
     if expiry <= now {
-        return Err(());
+        return Err(AuthorityMiss::Refused);
     }
     if renew && Auth::renewal_due(expiry, now) {
         state.renew_soon(user_id, token);
@@ -1900,22 +2303,143 @@ async fn read_expiry(
     Ok(expiry)
 }
 
+/// Why one authority read did not find the session live. A session the store
+/// reports as gone or expired is `Refused`; a read that missed its bound, or
+/// could not reach storage, is `Unavailable`: the server was busy, which is
+/// neither a refusal nor a bad frame (#227, #240).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthorityMiss {
+    Refused,
+    Unavailable,
+}
+
+/// What one bounded authority read found.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthorityRead {
+    Live,
+    Refused,
+    Unavailable,
+}
+
+/// The close reason for an attach that did not get a live read.
+fn attach_refusal(read: AuthorityRead) -> CloseReason {
+    if read == AuthorityRead::Unavailable {
+        AUTHORITY_UNAVAILABLE
+    } else {
+        ATTACH_REFUSED
+    }
+}
+
+/// The renewing authority read with the full wait, classified for the close log.
+async fn authority_read(state: &WebSocketState, user_id: &str, token: &str) -> AuthorityRead {
+    match read_expiry(state, user_id, token, true, AUTHORITY_WAIT).await {
+        Ok(_) => AuthorityRead::Live,
+        Err(AuthorityMiss::Refused) => AuthorityRead::Refused,
+        Err(AuthorityMiss::Unavailable) => AuthorityRead::Unavailable,
+    }
+}
+
+/// One attempt, no wait and no renewal, for teardown: a busy store must not
+/// hold a closing socket, and a closing socket is not activity (#240).
+async fn teardown_read(
+    state: &WebSocketState,
+    user_id: &str,
+    token: &str,
+) -> Result<i64, AuthorityMiss> {
+    read_expiry(state, user_id, token, false, Duration::ZERO).await
+}
+
 async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> bool {
-    read_expiry(state, user_id, token, true, AUTHORITY_WAIT)
-        .await
-        .is_ok()
+    authority_read(state, user_id, token).await == AuthorityRead::Live
 }
 
 struct ClientAttachment {
     handle: AttachmentHandle,
     input: crate::websocket_input::InputQueue,
     session_id: [u8; 16],
+    host_id: Option<uuid::Uuid>,
+    /// Rate-limit key of the account that owns this socket, for close lines.
+    owner: CloseOwner,
     last_out_seq: u64,
     last_in_acked: u64,
     input_sent_end: u64,
     credit: u64,
     awaiting_ack: bool,
     needs_snapshot: bool,
+}
+
+impl ClientAttachment {
+    fn close_record(
+        &self,
+        browser_stream_id: u32,
+        who: CloseWho,
+        reason: CloseReason,
+    ) -> CloseRecord {
+        let mut record = CloseRecord::new(
+            self.owner,
+            who,
+            reason,
+            self.host_id,
+            self.session_id,
+            browser_stream_id,
+        );
+        record.agent_stream_id = self.handle.stream_id();
+        record.out_seq = self.last_out_seq;
+        record.input_acked = self.last_in_acked;
+        record.input_sent = self.input_sent_end;
+        record.output_credit_bytes = self.credit;
+        record
+    }
+}
+
+fn record_socket_close(
+    state: &WebSocketState,
+    attachments: &HashMap<u32, ClientAttachment>,
+    who: CloseWho,
+    reason: CloseReason,
+    code: Option<u16>,
+    websocket_reason: Option<&'static str>,
+) {
+    for (stream_id, attachment) in attachments {
+        let mut record = attachment.close_record(*stream_id, who, reason);
+        record.websocket_code = code;
+        record.websocket_reason = websocket_reason;
+        state.close_logs.record(&record);
+    }
+}
+
+/// Record a browser control-stream close separately from the native WebSocket close frame.
+fn record_control_close(
+    state: &WebSocketState,
+    attachments: &HashMap<u32, ClientAttachment>,
+    code: u16,
+    reason: &str,
+) {
+    let close_reason = safe_websocket_reason(reason);
+    for (stream_id, attachment) in attachments {
+        let mut record = attachment.close_record(*stream_id, CloseWho::Browser, CLIENT_WENT_AWAY);
+        record.browser_stream_close_code = Some(code);
+        record.browser_stream_close_reason = Some(close_reason);
+        state.close_logs.record(&record);
+    }
+}
+
+/// Why a socket ends after guarded work failed with the transport open, and whether the session still
+/// reads live. One non-renewing read decides both: a refused session is a refusal; a read that misses
+/// its bound or cannot reach storage means the server was busy, never that the browser misbehaved; only
+/// while the session reads live is the caller's `live` reason true (#227). Teardown reuses the liveness
+/// for the 1011 Close, so a failed exit costs one authority read, not two.
+async fn failure_reason(
+    state: &WebSocketState,
+    user_id: &str,
+    token: &str,
+    live: CloseReason,
+) -> (CloseReason, bool) {
+    match teardown_read(state, user_id, token).await {
+        Ok(_) => (live, true),
+        Err(AuthorityMiss::Refused) => (RESUME_REFUSED, false),
+        Err(AuthorityMiss::Unavailable) => (AUTHORITY_UNAVAILABLE, false),
+    }
 }
 
 /// Browser plugin action adapter; dimensions arrive in the attachment's Resize.
@@ -2020,6 +2544,32 @@ async fn terminal_agent(
         return Err(());
     }
     state.remote_hosts.actor(host).await.ok_or(())
+}
+
+/// The session's host for this account: `None` when the account has no such session,
+/// `Some(None)` for a session on the server's own host.
+async fn session_host_id(
+    pool: &SqlitePool,
+    user: &str,
+    session: &[u8; 16],
+) -> Result<Option<Option<uuid::Uuid>>, ()> {
+    let Some(row) =
+        sqlx::query("SELECT remote_host_id FROM terminal_sessions WHERE id=? AND user_id=?")
+            .bind(session.as_slice())
+            .bind(user)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| ())?
+    else {
+        return Ok(None);
+    };
+    let bytes: Option<Vec<u8>> = row.get("remote_host_id");
+    bytes
+        .as_deref()
+        .map(uuid::Uuid::from_slice)
+        .transpose()
+        .map(Some)
+        .map_err(|_| ())
 }
 
 /// Writer identity survives reconnect and supervision; output remains session-wide.
@@ -2146,6 +2696,19 @@ fn encode_session_id(session_id: &[u8; 16]) -> String {
 pub(super) enum Inbound {
     Frame(Bytes),
     TransportPing(Bytes),
+    SocketClose {
+        code: Option<u16>,
+        reason: Option<&'static str>,
+    },
+    Failure(ReceiveFailure),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ReceiveFailure {
+    ConnectionClosed,
+    Protocol,
+    SizeLimit,
+    IdleTimeout,
 }
 
 async fn next_wire<S, K>(
@@ -2164,6 +2727,7 @@ where
             Some(Inbound::TransportPing(payload)) => {
                 send_message(sink, Message::Pong(payload)).await?;
             }
+            Some(Inbound::SocketClose { .. } | Inbound::Failure(_)) => return Err(()),
             None => return Ok(None),
         }
     }
@@ -2195,10 +2759,13 @@ where
                 return Ok(Some(Inbound::Frame(frame)));
             }
             Err(DecodeError::Incomplete) => {}
-            Err(_) => return Err(()),
+            Err(DecodeError::FrameTooLarge { .. } | DecodeError::BufferLimitExceeded) => {
+                return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
+            }
+            Err(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::Protocol))),
         }
         if receive.len() >= MAX_SOCKET_BUFFER {
-            return Err(());
+            return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
         }
         // A silent authenticated socket has no completion work and no timer [41].
         // Preserve a begun mux frame's deadline across select cancellation and
@@ -2206,29 +2773,43 @@ where
         // bounded by message/frame size, admission and live authority, rather
         // than an idle-read timer that disconnects healthy terminals every 30s.
         let message = if let Some(end) = *deadline {
-            tokio::time::timeout_at(end, source.next())
-                .await
-                .map_err(|_| ())?
+            match tokio::time::timeout_at(end, source.next()).await {
+                Ok(message) => message,
+                Err(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::IdleTimeout))),
+            }
         } else {
             source.next().await
         };
         let Some(message) = message else {
             return Ok(None);
         };
-        match message.map_err(|_| ())? {
-            Message::Binary(bytes) => {
-                let new_len = receive.len().checked_add(bytes.len()).ok_or(())?;
-                if new_len > MAX_SOCKET_BUFFER {
-                    return Err(());
+        match message {
+            Err(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::ConnectionClosed))),
+            Ok(message) => match message {
+                Message::Binary(bytes) => {
+                    let Some(new_len) = receive.len().checked_add(bytes.len()) else {
+                        return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
+                    };
+                    if new_len > MAX_SOCKET_BUFFER {
+                        return Ok(Some(Inbound::Failure(ReceiveFailure::SizeLimit)));
+                    }
+                    receive.extend_from_slice(&bytes);
+                    let partial = tokio::time::Instant::now() + PARTIAL_FRAME_TIMEOUT;
+                    *deadline = Some(deadline.map_or(partial, |existing| existing.min(partial)));
                 }
-                receive.extend_from_slice(&bytes);
-                let partial = tokio::time::Instant::now() + PARTIAL_FRAME_TIMEOUT;
-                *deadline = Some(deadline.map_or(partial, |existing| existing.min(partial)));
-            }
-            Message::Ping(payload) => return Ok(Some(Inbound::TransportPing(payload))),
-            Message::Pong(_) => {}
-            Message::Close(_) => return Ok(None),
-            Message::Text(_) => return Err(()),
+                Message::Ping(payload) => return Ok(Some(Inbound::TransportPing(payload))),
+                Message::Pong(_) => {}
+                Message::Close(frame) => {
+                    let (code, reason) = frame.map_or((None, None), |frame| {
+                        (
+                            Some(frame.code),
+                            Some(safe_websocket_reason(frame.reason.as_ref())),
+                        )
+                    });
+                    return Ok(Some(Inbound::SocketClose { code, reason }));
+                }
+                Message::Text(_) => return Ok(Some(Inbound::Failure(ReceiveFailure::Protocol))),
+            },
         }
     }
 }

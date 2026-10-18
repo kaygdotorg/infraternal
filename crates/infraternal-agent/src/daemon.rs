@@ -334,6 +334,24 @@ pub async fn run_authenticated(
     dispatch_authenticated(channel, state, execution_uid, None, None).await
 }
 
+/// Serve terminal actions only on an admitted SSH reattach, without plugin control.
+/// A published-setup Retry reattaches while the failed attempt's infraternal
+/// agent may still hold the runtime lifetime lock that plugin control takes;
+/// that runtime keeps node actions (#230). This is the same full-build
+/// dispatcher instance with no registry, not the session image's [243].
+/// # Errors
+/// Refuses invalid greeting, unsafe state, wrong uid and malformed terminal frames.
+pub async fn run_authenticated_terminal(
+    channel: &impl Channel,
+    state: Option<PathBuf>,
+    execution_uid: u32,
+) -> io::Result<()> {
+    validate_authenticated(channel, execution_uid)?;
+    let state = sessions::state(state)?;
+    let _retire = RetireChannel(channel);
+    run_channel::<false>(channel, state, Some(execution_uid), None, None, None).await
+}
+
 /// Run the first-prompt image without retaining node actions or opening other sessions.
 /// The caller supplies the already authenticated, shim-owned session; all data,
 /// writer cursors, credit and replay use the ordinary terminal dispatcher.
@@ -674,7 +692,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                                 renewals.spawn_blocking(move || (call_id, renewal.action(&action, &input)));
                             }
                         }
-                        Frame::Call {call_id, action_id: "terminal.open", input_json} if !SESSION_ONLY && (execution_uid.is_none() || stream == 0) => {
+                        Frame::Call {call_id, action_id: "terminal.open", input_json} if !SESSION_ONLY && plugins.is_some() && (execution_uid.is_none() || stream == 0) => {
                             use infraternal_plugin_api::admission::OpenRefusal;
                             registry.refresh();
                             census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
@@ -702,7 +720,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
                                 reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
                             }
                         }
-                        Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && stream == 0 => {
+                        Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && worker.is_some() && stream == 0 => {
                             let worker = worker.as_ref().ok_or_else(|| sessions::invalid("missing node worker"))?;
                             registry.refresh();
                             census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
@@ -710,7 +728,8 @@ async fn run_channel<const SESSION_ONLY: bool>(
                                 reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?;
                             }
                         }
-                        Frame::Call {call_id, ..} if SESSION_ONLY && stream == 0 => {
+                        // A registry-less reattach (#230) refuses actions as the image does.
+                        Frame::Call {call_id, ..} if (SESSION_ONLY || worker.is_none()) && stream == 0 => {
                             reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"This action is unavailable during host provisioning.\"}".to_vec()))?;
                         }
                         Frame::AttachTerm {session_id, last_out_seq, last_in_seq} if stream != 0 => {
