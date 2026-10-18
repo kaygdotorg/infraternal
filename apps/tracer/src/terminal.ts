@@ -11,6 +11,7 @@ import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } fro
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
 import { MuxConnection, reconnectDelay, STABLE_CONNECTION_MS, type StreamHandler } from "./connection";
 import { onDemand } from "./on-demand";
+import { captureFocusIntent } from "../../../packages/ui/src/focus-intent";
 import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
 
 const INITIAL_CREDIT = 1024 * 1024;
@@ -439,12 +440,7 @@ export class TerminalClient {
   static async open(config: TerminalConfig): Promise<TerminalClient> {
     // Initialization yields to input. Any focus or input activity during that
     // wait supersedes automatic focus, even if focus later returns to the body.
-    let focusUnchanged = true;
-    const invalidateFocus = () => { focusUnchanged = false; };
-    const focusWait = new AbortController();
-    for (const type of ["focusin", "pointerdown", "keydown", "input"]) {
-      document.addEventListener(type, invalidateFocus, { capture: true, signal: focusWait.signal });
-    }
+    const focusIntent = captureFocusIntent(document);
     try {
       const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
       await TerminalClient.prepareResources(font);
@@ -463,14 +459,14 @@ export class TerminalClient {
       // An already opened terminal has paid the same first-renderer cost. Also
       // supersede an optional warm-up still waiting for resources on this font.
       TerminalClient.rendererWarmups.set(font.id, Promise.resolve());
-      if (focusUnchanged && (config.shouldFocusOnOpen?.() ?? true) && !matchMedia("(pointer: coarse)").matches) {
+      if (focusIntent.isCurrent() && (config.shouldFocusOnOpen?.() ?? true) && !matchMedia("(pointer: coarse)").matches) {
         // Automatic focus is immediate, with no deferred renderer callback that
         // could take focus back after the person has moved to another surface.
         (terminal.textarea ?? config.host).focus();
       }
       return client;
     } finally {
-      focusWait.abort();
+      focusIntent.dispose();
     }
   }
 
