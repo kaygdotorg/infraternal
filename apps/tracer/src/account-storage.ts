@@ -53,10 +53,25 @@ export function clearAccountStorage(account: string | undefined): void {
 }
 
 /** Read an account drawing cache without making storage availability part of the interaction path. */
-export function readStoredJson(key: string): unknown {
-  try { return JSON.parse(localStorage.getItem(key) ?? "null") as unknown; } catch { return undefined; }
+export function readStoredJson(key: string, storage?: () => Pick<Storage, "getItem">): unknown {
+  try { return JSON.parse((storage ? storage() : localStorage).getItem(key) ?? "null") as unknown; } catch { return undefined; }
 }
 /** Account cache writes are best effort; unavailable storage never blocks server-owned work. */
-export function writeStoredJson(key: string, value: unknown): void {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode or quota: retain the in-memory drawing */ }
+export function writeStoredJson(key: string, value: unknown, storage?: () => Pick<Storage, "setItem">): void {
+  try { (storage ? storage() : localStorage).setItem(key, JSON.stringify(value)); } catch { /* private mode or quota: retain the in-memory drawing */ }
+}
+
+/** Cache notifications and coalesced writes share one disposal boundary, preventing late sign-out writes (D245). */
+export function createStoredJsonCache(key: string, value: () => unknown, storage?: () => Pick<Storage, "setItem">) {
+  let timer: ReturnType<typeof setTimeout> | undefined, disposed = false;
+  const listeners = new Set<() => void>();
+  const flush = (): void => { clearTimeout(timer); timer = undefined; if (!disposed) writeStoredJson(key, value(), storage); };
+  const schedule = (): void => { if (!disposed && timer === undefined) timer = setTimeout(flush, 300); };
+  const notify = (): void => { for (const listener of listeners) listener(); };
+  return {
+    schedule, flush, notify,
+    changed() { schedule(); notify(); },
+    subscribe(listener: () => void) { if (!disposed) listeners.add(listener); return () => { listeners.delete(listener); }; },
+    dispose() { if (timer !== undefined) flush(); disposed = true; listeners.clear(); },
+  };
 }
