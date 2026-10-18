@@ -146,8 +146,12 @@ Reviews and fixes run at the same time as the next lane's build.
   | `x86_64-unknown-linux-musl` | 21,102,256 bytes |
   | `aarch64-unknown-linux-musl` | 19,329,584 bytes |
 
-  These are the release-3 measurements (release-2 plus #230 same-server
-  re-enrollment and #227 close logging): +16,000 / +2,872 bytes over release-2
+  These are the #146 app-window integration measurements: +6,112 / +4,064
+  bytes over the frozen release-prod-live baseline (21,096,144 / 19,325,520).
+  The exact ceilings include no growth allowance (D243).
+
+  The release-3 measurements were release-2 plus #230 same-server
+  re-enrollment and #227 close logging: +16,000 / +2,872 bytes over release-2
   (D243, with the logging growth covered by D301).
 
   The release-2 measurements were: the release-retry line (next paragraph,
