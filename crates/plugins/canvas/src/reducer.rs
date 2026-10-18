@@ -7,62 +7,94 @@ fn is_closed(closed: &[String], id: &str) -> bool {
 fn s<'a>(value: &'a Value, key: &str) -> Result<&'a str, ()> {
     model::string(value, key).ok_or(())
 }
-#[must_use]
-pub fn valid_intent(value: &Value) -> bool {
-    let Some(kind) = model::string(value, "type") else {
-        return false;
-    };
-    let fields = match kind {
-        "view.add" => &["type", "view"][..],
-        "view.remove" => &["type", "view_id"][..],
-        "open" => &["type", "view_id", "column_id", "window", "after"][..],
-        "split" => &[
-            "type",
-            "view_id",
-            "anchor_id",
-            "axis",
-            "column_id",
-            "window",
-        ][..],
-        "close" => &["type", "window_id"][..],
-        "move" | "membership.add" => &["type", "view_id", "window_id", "column_id", "after"][..],
-        "resize" => &["type", "window_id", "height", "span", "rows", "row"][..],
-        "weight" => &["type", "view_id", "column_id", "weight"][..],
-        "membership.remove" => &["type", "view_id", "window_id"][..],
-        "pin" => &["type", "view_id", "node_id", "position"][..],
-        _ => return false,
-    };
-    if !model::shape(value, fields) {
-        return false;
-    }
-    let strings = match kind {
-        "view.add" => &[][..],
-        "view.remove" => &["view_id"][..],
-        "open" | "weight" => &["view_id", "column_id"][..],
-        "split" => &["view_id", "anchor_id", "axis", "column_id"][..],
-        "close" | "resize" => &["window_id"][..],
-        "move" | "membership.add" => &["view_id", "window_id", "column_id"][..],
-        "membership.remove" => &["view_id", "window_id"][..],
-        "pin" => &["view_id", "node_id"][..],
-        _ => return false,
-    };
-    if !strings
-        .iter()
-        .all(|key| model::string(value, key).is_some())
-        || value
-            .get("after")
-            .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(model::text))
-    {
-        return false;
-    }
-    match kind {
-        "view.add" => value.get("view").is_some_and(model::view),
-        "open" | "split" => {
+#[derive(Clone, Copy)]
+enum IntentCheck {
+    None,
+    View,
+    Window,
+    Split,
+    Resize,
+    Weight,
+    Pin,
+}
+struct IntentRule {
+    fields: &'static [&'static str],
+    strings: &'static [&'static str],
+    check: IntentCheck,
+}
+fn intent_rule(kind: &str) -> Option<IntentRule> {
+    // Keep shape and value checks in one kind dispatch so each intent has one
+    // authoritative list of accepted and required keys.
+    Some(match kind {
+        "view.add" => IntentRule {
+            fields: &["type", "view"],
+            strings: &[],
+            check: IntentCheck::View,
+        },
+        "view.remove" => IntentRule {
+            fields: &["type", "view_id"],
+            strings: &["view_id"],
+            check: IntentCheck::None,
+        },
+        "open" => IntentRule {
+            fields: &["type", "view_id", "column_id", "window", "after"],
+            strings: &["view_id", "column_id"],
+            check: IntentCheck::Window,
+        },
+        "split" => IntentRule {
+            fields: &[
+                "type",
+                "view_id",
+                "anchor_id",
+                "axis",
+                "column_id",
+                "window",
+            ],
+            strings: &["view_id", "anchor_id", "axis", "column_id"],
+            check: IntentCheck::Split,
+        },
+        "close" => IntentRule {
+            fields: &["type", "window_id"],
+            strings: &["window_id"],
+            check: IntentCheck::None,
+        },
+        "move" | "membership.add" => IntentRule {
+            fields: &["type", "view_id", "window_id", "column_id", "after"],
+            strings: &["view_id", "window_id", "column_id"],
+            check: IntentCheck::None,
+        },
+        "resize" => IntentRule {
+            fields: &["type", "window_id", "height", "span", "rows", "row"],
+            strings: &["window_id"],
+            check: IntentCheck::Resize,
+        },
+        "weight" => IntentRule {
+            fields: &["type", "view_id", "column_id", "weight"],
+            strings: &["view_id", "column_id"],
+            check: IntentCheck::Weight,
+        },
+        "membership.remove" => IntentRule {
+            fields: &["type", "view_id", "window_id"],
+            strings: &["view_id", "window_id"],
+            check: IntentCheck::None,
+        },
+        "pin" => IntentRule {
+            fields: &["type", "view_id", "node_id", "position"],
+            strings: &["view_id", "node_id"],
+            check: IntentCheck::Pin,
+        },
+        _ => return None,
+    })
+}
+fn check_intent(value: &Value, check: IntentCheck) -> bool {
+    match check {
+        IntentCheck::View => value.get("view").is_some_and(model::view),
+        IntentCheck::Window | IntentCheck::Split => {
             value.get("window").is_some_and(model::window)
-                && (kind != "split"
+                && (matches!(check, IntentCheck::Window)
                     || matches!(model::string(value, "axis"), Some("right" | "down")))
         }
-        "resize" => [
+        IntentCheck::Resize => [
             ("height", 0.05, 10_000.0, false),
             ("span", 1.0, 64.0, true),
             ("rows", 1.0, 64.0, true),
@@ -76,12 +108,33 @@ pub fn valid_intent(value: &Value) -> bool {
                         .is_some_and(|n| model::finite(n, *lo, *hi) && (!whole || n.fract() == 0.0))
             })
         }),
-        "weight" => model::numeric(value, "weight", 0.1, 10.0),
-        "pin" => value
+        IntentCheck::Weight => model::numeric(value, "weight", 0.1, 10.0),
+        IntentCheck::Pin => value
             .get("position")
             .is_none_or(|p| p.is_null() || model::point(p, 100_000.0)),
-        _ => true,
+        IntentCheck::None => true,
     }
+}
+#[must_use]
+pub fn valid_intent(value: &Value) -> bool {
+    let Some(kind) = model::string(value, "type") else {
+        return false;
+    };
+    let Some(rule) = intent_rule(kind) else {
+        return false;
+    };
+    if !model::shape(value, rule.fields)
+        || !rule
+            .strings
+            .iter()
+            .all(|key| model::string(value, key).is_some())
+        || value
+            .get("after")
+            .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(model::text))
+    {
+        return false;
+    }
+    check_intent(value, rule.check)
 }
 fn columns<'a>(doc: &'a mut Document, id: &str) -> Result<&'a mut Vec<Value>, ()> {
     let view = doc
