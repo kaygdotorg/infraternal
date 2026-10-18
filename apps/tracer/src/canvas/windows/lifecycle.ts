@@ -139,6 +139,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
   /** Undo of a close: the window comes back where it was (under its upper neighbour, or in its own column). */
   const reopen = (at: Placed): void => {
+    at = { ...at, model: { ...at.model, id: `w-${randomUuid()}` } };
     const c = views.get(at.view);
     const inv = cx.adapters.inventory;
     if (!c || c.wins.has(at.model.id)) return;
@@ -341,6 +342,7 @@ export function createWindows(cx: Ctx): WindowsModule {
    * no nesting, and the total footprint does not change.
    */
   const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel, instant = false): Promise<void> => {
+    cx.store.changed({ windowId: nm.id, anchorId: rec.model.id, axis: direction });
     const c = rec.owner;
     const root = rec.card.root;
     const b = makeWindow(cx, c, nm);

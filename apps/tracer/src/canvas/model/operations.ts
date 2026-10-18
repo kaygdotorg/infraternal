@@ -32,6 +32,11 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
       }
       continue;
     }
+    const pendingSplits = v.layout.columns.flatMap((c) => c.windows.flatMap((w) => !old.has(w.id) && splits.has(w.id) ? [{ c, w, edit: splits.get(w.id)! }] : []));
+    if (pendingSplits.length) {
+      for (const { c, w, edit } of pendingSplits) result.push({ type: "split", view_id: v.id, column_id: c.id, window: w, anchor_id: edit.anchorId, axis: edit.axis });
+      continue;
+    }
     const previousCols = previous ? cols(previous) : [];
     const memberships = new Map(previousCols.flatMap((c) => c.windows.map((w, i) => [w.id, { col: c.id, after: c.windows[i - 1]?.id }] as const)));
     for (const id of memberships.keys()) if (live.has(id) && !v.layout.columns.some((c) => c.windows.some((w) => w.id === id))) result.push({ type: "membership.remove", view_id: v.id, window_id: id });
