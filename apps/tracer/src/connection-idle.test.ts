@@ -419,3 +419,22 @@ test("a replacement route receives its own one-shot local stall grace", () => {
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
+
+test("continuous typing cannot cancel every silent-route confirmation turn", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30);
+    // Model an input task queued between each overdue liveness callback and
+    // its zero-delay confirmation. Liveness callbacks still run every 75ms.
+    // A = 250ms and G = 75ms give the claimed bound of 725 virtual ms.
+    for (let elapsed = 0; elapsed < 600_000 && f.connection.isWelcomed; elapsed += 75) {
+      f.suspend(75);
+      f.runBrowserTimer(true);
+      f.connection.sampleRoundTrip();
+      f.connection.send(1, { type: "Input", inSeq: BigInt(elapsed / 75), bytes: new Uint8Array([120]) });
+    }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
