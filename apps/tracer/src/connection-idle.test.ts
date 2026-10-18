@@ -49,6 +49,11 @@ function fixture(rtt: number, streams: number) {
     get probes() { return probes; }, get wakeups() { return wakeups; }, get disconnects() { return disconnects; },
     receive(stream: number, frame: WireFrame) { sockets[0]!.receive(stream, frame); },
     stopForwarding() { forwarding = false; },
+    welcomeLatest() {
+      const socket = sockets.at(-1)!;
+      socket.onopen?.();
+      socket.receive(0, { type: "Welcome", connectionId: new Uint8Array(16), resumeToken: new Uint8Array(32), resumeWindowSeconds: 120 });
+    },
     setRoundTrip(ms: number) { rtt = ms; },
     suspend(ms: number) { now += ms; },
     runBrowserTimer(onTime = false) {
@@ -387,6 +392,30 @@ test("a queued correlated reply cancels confirmation without letting a duplicate
       f.receive(0, { type: "Pong", ...answered });
       f.runBrowserTimer(true);
     }
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
+
+test("a replacement route receives its own one-shot local stall grace", () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    f.advance(30);
+    f.suspend(1000);
+    f.runBrowserTimer(true); // Consume the old route's grace.
+    f.connection.forceDrop();
+    f.advance(1000);
+    f.welcomeLatest();
+    f.advance(25); // First probe on the replacement route, A = 2000ms.
+    f.suspend(3000);
+    f.runBrowserTimer(true);
+    f.runBrowserTimer(true);
+    expect(f.connection.isWelcomed).toBe(true);
+    // The replacement receives one grace, never unlimited callback credit.
+    f.suspend(2000);
+    f.runBrowserTimer(true);
+    f.runBrowserTimer(true);
     expect(f.connection.isWelcomed).toBe(false);
   } finally { f.dispose(); }
 });
