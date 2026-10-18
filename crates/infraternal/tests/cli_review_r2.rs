@@ -172,7 +172,7 @@ fn a_paged_listing_is_still_one_envelope() {
     assert_eq!(envelope["data"]["peers"].as_array().map(Vec::len), Some(2));
 }
 
-// ---- Ctrl-C (D303: 130) ----------------------------------------------------------------
+// ---- Ctrl-C (D303/D305: 130 through the shell) -----------------------------------------
 
 #[test]
 fn ctrl_c_while_the_result_is_being_written_never_leaves_a_broken_line() {
@@ -221,7 +221,6 @@ fn ctrl_c_while_the_result_is_being_written_never_leaves_a_broken_line() {
 }
 
 #[test]
-#[ignore = "owner question: re-raise vs exit 130 (D303)"]
 fn ctrl_c_in_a_script_loop_stops_the_loop() {
     // `_exit(130)` makes the shell believe the command handled Ctrl-C itself, so a loop in the
     // script that ran it goes on to the next machine. Dying by SIGINT (restore the default

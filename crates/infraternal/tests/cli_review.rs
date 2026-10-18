@@ -176,7 +176,7 @@ fn ctrl_c_in_json_mode_ends_with_an_interrupted_envelope_and_exit_130() {
         .unwrap()
         .read_to_string(&mut out)
         .unwrap();
-    // D303: 130 interrupted. A shell reports 130 for death by SIGINT; a process that catches it exits 130.
+    // A shell reports 130 for SIGINT termination; a direct process wait sees signal 2.
     assert!(
         code.code() == Some(130) || code.signal() == Some(2),
         "unexpected end: {code:?}"
