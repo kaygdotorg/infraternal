@@ -91,7 +91,6 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly status = createStatusRelay(core.toast);
     private unregister: (() => void) | undefined;
     private disposed = false;
-    private wantsFocus = false;
     private visible = true;
     private activeNow = false;
     private painted = false;
@@ -229,6 +228,9 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         const { TerminalClient } = await import("../../terminal");
         if (this.disposed) return;
         const client = await TerminalClient.open({
+          // Only the currently selected window may take initial focus. open()
+          // also cancels this intent if the person interacts during its waits.
+          shouldFocusOnOpen: () => this.activeNow && !this.disposed,
           host: hostEl,
           hostName: this.model.host,
           screen: core.stage,
@@ -257,7 +259,6 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         this.unregister = core.registerTerminal(client);
         if (this.activeNow) core.setActiveTerminal(client);
         if (!this.visible) client.setSuspended(true);
-        if (this.wantsFocus) client.focus();
         if (this.retired) { client.markSessionGone(this.retired.status); if (first) settle(); }
         if (first) options.onFirstClient?.(client);
       } catch {
@@ -267,7 +268,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     }
 
     focus(): void {
-      if (this.client) this.client.focus(); else this.wantsFocus = true;
+      this.client?.focus();
     }
 
     markGone(host: string, sessionId: string, status?: number): void {
