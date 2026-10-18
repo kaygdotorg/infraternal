@@ -16,9 +16,9 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
-        mpsc::{Receiver, RecvTimeoutError, SyncSender},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     time::{Duration, Instant},
 };
@@ -251,6 +251,37 @@ pub(crate) struct StreamCloseLog(Arc<Inner>);
 struct Inner {
     queue: OnceLock<Option<SyncSender<CloseRecord>>>,
     dropped: Arc<AtomicU64>,
+    degraded: Degraded,
+}
+
+/// Fallback for a logger thread that failed to start or died. Nothing reads the queue then, so the
+/// callers themselves count the closes, say once on stderr that the logger is gone, and write the
+/// drop summary about once per window. This is the only path that formats on a caller's thread, and
+/// it runs only when the logger is already broken.
+#[derive(Default)]
+struct Degraded {
+    announced: std::sync::atomic::AtomicBool,
+    last_summary: Mutex<Option<Instant>>,
+}
+
+impl Degraded {
+    fn note(&self, dropped: &AtomicU64, now: Instant) {
+        if !self.announced.swap(true, Ordering::Relaxed) {
+            // stderr, not tracing: the subscriber is what the dead thread was writing through.
+            eprintln!(
+                "infraternal: terminal stream close logger is not running; counting closes and summarising them once a minute"
+            );
+        }
+        let mut last = self
+            .last_summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.is_some_and(|last| now < last + CLOSE_WINDOW) {
+            return;
+        }
+        *last = Some(now);
+        report_dropped(dropped.swap(0, Ordering::Relaxed));
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +292,7 @@ impl StreamCloseLog {
         Self(Arc::new(Inner {
             queue: OnceLock::new(),
             dropped: Arc::default(),
+            degraded: Degraded::default(),
         }))
     }
 
@@ -272,14 +304,18 @@ impl StreamCloseLog {
             .get_or_init(|| spawn_logger(self.0.dropped.clone()));
         let Some(queue) = queue else {
             self.0.dropped.fetch_add(1, Ordering::Relaxed);
+            self.0.degraded.note(&self.0.dropped, Instant::now());
             return;
         };
         #[cfg(test)]
         IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
-        if queue.try_send(*record).is_err() {
+        if let Err(error) = queue.try_send(*record) {
             #[cfg(test)]
             IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
             self.0.dropped.fetch_add(1, Ordering::Relaxed);
+            if matches!(error, TrySendError::Disconnected(_)) {
+                self.0.degraded.note(&self.0.dropped, Instant::now());
+            }
         }
     }
 }
@@ -364,12 +400,18 @@ impl DropReport {
             return;
         }
         self.last = now;
-        let count = dropped.swap(0, Ordering::Relaxed);
+        report_dropped(dropped.swap(0, Ordering::Relaxed));
+    }
+}
+
+/// One warning for closes that never reached the log: the queue was full or the logger is gone.
+fn report_dropped(count: u64) {
+    if count > 0 {
         tracing::warn!(
             target: "infraternal::terminal_stream",
             event = "terminal_stream_close_records_dropped",
             dropped = count,
-            "terminal stream close records dropped because the log queue was full"
+            "terminal stream close records dropped because the log queue was full or the logger is not running"
         );
     }
 }
@@ -917,6 +959,7 @@ mod tests {
         let logger = StreamCloseLog(Arc::new(Inner {
             queue: OnceLock::from(Some(queue)),
             dropped: Arc::default(),
+            degraded: Degraded::default(),
         }));
         for _ in 0..3 {
             logger.record(&record(owner(1), session(1)));
@@ -938,6 +981,37 @@ mod tests {
         assert_eq!(reports.len(), 2);
         assert_eq!(reports[0]["fields"]["dropped"], 2);
         assert_eq!(reports[1]["fields"]["dropped"], 5);
+    }
+
+    /// A logger that never started or died must not drop closes silently: the callers count them and
+    /// write one summary per window.
+    #[test]
+    fn a_dead_logger_is_counted_and_summarised_by_the_callers() {
+        for started in [false, true] {
+            let queue = started.then(|| std::sync::mpsc::sync_channel(1).0);
+            let logger = StreamCloseLog(Arc::new(Inner {
+                queue: OnceLock::from(queue),
+                dropped: Arc::default(),
+                degraded: Degraded::default(),
+            }));
+            let (capture, _guard) = Capture::start();
+            let now = Instant::now();
+            for _ in 0..3 {
+                logger.record(&record(owner(1), session(1)));
+            }
+            // The first close summarised at once; the other two wait for the next window.
+            assert_eq!(logger.0.dropped.load(Ordering::Relaxed), 2);
+            logger
+                .0
+                .degraded
+                .note(&logger.0.dropped, now + CLOSE_WINDOW * 2);
+            assert_eq!(logger.0.dropped.load(Ordering::Relaxed), 0);
+            let reports = capture.events("terminal_stream_close_records_dropped");
+            assert_eq!(reports.len(), 2, "started={started}");
+            assert_eq!(reports[0]["fields"]["dropped"], 1);
+            assert_eq!(reports[1]["fields"]["dropped"], 2);
+            assert!(logger.0.degraded.announced.load(Ordering::Relaxed));
+        }
     }
 
     #[test]
