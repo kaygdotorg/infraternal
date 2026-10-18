@@ -143,10 +143,16 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,096,144 bytes |
-  | `aarch64-unknown-linux-musl` | 19,325,520 bytes |
+  | `x86_64-unknown-linux-musl` | 21,100,176 bytes |
+  | `aarch64-unknown-linux-musl` | 19,328,840 bytes |
 
-  These are the release-3 measurements (release-2 plus #230 same-server
+  These are the #244 mobile browser recovery measurements: +4,032 / +3,320
+  bytes over release 3 (D243). The bounded visibility notice and fixed resume
+  check diagnostics reuse the existing codec, JSON and runtime; no dependency
+  or feature was added. The measured TCP jitter/loss/suspension run reduced
+  browser closes from 1.9337 per minute to zero. The ceilings retain no slack.
+
+  The release-3 measurements were 21,096,144 / 19,325,520 bytes (release-2 plus #230 same-server
   re-enrollment and #227 close logging): +16,000 / +2,872 bytes over release-2
   (D243, with the logging growth covered by D301).
 
