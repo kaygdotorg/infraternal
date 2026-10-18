@@ -256,3 +256,27 @@ async fn owned_session_reference_and_all_bounds_are_transactional() {
     );
     assert!(store.apply("a", &vec![b' '; 8193]).await.is_err());
 }
+
+#[tokio::test]
+async fn stale_noop_still_checks_numeric_bounds_before_committing() {
+    let (store, _) = fixture().await;
+    init(&store, document(1), "init").await;
+    apply(&store, "close", 1, json!({"type":"close","window_id":"w0"}))
+        .await
+        .unwrap();
+    for (index, intent) in [
+        json!({"type":"resize","window_id":"w0","span":0}),
+        json!({"type":"resize","window_id":"w0","height":-1}),
+        json!({"type":"weight","view_id":"console","column_id":"missing","weight":100}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            apply(&store, &format!("bad{index}"), 0, intent)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(canonical(&store, "a").await.revision, 2);
+}

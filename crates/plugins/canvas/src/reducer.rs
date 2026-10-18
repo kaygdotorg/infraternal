@@ -1,5 +1,5 @@
 //! Reduces one semantic intent against current state; storage supplies permanent close tombstones [183].
-use crate::model::{Column, Document, Layout, Point, View, Window};
+use crate::model::{Column, Document, Layout, Point, View, Window, finite};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -142,6 +142,29 @@ pub fn reduce<S: std::hash::BuildHasher>(
     intent: &Intent,
     closed: &HashSet<String, S>,
 ) -> Result<(), ()> {
+    // Bounds apply to the intent even when a close makes the edit a no-op.
+    let valid = match intent {
+        Intent::Resize {
+            height,
+            span,
+            rows,
+            row,
+            ..
+        } => {
+            height.is_none_or(|v| finite(v, 0.05, 10_000.0))
+                && span.is_none_or(|v| (1..=64).contains(&v))
+                && rows.is_none_or(|v| (1..=64).contains(&v))
+                && row.is_none_or(|v| v <= 64)
+        }
+        Intent::Weight { weight, .. } => finite(*weight, 0.1, 10.0),
+        Intent::Pin { position, .. } => position.as_ref().is_none_or(|p| {
+            finite(p.x, -100_000.0, 100_000.0) && finite(p.y, -100_000.0, 100_000.0)
+        }),
+        _ => true,
+    };
+    if !valid {
+        return Err(());
+    }
     match intent {
         Intent::ViewAdd { view } => {
             let empty = match &view.layout {
