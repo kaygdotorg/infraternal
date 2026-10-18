@@ -75,7 +75,7 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     console.log("MOBILE_UI fresh attach ready");
     const resend = page.getByRole("button", { name: "Send again", exact: true });
     await expect(resend).toBeVisible();
-    await expect(page.getByText("Your waiting typing is saved.", { exact: false })).toBeVisible();
+    await expect(page.getByText("New shell. Offline typing may not have arrived.", { exact: false })).toBeVisible();
     const retainedOutput = () => server.bridges.flatMap(bridge => [...bridge.output.values()]).join("");
     expect(retainedOutput().includes("retained-typing-54")).toBe(false);
     for (const theme of ["ink", "paper"]) {
