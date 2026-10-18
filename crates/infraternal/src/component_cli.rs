@@ -178,40 +178,77 @@ async fn execute(
     mut input: Value,
     json_output: bool,
 ) -> io::Result<()> {
+    let mut pages = None;
     loop {
         let output = call(state, action, &input).await?;
         let value: Value = serde_json::from_slice(&output).map_err(io::Error::other)?;
-        // A write may show the current status of what it changed.
-        let presentation = registry
-            .human_status_action(action)
-            .map_err(|_| io::ErrorKind::InvalidData)?;
-        let shown = if let Some(presentation) = presentation {
-            call(state, presentation, &json!({})).await?
+        let next_cursor = value
+            .get("next_cursor")
+            .filter(|cursor| !cursor.is_null())
+            .cloned();
+        if let Some(all_pages) = &mut pages {
+            merge_page(all_pages, value)?;
         } else {
-            output
-        };
-        let width = RenderOptions::detect(false).usable_width();
-        let presented = registry
-            .present(presentation.unwrap_or(action), &shown, width)
-            .map_err(|_| io::ErrorKind::InvalidData)?;
-        let mut result = CommandResult::new(
-            command,
-            state_of(&presented),
-            presented.message.clone(),
-            presented.data.clone(),
-        )
-        .with_body(presented.body.clone());
-        for next in &presented.next {
-            result = result.with_next_step(next.clone());
+            pages = Some(value);
         }
-        print(&result, json_output, false);
-        let Some(cursor) = value.get("next_cursor").filter(|cursor| !cursor.is_null()) else {
-            return Ok(());
+        let Some(cursor) = next_cursor else {
+            break;
         };
         let object = input.as_object_mut().ok_or(io::ErrorKind::InvalidData)?;
-        if object.get("cursor") == Some(cursor) {
+        if object.get("cursor") == Some(&cursor) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         object.insert("cursor".into(), cursor.clone());
     }
+
+    let value = pages.ok_or(io::ErrorKind::InvalidData)?;
+    // Present and write only after every page succeeds, so the envelope describes the whole list.
+    let output = serde_json::to_vec(&value).map_err(io::Error::other)?;
+    // A write may show the current status of what it changed.
+    let presentation = registry
+        .human_status_action(action)
+        .map_err(|_| io::ErrorKind::InvalidData)?;
+    let shown = if let Some(presentation) = presentation {
+        call(state, presentation, &json!({})).await?
+    } else {
+        output
+    };
+    let width = RenderOptions::detect(false).usable_width();
+    let presented = registry
+        .present(presentation.unwrap_or(action), &shown, width)
+        .map_err(|_| io::ErrorKind::InvalidData)?;
+    let mut result = CommandResult::new(
+        command,
+        state_of(&presented),
+        presented.message.clone(),
+        presented.data.clone(),
+    )
+    .with_body(presented.body.clone());
+    for next in &presented.next {
+        result = result.with_next_step(next.clone());
+    }
+    print(&result, json_output, false);
+    Ok(())
+}
+
+/// Combine the array records from successive pages and retain the final page's metadata.
+fn merge_page(all_pages: &mut Value, page: Value) -> io::Result<()> {
+    let Value::Object(page) = page else {
+        return Err(io::ErrorKind::InvalidData.into());
+    };
+    let Some(all_pages) = all_pages.as_object_mut() else {
+        return Err(io::ErrorKind::InvalidData.into());
+    };
+    for (key, value) in page {
+        match all_pages.entry(key) {
+            serde_json::map::Entry::Vacant(entry) => {
+                entry.insert(value);
+            }
+            serde_json::map::Entry::Occupied(mut entry) => match (entry.get_mut(), value) {
+                (Value::Array(all), Value::Array(mut next)) => all.append(&mut next),
+                (current, value) => *current = value,
+            },
+        }
+    }
+    Ok(())
 }

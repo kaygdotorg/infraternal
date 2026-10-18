@@ -93,6 +93,23 @@ fn fake_agent(state: &std::path::Path, replies: Vec<Value>) -> std::thread::Join
     })
 }
 
+fn mesh_peer(node: u64) -> Value {
+    json!({
+        "node": node,
+        "peer": {
+            "addresses": {"ipv4": format!("100.64.0.{node}")},
+            "endpoint": null,
+            "key": vec![1; 32],
+        },
+        "path": "Direct",
+        "counters": {
+            "received_bytes": 0,
+            "sent_bytes": 0,
+            "handshake_secs": 0,
+        },
+    })
+}
+
 // ---- one envelope (D299) ---------------------------------------------------------------
 
 #[test]
@@ -132,16 +149,14 @@ fn usage_errors_under_json_are_one_envelope_and_exit_2() {
 
 #[test]
 fn a_paged_listing_is_still_one_envelope() {
-    // `mesh peers` follows `next_cursor` itself and prints one envelope per page (component_cli
-    // `execute`). A script reading `--json` gets two results for one command, and the first one
-    // already says `ok: true` before the listing is complete.
+    // A script must see one result after the page set is complete, with every peer in its data.
     let home = home("pages");
     let state = private_state(&home);
     let agent = fake_agent(
         &state,
         vec![
-            json!({"peers": [], "version": 1, "next_cursor": {"version": 1, "node": 7}}),
-            json!({"peers": [], "version": 1, "next_cursor": null}),
+            json!({"peers": [mesh_peer(7)], "version": 1, "next_cursor": {"version": 1, "node": 7}}),
+            json!({"peers": [mesh_peer(8)], "version": 1, "next_cursor": null}),
         ],
     );
     let args = [
@@ -153,7 +168,8 @@ fn a_paged_listing_is_still_one_envelope() {
     ];
     let output = cli(&home, &args);
     let _ = agent.join();
-    one_envelope(&args, &output);
+    let envelope = one_envelope(&args, &output);
+    assert_eq!(envelope["data"]["peers"].as_array().map(Vec::len), Some(2));
 }
 
 // ---- Ctrl-C (D303: 130) ----------------------------------------------------------------
