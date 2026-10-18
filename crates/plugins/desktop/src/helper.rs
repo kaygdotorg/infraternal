@@ -75,7 +75,10 @@ struct Worker {
 }
 impl Worker {
     fn start(start: &Start, rect: Rect, native_path: PathBuf, wake: Arc<Wake>) -> io::Result<Self> {
-        let surface = std::env::var_os("INFRATERNAL_DESKTOP_SURFACE").is_some();
+        // Capture belongs to the stable companion that owns its permissions.
+        // Retain owned pixels only for explicit diagnostics; normal capture
+        // never takes the full-image copy/hash/pipe or polling path.
+        let surface = std::env::var_os("INFRATERNAL_DESKTOP_OWNED").is_none();
         let capture = if surface {
             None
         } else {
@@ -275,7 +278,7 @@ fn produce(
         }
         refreshed |= sharp;
         // The owned-pixel fallback is bounded by capture/copy cost, not an extra
-        // 30 fps scheduler. The opt-in surface path takes the native source rate.
+        // 30 fps scheduler. The companion path takes the native source rate.
         next_frame = begin;
     }
     capture.stop()
