@@ -133,7 +133,7 @@ impl Store {
         let mut noop = false;
         if initialize {
             let mut incoming = Document(request.get("document").cloned().ok_or(Error)?);
-            if !incoming.valid() {
+            if !incoming.valid() || serde_json::to_string(&incoming.0)?.len() > MAX_DOCUMENT {
                 return Err(Error);
             }
             incoming.normalize();
@@ -392,6 +392,9 @@ async fn save(
     force_snapshot: bool,
 ) -> Result<(), Error> {
     let json = serde_json::to_string(&document.0)?;
+    if json.len() > MAX_DOCUMENT {
+        return Err(Error);
+    }
     sqlx::query("UPDATE canvas_heads SET revision=?,document=?,initialized=1 WHERE account=?")
         .bind(document.revision())
         .bind(&json)

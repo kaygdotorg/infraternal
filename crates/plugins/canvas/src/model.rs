@@ -156,6 +156,7 @@ impl Document {
     pub fn windows(&self) -> impl Iterator<Item = &Value> {
         views(&self.0).flat_map(columns).flat_map(windows)
     }
+    /// Checks reference shape and cardinality; the host checks encoded bytes at commit.
     #[must_use]
     pub fn valid(&self) -> bool {
         let doc = &self.0;
@@ -218,7 +219,7 @@ impl Document {
                 }
             }
         }
-        serde_json::to_vec(doc).is_ok_and(|bytes| bytes.len() <= MAX_DOCUMENT)
+        true
     }
     /// Numeric spellings do not make identical legacy layouts become different recovery views.
     pub fn normalize(&mut self) {
