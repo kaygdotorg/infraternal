@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { terminalRefusal } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
@@ -235,6 +236,9 @@ export class TerminalClient {
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
   private readonly inputQueue = new ByteQueue(INPUT_QUEUE_LIMIT);
+  /** A fresh writer cannot deduplicate old input; keep the bounded queue until explicit consent. */
+  private inputNeedsResend = false;
+  private inputResendNotice: ToastController | undefined;
   private readonly outputQueue = new ByteQueue(INITIAL_CREDIT);
   private readonly inputScratch = new Uint8Array(INPUT_FRAME_LIMIT);
   private readonly resizeObserver: ResizeObserver;
@@ -841,6 +845,7 @@ export class TerminalClient {
     this.resizeObserver.disconnect();
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
+    this.inputResendNotice?.dispose();
     this.inputQueue.clear();
     this.outputQueue.clear();
     this.pendingSnapshot?.bytes.fill(0);
@@ -867,7 +872,7 @@ export class TerminalClient {
         if (this.closed || (this.pendingExit && !this.pendingExit.retired) || this.sessionGone) return;
         this.cancelStreamRetry();
         // A connection the server does not know starts every writer at zero, like a page reload.
-        if (!resumed && this.hasAttached) this.restartCursors();
+        if (!resumed && this.hasAttached) this.restartCursors(true);
         if (!this.sessionId) this.openSession();
         else {
           this.attachRequested = true;
@@ -1159,13 +1164,17 @@ export class TerminalClient {
   }
 
   /** Starts the stream's cursors over: its session is attached again from the beginning, as after a reload. */
-  private restartCursors(): void {
+  private restartCursors(retainInput = false): void {
     this.cursorEpoch += 1;
     this.receivedOutSeq = 0n;
     this.lastOutSeq = 0n;
-    this.nextInSeq = 0n;
+    this.inputNeedsResend = retainInput && this.inputQueue.length > 0;
+    this.nextInSeq = this.inputNeedsResend ? BigInt(this.inputQueue.length) : 0n;
     this.ackedInSeq = 0n;
-    this.inputQueue.clear();
+    if (!this.inputNeedsResend) {
+      this.inputQueue.clear();
+      this.inputResendNotice?.dismiss();
+    }
     this.outputQueue.clear();
     this.replayResponseFence = undefined;
     this.suppressReplayResponses = this.sessionId !== undefined;
@@ -1176,6 +1185,7 @@ export class TerminalClient {
   }
 
   private resendUnacknowledgedInput(): void {
+    if (this.inputNeedsResend) return;
     let offset = 0;
     let sequence = this.ackedInSeq;
     while (offset < this.inputQueue.length) {
@@ -1223,7 +1233,7 @@ export class TerminalClient {
     this.nextInSeq += BigInt(encoded.byteLength);
     // An Attach request is not a ready shim: per-key frames would fill its
     // bounded handshake queue. Retain them locally until replay confirms it.
-    if (this.attachmentConfirmed) {
+    if (this.attachmentConfirmed && !this.inputNeedsResend) {
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
         this.sendFrame(this.streamId, {
@@ -1241,6 +1251,25 @@ export class TerminalClient {
     if (this.inputQueue.free < INPUT_RESUME_GUARD) {
       this.pauseInput("Typing is paused because too much is waiting to be sent. It resumes when the connection is back.");
     }
+  }
+
+  /** Explicit consent applies once, only after the fresh writer's replay has painted. */
+  resendRetainedInput(): void {
+    if (!this.inputNeedsResend || this.closed) return;
+    if (!this.attachmentConfirmed) { this.showInputResendNotice(); return; }
+    this.inputNeedsResend = false;
+    this.inputResendNotice?.dismiss();
+    this.resendUnacknowledgedInput();
+  }
+
+  private showInputResendNotice(): void {
+    this.inputResendNotice ??= mountToast(this.config.host);
+    this.inputResendNotice.show({
+      message: "Reconnected. Your waiting typing is saved. Some may already have reached the shell. Resend it?",
+      tone: "error",
+      duration: 0,
+      action: { label: "Resend typing", onSelect: () => this.resendRetainedInput() },
+    });
   }
 
   private encoderIntoScratch(data: string): Uint8Array | undefined {
@@ -1417,6 +1446,7 @@ export class TerminalClient {
       if (this.attached && !this.attachmentConfirmed) {
         this.attachmentConfirmed = true;
         this.resendUnacknowledgedInput();
+        if (this.inputNeedsResend) this.showInputResendNotice();
         // Completing replay clears its wait, not an approximation or input-pressure warning.
         if (this.config.status.textContent === "Catching up…") this.setStatus("");
         this.conn.streamAttached(true, this.streamId);
