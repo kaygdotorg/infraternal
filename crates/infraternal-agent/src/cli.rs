@@ -21,12 +21,12 @@ pub fn plugin() -> PluginDefinition {
                 "Use this internal command only when a server launches an agent with a private socketpair.",
                 [
                     "Receive the inherited socket file descriptor from the server.",
-                    "Run the agent for the lifetime of that connection.",
+                    "Run the infraternal agent for the lifetime of that connection.",
                 ],
                 JsonSchema::object(
                     [
                         ("fd".to_owned(), JsonSchema::integer("Inherited socket file descriptor.")),
-                        ("state".to_owned(), JsonSchema::string("Private agent state directory.")),
+                        ("state".to_owned(), JsonSchema::string("Private infraternal agent state directory.")),
                     ],
                     std::iter::empty(),
                 ),
@@ -74,12 +74,12 @@ fn unbuilt() -> [ActionDefinition; 3] {
             ),
         )
         .not_available_yet()
-        .with_example("agent up", "Request agent setup for this node."),
+        .with_example("agent up", "Request infraternal agent setup for this node."),
         ActionDefinition::new(
             ["agent", "down"],
             "Stop the infraternal agent component on this node.",
             "Use this command when this node should leave its managed-node role.",
-            ["The agent component command is not available yet."],
+            ["The infraternal agent component command is not available yet."],
             JsonSchema::empty_object(),
             JsonSchema::command_result(),
             ActionContract::new(
@@ -97,12 +97,12 @@ fn unbuilt() -> [ActionDefinition; 3] {
                 "Stopping the infraternal agent disconnects this node from its server.".to_owned(),
             ],
         })
-        .with_example("agent down", "Stop the agent component on this node."),
+        .with_example("agent down", "Stop the infraternal agent component on this node."),
         ActionDefinition::new(
             ["agent", "status"],
             "Show the infraternal agent component state.",
             "Use this command to check whether this node is connected to a server.",
-            ["The agent component command is not available yet."],
+            ["The infraternal agent component command is not available yet."],
             JsonSchema::empty_object(),
             JsonSchema::command_result(),
             ActionContract::new(
@@ -113,7 +113,7 @@ fn unbuilt() -> [ActionDefinition; 3] {
             ),
         )
         .not_available_yet()
-        .with_example("agent status", "Check the agent component state."),
+        .with_example("agent status", "Check the infraternal agent component state."),
     ]
 }
 
