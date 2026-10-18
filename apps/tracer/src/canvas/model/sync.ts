@@ -6,7 +6,7 @@
 import type { Ctx } from "../context";
 import type { LayoutEdit } from "./operations";
 import type { CanvasDocument } from "./document";
-import { toDocument } from "./document";
+import { documentWindows, toDocument } from "./document";
 
 export interface DocumentSync {
   changed(split?: LayoutEdit): void;
@@ -21,14 +21,14 @@ export interface DocumentSync {
 }
 
 export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean = () => true): DocumentSync {
-  let timer = 0;
+  let queued = false;
   let disposed = false;
   let revision = 0;
   let before: CanvasDocument | undefined;
   const splits = new Map<string, LayoutEdit>();
   const document = (): CanvasDocument => toDocument([...cx.views.values()].filter((c) => persisted(c.view.id)).map((c) => c.view), cx.state.metrics, revision, cx.adapters.store.acceptsPendingReferences);
   const save = (): void => {
-    timer = 0;
+    queued = false;
     if (disposed) return;
     const unresolved = new Set([...cx.views.values()].flatMap((v) => [...v.wins.values()].filter((w) => w.model.kind === "terminal" && !w.model.sessionId).map((w) => w.model.id)));
     if (unresolved.size && !cx.adapters.store.acceptsPendingReferences) return;
@@ -40,7 +40,7 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
     for (const id of splits.keys()) if (next.views.some((v) => v.layout.type === "tiled" && v.layout.columns.some((c) => c.windows.some((w) => w.id === id)))) splits.delete(id);
   };
   return {
-    changed(split) { if (split) splits.set(split.windowId, split); if (!disposed && !timer) timer = window.setTimeout(save, 0); },
+    changed(split) { if (split) splits.set(split.windowId, split); if (!disposed && !queued) { queued = true; queueMicrotask(() => { if (queued) save(); }); } },
     reset(protectedIds = new Set(), protectedViews = new Set()) {
       before = document();
       before.views = before.views.filter((v) => !protectedViews.has(v.id));
@@ -51,11 +51,11 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
       return new Set([...cx.views.keys()].filter((id) => persisted(id) && !saved.has(id)));
     },
     uncommittedWindows() {
-      const saved = new Set(before?.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows.map((w) => w.id)) : []) ?? []);
+      const saved = new Set(before ? documentWindows(before).map((w) => w.id) : []);
       return new Set([...cx.views.values()].filter((v) => persisted(v.view.id)).flatMap((v) => [...v.wins.keys()].filter((id) => !saved.has(id))));
     },
-    flush() { if (timer) { window.clearTimeout(timer); save(); } cx.adapters.store.flush?.(); },
+    flush() { if (queued) save(); cx.adapters.store.flush?.(); },
     /** After this nothing is written again: sign-out removes the document right after (D245). */
-    dispose() { disposed = true; window.clearTimeout(timer); timer = 0; cx.adapters.store.dispose?.(); },
+    dispose() { disposed = true; queued = false; cx.adapters.store.dispose?.(); },
   };
 }
