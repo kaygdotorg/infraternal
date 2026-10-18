@@ -146,7 +146,12 @@ fn chains_to(certificate: &X509, root: X509) -> io::Result<bool> {
     let chain = openssl::stack::Stack::new().map_err(|_| refused())?;
     X509StoreContext::new()
         .map_err(|_| refused())?
-        .init(&trust.build(), certificate, &chain, |ctx| ctx.verify_cert())
+        .init(
+            &trust.build(),
+            certificate,
+            &chain,
+            openssl::x509::X509StoreContextRef::verify_cert,
+        )
         .map_err(|_| refused())
 }
 
