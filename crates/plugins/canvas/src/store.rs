@@ -1,6 +1,8 @@
 //! Serializes account-scoped SQLite commits and checkpoints without expiring retry receipts [183,248].
 use crate::{
-    model::{CHECKPOINT, Document, Layout, MAX_DOCUMENT, MAX_INPUT, MAX_RECEIPTS, Target, text},
+    model::{
+        CHECKPOINT, Document, Layout, MAX_DOCUMENT, MAX_INPUT, MAX_RECEIPTS, Target, Window, text,
+    },
     reducer::{Apply, Initialize, Intent, reduce},
 };
 use serde_json::{Value, json};
@@ -101,7 +103,11 @@ impl Store {
                 .into_iter()
                 .collect();
         reduce(&mut document, &request.intent, &closed)?;
-        ownership(&mut tx, account, &document).await?;
+        // Existing references were checked when admitted. Rechecking them on
+        // unrelated edits would freeze the layout after an ended session is reaped.
+        if let Intent::Open { window, .. } | Intent::Split { window, .. } = &request.intent {
+            ownership(&mut tx, account, std::iter::once(window)).await?;
+        }
         if let Intent::Close { window_id } = &request.intent {
             if closed.len() >= usize::try_from(MAX_RECEIPTS).map_err(|_| Error)?
                 && !closed.contains(window_id)
@@ -147,7 +153,7 @@ impl Store {
         if let Some(revision) = receipt(&mut tx, account, &request.op_id, &encoded).await? {
             return Ok(revision);
         }
-        ownership(&mut tx, account, &request.document).await?;
+        ownership(&mut tx, account, request.document.windows()).await?;
         let initialized: bool =
             sqlx::query_scalar("SELECT initialized FROM canvas_heads WHERE account=?")
                 .bind(account)
@@ -264,13 +270,13 @@ async fn receipt(
     }
     Ok(None)
 }
-async fn ownership(
+async fn ownership<'a>(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
-    document: &Document,
+    windows: impl Iterator<Item = &'a Window>,
 ) -> Result<(), Error> {
     let mut seen = HashSet::new();
-    for window in document.windows() {
+    for window in windows {
         if let Target::Session { id, .. } = &window.target
             && seen.insert(id)
         {
