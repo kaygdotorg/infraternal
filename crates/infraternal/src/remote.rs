@@ -58,9 +58,14 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     }
     // The host key is immutable (#78): SSH setup copies an enrolled identity
     // into its transaction before joining, and a published-setup Retry joins
-    // the same host again (#87, #230). Re-enroll that host's own key only for
-    // the server that enrolled it; anything else is refused before any
-    // network use, so this key's CSR never reaches another server.
+    // the same host again (#87, #230). Re-enroll that host's own key only when
+    // the invitation names the server that enrolled it (host id, uid, server
+    // name, and a CA that is the stored one or issued the stored certificate).
+    // These are public fields an invitation can copy, so this check alone does
+    // not stop the CSR from reaching a server the invitation points at. The
+    // real guard is the response check below: the issued certificate must be
+    // for this key and chain to the invited root, and the stored identity is
+    // replaced only after that.
     let previous = enrolled_key(data, &invitation, uid)?;
     let (key, snapshot) = match previous {
         Some((key, snapshot)) => (key, Some(snapshot)),
