@@ -1561,11 +1561,12 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                 .get_one::<String>("host")
                 .and_then(|host| host.parse().ok());
             let Some(host) = host else {
-                return report_failure(
+                return report_failure_as(
                     "remove-host",
                     "Invalid host identifier.",
                     "expected a host UUID".to_owned(),
                     json,
+                    Exit::Usage,
                 );
             };
             return host_remove::run(
