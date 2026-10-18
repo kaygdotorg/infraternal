@@ -6,6 +6,7 @@
  * to the next band of the group. A plain column scrolls on its own, as it always did. Callers pass a column element either
  * way; `scrollerOf` says what actually scrolls.
  */
+import { randomUuid } from "../../identifiers";
 import { Spring } from "../../../../../packages/ui/src/spring";
 import type { Ctx, ViewRec } from "../context";
 import { columnEls } from "./column-els";
@@ -104,9 +105,7 @@ export function scrollToWindow(colEl: HTMLElement, win: HTMLElement, instant = f
 }
 
 /** An id no column of the view has: a new column never takes the id of one that is already there (the scene's ids too). */
-export function freshColumnId(cx: Ctx, c: ViewRec): string {
-  const taken = new Set(columnEls(c.colsEl).map((e) => e.dataset.id ?? ""));
-  let id = "";
-  do id = `c${++cx.state.serial}`; while (taken.has(id));
-  return id;
+export function freshColumnId(_cx: Ctx, _c: ViewRec): string {
+  // Per-device counters collide when two devices create columns from the same snapshot (D183).
+  return `c-${randomUuid()}`;
 }
