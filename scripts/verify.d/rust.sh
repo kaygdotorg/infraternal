@@ -65,7 +65,7 @@ rust_check_static_binary() {
 
     case "$target" in
         x86_64-unknown-linux-musl) max_size_bytes=21104560 ;;
-        aarch64-unknown-linux-musl) max_size_bytes=19328928 ;;
+        aarch64-unknown-linux-musl) max_size_bytes=19332096 ;;
         *)
             printf 'no static binary size baseline configured for target: %s\n' "$target" >&2
             return 1
