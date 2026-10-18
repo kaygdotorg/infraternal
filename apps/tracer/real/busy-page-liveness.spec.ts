@@ -182,14 +182,16 @@ test("typing into a restored terminal stays with that terminal while others init
       await page.waitForTimeout(250);
     }
     await expect(page.locator('.cl[data-view="console"] .ui-window[data-status="live"]')).toHaveCount(8);
-    // Widen the scheduling gap between zero-delay tasks. Input tasks can arrive
+    // Widen the scheduling gap between promise-resolver zero-delay tasks. Input tasks can arrive
     // between renderer initializations in an ordinary busy browser too; this
     // makes that interleaving deterministic without changing the production code.
     await page.addInitScript(() => {
       const schedule = window.setTimeout.bind(window);
       let next = 0;
       window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-        if (timeout === 0) { next = Math.max(next, performance.now()) + 150; return schedule(handler, next - performance.now(), ...args); }
+        // Ordinary UI callbacks retain their scheduling: delaying those too
+        // would also change existing deferred-focus behavior on the baseline.
+        if (timeout === 0 && typeof handler === "function" && Function.prototype.toString.call(handler).includes("[native code]")) { next = Math.max(next, performance.now()) + 150; return schedule(handler, next - performance.now(), ...args); }
         return schedule(handler, timeout, ...args);
       }) as typeof window.setTimeout;
     });
