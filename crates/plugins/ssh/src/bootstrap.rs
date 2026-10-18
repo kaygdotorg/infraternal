@@ -51,6 +51,11 @@ pub trait Backend: Send + Sync {
     /// Bound readiness using an authenticated command exchange on this connection.
     /// Command execution is included, so the observation conservatively exceeds link RTT.
     fn observe_link(&self, _: &Authority, _: uuid::Uuid, _: Duration) {}
+    /// Extend the SSH commit command through this attempt's bounded route proof.
+    /// Older adapters keep their transport's configured command deadline.
+    fn setup_commit_timeout(&self, _: &Authority, _: uuid::Uuid) -> Option<Duration> {
+        None
+    }
     /// Reuse the server's existing session inventory notification source.
     fn session_notifications(&self, _: tokio::sync::watch::Sender<u64>) {}
     /// Retained subscriptions follow host revocation across transport replacement.
@@ -1297,6 +1302,14 @@ impl Bootstrap {
         Box::pin(async move {
             let proof = async {
                 let (release, approved) = tokio::sync::oneshot::channel();
+                // The SSH commit child must outlive both sequential readiness
+                // phases and its own command/exit round trips. Clamp it to the
+                // attempt limit; below that ceiling, readiness reports its
+                // route-specific failure before SSH cancels the command.
+                let commit_timeout = self
+                    .backend
+                    .setup_commit_timeout(authority, host)
+                    .map(|timeout| timeout.min(self.deadline));
                 tokio::try_join!(
                     async {
                         if published {
@@ -1317,7 +1330,7 @@ impl Bootstrap {
                             Failure::install("The host commit command ended before terminal proof.")
                         })
                     },
-                    installation.commit_after(approved),
+                    installation.commit_after(approved, commit_timeout),
                 )?;
                 // Completion discharges durable retirement only after proof and commit.
                 self.backend.completed(authority, host).await

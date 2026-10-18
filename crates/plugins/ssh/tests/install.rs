@@ -606,7 +606,7 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
         install.setup(&fixture.join).await.unwrap();
         let stage = fixture.base().join(".bootstrap-lock");
         let (release, receiver) = tokio::sync::oneshot::channel();
-        let pending = install.commit_after(receiver);
+        let pending = install.commit_after(receiver, None);
         tokio::pin!(pending);
         tokio::select! {
             result = &mut pending => panic!("commit preceded proof: {result:?}"),
