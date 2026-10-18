@@ -170,12 +170,14 @@ fn move_aside(nodes: &[Named], holder: &Named, name: &str) -> Renamed {
     let base = holder.claim.as_deref().unwrap_or(&holder.name);
     let to = free_name(nodes, base, holder.id, false, name).unwrap_or_else(|| {
         // Build the borrowed set only on suffix exhaustion; ordinary naming retains its existing path.
-        let occupied: BTreeSet<&str> = nodes
-            .iter()
-            .filter(|node| node.id != holder.id)
-            .map(|node| node.name.as_str())
-            .chain([name])
-            .collect();
+        // Insert directly so this rare fallback does not pull in bulk sorting code.
+        let mut occupied = BTreeSet::new();
+        occupied.insert(name);
+        for node in nodes {
+            if node.id != holder.id {
+                occupied.insert(node.name.as_str());
+            }
+        }
         let fallback = format!("mesh-{}", holder.host.as_deref().unwrap_or_default());
         if !occupied.contains(fallback.as_str()) {
             return fallback;
