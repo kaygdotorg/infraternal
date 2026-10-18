@@ -37,7 +37,7 @@ export interface ToastController {
 }
 
 export interface ToastOptions {
-  /** Window notices use a positioned, unscrolled parent so canvas transforms cannot move the action off screen. */
+  /** Window notices anchor to the inline start of a positioned, unscrolled parent. */
   placement?: "viewport" | "parent";
 }
 
@@ -45,7 +45,12 @@ export interface ToastOptions {
 export function mountToast(parent: HTMLElement, options: ToastOptions = {}): ToastController {
   const host = document.createElement("aside");
   host.className = "ui-toast ui-overlay-surface";
-  if (options.placement === "parent") host.style.position = "absolute";
+  if (options.placement === "parent") {
+    host.style.position = "absolute";
+    // Centering in a wide window can put the action beneath its neighboring
+    // view. Parent notices stay at the window's inline start.
+    host.style.marginInline = "0";
+  }
   host.hidden = true;
   host.setAttribute("aria-label", "Notification");
   host.setAttribute("role", "group");
