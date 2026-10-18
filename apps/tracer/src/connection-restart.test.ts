@@ -468,7 +468,7 @@ test("online and foreground events cancel delays and preserve handshakes in prog
   }
 });
 
-for (const online of [true, false]) test(`a refused resume forgets its capability once and fresh refusals keep backing off when online hint is ${online}`, () => {
+for (const online of [true, false]) for (const hint of [false, true]) test(`a refused resume keeps fresh refusal backoff (online: ${online}, new hint: ${hint})`, () => {
   const globals = globalThis as unknown as Record<string, unknown>;
   const original = { window: globals.window, location: globals.location, WebSocket: globals.WebSocket, navigator: globals.navigator, random: Math.random };
   let retry: (() => void) | undefined;
@@ -505,7 +505,8 @@ for (const online of [true, false]) test(`a refused resume forgets its capabilit
     sockets[1]!.onopen?.();
     sockets[1]!.receive({ type: "Close", code: 1008, reason: "the server refused to resume the connection" });
     const firstDelay = delay;
-    retry?.();
+    if (hint) (connection as unknown as { retryNow(): void }).retryNow();
+    else retry?.();
     sockets[2]!.onopen?.();
     // Also exercise a transport Close without an application Close frame.
     sockets[2]!.close();
@@ -513,6 +514,9 @@ for (const online of [true, false]) test(`a refused resume forgets its capabilit
     retry?.();
     sockets[3]!.onopen?.();
     expect(attempts).toEqual([false, true, false, false]);
+    sockets[3]!.receive({ type: "Welcome", connectionId: new Uint8Array(16).fill(3), resumeToken: new Uint8Array(32).fill(4), resumeWindowSeconds: 120 });
+    connection.forceDrop();
+    expect(delay).toBe(5); // Real success, rather than a hint, restores prompt recovery.
   } finally {
     connection?.dispose();
     Math.random = original.random;
