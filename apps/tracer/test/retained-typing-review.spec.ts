@@ -238,3 +238,39 @@ for (const width of [1440, 393, 375]) for (const theme of ["ink", "paper"]) {
     } finally { await context.close(); }
   });
 }
+
+/** Browser composition must keep its text target while a pending typing notice is visible. */
+for (const pending of [false, true]) test(`review: active composition survives the focus chord with a ${pending ? "pending" : "resolved"} typing choice`, async ({ page }) => {
+  await pendingTyping(page);
+  if (!pending) {
+    await page.getByRole("button", { name: "Discard" }).click();
+    await expect(page.locator('.cl[data-view="console"] .ui-window .ui-toast').first()).toBeHidden();
+  }
+  const input = page.locator('.cl[data-view="console"] .ui-window .terminal-host textarea').first();
+  await input.focus();
+  await input.evaluate((element) => {
+    const target = element as HTMLElement;
+    target.dataset.reviewCompositionStarted = "0";
+    target.dataset.reviewCompositionEnded = "0";
+    element.addEventListener("compositionstart", () => { target.dataset.reviewCompositionStarted = "1"; });
+    element.addEventListener("compositionend", () => { target.dataset.reviewCompositionEnded = "1"; });
+    const record = (event: KeyboardEvent): void => {
+      if (event.code !== "Space") return;
+      target.dataset.reviewSpaceComposing = String(event.isComposing);
+      target.dataset.reviewSpaceTrusted = String(event.isTrusted);
+      window.removeEventListener("keydown", record, true);
+    };
+    window.addEventListener("keydown", record, true);
+  });
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Input.imeSetComposition", { text: "漢", selectionStart: 1, selectionEnd: 1 });
+    await expect(input).toHaveAttribute("data-review-composition-started", "1");
+    await expect(input).toHaveAttribute("data-review-composition-ended", "0");
+    await page.keyboard.press("Control+Shift+Space");
+    await expect(input).toHaveAttribute("data-review-space-composing", "true");
+    await expect(input).toHaveAttribute("data-review-space-trusted", "true");
+    await expect(input).toHaveAttribute("data-review-composition-ended", "0");
+    await expect(input).toBeFocused();
+  } finally { await session.detach(); }
+});
