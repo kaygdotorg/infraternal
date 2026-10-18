@@ -20,7 +20,7 @@ const clustersPreview = process.env.INFRATERNAL_CLUSTERS_PREVIEW === "1";
 // without git history reports nothing, and the UI then says "dev".
 const commit = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" }).stdout.toString().trim();
 const build = await Bun.build({
-  entrypoints: ["src/main.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts"],
+  entrypoints: ["src/main.ts", "src/offline.worker.ts", "../../packages/ui/src/backdrop.worker.ts", "../../packages/ui/src/faulty-terminal.worker.ts"],
   outdir: dist,
   naming: { entry: "[name].js" },
   // TRACER_NO_MINIFY=1 or TRACER_BUILD_READABLE=1 keeps function names, so a CPU profile can be read.
