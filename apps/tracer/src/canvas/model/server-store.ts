@@ -3,6 +3,7 @@ import { randomUuid } from "../../identifiers";
 import { canvasKey, readStoredJson, writeStoredJson } from "../../account-storage";
 import { documentWindows as windows, parseDocument, type CanvasDocument } from "./document";
 import { edits, reduce, type Intent, type LayoutEdit } from "./operations";
+import { readLayoutCache, type Pending, type Migration } from "./cache";
 import type { CanvasStore } from "./store";
 
 export interface LayoutTransport {
@@ -10,8 +11,6 @@ export interface LayoutTransport {
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   subscribe(filter: { topic: string }, event: (event: Record<string, unknown>) => void, open?: () => void): () => void;
 }
-interface Pending { op_id: string; base_revision: number; intent: Intent; revision?: number; sent?: boolean }
-interface Migration { op_id: string; document: CanvasDocument }
 const empty = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [] });
 
 export class ServerCanvasStore implements CanvasStore {
@@ -36,20 +35,10 @@ export class ServerCanvasStore implements CanvasStore {
   constructor(private readonly transport: LayoutTransport, account: string, private readonly refused: () => void = () => {}) {
     this.#key = canvasKey(account);
     this.#first = new Promise((resolve) => { this.#loaded = resolve; });
-    {
-      const value = readStoredJson(this.#key);
-      const legacy = parseDocument(value);
-      if (legacy) { this.#migration = { op_id: randomUuid(), document: legacy }; this.#cached = true; }
-      else if (value && typeof value === "object" && "cacheVersion" in value && value.cacheVersion === 2) {
-        const cache = value as { canonical?: unknown; document?: unknown; pending?: Pending[]; unresolved?: string[]; migration?: Migration };
-        const canonical = parseDocument(cache.canonical), document = parseDocument(cache.document);
-        if (canonical && document) {
-          this.#canonical = canonical; this.#cached = true; this.#initialized = canonical.revision > 0;
-          if (Array.isArray(cache.unresolved)) this.#unresolved = new Set(cache.unresolved.filter((id) => typeof id === "string"));
-          if (Array.isArray(cache.pending) && cache.pending.length <= 1024) this.#pending = cache.pending;
-          if (cache.migration && typeof cache.migration.op_id === "string" && parseDocument(cache.migration.document)) this.#migration = cache.migration;
-        }
-      }
+    const cache = readLayoutCache(readStoredJson(this.#key));
+    if (cache) {
+      this.#canonical = cache.canonical; this.#pending = cache.pending; this.#unresolved = cache.unresolved;
+      this.#migration = cache.migration; this.#cached = true; this.#initialized = cache.canonical.revision > 0;
     }
     this.#off = transport.subscribe({ topic: "canvas.layout" }, (event) => this.#event(event), () => {
       this.#ready = false; this.#busy = false; this.#epoch++;

@@ -16,6 +16,11 @@ test("cached identity needs a matching layout and sign-out removes it", async ()
     expect(await cachedDrawingIdentity()).toBeUndefined();
     localStorage.setItem(canvasKey(id), JSON.stringify({ format: "infraternal.canvas", version: 1, revision: 1, views: [] }));
     expect(await cachedDrawingIdentity()).toEqual({ user_id: id, hostname: "host", username: "person" });
+    const document = { format: "infraternal.canvas", version: 1, revision: 1, views: [] };
+    localStorage.setItem(canvasKey(id), JSON.stringify({ cacheVersion: 2, canonical: document, document, pending: [] }));
+    expect(await cachedDrawingIdentity()).toEqual({ user_id: id, hostname: "host", username: "person" });
+    localStorage.setItem(canvasKey(id), JSON.stringify({ cacheVersion: 2, canonical: {}, document, pending: [] }));
+    expect(await cachedDrawingIdentity()).toBeUndefined();
     clearAccountStorage(id); expect(await cachedDrawingIdentity()).toBeUndefined(); expect(values.size).toBe(0);
   } finally { if (original) Object.defineProperty(globalThis, "localStorage", original); else Reflect.deleteProperty(globalThis, "localStorage"); if (originalSession) Object.defineProperty(globalThis, "sessionStorage", originalSession); else Reflect.deleteProperty(globalThis, "sessionStorage"); }
 });

@@ -9,9 +9,8 @@ export async function cachedDrawingIdentity(): Promise<DrawingIdentity | undefin
     const account = localStorage.getItem(lastAccountKey);
     if (!isCanonicalUuid(account)) return undefined;
     const canvas = readStoredJson(canvasKey(account));
-    const { parseDocument } = await import("./canvas/model/document");
-    const cache = canvas && typeof canvas === "object" ? canvas as Record<string, unknown> : undefined;
-    if (!parseDocument(canvas) && !parseDocument(cache?.document) && !parseDocument(cache?.canonical)) return undefined;
+    const { readLayoutCache } = await import("./canvas/model/cache");
+    if (!readLayoutCache(canvas)) return undefined;
     const value = readStoredJson(drawingIdentityKey(account));
     if (!value || typeof value !== "object") return undefined;
     const row = value as Record<string, unknown>;
