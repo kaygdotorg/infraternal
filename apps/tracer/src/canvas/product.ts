@@ -225,7 +225,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const paintLayout = (): void => {
     if (canvas.cx.state.movingWindow) { paintAfterDrop = true; return; }
     const revision = ++paintRevision;
-    void onDemand(() => import("./model/reconcile.on-demand")).then(({ reconcile }) => reconcile(canvas.cx, () => {
+    void import("./model/reconcile").then(({ reconcile }) => reconcile(canvas.cx, () => {
       canvas.flush();
       return { document: store.current!(), protectedIds: canvas.cx.store.uncommittedWindows(), protectedViews: canvas.cx.store.uncommittedViews() };
     }, resolve, () => !disposed && revision === paintRevision));
@@ -240,7 +240,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   if (saved) inventory.setLayout(saved);
   canvas.cx.nav.flyView("console", true);
   canvasReady();
-  whenIdle(() => { if (!disposed) { void onDemand(() => import("./model/reconcile.on-demand")).catch(() => undefined); } });
+  whenIdle(() => { if (!disposed) { void import("./model/reconcile").catch(() => undefined); } });
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
   if (first) canvas.cx.win.setActive(first);
   // Neither inventory code nor its RPC competes with the first terminal frame.
