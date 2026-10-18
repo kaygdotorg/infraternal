@@ -108,6 +108,15 @@ class JoinDeadlineReview(unittest.TestCase):
     def test_retry_tcp_fallback_600_ms_rtt(self):
         self.run_case(retry=True, rtt=600, tcp_only=True)
 
+    def test_clean_tcp_fallback_startup_inside_link_scaled_allowance(self):
+        # The authenticated 600 ms exchange gives more than 34.8 s per phase.
+        # Service startup plus TLS greeting fit that allowance; a parallel
+        # commit channel must not impose its shorter command timeout on proof.
+        self.run_case(rtt=600, startup=31, tcp_only=True)
+
+    def test_retry_tcp_fallback_startup_inside_link_scaled_allowance(self):
+        self.run_case(retry=True, rtt=600, startup=31, tcp_only=True)
+
     def test_retry_root_lan(self):
         self.run_case(retry=True, mode="root")
 
