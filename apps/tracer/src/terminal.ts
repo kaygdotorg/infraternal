@@ -440,6 +440,10 @@ export class TerminalClient {
   static async open(config: TerminalConfig): Promise<TerminalClient> {
     const font = config.font ?? fontById(DEFAULT_FONT_ID)!;
     await TerminalClient.prepareResources(font);
+    // Restored windows share the resource promise. Give each renderer its own
+    // task so dozens of initializations cannot hold queued socket replies in
+    // one microtask batch (#245); the first window pays only one task turn.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     const terminal = TerminalClient.createRenderer(font, config);
     const client = new TerminalClient(config, terminal, font);
     // Weights go in before the first measurement so the grid is measured from the face it draws.
