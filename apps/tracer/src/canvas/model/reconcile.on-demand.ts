@@ -1,21 +1,32 @@
 /** Paint shared layout changes without replacing live terminal bindings or this device's focus/camera (D178). */
-import type { Ctx } from "../context";
+import type { Ctx, ViewRec } from "../context";
 import { CELL } from "../layout/geometry";
 import { loadGroups } from "../layout/groups-handle";
-import { columnsFromDocument, type CanvasDocument, type DocTarget } from "./document";
+import { columnsFromDocument, type CanvasDocument, type DocTarget, type DocView } from "./document";
 import { makeBody } from "../views/body";
 import type { WindowModel } from "./types";
 
-export async function reconcile(cx: Ctx, document: CanvasDocument, resolve: (target: DocTarget) => Partial<WindowModel> | undefined, current: () => boolean, protectedIds: ReadonlySet<string> = new Set()): Promise<void> {
+/** Metadata changes leave terminal geometry and device focus alone. */
+function place(view: ViewRec, document: DocView): void {
+  if (view.view.name !== document.name) { view.view.name = document.name; const label = view.label.querySelector(".cl-label-name"); if (label) label.textContent = document.name; }
+  const x = document.cell.x * CELL, y = document.cell.y * CELL;
+  if (view.view.x !== x || view.view.y !== y) { view.view.x = x; view.view.y = y; view.sx.set(x, true); view.sy.set(y, true); }
+}
+export interface SharedPaint { document: CanvasDocument; protectedIds: ReadonlySet<string>; protectedViews: ReadonlySet<string> }
+export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (target: DocTarget, windowId: string) => Partial<WindowModel> | undefined, current: () => boolean): Promise<void> {
   const grouped = await loadGroups();
   if (!current()) return;
-  const keep = new Set(document.views.map((v) => v.id));
+  // Imports may have yielded to input; capture the latest projection only after those boundaries.
+  const { document, protectedIds, protectedViews } = read();
+  const keep = new Set([...document.views.map((v) => v.id), ...protectedViews]);
   for (const c of [...cx.views.values()]) if (c.view.id !== "settings" && !keep.has(c.view.id)) cx.view.remove(c);
   for (const view of document.views) {
     let c = cx.views.get(view.id);
     // Graph content is owned by its existing source; layout only positions its pins.
     if (view.layout.type === "graph") {
-      if (c) { c.view.x = view.cell.x * CELL; c.view.y = view.cell.y * CELL; c.sx.set(c.view.x, true); c.sy.set(c.view.y, true); }
+      if (!c) { c = cx.view.build({ id: view.id, name: view.name, layout: "graph", cols: [], nodes: [], graphPins: view.layout.pinned, x: view.cell.x * CELL, y: view.cell.y * CELL }); cx.views.set(view.id, c); }
+      else if (JSON.stringify(c.view.graphPins) !== JSON.stringify(view.layout.pinned)) { c.view.graphPins = view.layout.pinned; cx.mesh?.refreshLayout(c); }
+      place(c, view);
       continue;
     }
     const columns = columnsFromDocument(view.layout, cx.state.metrics, resolve);
@@ -38,22 +49,23 @@ export async function reconcile(cx: Ctx, document: CanvasDocument, resolve: (tar
       const rec = c.wins.get(model.id);
       if (!rec) c.wins.set(model.id, cx.win.make(c, model));
       else {
+        const relabel = rec.model.host !== model.host || rec.model.user !== model.user || rec.model.session !== model.session;
         const sameHost = rec.model.hostId === model.hostId && rec.model.host === model.host;
         const retargeted = rec.model.sessionId !== model.sessionId || rec.model.hostId !== model.hostId;
         rec.model.host = model.host;
         for (const k of ["sessionId", "session", "hostId", "user", "address", "os"] as const) { if (model[k] === undefined) delete rec.model[k]; else Object.assign(rec.model, { [k]: model[k] }); }
         if (retargeted && (!sameHost || !rec.binding?.retarget?.(rec.model))) { rec.binding?.dispose(); makeBody(cx, rec); rec.binding?.setActive(cx.state.activeWin === rec); }
-        rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), ...(rec.model.session ? { session: rec.model.session } : {}) });
+        if (relabel) rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), ...(rec.model.session ? { session: rec.model.session } : {}) });
         for (const k of ["h", "span", "rows", "row"] as const) { if (model[k] === undefined) delete rec.model[k]; else rec.model[k] = model[k]; } }
     }
     grouped.applyCols(cx, c, columns);
-    c.view.name = view.name;
-    const name = c.label.querySelector(".cl-label-name"); if (name) name.textContent = view.name;
     c.view.cols = columns;
-    c.view.x = view.cell.x * CELL; c.view.y = view.cell.y * CELL;
-    c.sx.set(c.view.x, true); c.sy.set(c.view.y, true);
+    place(c, view);
     cx.view.geometry(c); cx.view.paintEmpty(c);
   }
   if (!cx.state.activeWin) { const first = cx.views.get(cx.state.currentView)?.wins.values().next().value; if (first) cx.win.setActive(first); }
+  cx.store.reset(protectedIds, new Set([...protectedViews].filter((id) => !document.views.some((v) => v.id === id))));
+  cx.adapters.inventory?.setLayout?.(document);
+  if (protectedIds.size || protectedViews.size) cx.store.changed();
   cx.tree.render(); cx.pill.paint(); cx.toolbar.update(); cx.visibility.lodChanged();
 }

@@ -38,7 +38,11 @@ import { teachOnce } from "../hints";
 import type { DetailsSourceLoader } from "./windows/details-source";
 import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
 
+import type { CanvasStore } from "./model/store";
+
 export interface ProductCanvasOptions {
+  /** Isolated preview documents never use the production transport. */
+  previewStore?: CanvasStore;
   /** The embedded host's name and the person's login. */
   host: { name: string; user?: string };
   /** Layouts are kept per account. */
@@ -120,7 +124,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       }
     }
   });
-  const store = new ServerCanvasStore(connection, options.accountId, () => { if (!disposed) core.toast.show({ message: "Layout changes are waiting to sync. Reconnect to try again.", tone: "error", duration: 5000 }); });
+  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, () => { if (!disposed) core.toast.show({ message: "Layout changes are waiting to sync. Reconnect to try again.", tone: "error", duration: 5000 }); });
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: embedded, connection, inventory, roundTrip: () => roundTrip }));
   // A ready result carries the admitted UUID; labels are only presentation.
@@ -185,9 +189,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const applyIdentities = (hosts: readonly { id: string; name: string; user?: string; os?: HostPlatform }[]): void => {
     for (const h of hosts) canvas.cx.win.setHostIdentity({ host: h.name, hostId: h.id }, { ...(h.os ? { os: h.os } : {}), user: h.user });
   };
-  const resolve = (target: DocTarget): Partial<WindowModel> | undefined => {
+  const resolve = (target: DocTarget, windowId: string): Partial<WindowModel> | undefined => {
     if (target.type !== "session") return undefined;
-    const reference = { host: target.host, sessionId: target.id, ...(target.name ? { session: target.name } : {}) };
+    const reference = { host: target.host, ...(!store.unresolvedWindow?.(windowId) ? { sessionId: target.id } : {}), ...(target.name ? { session: target.name } : {}) };
     if (target.hostId) {
       const identity = { ...(target.user ? { user: target.user } : {}), ...(target.address ? { address: target.address } : {}) };
       sessions.registerHost({ id: target.hostId, name: target.host, ...identity });
@@ -204,8 +208,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: (doc?.cell.x ?? 0) * CELL, y: (doc?.cell.y ?? 0) * CELL };
     const settings = buildSettingsView(false, m, BUILTIN_SECTIONS);
     settings.x = boxOf(console_, m).w + CELL;
-    const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh" && v.layout.type === "tiled").map((v): ViewModel => ({
-      id: v.id, name: v.name, layout: "tiled", cols: v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : [], nodes: [], x: v.cell.x * CELL, y: v.cell.y * CELL,
+    const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh").map((v): ViewModel => ({
+      id: v.id, name: v.name, layout: v.layout.type === "graph" ? "graph" : "tiled", ...(v.layout.type === "graph" ? { graphPins: v.layout.pinned } : {}), cols: v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : [], nodes: [], x: v.cell.x * CELL, y: v.cell.y * CELL,
     }));
     return [console_, ...recovered, settings];
   });
@@ -213,28 +217,25 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const offMeshView = offerMeshView(canvas.cx, mesh, { keep: Boolean(savedMesh) });
   if (savedMesh) {
     const view = canvas.cx.views.get("mesh");
-    if (view) { view.view.x = savedMesh.cell.x * CELL; view.view.y = savedMesh.cell.y * CELL; view.sx.set(view.view.x, true); view.sy.set(view.view.y, true); }
+    if (view) { if (savedMesh.layout.type === "graph") view.view.graphPins = savedMesh.layout.pinned; view.view.x = savedMesh.cell.x * CELL; view.view.y = savedMesh.cell.y * CELL; view.sx.set(view.view.x, true); view.sy.set(view.view.y, true); }
   }
   // Capture initial structure once; subsequent server paints reset the comparison baseline.
-  if (saved) canvas.cx.store.reset(); else canvas.cx.store.changed();
+  if (saved?.views.some((view) => view.id === "console")) canvas.cx.store.reset(); else canvas.cx.store.changed();
   let paintRevision = 0;
-  const offLayout = store.subscribe(() => {
-    // Journal any completed local edit before another device's update can replace its presentation.
-    canvas.flush();
-    const protectedIds = canvas.cx.store.uncommittedWindows();
-    const document = store.current();
+  const paintLayout = (): void => {
     const revision = ++paintRevision;
-    void onDemand(() => import("./model/reconcile.on-demand")).then(({ reconcile }) => reconcile(canvas.cx, document, resolve, () => !disposed && revision === paintRevision, protectedIds)).then(() => {
-      if (disposed || revision !== paintRevision) return;
-      canvas.cx.store.reset(protectedIds);
-      if (protectedIds.size) canvas.cx.store.changed();
-      inventory.setLayout(document);
-    });
-  });
+    void onDemand(() => import("./model/reconcile.on-demand")).then(({ reconcile }) => reconcile(canvas.cx, () => {
+      canvas.flush();
+      return { document: store.current!(), protectedIds: canvas.cx.store.uncommittedWindows(), protectedViews: canvas.cx.store.uncommittedViews() };
+    }, resolve, () => !disposed && revision === paintRevision));
+  };
+  const offLayout = store.current ? store.subscribe(paintLayout) : () => {};
+  // Changes can arrive while grouped-layout code loads during mount.
+  if (store.current) paintLayout();
   if (saved) inventory.setLayout(saved);
   canvas.cx.nav.flyView("console", true);
   canvasReady();
-  whenIdle(() => { if (!disposed) { store.prepare(); void onDemand(() => import("./model/reconcile.on-demand")).catch(() => undefined); } });
+  whenIdle(() => { if (!disposed) { void onDemand(() => import("./model/reconcile.on-demand")).catch(() => undefined); } });
   const first = [...(canvas.cx.views.get("console")?.wins.values() ?? [])][0];
   if (first) canvas.cx.win.setActive(first);
   // Neither inventory code nor its RPC competes with the first terminal frame.
