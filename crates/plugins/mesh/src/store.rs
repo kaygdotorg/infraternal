@@ -278,30 +278,6 @@ async fn wanted_name(
     };
     Ok((wanted, records))
 }
-/// Refuses a person's name for node `id` (`None` while enrolling a new one) that belongs to the server's node:
-/// `server`, which every viewer without host facts reads as the server, and the name the server's node carries
-/// now (its hostname). Automatic naming never gives either to a remote machine (`wanted_name`); this closes the
-/// hand path, so no viewer ever sees two nodes called `server` and `server.<suffix>` never points at a remote.
-/// The server's node itself may take either.
-pub(crate) async fn refuse_server_names(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    id: Option<i64>,
-    name: &str,
-) -> Result<(), crate::api::MeshApiError> {
-    let server: Option<(i64, String)> =
-        sqlx::query_as("SELECT id,name FROM mesh_nodes WHERE dataplane_host='server'")
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| storage_error("Mesh storage unavailable."))?;
-    let is_server = server
-        .as_ref()
-        .is_some_and(|(server, _)| Some(*server) == id);
-    let servers = name == SERVER_LABEL || server.is_some_and(|(_, held)| held == name);
-    if servers && !is_server {
-        return Err(crate::api::MeshApiError::Reserved);
-    }
-    Ok(())
-}
 /// Frees `name` for a person's choice on node `id` (`None` while enrolling a new one). A person outranks every
 /// automatic name (migration 0026), so a node holding `name` by record, report or placeholder moves aside to a
 /// suffix of its own claim, audited as an automatic rename with the change's revision. Returns the nodes moved.
@@ -309,27 +285,25 @@ pub(crate) async fn refuse_server_names(
 /// Only another person's name refuses, as a bare conflict. That is no oracle: the refusal says only that the
 /// name is in use, which every Mesh member can learn from the name's DNS record, while a name a machine
 /// reported (a host fact, hidden from viewers who are not the owner) never refuses anything. The server's names
-/// are refused before this, by [`refuse_server_names`].
+/// refuse with [`crate::api::MeshApiError::Reserved`], except for the server's own node.
 pub(crate) async fn make_room(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: Option<i64>,
     name: &str,
 ) -> Result<Vec<i64>, crate::api::MeshApiError> {
     let unavailable = |_| storage_error("Mesh storage unavailable.");
-    let nodes: Vec<Named> =
-        sqlx::query("SELECT id,name,name_source,dataplane_host,name_claim FROM mesh_nodes")
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(unavailable)?
-            .iter()
-            .map(|row| Named {
-                id: row.get("id"),
-                name: row.get("name"),
-                source: row.get("name_source"),
-                host: row.get("dataplane_host"),
-                claim: row.get("name_claim"),
-            })
-            .collect();
+    let nodes = named_nodes(tx).await.map_err(unavailable)?;
+    // `server`, which every viewer without host facts reads as the server, and the server node's current name
+    // (its hostname) belong to the server's node. Automatic naming never gives either to a remote machine
+    // (`wanted_name`); refusing them here closes the person's path, so no viewer sees two nodes called `server`
+    // and `server.<suffix>` never points at a remote.
+    let server = nodes
+        .iter()
+        .find(|node| node.host.as_deref() == Some(SERVER_LABEL));
+    let servers = name == SERVER_LABEL || server.is_some_and(|server| server.name == name);
+    if servers && server.is_none_or(|server| Some(server.id) != id) {
+        return Err(crate::api::MeshApiError::Reserved);
+    }
     let Some(holder) = nodes
         .iter()
         .find(|node| Some(node.id) != id && node.name == name)
@@ -352,6 +326,25 @@ pub(crate) async fn make_room(
         .await
         .map_err(|_| storage_error("Mesh storage unavailable."))?;
     Ok(vec![holder.id])
+}
+/// Every node's name as naming sees it, read once per change.
+async fn named_nodes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<Vec<Named>, sqlx::Error> {
+    Ok(
+        sqlx::query("SELECT id,name,name_source,dataplane_host,name_claim FROM mesh_nodes")
+            .fetch_all(&mut **tx)
+            .await?
+            .iter()
+            .map(|row| Named {
+                id: row.get("id"),
+                name: row.get("name"),
+                source: row.get("name_source"),
+                host: row.get("dataplane_host"),
+                claim: row.get("name_claim"),
+            })
+            .collect(),
+    )
 }
 /// Applies automatic renames in order: a node moved aside first frees the name the next one takes.
 async fn rename(
@@ -467,20 +460,9 @@ impl Store {
             return Err("Mesh membership was removed; authorized enrollment is required.");
         }
         let (wanted, records) = wanted_name(&mut tx, host, server, reported).await?;
-        let nodes: Vec<Named> =
-            sqlx::query("SELECT id,name,name_source,dataplane_host,name_claim FROM mesh_nodes")
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(|_| "Mesh storage unavailable.")?
-                .iter()
-                .map(|row| Named {
-                    id: row.get("id"),
-                    name: row.get("name"),
-                    source: row.get("name_source"),
-                    host: row.get("dataplane_host"),
-                    claim: row.get("name_claim"),
-                })
-                .collect();
+        let nodes = named_nodes(&mut tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
         let mut renamed = Vec::new();
         let id = if let Some(row) = existing {
             // Temporary discovery absence is not an endpoint removal [166].
