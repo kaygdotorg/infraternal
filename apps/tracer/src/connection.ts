@@ -129,6 +129,8 @@ export class MuxConnection {
   /** A delayed browser task is local uncertainty, never evidence that the peer stopped answering (#245). */
   private livenessDueAt = Infinity;
   private lastLivenessStallAt = -Infinity;
+  /** One local-stall grace per peer reply; callbacks alone cannot renew it (#245). */
+  private stallGraceUsed = false;
   private lastPongAt = 0;
   private fastProbeUntil = 0;
   private readonly unacknowledgedInput = new Map<number, bigint>();
@@ -334,6 +336,7 @@ export class MuxConnection {
     // A reply proves this direction works; discard older unanswered probes too.
     for (const key of this.pendingPings.keys()) { if (key <= nonce) this.pendingPings.delete(key); }
     this.lastPongAt = now;
+    this.stallGraceUsed = false;
     if (delayed) { this.scheduleLiveness(); return; }
     const ms = Math.max(1, now - startedAt);
     if (this.livenessRtt !== undefined && ms > this.livenessRtt + 5) this.fastProbeUntil = now + Math.max(250, ms * 2);
@@ -520,10 +523,15 @@ export class MuxConnection {
   private accountLivenessDelay(now: number): boolean {
     const late = now - this.livenessDueAt;
     if (late <= LIVENESS_TICK_MS) return false;
-    // The stall may include time before dueAt, which cannot be measured without
-    // extra polling. Observe a fresh allowance instead of counting that unknown
-    // interval as network silence. Timely tasks keep the existing deadline.
-    if (this.pendingPings.size > 0) this.lastPongAt = now;
+    // The first stall may include the scheduled wait too. Allow one fresh
+    // observation interval, but only a correlated peer reply can replenish it.
+    // With callback gaps bounded by G and allowance A, retirement takes at most
+    // 2*A + 3*G after issuance (including the final socket-task turn). No wall
+    // clock bound is possible while the browser executes no tasks at all.
+    if (this.pendingPings.size > 0 && !this.stallGraceUsed) {
+      this.lastPongAt = now;
+      this.stallGraceUsed = true;
+    }
     this.lastLivenessStallAt = now;
     // Consume the credit once even if a socket task runs before the timer.
     this.livenessDueAt = now;
@@ -532,14 +540,15 @@ export class MuxConnection {
 
   private checkLiveness(confirm = false): void {
     const now = performance.now();
-    const stalled = this.accountLivenessDelay(now);
+    this.accountLivenessDelay(now);
     this.livenessTimer = 0;
     this.livenessDueAt = Infinity;
     if (!this.isWelcomed || this.closed) return;
     if (this.pendingPings.size > 0 && now - this.lastPongAt >= this.responseAllowance()) {
       // Timer and socket tasks have different queues. Give already-arrived
-      // replies a task turn before closing; a further local stall repeats it.
-      if (confirm && !stalled) this.retireUnresponsiveSocket();
+      // replies one task turn before closing. Repeated local stalls cannot
+      // renew that turn: only an actual correlated reply redeems the route.
+      if (confirm) this.retireUnresponsiveSocket();
       else {
         this.livenessDueAt = now;
         this.livenessTimer = window.setTimeout(() => this.checkLiveness(true), 0);
@@ -729,6 +738,7 @@ export class MuxConnection {
     this.livenessTimer = 0;
     this.livenessDueAt = Infinity;
     this.lastLivenessStallAt = -Infinity;
+    this.stallGraceUsed = false;
     this.lastPingAt = -Infinity;
     this.lastRttReportAt = -Infinity;
     this.pendingPings.clear();
