@@ -775,9 +775,16 @@ export class TerminalClient {
     this.restartCursorBlink();
   }
 
-  /** Focuses Ghostty's actual input host so the mobile keyboard can stay open. */
+  /**
+   * Focuses the element that receives typing so the mobile keyboard can stay open. That is the renderer's text input, as
+   * when a pointer lands on the canvas: committed text (a phone keyboard, an IME commit, dictation) arrives as
+   * `beforeinput` on it only, while the container merely sees physical keys. The renderer's own `focus()` targets the
+   * container and re-focuses it on the next task, so it is the fallback before the input exists.
+   */
   focus(): void {
-    this.terminal.focus();
+    const input = this.config.host.querySelector("textarea");
+    if (input) input.focus({ preventScroll: true });
+    else this.terminal.focus();
   }
 
   /** Sets one modifier; the one-argument form keeps the earlier keybar API compatible. */
