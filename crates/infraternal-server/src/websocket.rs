@@ -1599,10 +1599,11 @@ where
             // `None`: this account has no record of the session. The id is the client's
             // choice and may be another account's, so no line ever names it (#227).
             let Ok(owned_host) = session_host_id(&state.pool, user_id, &session).await else {
+                // The store could not answer; the browser's frame was well formed.
                 state.close_logs.record(&CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::Server,
-                    PROTOCOL_ERROR,
+                    AUTHORITY_UNAVAILABLE,
                     None,
                     NO_SESSION,
                     stream_id,
@@ -1629,7 +1630,8 @@ where
                 // stream Close instead of losing the whole socket: the browser would
                 // reconnect and attach again at once, forever (#158). Every other
                 // refusal (authority, the writer limit, the database) still closes it.
-                if session_is_live(state, user_id, session_token).await
+                let authority = authority_read(state, user_id, session_token).await;
+                if authority == AuthorityRead::Live
                     && session_gone(&state.pool, user_id, &session).await?
                 {
                     let close = if owned_host.is_some() {
@@ -1662,10 +1664,12 @@ where
                     };
                     return send_frame(sink, stream_id, &gone, encode).await;
                 }
+                // A read that missed its bound is a busy server, not a refused attach.
+                let refusal = attach_refusal(authority);
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::Server,
-                    ATTACH_REFUSED,
+                    refusal,
                     host_id,
                     logged_session,
                     stream_id,
@@ -1700,11 +1704,13 @@ where
                 state.close_logs.record(&close);
                 return Err(());
             }
-            if !session_is_live(state, user_id, session_token).await {
+            let authority = authority_read(state, user_id, session_token).await;
+            if authority != AuthorityRead::Live {
+                let refusal = attach_refusal(authority);
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::Server,
-                    ATTACH_REFUSED,
+                    refusal,
                     host_id,
                     session,
                     stream_id,
@@ -1770,11 +1776,13 @@ where
                 )
                 .await;
             };
-            if !session_is_live(state, user_id, session_token).await {
+            let authority = authority_read(state, user_id, session_token).await;
+            if authority != AuthorityRead::Live {
+                let refusal = attach_refusal(authority);
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::Server,
-                    ATTACH_REFUSED,
+                    refusal,
                     host_id,
                     session,
                     stream_id,
@@ -2044,21 +2052,45 @@ async fn authority_deadline(
 }
 
 async fn session_is_live(state: &WebSocketState, user_id: &str, token: &str) -> bool {
+    authority_read(state, user_id, token).await == AuthorityRead::Live
+}
+
+/// What one bounded, renewing authority read found. A read that missed its bound or could not reach
+/// storage is `Unavailable`: the server was busy, which is neither a refusal nor a bad frame (#227).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthorityRead {
+    Live,
+    Refused,
+    Unavailable,
+}
+
+/// The close reason for an attach that did not get a live read.
+fn attach_refusal(read: AuthorityRead) -> CloseReason {
+    if read == AuthorityRead::Unavailable {
+        AUTHORITY_UNAVAILABLE
+    } else {
+        ATTACH_REFUSED
+    }
+}
+
+async fn authority_read(state: &WebSocketState, user_id: &str, token: &str) -> AuthorityRead {
     let Ok(now) = unix_seconds() else {
-        return false;
+        return AuthorityRead::Unavailable;
     };
     #[cfg(test)]
     let read_timeout = state.authority_read_timeout;
     #[cfg(not(test))]
     let read_timeout = AUTHORITY_READ_TIMEOUT;
-    matches!(
-        tokio::time::timeout(
-            read_timeout,
-            state.auth.socket_activity(token, user_id, now)
-        )
-        .await,
-        Ok(Ok(_))
+    match tokio::time::timeout(
+        read_timeout,
+        state.auth.socket_activity(token, user_id, now),
     )
+    .await
+    {
+        Ok(Ok(_)) => AuthorityRead::Live,
+        Ok(Err(crate::auth::Error::Denied)) => AuthorityRead::Refused,
+        Ok(Err(_)) | Err(_) => AuthorityRead::Unavailable,
+    }
 }
 
 struct ClientAttachment {

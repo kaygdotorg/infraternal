@@ -720,3 +720,69 @@ async fn authority_read_timeout_during_a_frame_logs_authority_unavailable() {
     agent.abort();
     server.abort();
 }
+
+/// A store that cannot answer the attach's session lookup is a busy server, not a bad frame.
+#[tokio::test]
+async fn session_lookup_store_error_logs_authority_unavailable() {
+    let _serial = SERIAL.lock().await;
+    let (capture, _subscriber) = Capture::start();
+    let f = fixture().await;
+    let session_id = [0x76; 16];
+    let (socket, _host) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .await
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = crate::websocket::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let (mut browser, _) = connect_async(test_ws_request(address, &cookie))
+        .await
+        .unwrap();
+    assert_server_hello(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "lookup-error",
+        },
+    )
+    .await;
+    read_welcome(&mut browser).await;
+    // The lookup reads this table; renaming it makes the query fail while authority still reads live.
+    sqlx::query("ALTER TABLE terminal_sessions RENAME TO terminal_sessions_gone")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    client_ws_send(
+        &mut browser,
+        1,
+        &Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        },
+    )
+    .await;
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = capture.events("terminal_stream_closed");
+            if !events.is_empty() {
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the failed lookup must log its close");
+    let fields = &events[0]["fields"];
+    assert_eq!(fields["reason"], "authority_unavailable", "{fields}");
+    server.abort();
+}
