@@ -1458,6 +1458,8 @@ export class TerminalClient {
     this.fitQueued = true;
     requestAnimationFrame(() => {
       this.fitQueued = false;
+      // A layout update can retire or park this renderer after the frame was queued.
+      if (this.closed || this.suspended || this.frozen) return;
       const style = getComputedStyle(this.config.host);
       const width = this.config.host.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
       const height = this.config.host.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
