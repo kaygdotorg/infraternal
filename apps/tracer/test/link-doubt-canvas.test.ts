@@ -38,7 +38,7 @@ test("on the canvas a doubted link changes the toast or the window's connection 
       streamId: 1, lastOutSeq: 0n, receivedOutSeq: 0n, sessionId: new Uint8Array(16),
       config: {
         status,
-        hooks: { onDisconnected: () => signals.push("disconnected"), onAttached: () => signals.push("attached") },
+        hooks: { onDisconnected: () => signals.push("disconnected"), onAttached: () => signals.push("attached"), onLinkDoubt: (doubted: boolean) => signals.push(`doubt:${doubted}`) },
         onConnectionChange: (connected: boolean) => signals.push(`connection:${connected}`),
       },
       conn: { streamAttached: (ready: boolean) => signals.push(`stream:${ready}`) },
