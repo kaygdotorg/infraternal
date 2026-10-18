@@ -25,6 +25,7 @@ import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { parseInventory, type AppTarget } from "./inventory";
 import { chooseSize, densityMilli, sizeChanged, type StreamSize } from "./size";
 import { onConnection, type ControlState, type StreamState } from "./status";
+import { traceClock, traceEnabled, recordFrame } from "./frame-trace";
 import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 
 /** `no-preference` lets the browser pick hardware decoding where it has it (the choice is the browser's, not ours). */
@@ -313,13 +314,18 @@ export class AppStream {
     }
     if (frame.type !== "Desktop" || frame.message.kind !== "video") return;
     const m = frame.message;
+    const receivedAt = this.measuring ? traceClock() : 0;
     // The access unit is a view into the socket's receive buffer, which the next message reuses: copy it into a buffer
     // the worker takes over (one memcpy of the unit, nothing else on this thread).
     const copy = m.bytes.slice();
-    this.worker?.postMessage({ t: "chunk", sequence: Number(m.sequence), keyframe: m.keyframe, bytes: copy.buffer } satisfies ToWorker, [copy.buffer]);
+    const packet: ToWorker = { t: "chunk", sequence: Number(m.sequence), keyframe: m.keyframe, bytes: copy.buffer };
+    if (this.measuring) packet.trace = { captureNs: m.captureNs.toString(), bytes: copy.byteLength, receivedAt, copyFinishedAt: traceClock() };
+    this.worker?.postMessage(packet, [copy.buffer]);
   }
 
   // ---- the worker and its surface ---------------------------------------------------------------------------------
+
+  private readonly measuring = traceEnabled();
 
   private ensureSurface(): void {
     window.clearTimeout(this.releaseTimer);
@@ -331,7 +337,7 @@ export class AppStream {
     const worker = this.o.makeWorker ? this.o.makeWorker() : new Worker(new URL("./decode.worker.on-demand.js", document.baseURI), { type: "module" });
     worker.onmessage = (event: MessageEvent<FromWorker>) => this.fromWorker(event.data);
     worker.onerror = () => { this.setState({ kind: "failed", reason: "decode" }); };
-    worker.postMessage({ t: "init", canvas: offscreen, hardware: HARDWARE } satisfies ToWorker, [offscreen]);
+    worker.postMessage({ t: "init", canvas: offscreen, hardware: HARDWARE, ...(this.measuring ? { measure: true } : {}) } satisfies ToWorker, [offscreen]);
     this.worker = worker;
     this.canvas = canvas;
     this.o.events.surface(canvas);
@@ -363,6 +369,7 @@ export class AppStream {
         if (m.reason === "decode") this.setState(this.hadPicture ? this.state : { kind: "failed", reason: "decode" });
         else this.setState({ kind: "unsupported", reason: m.reason === "unsupported-canvas" ? "canvas" : "codec" });
         return;
+      case "trace": recordFrame(m.frame); return;
       case "stats": for (const w of this.statsWaiters.splice(0)) w(m.stats); return;
     }
   }
