@@ -229,7 +229,7 @@ fn dispatch_action(
         CliHandler::EmbeddedAgent => {
             #[cfg(feature = "plugin-agent")]
             {
-                run_embedded_agent(matches, json_output)
+                run_embedded_agent(registry, matches, json_output)
             }
             #[cfg(not(feature = "plugin-agent"))]
             {
@@ -448,7 +448,11 @@ fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Opt
         CommandResult::new(
             name.clone(),
             CommandState::Ready,
-            format!("infraternal {name} has {} commands.", commands.len()),
+            if commands.len() == 1 {
+                format!("infraternal {name} has 1 command.")
+            } else {
+                format!("infraternal {name} has {} commands.", commands.len())
+            },
             json!({"commands": commands}),
         )
         .with_body(body)
@@ -503,7 +507,11 @@ fn run_skill(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool)
         let result = CommandResult::new(
             "skill",
             CommandState::Ready,
-            format!("{} commands are enabled in this build.", commands.len()),
+            if commands.len() == 1 {
+                "1 command is enabled in this build.".to_owned()
+            } else {
+                format!("{} commands are enabled in this build.", commands.len())
+            },
             json!({"commands": commands, "skill": "", "files": []}),
         )
         .with_next_step("infraternal skill <command>");
@@ -1001,11 +1009,19 @@ fn run_server_foreground(
 }
 
 #[cfg(feature = "plugin-agent")]
-fn run_embedded_agent(matches: &ArgMatches, json_output: bool) -> ExitCode {
+fn run_embedded_agent(
+    registry: &ActionRegistry,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
     let Some(fd) = matches
         .get_one::<i64>("fd")
         .and_then(|fd| i32::try_from(*fd).ok())
     else {
+        // Typed by a person (the server passes a descriptor), `agent` is a group like the others.
+        if let Some(listed) = run_group(registry, &["agent"], json_output) {
+            return listed;
+        }
         return emit(
             CommandResult::new(
                 "agent",
