@@ -36,7 +36,7 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
     const next = document();
     void cx.adapters.store.save(next, splits, before, unresolved);
     before = next;
-    cx.adapters.inventory?.setLayout?.(next);
+    cx.adapters.inventory?.setLayout?.(cx.adapters.store.current?.() ?? next);
     for (const id of splits.keys()) if (next.views.some((v) => v.layout.type === "tiled" && v.layout.columns.some((c) => c.windows.some((w) => w.id === id)))) splits.delete(id);
   };
   return {
