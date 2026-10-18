@@ -15,7 +15,7 @@
  * The full snapshot is replayed after every socket welcome, so missed changes during a disconnect cannot revive a
  * stale row. Ended records stay available to their existing window but disappear from every session list.
  */
-import type { CanvasDocument } from "../model/document";
+import type { CanvasDocument, DocTarget } from "../model/document";
 import { inventoryKey } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
@@ -65,10 +65,18 @@ export function createLiveInventory(options: { accountId: string; host: string }
   return {
     can,
     setLayout(document) {
-      shared = new Set(document.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows.flatMap((w) => w.target.type === "session" ? [w.target.id] : [])) : []));
-      const names = new Map(document.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows.flatMap((w) => w.target.type === "session" && w.target.name ? [[w.target.id, w.target.name] as const] : [])) : []));
+      const targets: Extract<DocTarget, { type: "session" }>[] = [];
+      for (const view of document.views) if (view.layout.type === "tiled") for (const col of view.layout.columns) for (const window of col.windows) if (window.target.type === "session") targets.push(window.target);
+      shared = new Set(targets.map((t) => t.id));
       let changed = false;
-      for (const s of records.values()) if (!s.gone) { const state = shared.has(s.id) ? "open" : "detached"; if (s.state !== state) { s.state = state; changed = true; } const name = names.get(s.id); if (name && name !== s.name) { s.name = name; changed = true; } }
+      for (const s of records.values()) if (!s.gone) {
+        const state = shared.has(s.id) ? "open" : "detached";
+        if (s.state !== state) { s.state = state; changed = true; }
+      }
+      for (const target of targets) {
+        const record = records.get(target.id);
+        if (record && target.name && target.name !== record.name) { record.name = target.name; changed = true; }
+      }
       if (changed) emit();
     },
     status: (): InventoryStatus => verifiedHosts.has(options.host) ? "ready" : "loading",
