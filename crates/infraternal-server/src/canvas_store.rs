@@ -119,15 +119,17 @@ impl Store {
         }
         let op_id = model::string(&request, "op_id").ok_or(Error)?;
         let action = if initialize { "initialize" } else { "apply" };
-        let encoded = serde_json::to_string(&model::object(vec![
+        // Permanent retry receipts retain the existing SHA-256 digest, never a
+        // second copy of a bootstrap document. Canonical JSON ignores key order.
+        let request_hash = crate::auth::hash(&serde_json::to_string(&model::object(vec![
             ("action", Value::from(action)),
             ("input", request.clone()),
-        ]))?;
+        ]))?);
         let _writer = self.writes.lock().await;
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
         let mut document = head(&mut tx, account).await?;
         if let Some(revision) =
-            receipt(&mut tx, account, op_id, &encoded, document.revision()).await?
+            receipt(&mut tx, account, op_id, &request_hash, document.revision()).await?
         {
             return Ok(revision);
         }
@@ -220,7 +222,13 @@ impl Store {
             ])
         };
         save(
-            &mut tx, account, &document, op_id, &encoded, &event, initialize,
+            &mut tx,
+            account,
+            &document,
+            op_id,
+            &request_hash,
+            &event,
+            initialize,
         )
         .await?;
         commit(tx, self.changes.clone()).await?;
@@ -341,7 +349,7 @@ async fn receipt(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
     id: &str,
-    request: &str,
+    request_hash: &str,
     revision: i64,
 ) -> Result<Option<i64>, Error> {
     if let Some(row) =
@@ -351,7 +359,7 @@ async fn receipt(
             .fetch_optional(&mut **tx)
             .await?
     {
-        if row.get::<String, _>("request") != request {
+        if row.get::<String, _>("request") != request_hash {
             return Err(Error);
         }
         return Ok(Some(row.get("revision")));
@@ -399,7 +407,7 @@ async fn save(
     account: &str,
     document: &Document,
     id: &str,
-    request: &str,
+    request_hash: &str,
     event: &Value,
     force_snapshot: bool,
 ) -> Result<(), Error> {
@@ -416,7 +424,7 @@ async fn save(
     sqlx::query("INSERT INTO canvas_receipts(account,op_id,request,revision) VALUES(?,?,?,?)")
         .bind(account)
         .bind(id)
-        .bind(request)
+        .bind(request_hash)
         .bind(document.revision())
         .execute(&mut **tx)
         .await?;
