@@ -8,7 +8,7 @@ use infraternal_plugin_api::{
 };
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -107,10 +107,9 @@ impl Plugin for CanvasPlugin {
                                     "canvas.layout.apply" | "canvas.layout.initialize" => store.call(action_id=="canvas.layout.initialize",host.user_id(),input_json).await,
                                     _=>Err(()),
                                 };
-                                let ok = result.is_ok();
-                                let output = result.map_or_else(|()| json!({"error":"invalid canvas operation"}),|revision| json!({"revision":revision}));
-                                let json = serde_json::to_vec(&output).map_err(|_|())?;
-                                send(&replies,0,Frame::Result {call_id,ok,json:&json}).await
+                                let mut output = Vec::new();
+                                let (ok, json) = result_json(result, &mut output)?;
+                                send(&replies,0,Frame::Result {call_id,ok,json}).await
                             })).await,
                             Frame::Subscribe { sub_id,filter_json } => {
                                 let generation = decoded.stream_id >> 1;
@@ -174,6 +173,19 @@ async fn send(replies: &ReplySender, stream: u32, frame: Frame<'_>) -> Result<()
     replies.send(Bytes::from(wire)).await.map_err(|_| ())
 }
 
+fn result_json(result: Result<i64, ()>, output: &mut Vec<u8>) -> Result<(bool, &[u8]), ()> {
+    match result {
+        Ok(revision) => {
+            output.extend_from_slice(b"{\"revision\":");
+            serde_json::to_writer(&mut *output, &revision).map_err(|_| ())?;
+            output.push(b'}');
+            Ok((true, output))
+        }
+        Err(()) => Ok((false, br#"{"error":"invalid canvas operation"}"#)),
+    }
+}
+
+/// Checks shared action metadata and the compact result wire encoding.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +198,15 @@ mod tests {
             serde_json::from_str::<Filter>(r#"{"topic":"canvas.layout","account":"other"}"#)
                 .is_err()
         );
+    }
+    #[test]
+    fn result_json_preserves_both_wire_shapes() {
+        let mut output = Vec::new();
+        let (ok, json) = result_json(Ok(9), &mut output).unwrap();
+        assert!(ok);
+        assert_eq!(json, br#"{"revision":9}"#);
+        let (ok, json) = result_json(Err(()), &mut output).unwrap();
+        assert!(!ok);
+        assert_eq!(json, br#"{"error":"invalid canvas operation"}"#);
     }
 }
