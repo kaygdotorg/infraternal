@@ -55,9 +55,9 @@ impl Snapshot {
 /// The name a machine is called by, from an address (`user@minipc01`, `minipc01.lan:22`) or a reported hostname.
 ///
 /// Takes the first DNS label, lowercased. Anything address-like gives nothing, so a numeric address never becomes
-/// a name and the caller falls back to the next source: IPv4 (also shortened, `10.69.69`), IPv6 in any spelling
-/// (bracketed, with a zone `%eth0` or `%25eth0`), and labels made only of digits. So does anything that is not a
-/// valid Mesh host name.
+/// a name and the caller falls back to the next source: IPv4 in any spelling (shortened `10.69.69`, hex
+/// `0x0a.0x45`, octal), IPv6 in any spelling (bracketed, with a zone `%eth0` or `%25eth0`), and labels made only
+/// of digits. So does anything that is not a valid Mesh host name.
 #[must_use]
 pub fn machine_name(source: &str) -> Option<String> {
     let host = source
@@ -69,10 +69,7 @@ pub fn machine_name(source: &str) -> Option<String> {
         return None;
     }
     let host = host.split_once(':').map_or(host, |(host, _)| host);
-    if host
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || byte == b'.')
-    {
+    if is_ipv4_spelling(host) {
         return None;
     }
     let label = host.split('.').next()?.to_ascii_lowercase();
@@ -85,6 +82,17 @@ pub fn machine_name(source: &str) -> Option<String> {
         return None;
     }
     Some(label)
+}
+/// Whether `host` is an IPv4 address in any spelling the C resolver (`inet_aton`, and so ssh) accepts: one to
+/// four dot-separated numbers, each decimal, octal (leading `0`) or hex (`0x`), so `10.69.69`, `0x0a454505` and
+/// `0x7f.1` are addresses too. A trailing dot (the absolute form) changes nothing.
+fn is_ipv4_spelling(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let number = |part: &str| match part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+        Some(hex) => hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        None => !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
+    };
+    !host.is_empty() && host.split('.').count() <= 4 && host.split('.').all(number)
 }
 /// Who named a node; a higher rank may move a lower one's automatic name aside (migration 0026, #236).
 fn rank(source: &str) -> u8 {
@@ -900,6 +908,8 @@ mod naming_tests {
         );
         assert_eq!(machine_name("minipc01:2222").as_deref(), Some("minipc01"));
         assert_eq!(machine_name("monitor01").as_deref(), Some("monitor01"));
+        // Not an address: `x` is not followed by hex digits only.
+        assert_eq!(machine_name("root@0xygen.lan").as_deref(), Some("0xygen"));
     }
     #[test]
     fn a_numeric_or_invalid_address_gives_no_name() {
@@ -912,6 +922,11 @@ mod naming_tests {
             "root@",
             "a_b",
             "-x",
+            "root@0x0a.0x45.0x45.0x05",
+            "0X0A454505",
+            "root@010.1",
+            "10.69.69.5.",
+            "root@unnamed-3",
         ] {
             assert_eq!(machine_name(source), None, "{source}");
         }
