@@ -25,7 +25,7 @@ test("server and host close reasons identify why a terminal reconnects, in plain
     expect(text.endsWith(".")).toBe(true);
   }
   expect(plainCloseReason("remote stream unavailable")).toBe("The infraternal agent on the host lost its connection to the server.");
-  expect(plainCloseReason("the server was too busy to confirm the session")).toBe("The server was too busy to confirm your session; reconnecting.");
+  expect(plainCloseReason("the server was too busy to confirm the session")).toBe("The server was too busy to confirm your session.");
 });
 
 test("routine detach and connection rotation reasons stay neutral", () => {
