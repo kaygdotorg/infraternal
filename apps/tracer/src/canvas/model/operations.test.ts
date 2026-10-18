@@ -1,6 +1,6 @@
 /** Stable-neighbour and shared-band layout regressions (#243). */
 import { expect, test } from "bun:test";
-import { edits, reduce, type Intent } from "./operations.on-demand";
+import { edits, reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
 const doc = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 const open = (id: string): Intent => ({ type: "open", view_id: "console", column_id: "c", window: { id, target: { type: "settings", section: "appearance" } } });

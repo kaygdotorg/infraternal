@@ -6,12 +6,15 @@
  * Cameras and focus belong to each device and never enter this interface.
  */
 import { parseDocument, type CanvasDocument } from "./document";
-import type { LayoutEdit } from "./operations.on-demand";
+import type { LayoutEdit } from "./operations";
 import { canvasKey } from "../../account-storage";
 
 export interface CanvasStore {
+  readonly acceptsPendingReferences?: boolean;
   load(): Promise<CanvasDocument | undefined>;
-  save(doc: CanvasDocument, splits?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument): Promise<void>;
+  save(doc: CanvasDocument, splits?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved?: ReadonlySet<string>): Promise<void>;
+  current?(): CanvasDocument;
+  unresolvedWindow?(id: string): boolean;
   flush?(): void;
   dispose?(): void;
   subscribe(listener: (doc: CanvasDocument) => void): () => void;

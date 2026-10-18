@@ -1,7 +1,7 @@
 /** Subscription, migration and durable retry ordering regressions for the product canvas (#243). */
 import { beforeEach, expect, test } from "bun:test";
 import { ServerCanvasStore, type LayoutTransport } from "./server-store";
-import { reduce, type Intent } from "./operations.on-demand";
+import { reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
@@ -52,4 +52,37 @@ test("dispose cancels late cache writes after sign-out", async () => {
   const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
   const next = document(); reduce(next, opened); await store.save(next); store.dispose(); clearAccountStorage("a");
   transport.calls[0]!.resolve({ revision: 1 }); await tick(); store.flush(); expect(localStorage.getItem(canvasKey("a"))).toBeNull();
+});
+test("a pending reference preserves unrelated edits across remote paints and is never sent", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  const initial = document(); reduce(initial, opened);
+  await store.save(initial); const first = transport.calls[0]!;
+  transport.event({ type: "canvas.layout.operation", revision: 1, op_id: first.input.op_id, intent: opened }); first.resolve({ revision: 1 }); await tick();
+  const pending: Intent = { type: "split", view_id: "console", column_id: "c", anchor_id: "w", axis: "down", window: { id: "new", target: { type: "session", id: "new", host: "local" } } };
+  const split = store.current(); reduce(split, pending);
+  await store.save(split, new Map([["new", { windowId: "new", anchorId: "w", axis: "down" }]]), initial, new Set(["new"]));
+  const moved = structuredClone(split); moved.views[0]!.cell.x = 3;
+  await store.save(moved, undefined, split, new Set(["new"]));
+  expect(transport.calls).toHaveLength(1);
+  transport.event({ type: "canvas.layout.operation", revision: 2, op_id: "peer", intent: { type: "view.update", view_id: "console", name: "Peer" } });
+  expect(store.current().views[0]!.cell.x).toBe(3);
+  const resolved = structuredClone(store.current()), layout = resolved.views[0]!.layout;
+  if (layout.type === "tiled") layout.columns[0]!.windows.find((w) => w.id === "new")!.target = { type: "session", id: "real", host: "local" };
+  await store.save(resolved, undefined, store.current(), new Set());
+  expect(transport.calls).toHaveLength(2);
+  expect((transport.calls[1]!.input.intent as Extract<Intent, { type: "split" }>).window.target).toEqual({ type: "session", id: "real", host: "local" });
+  store.dispose();
+});
+test("closing an unsent shell removes its unresolved birth without blocking surviving children", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a"); transport.snapshot();
+  const next = document(); reduce(next, { type: "open", view_id: "console", column_id: "c", window: { id: "pending", target: { type: "session", id: "pending", host: "local" } } });
+  await store.save(next, undefined, document(), new Set(["pending"]));
+  const surviving = structuredClone(next); reduce(surviving, { type: "split", view_id: "console", column_id: "c", window: { id: "child", target: { type: "session", id: "session", host: "local" } }, anchor_id: "pending", axis: "down" });
+  await store.save(surviving, new Map([["child", { windowId: "child", anchorId: "pending", axis: "down" }]]), next, new Set(["pending"]));
+  const closed = structuredClone(surviving); reduce(closed, { type: "close", window_id: "pending" });
+  await store.save(closed, undefined, surviving);
+  expect(transport.calls).toHaveLength(1);
+  const intent = transport.calls[0]!.input.intent as Extract<Intent, { type: "open" }>;
+  expect(intent.type).toBe("open"); expect(intent.window.id).toBe("child");
+  store.flush(); expect(JSON.stringify(JSON.parse(localStorage.getItem(canvasKey("a"))!).pending)).not.toContain('"id":"pending"'); store.dispose();
 });

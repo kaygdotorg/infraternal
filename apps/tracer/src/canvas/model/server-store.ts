@@ -2,8 +2,7 @@
 import { randomUuid } from "../../identifiers";
 import { canvasKey, readStoredJson, writeStoredJson } from "../../account-storage";
 import { parseDocument, type CanvasDocument } from "./document";
-import type { Intent, LayoutEdit } from "./operations.on-demand";
-import { onDemand } from "../../on-demand";
+import { edits, reduce, type Intent, type LayoutEdit } from "./operations";
 import type { CanvasStore } from "./store";
 
 export interface LayoutTransport {
@@ -11,11 +10,13 @@ export interface LayoutTransport {
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   subscribe(filter: { topic: string }, event: (event: Record<string, unknown>) => void, open?: () => void): () => void;
 }
-interface Pending { op_id: string; base_revision: number; intent: Intent; revision?: number }
+interface Pending { op_id: string; base_revision: number; intent: Intent; revision?: number; sent?: boolean }
 interface Migration { op_id: string; document: CanvasDocument }
 const empty = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [] });
 
 export class ServerCanvasStore implements CanvasStore {
+  readonly acceptsPendingReferences = true;
+  #unresolved = new Set<string>();
   #canonical = empty();
   #presented = empty();
   #pending: Pending[] = [];
@@ -30,16 +31,6 @@ export class ServerCanvasStore implements CanvasStore {
   readonly #listeners = new Set<(doc: CanvasDocument) => void>();
   readonly #key: string;
   readonly #off: () => void;
-  #engine: typeof import("./operations.on-demand") | undefined;
-  #loading: Promise<typeof import("./operations.on-demand")> | undefined;
-  #work: Promise<void> = Promise.resolve();
-  #loadEngine(): Promise<typeof import("./operations.on-demand")> {
-    return this.#loading ??= onDemand(() => import("./operations.on-demand")).then((engine) => { this.#engine = engine; return engine; }, (error: unknown) => { this.#loading = undefined; throw error; });
-  }
-  #enqueue(run: () => void | Promise<void>): Promise<void> {
-    this.#work = this.#work.then(() => { if (!this.#disposed) return run(); }).catch(() => { if (!this.#disposed) this.refused(); });
-    return this.#work;
-  }
   #loaded: (() => void) | undefined;
   readonly #first: Promise<void>;
 
@@ -51,10 +42,11 @@ export class ServerCanvasStore implements CanvasStore {
       const legacy = parseDocument(value);
       if (legacy) { this.#migration = { op_id: randomUuid(), document: legacy }; this.#presented = legacy; this.#cached = true; }
       else if (value && typeof value === "object" && "cacheVersion" in value && value.cacheVersion === 2) {
-        const cache = value as { canonical?: unknown; document?: unknown; pending?: Pending[]; migration?: Migration };
+        const cache = value as { canonical?: unknown; document?: unknown; pending?: Pending[]; unresolved?: string[]; migration?: Migration };
         const canonical = parseDocument(cache.canonical), document = parseDocument(cache.document);
         if (canonical && document) {
           this.#canonical = canonical; this.#presented = document; this.#cached = true; this.#initialized = canonical.revision > 0;
+          if (Array.isArray(cache.unresolved)) this.#unresolved = new Set(cache.unresolved.filter((id) => typeof id === "string"));
           if (Array.isArray(cache.pending) && cache.pending.length <= 1024) this.#pending = cache.pending;
           if (cache.migration && typeof cache.migration.op_id === "string" && parseDocument(cache.migration.document)) this.#migration = cache.migration;
         }
@@ -69,35 +61,44 @@ export class ServerCanvasStore implements CanvasStore {
     return this.#cached || this.#initialized || this.#presented.views.length ? structuredClone(this.#presented) : undefined;
   }
   /** Record each completed edit immediately; only cache serialization is coalesced. */
-  /** Warm after first draw; input still uses its optimistic runtime model immediately. */
-  prepare(): void { void this.#loadEngine().catch(() => undefined); }
-  save(doc: CanvasDocument, splits?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument): Promise<void> {
-    const next = structuredClone(doc), previous = before && structuredClone(before), hints = splits && new Map(splits);
-    const capture = (): void => {
-      if (this.#disposed || !this.#engine) return;
-      for (const intent of this.#engine.edits(previous ?? this.#presented, next, hints)) this.#pending.push({ op_id: randomUuid(), base_revision: this.#canonical.revision, intent });
-      this.#presented = next;
-      this.#checkpoint(); this.#pump();
-    };
-    // A listener can flush an edit inside a canonical paint. Capture it before deriving that paint's overlay.
-    if (this.#engine) { capture(); return Promise.resolve(); }
-    return this.#enqueue(async () => { await this.#loadEngine(); capture(); });
+  unresolvedWindow(id: string): boolean { return this.#unresolved.has(id); }
+  async save(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): Promise<void> {
+    if (this.#disposed) return;
+    const previous = structuredClone(before ?? this.#presented);
+    const windows = (d: CanvasDocument) => d.views.flatMap((v) => v.layout.type === "tiled" ? v.layout.columns.flatMap((c) => c.windows) : []);
+    const live = new Map(windows(doc).map((w) => [w.id, w]));
+    // Unsatisfied references belong only to the local journal. Complete an unsent birth in place;
+    // a sent request is immutable because its operation ID must always identify the same input.
+    for (const id of this.#unresolved) {
+      if (unresolved.has(id)) continue;
+      const window = live.get(id);
+      if (window) for (const p of this.#pending) {
+        if (!p.sent && (p.intent.type === "open" || p.intent.type === "split") && p.intent.window.id === id) {
+          p.intent.window.target = structuredClone(window.target);
+          for (const old of windows(previous)) if (old.id === id) old.target = structuredClone(window.target);
+        }
+      }
+    }
+    const cancelled = this.#pending.some((p) => !p.sent && (p.intent.type === "open" || p.intent.type === "split") && this.#unresolved.has(p.intent.window.id) && !live.has(p.intent.window.id));
+    this.#unresolved = new Set(unresolved);
+    let baseline = previous;
+    if (cancelled) {
+      // Removing an uncreated shell also removes its dependency. Rebuild only the unsent suffix,
+      // so surviving children become independent opens and no placeholder can reach the server.
+      this.#pending = this.#pending.filter((p) => p.sent);
+      baseline = this.current();
+    }
+    for (const intent of edits(baseline, doc, cancelled ? undefined : hints)) this.#pending.push({ op_id: randomUuid(), base_revision: this.#canonical.revision, intent });
+    this.#presented = structuredClone(doc);
+    this.#checkpoint(); this.#pump();
   }
   current(): CanvasDocument {
-    if (!this.#engine && this.#pending.length) return structuredClone(this.#presented);
-    const doc = structuredClone(this.#canonical);
-    for (const p of this.#pending) this.#engine?.reduce(doc, p.intent);
+    const doc = structuredClone(!this.#initialized && this.#migration ? this.#migration.document : this.#canonical);
+    for (const p of this.#pending) reduce(doc, p.intent);
     return doc;
   }
   subscribe(listener: (doc: CanvasDocument) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   #event(event: Record<string, unknown>): void {
-    const epoch = this.#epoch;
-    void this.#enqueue(async () => {
-      if (event.type === "canvas.layout.operation" || this.#pending.length) await this.#loadEngine();
-      if (!this.#disposed && epoch === this.#epoch) this.#accept(event);
-    });
-  }
-  #accept(event: Record<string, unknown>): void {
     if (this.#disposed || !Number.isSafeInteger(event.revision) || (event.type !== "canvas.layout.snapshot" || this.#ready) && Number(event.revision) < this.#canonical.revision) return;
     if (event.type === "canvas.layout.snapshot") {
       const document = parseDocument(event.document);
@@ -107,7 +108,7 @@ export class ServerCanvasStore implements CanvasStore {
       if (event.revision === this.#canonical.revision) return;
       // Never apply a partial history. A fresh subscription obtains an atomic snapshot on reconnect.
       if (event.revision !== this.#canonical.revision + 1 || !event.intent || typeof event.intent !== "object") return;
-      if (!event.noop) this.#engine?.reduce(this.#canonical, event.intent as Intent);
+      if (!event.noop) reduce(this.#canonical, event.intent as Intent);
       this.#canonical.revision = Number(event.revision);
       this.#pending = this.#pending.filter((p) => p.op_id !== event.op_id);
     } else return;
@@ -126,22 +127,24 @@ export class ServerCanvasStore implements CanvasStore {
     const migration = this.#migration;
     const operation = this.#pending.find((p) => p.revision === undefined);
     if (!migration && !operation) return;
+    if (!migration && operation && (operation.intent.type === "open" || operation.intent.type === "split") && this.#unresolved.has(operation.intent.window.id)) return;
+    if (operation && !migration) operation.sent = true;
     this.#busy = true;
     const epoch = this.#epoch;
     const action = migration ? "canvas.layout.initialize" : "canvas.layout.apply";
     const input = migration ? { ...migration } : { op_id: operation!.op_id, base_revision: operation!.base_revision, intent: operation!.intent };
-    void this.transport.call(action, input).then((result) => this.#enqueue(() => {
+    void this.transport.call(action, input).then((result) => {
       if (this.#disposed || epoch !== this.#epoch) return;
       if (!Number.isSafeInteger(result.revision)) { this.#busy = false; this.#ready = false; this.refused(); return; }
       if (migration) { this.#migration = undefined; this.#initialized = true; }
       else operation!.revision = Number(result.revision);
       this.#pending = this.#pending.filter((p) => p.revision === undefined || p.revision > this.#canonical.revision);
       this.#busy = false; this.#publish(); this.#pump();
-    }), () => this.#enqueue(() => {
+    }, () => {
       if (this.#disposed || epoch !== this.#epoch) return;
       // Keep the identical input for retry after the next snapshot, including its original base revision.
       this.#busy = false; this.#ready = false; this.#checkpoint(); this.refused();
-    }));
+    });
   }
   #checkpoint(): void {
     if (this.#timer !== undefined || this.#disposed) return;
@@ -150,7 +153,7 @@ export class ServerCanvasStore implements CanvasStore {
   flush(): void {
     if (this.#disposed) return;
     clearTimeout(this.#timer); this.#timer = undefined;
-    writeStoredJson(this.#key, { cacheVersion: 2, canonical: this.#canonical, document: this.#presented, pending: this.#pending, ...(this.#migration ? { migration: this.#migration } : {}) });
+    writeStoredJson(this.#key, { cacheVersion: 2, canonical: this.#canonical, document: this.#presented, pending: this.#pending, unresolved: [...this.#unresolved], ...(this.#migration ? { migration: this.#migration } : {}) });
   }
   dispose(): void { this.flush(); this.#disposed = true; this.#epoch++; this.#off(); this.#listeners.clear(); this.#loaded?.(); }
 }
