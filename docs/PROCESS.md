@@ -143,10 +143,14 @@ Reviews and fixes run at the same time as the next lane's build.
 
   | Target | Measured ceiling |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,096,144 bytes |
-  | `aarch64-unknown-linux-musl` | 19,325,520 bytes |
+  | `x86_64-unknown-linux-musl` | 21,101,136 bytes |
+  | `aarch64-unknown-linux-musl` | 19,328,928 bytes |
 
-  These are the release-3 measurements (release-2 plus #230 same-server
+  These include the #230 event-driven readiness wait: +4,992 / +3,408 B
+  over the release-3 ceilings. The matched comparison and live-link checks
+  are recorded on #230; no dependency, feature or profile changed.
+
+  The previous ceilings were the release-3 measurements (release-2 plus #230 same-server
   re-enrollment and #227 close logging): +16,000 / +2,872 bytes over release-2
   (D243, with the logging growth covered by D301).
 
