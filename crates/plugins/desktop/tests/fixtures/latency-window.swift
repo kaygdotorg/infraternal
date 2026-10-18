@@ -13,9 +13,13 @@ let colours: [(CGFloat, CGFloat, CGFloat)] = [
 ]
 final class Picture: NSView {
     var sequence = 0
+    private var typed = ""
     override var acceptsFirstResponder: Bool { true }
     override func keyDown(with event: NSEvent) {
         emit(["kind": "input", "ticks": mach_absolute_time(), "sequence": sequence + 1])
+        if let characters = event.characters, !event.modifierFlags.contains(.command) {
+            typed = String((typed + characters).suffix(80))
+        }
         advance()
     }
     func advance() { sequence += 1; needsDisplay = true; displayIfNeeded() }
@@ -24,11 +28,11 @@ final class Picture: NSView {
         let colour = colours[sequence % colours.count]
         NSColor(srgbRed: colour.0, green: colour.1, blue: colour.2, alpha: 1).setFill()
         bounds.fill()
-        let label = "App window measurement\nFrame \(sequence)\nType to change this native window"
+        let label = "App window measurement\nFrame \(sequence)\nType to change this native window\n\(typed)"
         label.draw(at: NSPoint(x: 24, y: bounds.height - 100), withAttributes: [
             .font: NSFont.systemFont(ofSize: 22), .foregroundColor: NSColor.white,
         ])
-        emit(["kind": "draw", "sequence": sequence, "begin_ticks": begin, "end_ticks": mach_absolute_time()])
+        emit(["kind": "draw", "sequence": sequence, "begin_ticks": begin, "end_ticks": mach_absolute_time(), "typed_count": typed.count])
     }
 }
 let app = NSApplication.shared
@@ -55,8 +59,8 @@ DispatchQueue.global().async {
                 timer?.invalidate()
                 timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { _ in view.advance() }
             case "idle": timer?.invalidate(); timer = nil
-            case "shape":
-                window.setContentSize(NSSize(width: 480, height: 600))
+            case "shape", "wide":
+                window.setContentSize(line == "shape" ? NSSize(width: 480, height: 600) : NSSize(width: 640, height: 400))
                 if let screen = NSScreen.main {
                     window.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.maxX - window.frame.width - 10, y: screen.visibleFrame.maxY - 10))
                 }
