@@ -1161,8 +1161,8 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     }
     let server = tokio::spawn(
         axum_server::bind(std::net::SocketAddr::new(controller_ip, 4929))
-        .acceptor(enrollment_acceptor(http_tls))
-        .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
+            .acceptor(enrollment_acceptor(http_tls))
+            .serve(http.into_make_service_with_connect_info::<std::net::SocketAddr>()),
     );
     let started = Instant::now();
     *FULLY_JOINED.lock().unwrap() = None;
@@ -1294,10 +1294,10 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                                 && retried_attempt.is_none()
                             {
                                 if timeout_retry {
-                                assert!(std::process::Command::new("nft")
-                                    .args(["delete", "table", "inet", "addhost_retry_230"])
-                                    .status().unwrap().success());
-                                println!("RETRY timeout=published_setup stage={:?} failed_step={:?} network_restored=true", failure.stage, failure.failed_step);
+                                    assert!(std::process::Command::new("nft")
+                                        .args(["delete", "table", "inet", "addhost_retry_230"])
+                                        .status().unwrap().success());
+                                    println!("RETRY timeout=published_setup stage={:?} failed_step={:?} network_restored=true", failure.stage, failure.failed_step);
                                 } else {
                                     println!("RETRY published_setup stage={:?} failed_step={:?} injected=true", failure.stage, failure.failed_step);
                                 }
@@ -1319,7 +1319,7 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                     }
                     let joined = FULLY_JOINED.lock().unwrap().unwrap();
                     if retry_phase_timing() {
-                    println!("METRIC addhost_instant fully_joined_ms={:.3}", joined.duration_since(started).as_secs_f64() * 1000.0);
+                        println!("METRIC addhost_instant fully_joined_ms={:.3}", joined.duration_since(started).as_secs_f64() * 1000.0);
                     }
                     if retry_phase_timing() && let Some(prompt) = prompt_published_at {
                         let prompt_to_ready_ms = joined.duration_since(prompt).as_secs_f64() * 1000.0;
