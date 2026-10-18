@@ -35,6 +35,11 @@ const ROOT = document.documentElement;
 const THEME_COLOR = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
 const MODIFIER_KEYS = ["ctrl", "alt"] as const;
 
+/** A key pressed during a native composition (IME) belongs to the composition; keyCode 229 covers engines that omit `isComposing`. */
+function isComposingKey(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229;
+}
+
 export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
@@ -767,7 +772,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // the palette, since a terminal never receives ⌘; a declined press goes through to the terminal (Ctrl+K stays the shell's).
   // The font chords act on the one terminal here; on the canvas the canvas binds them to its active window.
   if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
-  removeShortcuts.push(bindShortcut("focus-resend-actions", () => { client?.focusInputResendActions(); }, () => client?.hasPendingInputResend() ?? false));
+  removeShortcuts.push(bindShortcut("focus-resend-actions", () => { client?.focusInputResendActions(); }, (event) => !isComposingKey(event) && (client?.hasPendingInputResend() ?? false)));
   removeShortcuts.push(bindShortcut("palette", () => setPalette(palette.hidden, "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
