@@ -1482,13 +1482,10 @@ fn run_remote_agent(
             ),
             "Check the server address and that this machine is still enrolled, then run the command again.",
             result.as_ref().err().map_or(Exit::Failed, |error| {
-                let text = remote::public_error(error);
-                if text.contains("TLS verification") {
-                    Exit::NotAllowed
-                } else if text.contains("DNS") || text.contains("connection failed") {
-                    Exit::Unreachable
-                } else {
-                    Exit::Failed
+                match remote::Failure::of(error) {
+                    Some(remote::Failure::Tls) => Exit::NotAllowed,
+                    Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
+                    Some(remote::Failure::Refused) | None => Exit::Failed,
                 }
             }),
         )
