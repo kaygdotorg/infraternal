@@ -287,3 +287,24 @@ for (const valid of [false, true]) test(`retirement gives a queued ${valid ? "co
     expect(f.connection.isWelcomed).toBe(valid);
   } finally { f.dispose(); }
 });
+
+for (const { interval, typing } of [{ interval: 75, typing: true }, { interval: 1000, typing: false }, { interval: 60_000, typing: false }]) test(`a dead ${typing ? "typing" : "idle"} route eventually retires when browser tasks run every ${interval}ms`, () => {
+  const f = fixture(1, 1);
+  try {
+    f.advance(1001);
+    f.stopForwarding();
+    // Unacknowledged typing keeps the existing 25ms probe cadence active.
+    // The browser still executes tasks and sends probes, but no peer replies.
+    if (typing) f.connection.send(1, { type: "Input", inSeq: 0n, bytes: new Uint8Array([1]) });
+    const probes = f.probes;
+    // These are virtual-clock schedules, not host timing measurements. Repeated
+    // busy-page tasks and background timer batches must not renew peer proof.
+    for (let elapsed = 0; elapsed < 600_000; elapsed += interval) {
+      f.suspend(interval);
+      f.runBrowserTimer(true);
+      if (!f.connection.isWelcomed) break;
+    }
+    expect(f.probes).toBeGreaterThan(probes);
+    expect(f.connection.isWelcomed).toBe(false);
+  } finally { f.dispose(); }
+});
