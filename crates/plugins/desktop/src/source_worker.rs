@@ -122,9 +122,11 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
                 packet = leg.lane.receive(), if pending.len() < 64 => {
                     let packet = packet.map_err(|()| PluginError::Rejected)?;
                     let (kind, body) = command(&packet, &leg.metadata)?;
+                    crate::measurement::control("source_control_receive", kind);
                     let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
                     let send_deadline = pending.front().map_or(deadline, |response| response.deadline.min(deadline));
                     tokio::time::timeout_at(send_deadline, helper.send(kind, &body)).await.map_err(|_| PluginError::Rejected)?.map_err(|_| PluginError::Rejected)?;
+                    crate::measurement::control("source_control_sent", kind);
                     pending.push_back(Pending { deadline, expected: reply_kind(kind), reply: None });
                 },
                 request = leg.requests.recv(), if pending.len() < 64 => {
@@ -138,9 +140,11 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
                     let (kind, body) = message.map_err(|_| PluginError::Rejected)?;
                     if kind == Kind::Video {
                         let video = video(&body, &leg.metadata)?;
+                        crate::measurement::frame("source_helper_read", &video);
                         send.publish(video).await;
                     } else if kind == Kind::Error { return Err(PluginError::Rejected); }
                     else if pending.front().is_some_and(|response| response.expected == kind) {
+                        crate::measurement::control("source_control_ack", kind);
                         let response = pending.pop_front().ok_or(PluginError::Rejected)?;
                         if let Some(reply) = response.reply { let value = serde_json::from_slice(&body).map_err(|_| PluginError::Rejected); let _ = reply.send(value); }
                     } else if kind != Kind::Geometry { return Err(PluginError::Rejected); }
@@ -207,6 +211,7 @@ async fn send_video(
             });
             continue;
         }
+        crate::measurement::frame("source_send_begin", &video);
         let began = std::time::Instant::now();
         let send = async {
             if let Some(datagrams) = &datagrams {
@@ -252,6 +257,7 @@ async fn send_video(
             .await
             .map_err(|_| PluginError::Rejected)?
             .map_err(|()| PluginError::Rejected)?;
+        crate::measurement::frame("source_send_end", &video);
         // Propagate leg-B backpressure to capture quality. This shares the
         // bounded repair queue, so slow links cannot create an unbounded task
         // or control backlog. Reserve a slot for mandatory delta repair; quality

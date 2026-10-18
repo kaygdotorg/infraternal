@@ -779,7 +779,9 @@ async fn viewer_loop(
     replies: ReplySender,
     mut stopped: watch::Receiver<bool>,
 ) -> Result<(), ()> {
-    let replies = replies.with_authority(viewer.delivery_authority());
+    let authority = viewer.delivery_authority();
+    let measuring = crate::measurement::enabled();
+    let replies = replies.with_authority(authority.clone());
     let mut parameters = crate::parameter_sets::Parameters::default();
     let mut pending_parameters = None;
     let mut delivery: Option<Operation<'static, Result<(), ()>>> = None;
@@ -818,13 +820,14 @@ async fn viewer_loop(
             }
             frame = viewer.next(), if delivery.is_none() => {
                 let frame = frame.map_err(|_| ())?;
+                crate::measurement::frame("viewer_dequeue", &frame);
                 if frame.keyframe && let Some(choice) = pending_parameters.take() { parameters = choice; }
                 let bytes = if frame.keyframe { crate::parameter_sets::select(&frame.bytes, parameters)? } else { frame.bytes.clone() };
                 let mut encoded = Vec::new();
                 encode_muxed_frame_into(stream, &Frame::Desktop(Message::Video { sequence: frame.sequence, capture_ns: frame.capture_ns, keyframe: frame.keyframe, bytes: &bytes }), &mut encoded).map_err(|_| ())?;
                 // A latest-frame watch and one retained packet prevent a slow
                 // browser from accumulating a second per-viewer bulk queue.
-                let replies = replies.clone();
+                let replies = if measuring { replies.with_authority(crate::measurement::delivery(authority.clone(), &frame)) } else { replies.clone() };
                 delivery = Some(Box::pin(async move {
                     tokio::time::timeout(Duration::from_secs(1), replies.send_and_wait(Bytes::from(encoded))).await.map_err(|_| ())?
                 }));

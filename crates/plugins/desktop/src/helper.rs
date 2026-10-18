@@ -9,6 +9,9 @@ use std::hash::Hasher;
 #[derive(serde::Deserialize)]
 struct Clock {
     capture_ticks: u64,
+    // Older clock replies omit this diagnostic field; capture still uses ticks.
+    #[serde(default)]
+    capture_ns: u64,
 }
 use std::{
     io::{self, Read},
@@ -225,10 +228,13 @@ fn produce(
         let (_, clock) = encoder.call(Kind::Status, b"{}")?;
         let clock: Clock = serde_json::from_slice(&clock)?;
         let begin = Instant::now();
+        crate::measurement::record("fallback_copy_begin", clock.capture_ns, 0, 0);
         let pixels = capture.copy_pixels()?;
+        crate::measurement::record("fallback_copy_end", clock.capture_ns, 0, pixels.len());
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         hash.write(&pixels);
         let current = hash.finish();
+        crate::measurement::record("fallback_hash_end", clock.capture_ns, 0, pixels.len());
         if fingerprint != Some(current) {
             fingerprint = Some(current);
             last_change = Instant::now();
@@ -255,6 +261,7 @@ fn produce(
         if kind != Kind::Video {
             return Err(io::Error::other("Desktop encoding unavailable."));
         }
+        crate::measurement::helper_frame("helper_native_read", &body);
         // At most one compressed frame waits for the local writer. Never wait on a
         // slow reader here. After an encoded drop the next delivered frame must be an
         // IDR: a P-frame that references an undelivered frame would corrupt decoding.
@@ -329,6 +336,7 @@ fn produce_surface(
         let Some(body) = native.surface_video()? else {
             continue;
         };
+        crate::measurement::helper_frame("helper_native_read", &body);
         let keyframe = body.get(8) == Some(&1);
         if waiting_keyframe && !keyframe {
             continue;
@@ -452,7 +460,9 @@ fn run(
                 continue;
             };
             if Instant::now() >= reconcile {
+                crate::measurement::record("helper_reconcile_begin", 0, 0, 0);
                 let (_, geometry) = native.call(Kind::Status, b"{}")?;
+                crate::measurement::record("helper_reconcile_end", 0, 0, 0);
                 let rect = actual(&geometry)?;
                 if rect != stream.rect {
                     stream.update(stream.size, rect);
@@ -463,7 +473,12 @@ fn run(
             let frame = stream.frames.try_recv();
             let had_frame = frame.is_ok();
             match frame {
-                Ok(frame) => protocol::write(socket, Kind::Video, &frame?)?,
+                Ok(frame) => {
+                    let frame = frame?;
+                    crate::measurement::helper_frame("helper_socket_begin", &frame);
+                    protocol::write(socket, Kind::Video, &frame)?;
+                    crate::measurement::helper_frame("helper_socket_end", &frame);
+                }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(io::Error::other("Desktop capture stopped."));

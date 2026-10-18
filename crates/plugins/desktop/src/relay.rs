@@ -111,7 +111,10 @@ async fn run_inner(
                         Some(crate::session::Video { sequence, capture_ns, keyframe, bytes: packet.slice(offset..) })
                     },
                 };
-                if let Some(frame) = frame { session.publish(frame).map_err(|_| ())?; }
+                if let Some(frame) = frame {
+                    crate::measurement::frame("relay_receive", &frame);
+                    session.publish(frame).map_err(|_| ())?;
+                }
                 if assembly.take_repair() {
                     send(&session, host.as_ref(), lease.0.as_ref(), HostCommand::Keyframe, &mut wire).await?;
                 }

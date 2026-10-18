@@ -20,6 +20,12 @@ pub mod socket;
 
 #[cfg(any(feature = "source", feature = "server"))]
 pub mod datagram;
+#[cfg(any(
+    feature = "source",
+    feature = "server",
+    all(feature = "desktop", target_os = "macos")
+))]
+mod measurement;
 #[cfg(any(feature = "source", feature = "server"))]
 pub mod media;
 #[cfg(feature = "source")]

@@ -2,9 +2,14 @@
 #![cfg(all(feature = "desktop", target_os = "linux"))]
 #![forbid(unsafe_code)]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
+#[cfg(any(feature = "source", feature = "server"))]
+use infraternal_plugin_desktop::media;
 use infraternal_plugin_desktop::{capture, protocol, socket};
 #[path = "../src/helper.rs"]
 mod helper;
+#[allow(dead_code)]
+#[path = "../src/measurement.rs"]
+mod measurement;
 #[allow(dead_code)]
 #[path = "../src/native.rs"]
 mod native;
