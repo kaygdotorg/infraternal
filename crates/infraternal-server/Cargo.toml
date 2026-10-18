@@ -85,3 +85,7 @@ required-features = ["remote"]
 [[example]]
 name = "mesh_revocation_fixture"
 required-features = ["remote", "mesh"]
+
+[[example]]
+name = "layout_bench"
+required-features = ["canvas"]

@@ -1,8 +1,9 @@
 //! Checks authenticated mux delivery, subscription generations and cancellation at outbound backpressure [28,183,198].
+#![cfg(feature = "canvas")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use bytes::Bytes;
 use infraternal_plugin_api::{Operation, Plugin, ReplySender, SocketHost};
-use infraternal_plugin_canvas::{socket::CanvasPlugin, store::Store};
+use infraternal_plugin_canvas::socket::CanvasPlugin;
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use std::sync::{
     Arc,
@@ -55,14 +56,12 @@ async fn snapshot_then_ordered_commit_events_and_revocation_cancel_output() {
         .await
         .unwrap();
     sqlx::raw_sql("CREATE TABLE users(id TEXT PRIMARY KEY); INSERT INTO users VALUES('a'),('b'); CREATE TABLE terminal_sessions(id BLOB PRIMARY KEY,user_id TEXT);").execute(&pool).await.unwrap();
-    sqlx::raw_sql(include_str!(
-        "../../../infraternal-server/migrations/0026_canvas_layout.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0026_canvas_layout.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let store = Store::new(pool);
-    let plugin = CanvasPlugin(store.clone());
+    let plugin = CanvasPlugin(Arc::new(store.clone()));
     let (live, authority) = watch::channel(true);
     let (requests, receiver) = mpsc::channel(4);
     let (outbound, mut answers) = mpsc::channel(1);
@@ -138,3 +137,5 @@ async fn snapshot_then_ordered_commit_events_and_revocation_cancel_output() {
     registry[0].store(0, Ordering::Release);
     drop(requests);
 }
+
+use infraternal_server::canvas_store::Store;

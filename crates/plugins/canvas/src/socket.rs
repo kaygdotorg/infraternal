@@ -1,5 +1,5 @@
 //! Hosts idle-free layout subscriptions on the existing authorized control stream [16,183,198].
-use crate::store::Store;
+use crate::store::LayoutStore;
 use bytes::Bytes;
 use infraternal_plugin_api::{
     ActionDef, DefaultValue, Dependency, DryRun, Effect, Operation, Permission, Plugin,
@@ -66,7 +66,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     unavailable_event: br#"{"type":"error","error":"canvas unavailable"}"#,
 };
 /// Metadata construction starts no task; workers exist only for active sockets.
-pub struct CanvasPlugin(pub Store);
+pub struct CanvasPlugin(pub Arc<dyn LayoutStore>);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Filter {
@@ -90,7 +90,7 @@ impl Plugin for CanvasPlugin {
         replies: ReplySender,
         registry: SubscriptionRegistry,
     ) -> Operation<'static, ()> {
-        let store = self.0.clone();
+        let store = Arc::clone(&self.0);
         Box::pin(async move {
             // Subscribe before the first read; coalesced notices cannot lose a commit.
             let mut changes = store.changes();
@@ -104,12 +104,11 @@ impl Plugin for CanvasPlugin {
                         match decoded.frame {
                             Frame::Call { call_id,action_id,input_json } => host.authorized(Box::pin(async {
                                 let result = match action_id {
-                                    "canvas.layout.apply" => store.apply(host.user_id(),input_json).await,
-                                    "canvas.layout.initialize" => store.initialize(host.user_id(),input_json).await,
-                                    _ => Err(crate::store::Error),
+                                    "canvas.layout.apply" | "canvas.layout.initialize" => store.call(action_id=="canvas.layout.initialize",host.user_id(),input_json).await,
+                                    _=>Err(()),
                                 };
                                 let ok = result.is_ok();
-                                let output = result.map_or_else(|_| json!({"error":"invalid canvas operation"}),|revision| json!({"revision":revision}));
+                                let output = result.map_or_else(|()| json!({"error":"invalid canvas operation"}),|revision| json!({"revision":revision}));
                                 let json = serde_json::to_vec(&output).map_err(|_|())?;
                                 send(&replies,0,Frame::Result {call_id,ok,json:&json}).await
                             })).await,
@@ -119,7 +118,7 @@ impl Plugin for CanvasPlugin {
                                 if valid && subscription_current(&registry,sub_id,generation) {
                                     subscriptions.retain(|s| s.id != sub_id);
                                     subscriptions.push(Subscription{id:sub_id,generation,revision:None});
-                                    host.authorized(Box::pin(publish(&store,host.user_id(),&replies,&registry,&mut subscriptions))).await
+                                    host.authorized(Box::pin(publish(store.as_ref(),host.user_id(),&replies,&registry,&mut subscriptions))).await
                                 } else {
                                     host.authorized(Box::pin(send(&replies,generation<<1,Frame::Event{sub_id,event_json:br#"{"type":"error","error":"invalid canvas operation"}"#}))).await
                                 }
@@ -129,7 +128,7 @@ impl Plugin for CanvasPlugin {
                     }
                     notice = changes.changed(), if !subscriptions.is_empty() => {
                         if notice.is_err() { break; }
-                        host.authorized(Box::pin(publish(&store,host.user_id(),&replies,&registry,&mut subscriptions))).await
+                        host.authorized(Box::pin(publish(store.as_ref(),host.user_id(),&replies,&registry,&mut subscriptions))).await
                     }
                 };
                 if result.is_err() {
@@ -140,14 +139,14 @@ impl Plugin for CanvasPlugin {
     }
 }
 async fn publish(
-    store: &Store,
+    store: &dyn LayoutStore,
     account: &str,
     replies: &ReplySender,
     registry: &SubscriptionRegistry,
     subscriptions: &mut [Subscription],
 ) -> Result<(), ()> {
     for sub in subscriptions {
-        for event in store.events(account, sub.revision).await.map_err(|_| ())? {
+        for event in store.events(account, sub.revision).await? {
             if !subscription_current(registry, sub.id, sub.generation) {
                 break;
             }

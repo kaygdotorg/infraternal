@@ -22,6 +22,8 @@ pub mod ca_http;
 pub mod ca_membership;
 #[cfg(feature = "remote")]
 pub mod ca_memory;
+#[cfg(feature = "canvas")]
+pub mod canvas_store;
 #[cfg(feature = "cli-plugin")]
 pub mod cli;
 #[cfg(feature = "remote")]

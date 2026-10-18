@@ -1,96 +1,17 @@
-//! Validates the bounded v1 reference document without accepting content or configuration [180].
+//! Validates the existing v1 JSON document in place, reusing the server's JSON representation [180,243,248].
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
-
+use serde_json::{Value, json};
 pub const MAX_DOCUMENT: usize = 48 * 1024;
 pub const MAX_INPUT: usize = 8 * 1024;
 pub const MAX_RECEIPTS: i64 = 65_536;
 pub const CHECKPOINT: i64 = 128;
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Document {
-    pub format: String,
-    pub version: u8,
-    pub revision: i64,
-    pub views: Vec<View>,
-}
+#[serde(transparent)]
+pub struct Document(pub Value);
 impl Default for Document {
     fn default() -> Self {
-        Self {
-            format: "infraternal.canvas".into(),
-            version: 1,
-            revision: 0,
-            views: vec![],
-        }
+        Self(json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[]}))
     }
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct View {
-    pub id: String,
-    pub kind: String,
-    pub name: String,
-    pub cell: Point,
-    pub layout: Layout,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-pub enum Layout {
-    Tiled { columns: Vec<Column> },
-    Graph { pinned: BTreeMap<String, Point> },
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Point {
-    pub x: f64,
-    pub y: f64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Column {
-    pub id: String,
-    pub weight: f64,
-    pub windows: Vec<Window>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Window {
-    pub id: String,
-    pub target: Target,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub span: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rows: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub row: Option<u8>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-pub enum Target {
-    Session {
-        id: String,
-        host: String,
-        #[serde(default, rename = "hostId", skip_serializing_if = "Option::is_none")]
-        host_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        user: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        address: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    Settings {
-        section: String,
-    },
-    Containers {
-        host: String,
-    },
-    Logs {
-        host: String,
-    },
 }
 #[must_use]
 pub fn text(value: &str) -> bool {
@@ -100,116 +21,240 @@ pub fn text(value: &str) -> bool {
 pub fn finite(value: f64, low: f64, high: f64) -> bool {
     value.is_finite() && (low..=high).contains(&value)
 }
-impl Target {
-    #[must_use]
-    pub fn valid(&self) -> bool {
-        match self {
-            Self::Session {
-                id,
-                host,
-                host_id,
-                user,
-                address,
-                name,
-            } => {
-                text(id)
-                    && text(host)
-                    && host_id.as_ref().is_none_or(|id| {
-                        uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == *id)
+#[must_use]
+pub fn shape(value: &Value, fields: &[&str]) -> bool {
+    value
+        .as_object()
+        .is_some_and(|v| v.keys().all(|key| fields.contains(&key.as_str())))
+}
+#[must_use]
+pub fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key)?.as_str().filter(|s| text(s))
+}
+pub(crate) fn numeric(value: &Value, key: &str, low: f64, high: f64) -> bool {
+    value
+        .get(key)
+        .and_then(Value::as_f64)
+        .is_some_and(|v| finite(v, low, high))
+}
+fn optional_number(value: &Value, key: &str, low: f64, high: f64, whole: bool) -> bool {
+    value.get(key).is_none_or(|n| {
+        n.as_f64()
+            .is_some_and(|v| finite(v, low, high) && (!whole || v.fract() == 0.0))
+    })
+}
+pub(crate) fn point(value: &Value, limit: f64) -> bool {
+    shape(value, &["x", "y"])
+        && numeric(value, "x", -limit, limit)
+        && numeric(value, "y", -limit, limit)
+}
+pub(crate) fn target(value: &Value) -> bool {
+    match string(value, "type") {
+        Some("session") => {
+            shape(
+                value,
+                &["type", "id", "host", "hostId", "user", "address", "name"],
+            ) && string(value, "id").is_some()
+                && string(value, "host").is_some()
+                && value.get("hostId").is_none_or(|v| {
+                    v.as_str().is_some_and(|id| {
+                        uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id)
                     })
-                    && [user, address, name]
-                        .iter()
-                        .all(|item| item.as_ref().is_none_or(|s| text(s)))
-            }
-            Self::Settings { section } => text(section),
-            Self::Containers { host } | Self::Logs { host } => text(host),
+                })
+                && ["user", "address", "name"]
+                    .iter()
+                    .all(|key| value.get(key).is_none() || string(value, key).is_some())
         }
+        Some("settings") => {
+            shape(value, &["type", "section"]) && string(value, "section").is_some()
+        }
+        Some("containers" | "logs") => {
+            shape(value, &["type", "host"]) && string(value, "host").is_some()
+        }
+        _ => false,
     }
 }
-impl Window {
-    #[must_use]
-    pub fn valid(&self) -> bool {
-        text(&self.id)
-            && self.target.valid()
-            && self.height.is_none_or(|v| finite(v, 0.05, 10_000.0))
-            && self.span.is_none_or(|v| (1..=64).contains(&v))
-            && self.rows.is_none_or(|v| (1..=64).contains(&v))
-            && self.row.is_none_or(|v| v <= 64)
+pub(crate) fn window(value: &Value) -> bool {
+    shape(value, &["id", "target", "height", "span", "rows", "row"])
+        && string(value, "id").is_some()
+        && value.get("target").is_some_and(target)
+        && optional_number(value, "height", 0.05, 10_000.0, false)
+        && optional_number(value, "span", 1.0, 64.0, true)
+        && optional_number(value, "rows", 1.0, 64.0, true)
+        && optional_number(value, "row", 0.0, 64.0, true)
+}
+pub(crate) fn view(value: &Value) -> bool {
+    shape(value, &["id", "kind", "name", "cell", "layout"])
+        && ["id", "kind", "name"]
+            .iter()
+            .all(|key| string(value, key).is_some())
+        && value.get("cell").is_some_and(|p| point(p, 1000.0))
+        && match value.get("layout") {
+            Some(layout) if string(layout, "type") == Some("tiled") => {
+                shape(layout, &["type", "columns"])
+                    && layout
+                        .get("columns")
+                        .and_then(Value::as_array)
+                        .is_some_and(|cols| {
+                            cols.len() <= 64
+                                && cols.iter().all(|c| {
+                                    shape(c, &["id", "weight", "windows"])
+                                        && string(c, "id").is_some()
+                                        && numeric(c, "weight", 0.1, 10.0)
+                                        && c.get("windows").and_then(Value::as_array).is_some_and(
+                                            |wins| wins.len() <= 256 && wins.iter().all(window),
+                                        )
+                                })
+                        })
+            }
+            Some(layout) if string(layout, "type") == Some("graph") => {
+                shape(layout, &["type", "pinned"])
+                    && layout
+                        .get("pinned")
+                        .and_then(Value::as_object)
+                        .is_some_and(|pins| {
+                            pins.len() <= 256
+                                && pins.iter().all(|(id, p)| text(id) && point(p, 100_000.0))
+                        })
+            }
+            _ => false,
+        }
+}
+pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
+    doc.get("views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+pub(crate) fn columns(view: &Value) -> impl Iterator<Item = &Value> {
+    view.get("layout")
+        .and_then(|l| l.get("columns"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+pub(crate) fn windows(column: &Value) -> impl Iterator<Item = &Value> {
+    column
+        .get("windows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+#[must_use]
+pub fn object(fields: Vec<(&str, Value)>) -> Value {
+    let mut object = serde_json::Map::new();
+    for (key, value) in fields {
+        object.insert(key.into(), value);
     }
+    Value::Object(object)
 }
 impl Document {
     #[must_use]
+    pub fn revision(&self) -> i64 {
+        self.0.get("revision").and_then(Value::as_i64).unwrap_or(0)
+    }
+    pub fn windows(&self) -> impl Iterator<Item = &Value> {
+        views(&self.0).flat_map(columns).flat_map(windows)
+    }
+    #[must_use]
     pub fn valid(&self) -> bool {
-        if self.format != "infraternal.canvas"
-            || self.version != 1
-            || !(0..=9_007_199_254_740_991).contains(&self.revision)
-            || self.views.len() > 64
+        let doc = &self.0;
+        if !shape(doc, &["format", "version", "revision", "views"])
+            || string(doc, "format") != Some("infraternal.canvas")
+            || doc.get("version").and_then(Value::as_u64) != Some(1)
+            || !doc
+                .get("revision")
+                .and_then(Value::as_i64)
+                .is_some_and(|v| (0..=9_007_199_254_740_991).contains(&v))
         {
             return false;
         }
-        let mut views = HashSet::new();
-        let mut targets = HashMap::new();
-        let mut count = 0;
-        for view in &self.views {
-            if !text(&view.id)
-                || !views.insert(&view.id)
-                || !text(&view.kind)
-                || !text(&view.name)
-                || !finite(view.cell.x, -1000.0, 1000.0)
-                || !finite(view.cell.y, -1000.0, 1000.0)
-            {
+        let Some(views) = doc.get("views").and_then(Value::as_array) else {
+            return false;
+        };
+        if views.len() > 64 || !views.iter().all(view) {
+            return false;
+        }
+        let mut view_ids = Vec::new();
+        let mut targets = Vec::<(&str, &Value)>::new();
+        let mut total = 0;
+        for view in views {
+            let Some(id) = string(view, "id") else {
+                return false;
+            };
+            if view_ids.contains(&id) {
                 return false;
             }
-            match &view.layout {
-                Layout::Tiled { columns } => {
-                    if columns.len() > 64 {
+            view_ids.push(id);
+            let mut column_ids = Vec::new();
+            let mut window_ids = Vec::new();
+            for column in columns(view) {
+                let Some(id) = string(column, "id") else {
+                    return false;
+                };
+                if column_ids.contains(&id) {
+                    return false;
+                }
+                column_ids.push(id);
+                for window in windows(column) {
+                    total += 1;
+                    let Some(id) = string(window, "id") else {
+                        return false;
+                    };
+                    if total > 256 || window_ids.contains(&id) {
                         return false;
                     }
-                    let mut column_ids = HashSet::new();
-                    let mut windows = HashSet::new();
-                    for column in columns {
-                        if !text(&column.id)
-                            || !column_ids.insert(&column.id)
-                            || !finite(column.weight, 0.1, 10.0)
-                        {
-                            return false;
-                        }
-                        for window in &column.windows {
-                            count += 1;
-                            if count > 256 || !window.valid() || !windows.insert(&window.id) {
-                                return false;
-                            }
-                            if let Some(target) = targets.insert(&window.id, &window.target)
-                                && target != &window.target
-                            {
-                                return false;
-                            }
-                        }
-                    }
-                }
-                Layout::Graph { pinned } => {
-                    if pinned.len() > 256
-                        || pinned.iter().any(|(id, p)| {
-                            !text(id)
-                                || !finite(p.x, -100_000.0, 100_000.0)
-                                || !finite(p.y, -100_000.0, 100_000.0)
-                        })
+                    window_ids.push(id);
+                    let Some(target) = window.get("target") else {
+                        return false;
+                    };
+                    if targets
+                        .iter()
+                        .any(|(seen, old)| *seen == id && *old != target)
                     {
                         return false;
+                    }
+                    targets.push((id, target));
+                }
+            }
+        }
+        serde_json::to_vec(doc).is_ok_and(|bytes| bytes.len() <= MAX_DOCUMENT)
+    }
+    /// Numeric spellings do not make identical legacy layouts become different recovery views.
+    pub fn normalize(&mut self) {
+        fn floats(value: &mut Value, keys: &[&str]) {
+            for key in keys {
+                if let Some(number) = value.get(key).and_then(Value::as_f64) {
+                    value[*key] = Value::from(number);
+                }
+            }
+        }
+        if let Some(views) = self.0.get_mut("views").and_then(Value::as_array_mut) {
+            for view in views {
+                if let Some(cell) = view.get_mut("cell") {
+                    floats(cell, &["x", "y"]);
+                }
+                if let Some(layout) = view.get_mut("layout") {
+                    if let Some(columns) = layout.get_mut("columns").and_then(Value::as_array_mut) {
+                        for column in columns {
+                            floats(column, &["weight"]);
+                            if let Some(windows) =
+                                column.get_mut("windows").and_then(Value::as_array_mut)
+                            {
+                                for window in windows {
+                                    floats(window, &["height"]);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(pins) = layout.get_mut("pinned").and_then(Value::as_object_mut) {
+                        for point in pins.values_mut() {
+                            floats(point, &["x", "y"]);
+                        }
                     }
                 }
             }
         }
-        serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_DOCUMENT)
-    }
-    pub fn windows(&self) -> impl Iterator<Item = &Window> {
-        self.views
-            .iter()
-            .flat_map(|view| match &view.layout {
-                Layout::Tiled { columns } => columns.as_slice(),
-                Layout::Graph { .. } => &[],
-            })
-            .flat_map(|column| &column.windows)
     }
 }
 
@@ -220,19 +265,17 @@ mod tests {
     fn reference_document_has_strict_shape_and_bounds() {
         let mut doc = Document::default();
         assert!(doc.valid());
-        assert!(serde_json::from_str::<Document>(r#"{"format":"infraternal.canvas","version":1,"revision":0,"views":[],"content":"unexpected"}"#).is_err());
-        doc.views.push(View {
-            id: "console".into(),
-            kind: "console".into(),
-            name: "Console".into(),
-            cell: Point { x: 0.0, y: 0.0 },
-            layout: Layout::Tiled { columns: vec![] },
-        });
-        assert!(doc.valid());
-        doc.views.push(doc.views[0].clone());
+        doc.0["content"] = json!("unexpected");
         assert!(!doc.valid());
-        doc.views.pop();
-        doc.views[0].cell.x = f64::INFINITY;
+        doc.0.as_object_mut().unwrap().remove("content");
+        let view = json!({"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}});
+        doc.0["views"] = json!([view]);
+        assert!(doc.valid());
+        let copied = doc.0["views"][0].clone();
+        doc.0["views"].as_array_mut().unwrap().push(copied);
+        assert!(!doc.valid());
+        doc.0["views"].as_array_mut().unwrap().pop();
+        doc.0["views"][0]["cell"]["x"] = json!(2000);
         assert!(!doc.valid());
         assert!(!text(&"x".repeat(201)));
     }

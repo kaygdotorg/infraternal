@@ -1,9 +1,7 @@
 //! Measures full parsed SQLite apply latency from two concurrent devices; run only on the locked perf VM [5,183,248].
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use infraternal_plugin_canvas::{
-    model::{Column, Document, Layout, Point, Target, View, Window},
-    store::Store,
-};
+use infraternal_plugin_canvas::model::Document;
+use infraternal_server::canvas_store::Store;
 use serde_json::json;
 use std::{
     path::PathBuf,
@@ -39,12 +37,10 @@ async fn main() {
             .await
             .unwrap();
         sqlx::raw_sql("PRAGMA foreign_keys=ON; CREATE TABLE users(id TEXT PRIMARY KEY); INSERT INTO users VALUES('a'); CREATE TABLE terminal_sessions(id BLOB PRIMARY KEY,user_id TEXT REFERENCES users(id));").execute(&pool).await.unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../../infraternal-server/migrations/0026_canvas_layout.sql"
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0026_canvas_layout.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         let mut windows = vec![];
         for i in 0..count {
             let id = uuid::Uuid::new_v4();
@@ -53,38 +49,11 @@ async fn main() {
                 .execute(&pool)
                 .await
                 .unwrap();
-            windows.push(Window {
-                id: format!("w{i}"),
-                target: Target::Session {
-                    id: id.to_string(),
-                    host: "benchmark-host".into(),
-                    host_id: None,
-                    user: None,
-                    address: None,
-                    name: None,
-                },
-                height: None,
-                span: None,
-                rows: None,
-                row: None,
-            });
+            windows.push(json!({"id":format!("w{i}"),"target":{"type":"session","id":id,"host":"benchmark-host"}}));
         }
-        let doc = Document {
-            views: vec![View {
-                id: "console".into(),
-                kind: "console".into(),
-                name: "Console".into(),
-                cell: Point { x: 0.0, y: 0.0 },
-                layout: Layout::Tiled {
-                    columns: vec![Column {
-                        id: "c".into(),
-                        weight: 1.0,
-                        windows,
-                    }],
-                },
-            }],
-            ..Document::default()
-        };
+        let doc = Document(
+            json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[{"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[{"id":"c","weight":1,"windows":windows}]}}]}),
+        );
         let store = Store::new(pool.clone());
         let input = serde_json::to_vec(&json!({"op_id":"initialize","document":doc})).unwrap();
         store.initialize("a", &input).await.unwrap();

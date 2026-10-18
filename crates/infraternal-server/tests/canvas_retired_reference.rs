@@ -1,6 +1,7 @@
 //! Keeps unrelated layout edits usable after a previously owned terminal reference is retired [180,183].
+#![cfg(feature = "canvas")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use infraternal_plugin_canvas::store::Store;
+use infraternal_server::canvas_store::Store;
 use serde_json::json;
 #[tokio::test]
 async fn retired_reference_does_not_block_an_unrelated_edit() {
@@ -10,12 +11,10 @@ async fn retired_reference_does_not_block_an_unrelated_edit() {
         .await
         .unwrap();
     sqlx::raw_sql("CREATE TABLE users(id TEXT PRIMARY KEY); INSERT INTO users VALUES('a'); CREATE TABLE terminal_sessions(id BLOB PRIMARY KEY,user_id TEXT);").execute(&pool).await.unwrap();
-    sqlx::raw_sql(include_str!(
-        "../../../infraternal-server/migrations/0026_canvas_layout.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0026_canvas_layout.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let id = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO terminal_sessions VALUES(?, 'a')")
         .bind(id.as_bytes().as_slice())

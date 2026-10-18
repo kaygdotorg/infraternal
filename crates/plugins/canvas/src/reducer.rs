@@ -1,315 +1,338 @@
-//! Reduces one semantic intent against current state; storage supplies permanent close tombstones [183].
-use crate::model::{Column, Document, Layout, Point, View, Window, finite};
-use serde::{Deserialize, Serialize};
+//! Applies stable-ID semantic intents to the existing JSON representation; storage supplies permanent close IDs [183,243].
+use crate::model::{self, Document};
+use serde_json::{Value, json};
 use std::collections::HashSet;
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Apply {
-    pub op_id: String,
-    pub base_revision: i64,
-    pub intent: Intent,
+fn s<'a>(value: &'a Value, key: &str) -> Result<&'a str, ()> {
+    model::string(value, key).ok_or(())
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Initialize {
-    pub op_id: String,
-    pub document: Document,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum Intent {
-    #[serde(rename = "view.add")]
-    ViewAdd { view: View },
-    #[serde(rename = "view.remove")]
-    ViewRemove { view_id: String },
-    #[serde(rename = "open")]
-    Open {
-        view_id: String,
-        column_id: String,
-        window: Window,
-        after: Option<String>,
-    },
-    #[serde(rename = "split")]
-    Split {
-        view_id: String,
-        anchor_id: String,
-        axis: Axis,
-        column_id: String,
-        window: Window,
-    },
-    #[serde(rename = "close")]
-    Close { window_id: String },
-    #[serde(rename = "move")]
-    Move {
-        view_id: String,
-        window_id: String,
-        column_id: String,
-        after: Option<String>,
-    },
-    #[serde(rename = "resize")]
-    Resize {
-        window_id: String,
-        height: Option<f64>,
-        span: Option<u8>,
-        rows: Option<u8>,
-        row: Option<u8>,
-    },
-    #[serde(rename = "weight")]
-    Weight {
-        view_id: String,
-        column_id: String,
-        weight: f64,
-    },
-    #[serde(rename = "membership.add")]
-    MembershipAdd {
-        view_id: String,
-        column_id: String,
-        window_id: String,
-        after: Option<String>,
-    },
-    #[serde(rename = "membership.remove")]
-    MembershipRemove { view_id: String, window_id: String },
-    #[serde(rename = "pin")]
-    Pin {
-        view_id: String,
-        node_id: String,
-        position: Option<Point>,
-    },
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Axis {
-    Right,
-    Down,
-}
-fn columns<'a>(doc: &'a mut Document, id: &str) -> Result<&'a mut Vec<Column>, ()> {
-    match &mut doc
-        .views
-        .iter_mut()
-        .find(|view| view.id == id)
-        .ok_or(())?
-        .layout
+#[must_use]
+pub fn valid_intent(value: &Value) -> bool {
+    let Some(kind) = model::string(value, "type") else {
+        return false;
+    };
+    let fields = match kind {
+        "view.add" => &["type", "view"][..],
+        "view.remove" => &["type", "view_id"][..],
+        "open" => &["type", "view_id", "column_id", "window", "after"][..],
+        "split" => &[
+            "type",
+            "view_id",
+            "anchor_id",
+            "axis",
+            "column_id",
+            "window",
+        ][..],
+        "close" => &["type", "window_id"][..],
+        "move" | "membership.add" => &["type", "view_id", "window_id", "column_id", "after"][..],
+        "resize" => &["type", "window_id", "height", "span", "rows", "row"][..],
+        "weight" => &["type", "view_id", "column_id", "weight"][..],
+        "membership.remove" => &["type", "view_id", "window_id"][..],
+        "pin" => &["type", "view_id", "node_id", "position"][..],
+        _ => return false,
+    };
+    if !model::shape(value, fields) {
+        return false;
+    }
+    let strings = match kind {
+        "view.add" => &[][..],
+        "view.remove" => &["view_id"][..],
+        "open" | "weight" => &["view_id", "column_id"][..],
+        "split" => &["view_id", "anchor_id", "axis", "column_id"][..],
+        "close" | "resize" => &["window_id"][..],
+        "move" | "membership.add" => &["view_id", "window_id", "column_id"][..],
+        "membership.remove" => &["view_id", "window_id"][..],
+        "pin" => &["view_id", "node_id"][..],
+        _ => return false,
+    };
+    if !strings
+        .iter()
+        .all(|key| model::string(value, key).is_some())
+        || value
+            .get("after")
+            .is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(model::text))
     {
-        Layout::Tiled { columns } => Ok(columns),
-        Layout::Graph { .. } => Err(()),
+        return false;
+    }
+    match kind {
+        "view.add" => value.get("view").is_some_and(model::view),
+        "open" | "split" => {
+            value.get("window").is_some_and(model::window)
+                && (kind != "split"
+                    || matches!(model::string(value, "axis"), Some("right" | "down")))
+        }
+        "resize" => [
+            ("height", 0.05, 10_000.0, false),
+            ("span", 1.0, 64.0, true),
+            ("rows", 1.0, 64.0, true),
+            ("row", 0.0, 64.0, true),
+        ]
+        .iter()
+        .all(|(key, lo, hi, whole)| {
+            value.get(key).is_none_or(|v| {
+                v.is_null()
+                    || v.as_f64()
+                        .is_some_and(|n| model::finite(n, *lo, *hi) && (!whole || n.fract() == 0.0))
+            })
+        }),
+        "weight" => model::numeric(value, "weight", 0.1, 10.0),
+        "pin" => value
+            .get("position")
+            .is_none_or(|p| p.is_null() || model::point(p, 100_000.0)),
+        _ => true,
     }
 }
+fn columns<'a>(doc: &'a mut Document, id: &str) -> Result<&'a mut Vec<Value>, ()> {
+    let view = doc
+        .0
+        .get_mut("views")
+        .and_then(Value::as_array_mut)
+        .ok_or(())?
+        .iter_mut()
+        .find(|v| model::string(v, "id") == Some(id))
+        .ok_or(())?;
+    view.get_mut("layout")
+        .and_then(|l| l.get_mut("columns"))
+        .and_then(Value::as_array_mut)
+        .ok_or(())
+}
 fn insert(
-    cols: &mut Vec<Column>,
+    cols: &mut Vec<Value>,
     column_id: &str,
-    window: Window,
+    window: Value,
     after: Option<&str>,
 ) -> Result<(), ()> {
     if cols
         .iter()
-        .flat_map(|c| &c.windows)
-        .any(|w| w.id == window.id)
+        .flat_map(model::windows)
+        .any(|w| w.get("id") == window.get("id"))
     {
         return Err(());
     }
-    if !cols.iter().any(|c| c.id == column_id) {
-        cols.push(Column {
-            id: column_id.into(),
-            weight: 1.0,
-            windows: vec![],
-        });
+    if !cols
+        .iter()
+        .any(|c| model::string(c, "id") == Some(column_id))
+    {
+        cols.push(json!({"id":column_id,"weight":1.0,"windows":[]}));
     }
-    let col = cols.iter_mut().find(|c| c.id == column_id).ok_or(())?;
+    let col = cols
+        .iter_mut()
+        .find(|c| model::string(c, "id") == Some(column_id))
+        .ok_or(())?;
+    let wins = col
+        .get_mut("windows")
+        .and_then(Value::as_array_mut)
+        .ok_or(())?;
     let offset = after.map_or(0, |id| {
-        col.windows
-            .iter()
-            .position(|w| w.id == id)
-            .map_or(col.windows.len(), |i| i + 1)
+        wins.iter()
+            .position(|w| model::string(w, "id") == Some(id))
+            .map_or(wins.len(), |i| i + 1)
     });
-    col.windows.insert(offset, window);
+    wins.insert(offset, window);
     Ok(())
 }
-fn remove(cols: &mut [Column], id: &str) -> Option<Window> {
+fn remove(cols: &mut [Value], id: &str) -> Option<Value> {
     for col in cols {
-        if let Some(index) = col.windows.iter().position(|w| w.id == id) {
-            return Some(col.windows.remove(index));
+        let wins = col.get_mut("windows")?.as_array_mut()?;
+        if let Some(at) = wins.iter().position(|w| model::string(w, "id") == Some(id)) {
+            return Some(wins.remove(at));
         }
     }
     None
 }
-/// The caller discards the working document on error; no partial mutations may be committed.
+/// Reduces against current state. The caller discards the working document on any error.
 /// # Errors
-/// Rejects nonexistent destinations, ID reuse and out-of-bounds final state.
-#[allow(clippy::too_many_lines, clippy::result_unit_err)]
+/// Refuses invalid bounds, missing destinations and reuse of stable IDs.
+#[allow(clippy::result_unit_err, clippy::too_many_lines)]
 pub fn reduce<S: std::hash::BuildHasher>(
     doc: &mut Document,
-    intent: &Intent,
+    intent: &Value,
     closed: &HashSet<String, S>,
 ) -> Result<(), ()> {
-    // Bounds apply to the intent even when a close makes the edit a no-op.
-    let valid = match intent {
-        Intent::Open { window, .. } | Intent::Split { window, .. } => window.valid(),
-        Intent::Resize {
-            height,
-            span,
-            rows,
-            row,
-            ..
-        } => {
-            height.is_none_or(|v| finite(v, 0.05, 10_000.0))
-                && span.is_none_or(|v| (1..=64).contains(&v))
-                && rows.is_none_or(|v| (1..=64).contains(&v))
-                && row.is_none_or(|v| v <= 64)
-        }
-        Intent::Weight { weight, .. } => finite(*weight, 0.1, 10.0),
-        Intent::Pin { position, .. } => position.as_ref().is_none_or(|p| {
-            finite(p.x, -100_000.0, 100_000.0) && finite(p.y, -100_000.0, 100_000.0)
-        }),
-        _ => true,
-    };
-    if !valid {
+    if !doc.valid() || !valid_intent(intent) {
         return Err(());
     }
-    match intent {
-        Intent::ViewAdd { view } => {
-            let empty = match &view.layout {
-                Layout::Tiled { columns } => columns.is_empty(),
-                Layout::Graph { pinned } => pinned.is_empty(),
-            };
-            if !empty || doc.views.iter().any(|v| v.id == view.id) {
+    let kind = s(intent, "type")?;
+    match kind {
+        "view.add" => {
+            let view = intent.get("view").ok_or(())?;
+            let empty = view
+                .get("layout")
+                .is_some_and(|l| match model::string(l, "type") {
+                    Some("tiled") => l
+                        .get("columns")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty),
+                    Some("graph") => l
+                        .get("pinned")
+                        .and_then(Value::as_object)
+                        .is_some_and(serde_json::Map::is_empty),
+                    _ => false,
+                });
+            if !empty || model::views(&doc.0).any(|v| v.get("id") == view.get("id")) {
                 return Err(());
             }
-            doc.views.push(view.clone());
+            doc.0
+                .get_mut("views")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?
+                .push(view.clone());
         }
-        Intent::ViewRemove { view_id } => doc.views.retain(|v| v.id != *view_id),
-        Intent::Open {
-            view_id,
-            column_id,
-            window,
-            after,
-        } => {
-            if closed.contains(&window.id) || doc.windows().any(|w| w.id == window.id) {
-                return Err(());
-            }
-            insert(
-                columns(doc, view_id)?,
-                column_id,
-                window.clone(),
-                after.as_deref(),
-            )?;
+        "view.remove" => {
+            let id = s(intent, "view_id")?;
+            doc.0
+                .get_mut("views")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?
+                .retain(|v| model::string(v, "id") != Some(id));
         }
-        Intent::Split {
-            view_id,
-            anchor_id,
-            axis,
-            column_id,
-            window,
-        } => {
-            if closed.contains(&window.id) || doc.windows().any(|w| w.id == window.id) {
+        "open" | "split" => {
+            let window = intent.get("window").ok_or(())?;
+            let id = s(window, "id")?;
+            if closed.contains(id) || doc.windows().any(|w| model::string(w, "id") == Some(id)) {
                 return Err(());
             }
-            // Closing the anchor wins even if a stale split arrives afterwards.
-            if closed.contains(anchor_id) {
+            if kind == "split" && closed.contains(s(intent, "anchor_id")?) {
                 return Ok(());
             }
-            let cols = columns(doc, view_id)?;
-            crate::tiling::split(cols, anchor_id, axis, column_id, window.clone())?;
+            let cols = columns(doc, s(intent, "view_id")?)?;
+            if kind == "open" {
+                insert(
+                    cols,
+                    s(intent, "column_id")?,
+                    window.clone(),
+                    model::string(intent, "after"),
+                )?;
+            } else {
+                crate::tiling::split(
+                    cols,
+                    s(intent, "anchor_id")?,
+                    s(intent, "axis")?,
+                    s(intent, "column_id")?,
+                    window.clone(),
+                )?;
+            }
         }
-        Intent::Close { window_id } => {
-            for view in &mut doc.views {
-                if let Layout::Tiled { columns } = &mut view.layout {
-                    remove(columns, window_id);
+        "close" => {
+            let id = s(intent, "window_id")?;
+            for view in doc
+                .0
+                .get_mut("views")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?
+            {
+                if let Some(cols) = view
+                    .get_mut("layout")
+                    .and_then(|l| l.get_mut("columns"))
+                    .and_then(Value::as_array_mut)
+                {
+                    remove(cols, id);
                 }
             }
         }
-        Intent::Move {
-            view_id,
-            window_id,
-            column_id,
-            after,
-        } => {
-            if closed.contains(window_id) {
+        "move" => {
+            let id = s(intent, "window_id")?;
+            if closed.contains(id) {
                 return Ok(());
             }
-            let cols = columns(doc, view_id)?;
-            if let Some(window) = remove(cols, window_id) {
-                insert(cols, column_id, window, after.as_deref())?;
+            let cols = columns(doc, s(intent, "view_id")?)?;
+            if let Some(window) = remove(cols, id) {
+                insert(
+                    cols,
+                    s(intent, "column_id")?,
+                    window,
+                    model::string(intent, "after"),
+                )?;
             }
         }
-        Intent::Resize {
-            window_id,
-            height,
-            span,
-            rows,
-            row,
-        } => {
-            if closed.contains(window_id) {
+        "resize" => {
+            let id = s(intent, "window_id")?;
+            if closed.contains(id) {
                 return Ok(());
             }
-            for view in &mut doc.views {
-                if let Layout::Tiled { columns } = &mut view.layout {
-                    for window in columns
-                        .iter_mut()
-                        .flat_map(|c| &mut c.windows)
-                        .filter(|w| w.id == *window_id)
-                    {
-                        if height.is_some() {
-                            window.height = *height;
-                        }
-                        if span.is_some() {
-                            window.span = *span;
-                        }
-                        if rows.is_some() {
-                            window.rows = *rows;
-                        }
-                        if row.is_some() {
-                            window.row = *row;
+            for view in doc
+                .0
+                .get_mut("views")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?
+            {
+                if let Some(cols) = view
+                    .get_mut("layout")
+                    .and_then(|l| l.get_mut("columns"))
+                    .and_then(Value::as_array_mut)
+                {
+                    for col in cols {
+                        for window in col
+                            .get_mut("windows")
+                            .and_then(Value::as_array_mut)
+                            .ok_or(())?
+                        {
+                            if model::string(window, "id") == Some(id) {
+                                for field in ["height", "span", "rows", "row"] {
+                                    if let Some(value) = intent.get(field).filter(|v| !v.is_null())
+                                    {
+                                        window[field] = value.clone();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        Intent::Weight {
-            view_id,
-            column_id,
-            weight,
-        } => {
-            let cols = columns(doc, view_id)?;
-            // A stale resize of a removed column is harmless.
-            if let Some(col) = cols.iter_mut().find(|c| c.id == *column_id) {
-                col.weight = *weight;
+        "weight" => {
+            let cols = columns(doc, s(intent, "view_id")?)?;
+            if let Some(col) = cols
+                .iter_mut()
+                .find(|c| model::string(c, "id") == model::string(intent, "column_id"))
+            {
+                col["weight"] = intent["weight"].clone();
             }
         }
-        Intent::MembershipAdd {
-            view_id,
-            column_id,
-            window_id,
-            after,
-        } => {
-            if closed.contains(window_id) {
+        "membership.add" => {
+            let id = s(intent, "window_id")?;
+            if closed.contains(id) {
                 return Ok(());
             }
             let window = doc
                 .windows()
-                .find(|w| w.id == *window_id)
+                .find(|w| model::string(w, "id") == Some(id))
                 .cloned()
                 .ok_or(())?;
-            insert(columns(doc, view_id)?, column_id, window, after.as_deref())?;
+            insert(
+                columns(doc, s(intent, "view_id")?)?,
+                s(intent, "column_id")?,
+                window,
+                model::string(intent, "after"),
+            )?;
         }
-        Intent::MembershipRemove { view_id, window_id } => {
-            remove(columns(doc, view_id)?, window_id);
+        "membership.remove" => {
+            remove(
+                columns(doc, s(intent, "view_id")?)?,
+                s(intent, "window_id")?,
+            );
         }
-        Intent::Pin {
-            view_id,
-            node_id,
-            position,
-        } => {
-            let view = doc.views.iter_mut().find(|v| v.id == *view_id).ok_or(())?;
-            let Layout::Graph { pinned } = &mut view.layout else {
-                return Err(());
-            };
-            if let Some(position) = position {
-                pinned.insert(node_id.clone(), position.clone());
+        "pin" => {
+            let view = doc
+                .0
+                .get_mut("views")
+                .and_then(Value::as_array_mut)
+                .ok_or(())?
+                .iter_mut()
+                .find(|v| model::string(v, "id") == model::string(intent, "view_id"))
+                .ok_or(())?;
+            let pins = view
+                .get_mut("layout")
+                .and_then(|l| l.get_mut("pinned"))
+                .and_then(Value::as_object_mut)
+                .ok_or(())?;
+            let id = s(intent, "node_id")?;
+            if let Some(position) = intent.get("position").filter(|v| !v.is_null()) {
+                pins.insert(id.into(), position.clone());
             } else {
-                pinned.remove(node_id);
+                pins.remove(id);
             }
         }
+        _ => return Err(()),
     }
     if doc.valid() { Ok(()) } else { Err(()) }
 }
@@ -317,74 +340,13 @@ pub fn reduce<S: std::hash::BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Point, Target};
     fn document() -> Document {
-        Document {
-            views: vec![View {
-                id: "console".into(),
-                kind: "console".into(),
-                name: "Console".into(),
-                cell: Point { x: 0.0, y: 0.0 },
-                layout: Layout::Tiled { columns: vec![] },
-            }],
-            ..Document::default()
-        }
-    }
-    fn open(id: &str) -> Intent {
-        Intent::Open {
-            view_id: "console".into(),
-            column_id: id.into(),
-            window: Window {
-                id: id.into(),
-                target: Target::Settings {
-                    section: "appearance".into(),
-                },
-                height: None,
-                span: None,
-                rows: None,
-                row: None,
-            },
-            after: None,
-        }
-    }
-    #[test]
-    fn split_divides_only_its_own_band() {
-        let mut doc = document();
-        let closed = HashSet::new();
-        reduce(&mut doc, &open("a"), &closed).unwrap();
-        let Intent::Open { mut window, .. } = open("b") else {
-            panic!("open")
-        };
-        window.id = "b".into();
-        reduce(
-            &mut doc,
-            &Intent::Open {
-                view_id: "console".into(),
-                column_id: "a".into(),
-                window,
-                after: Some("a".into()),
-            },
-            &closed,
+        Document(
+            json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[{"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}}]}),
         )
-        .unwrap();
-        let Intent::Open { window, .. } = open("new") else {
-            panic!("open")
-        };
-        reduce(
-            &mut doc,
-            &Intent::Split {
-                view_id: "console".into(),
-                anchor_id: "b".into(),
-                axis: Axis::Right,
-                column_id: "right".into(),
-                window,
-            },
-            &closed,
-        )
-        .unwrap();
-        assert_eq!(doc.windows().find(|w| w.id == "a").unwrap().span, Some(2));
-        assert_eq!(doc.windows().find(|w| w.id == "b").unwrap().row, Some(1));
-        assert_eq!(doc.windows().find(|w| w.id == "new").unwrap().row, Some(1));
+    }
+    fn open(id: &str) -> Value {
+        json!({"type":"open","view_id":"console","column_id":id,"window":{"id":id,"target":{"type":"settings","section":"appearance"}}})
     }
     #[test]
     fn independent_edits_commute_and_close_wins_in_both_orders() {
@@ -395,19 +357,9 @@ mod tests {
             let closed = HashSet::new();
             reduce(&mut doc, &open(&a), &closed).unwrap();
             reduce(&mut doc, &open(&b), &closed).unwrap();
-            let resize = Intent::Resize {
-                window_id: a.clone(),
-                height: Some(2.0),
-                span: None,
-                rows: None,
-                row: None,
-            };
-            let moved = Intent::Move {
-                view_id: "console".into(),
-                window_id: b,
-                column_id: a.clone(),
-                after: Some(a.clone()),
-            };
+            let resize = json!({"type":"resize","window_id":a,"height":2.0});
+            let moved =
+                json!({"type":"move","view_id":"console","window_id":b,"column_id":a,"after":a});
             let mut left = doc.clone();
             let mut right = doc.clone();
             reduce(&mut left, &resize, &closed).unwrap();
@@ -415,9 +367,7 @@ mod tests {
             reduce(&mut right, &moved, &closed).unwrap();
             reduce(&mut right, &resize, &closed).unwrap();
             assert_eq!(left, right);
-            let close = Intent::Close {
-                window_id: a.clone(),
-            };
+            let close = json!({"type":"close","window_id":a});
             let mut tombstones = HashSet::new();
             tombstones.insert(a.clone());
             reduce(&mut left, &close, &closed).unwrap();
@@ -425,8 +375,42 @@ mod tests {
             reduce(&mut right, &resize, &closed).unwrap();
             reduce(&mut right, &close, &closed).unwrap();
             assert_eq!(left, right);
-            assert!(!left.windows().any(|w| w.id == a));
+            assert!(!left.windows().any(|w| w["id"] == a));
             assert!(reduce(&mut left, &open(&a), &tombstones).is_err());
+        }
+    }
+    #[test]
+    fn split_divides_only_its_own_band() {
+        let mut doc = document();
+        let closed = HashSet::new();
+        reduce(&mut doc, &open("a"), &closed).unwrap();
+        let mut b = open("b");
+        b["column_id"] = json!("a");
+        b["after"] = json!("a");
+        reduce(&mut doc, &b, &closed).unwrap();
+        let split = json!({"type":"split","view_id":"console","anchor_id":"b","axis":"right","column_id":"right","window":{"id":"new","target":{"type":"settings","section":"appearance"}}});
+        reduce(&mut doc, &split, &closed).unwrap();
+        assert_eq!(doc.windows().find(|w| w["id"] == "a").unwrap()["span"], 2);
+        assert_eq!(doc.windows().find(|w| w["id"] == "b").unwrap()["row"], 1);
+        assert_eq!(doc.windows().find(|w| w["id"] == "new").unwrap()["row"], 1);
+    }
+    #[test]
+    fn sample_corpus_preserves_strict_variant_fields_and_round_trips() {
+        for value in [
+            json!({"type":"resize","window_id":"w","height":2.0,"rows":2}),
+            json!({"type":"pin","view_id":"mesh","node_id":"n","position":{"x":1,"y":2}}),
+            open("w"),
+        ] {
+            assert!(valid_intent(&value));
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert_eq!(value, serde_json::from_slice::<Value>(&bytes).unwrap());
+        }
+        for value in [
+            json!({"type":"close","window_id":"w","account":"b"}),
+            json!({"type":"resize","window_id":"w","span":1.5}),
+            json!({"type":"open","view_id":"v","column_id":"c","window":{"id":"w","target":{"type":"settings","section":"a","id":"other"}}}),
+        ] {
+            assert!(!valid_intent(&value));
         }
     }
 }
