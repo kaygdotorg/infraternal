@@ -52,9 +52,9 @@ function fixture() {
   return { client, queue, sent, notice: () => notice!, dismissals: () => dismissals };
 }
 
-function waiting() {
+function waiting(text = "synthetic-old\n") {
   const f = fixture();
-  f.client.handleInput("synthetic-old\n");
+  f.client.handleInput(text);
   f.client.restartCursors(true);
   f.client.attachmentConfirmed = true;
   f.client.showInputResendNotice();
@@ -99,15 +99,20 @@ test("review: new typing reaches the fresh shell while saved typing stays pendin
 });
 
 test("review: retained input and consent are local to their terminal window", () => {
-  const first = waiting();
-  const second = waiting();
+  // Distinct markers expose a swapped buffer; identical markers would conceal cross-window delivery.
+  const first = waiting("window-one\n");
+  const second = waiting("window-two\n");
   first.client.resendRetainedInput();
   first.client.resendRetainedInput();
   expect(first.sent).toHaveLength(1);
+  expect(first.sent[0]?.type === "Input" ? new TextDecoder().decode(first.sent[0].bytes) : "").toBe("window-one\n");
   expect(second.sent).toHaveLength(0);
   expect(second.client.inputNeedsResend).toBe(true);
-  expect(second.client.retainedInput?.byteLength).toBe(14);
+  expect(new TextDecoder().decode(second.client.retainedInput)).toBe("window-two\n");
   expect(second.queue.length).toBe(0);
+  second.client.resendRetainedInput();
+  expect(second.sent[0]?.type === "Input" ? new TextDecoder().decode(second.sent[0].bytes) : "").toBe("window-two\n");
+  expect(first.sent).toHaveLength(1);
 });
 
 test("review: selecting a different session removes saved typing and its action", () => {
