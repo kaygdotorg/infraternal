@@ -221,14 +221,19 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   }
   // Capture initial structure once; subsequent server paints reset the comparison baseline.
   if (saved?.views.some((view) => view.id === "console")) canvas.cx.store.reset(); else canvas.cx.store.changed();
-  let paintRevision = 0;
+  let paintRevision = 0, paintAfterDrop = false;
   const paintLayout = (): void => {
+    if (canvas.cx.state.movingWindow) { paintAfterDrop = true; return; }
     const revision = ++paintRevision;
     void onDemand(() => import("./model/reconcile.on-demand")).then(({ reconcile }) => reconcile(canvas.cx, () => {
       canvas.flush();
       return { document: store.current!(), protectedIds: canvas.cx.store.uncommittedWindows(), protectedViews: canvas.cx.store.uncommittedViews() };
     }, resolve, () => !disposed && revision === paintRevision));
   };
+  // A canonical update cannot reparent a lifted window in the middle of its gesture.
+  const dropped = (): void => { if (paintAfterDrop) { paintAfterDrop = false; queueMicrotask(paintLayout); } };
+  window.addEventListener("pointerup", dropped);
+  window.addEventListener("pointercancel", dropped);
   const offLayout = store.current ? store.subscribe(paintLayout) : () => {};
   // Changes can arrive while grouped-layout code loads during mount.
   if (store.current) paintLayout();
@@ -259,6 +264,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     dispose() {
       canvas.flush();
       offLayout();
+      window.removeEventListener("pointerup", dropped);
+      window.removeEventListener("pointercancel", dropped);
       offRoundTrip();
       disposed = true;
       offHosts?.();

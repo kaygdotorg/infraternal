@@ -58,6 +58,9 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
         if (relabel) rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), ...(rec.model.session ? { session: rec.model.session } : {}) });
         for (const k of ["h", "span", "rows", "row"] as const) { if (model[k] === undefined) delete rec.model[k]; else rec.model[k] = model[k]; } }
     }
+    // Bindings keep the original model object. Columns must share it so asynchronous reference
+    // completion reaches the next document instead of reopening the same shell on every paint.
+    for (const col of columns) col.wins = col.wins.map((model) => c.wins.get(model.id)?.model ?? model);
     grouped.applyCols(cx, c, columns);
     c.view.cols = columns;
     place(c, view);
