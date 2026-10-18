@@ -124,16 +124,7 @@ fn run_invocation() -> ExitCode {
     let requested_json = requested_json_early();
     let matches = match cli::command_tree::build(&registry).try_get_matches() {
         Ok(matches) => matches,
-        Err(error)
-            if requested_json
-                && !matches!(
-                    error.kind(),
-                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-                ) =>
-        {
-            return usage_error(&registry, &error);
-        }
-        Err(error) => error.exit(),
+        Err(error) => return parse_failure(&registry, &error, requested_json),
     };
     let json_output = matches.get_flag("json");
     let selected = cli::command_tree::selected(&matches);
@@ -282,11 +273,30 @@ fn requested_json_early() -> bool {
     std::env::args_os().any(|argument| argument == "--json")
 }
 
-/// A command line that does not parse, reported in the envelope; see `cli::usage`.
-fn usage_error(registry: &ActionRegistry, error: &clap::Error) -> ExitCode {
+/// What to do with a command line that did not parse (see `cli::usage`).
+///
+/// Help and version are not failures: people get the parser's text, `--json` callers one envelope
+/// that carries the same text. Every real failure is worded by us, in text and in JSON, so the
+/// value that was typed (it may be a URL with a token, or a path) is never echoed back.
+fn parse_failure(registry: &ActionRegistry, error: &clap::Error, json: bool) -> ExitCode {
+    use clap::error::ErrorKind;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let tree = cli::command_tree::build(registry);
-    emit(cli::usage::result(&tree, &args, error), true, Exit::Usage)
+    match error.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion if json => emit(
+            cli::usage::help_result(&tree, &args, error),
+            true,
+            Exit::Ok,
+        ),
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            if !json =>
+        {
+            error.exit()
+        }
+        _ => emit(cli::usage::result(&tree, &args, error), json, Exit::Usage),
+    }
 }
 
 /// The shipping diagnostic refuses partial protection independently of server development policy.

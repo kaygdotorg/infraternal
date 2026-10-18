@@ -60,6 +60,33 @@ fn context_strings(error: &clap::Error, kind: ContextKind) -> Vec<String> {
     }
 }
 
+/// The envelope for `--help` or `--version` under `--json`: the text a person would have read.
+#[must_use]
+pub fn help_result(root: &Command, args: &[String], error: &clap::Error) -> CommandResult<Value> {
+    let path = command_path(root, args);
+    let command = if path.is_empty() {
+        "infraternal".to_owned()
+    } else {
+        path.join(" ")
+    };
+    let is_version = error.kind() == ErrorKind::DisplayVersion;
+    let text = error.to_string();
+    CommandResult::new(
+        command,
+        CommandState::Ready,
+        if is_version {
+            "The version of this build."
+        } else {
+            "Help for this command."
+        },
+        if is_version {
+            json!({ "version": text.trim_end() })
+        } else {
+            json!({ "help": text.trim_end() })
+        },
+    )
+}
+
 /// Build the envelope for a parse failure of the typed `args` (without the program name).
 #[must_use]
 pub fn result(root: &Command, args: &[String], error: &clap::Error) -> CommandResult<Value> {
